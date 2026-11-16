@@ -5,8 +5,16 @@ import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.ContentCacheKind
 import dev.mangaflow.experience.contentCachePreferences
 import dev.mangaflow.experience.PrefetchByteBudget
-import dev.mangaflow.experience.prefetchOriginalPage
+import dev.mangaflow.experience.PrefetchBudgetExceeded
+import dev.mangaflow.experience.PrefetchStage
+import dev.mangaflow.experience.prefetchOriginalPageResult
+import dev.mangaflow.experience.inspectReaderPreparedArtifacts
+import dev.mangaflow.experience.ReaderPreparedArtifacts
+import dev.mangaflow.experience.readerPageCacheKey
+import dev.mangaflow.experience.ExperienceAdmissionDeferred
 import dev.mangaflow.data.ReaderSourceStandbyController
+import dev.mangaflow.data.ReaderNextChapterPreparation
+import dev.mangaflow.data.ReaderNextChapterPreparationPhase
 import dev.mangaflow.data.approximateReaderPage
 import dev.mangaflow.data.plugins.prefetchScriptPage
 import dev.mangaflow.data.plugins.scriptSourceImageEpoch
@@ -69,6 +77,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
@@ -86,6 +95,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.async
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withTimeout
@@ -293,6 +303,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private var authorRequest = 0L
     private val _reading = MutableStateFlow<ReadingSession?>(null)
     val reading = _reading.asStateFlow()
+    private val _nextChapterPreparation = MutableStateFlow<ReaderNextChapterPreparation?>(null)
+    val nextChapterPreparation = _nextChapterPreparation.asStateFlow()
     private val readerStandbys = ReaderSourceStandbyController(application, repository, viewModelScope)
     val readerSourceStandbys = readerStandbys.state
     private val _chapterSourceOperation = MutableStateFlow(ChapterSourceOperation())
@@ -332,6 +344,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private var libraryOpenRequestId = 0L
     private var chapterPrefetchJob: Job? = null
     private var chapterPrefetchKey: String? = null
+    private var chapterPrefetchRequest = 0L
     private var readingRequestId = 0L
     @Volatile private var detailRequestId = 0L
     @Volatile private var browseRequestId = 0L
@@ -360,6 +373,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             services.sourceConfiguration.drop(1).collect { scope ->
                 val current = _browse.value
                 cancelReaderSourceStandbys()
+                cancelNextChapterPrefetch()
                 if (current.isFederatedSearch && current.sourceScope != scope) showBrowse(current.copy(
                     items = emptyList(), sourceMatches = emptyMap(), sourceChoiceIds = emptySet(),
                     searchSources = emptyMap(), sourceNextPages = emptyMap(), hasMore = false,
@@ -2320,8 +2334,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         cancelReaderSourceStandbys()
         cancelLibraryReading()
         readingCatalogJob?.cancel()
-        chapterPrefetchJob?.cancel()
-        chapterPrefetchKey = null
+        cancelNextChapterPrefetch()
         readingRequestId++
         visibleReading = null
         _reading.value = session
@@ -2519,6 +2532,16 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         warmReaderSourceStandbys(manga, current, pages.indexOf(page), pages.size)
     }
 
+    private data class NextChapterLimits(val allowed: Boolean, val ahead: Int, val bytes: Long, val foreground: Boolean)
+
+    private fun cancelNextChapterPrefetch() {
+        chapterPrefetchRequest++
+        chapterPrefetchJob?.cancel()
+        chapterPrefetchJob = null
+        chapterPrefetchKey = null
+        _nextChapterPreparation.value = null
+    }
+
     /** Only a visible chapter can request its immediate same-group successor. */
     fun prefetchNextChapter(manga: Manga, chapter: Chapter) {
         if (manga.sourceUrl == LOCAL_SOURCE_URL) return
@@ -2529,50 +2552,200 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val siblings = session.chapters.filter { it.group == current.group }.sortedBy(Chapter::index)
         val next = siblings.getOrNull(siblings.indexOfFirst { it.id == current.id } + 1) ?: return
         if (next.id != chapter.id) return
-        val alreadyDownloaded = downloads.entries.value.any {
-            it.manga.id == manga.id && it.chapter.id == chapter.id && it.status == DownloadStatus.COMPLETED
-        }
-        if (alreadyDownloaded) return
+        if (downloads.entries.value.any { it.manga.id == manga.id && it.chapter.id == chapter.id &&
+                it.status == DownloadStatus.COMPLETED }) return
         val key = "${manga.id}/${chapter.id}"
         if (chapterPrefetchKey == key && chapterPrefetchJob?.isActive == true) return
-        chapterPrefetchJob?.cancel()
+        val previous = chapterPrefetchJob
+        previous?.cancel()
         chapterPrefetchKey = key
+        val request = ++chapterPrefetchRequest
         val epoch = readingRequestId
         val currentChapter = current.id
         val owner = chapterSourceMangaId(manga.id, chapter)
         val source = SourceKeys.decodeChapter(owner, chapter.id).sourceId
+        val configuration = repository.sourceConfigurationKey()
+        val sourceEpoch = scriptSourceImageEpoch(application, source)
+        fun currentSession(): Boolean {
+            if (request != chapterPrefetchRequest || epoch != readingRequestId || chapterPrefetchKey != key ||
+                visibleReading?.first?.id != manga.id || visibleReading?.second?.id != currentChapter ||
+                repository.sourceConfigurationKey() != configuration ||
+                scriptSourceImageEpoch(application, source) != sourceEpoch) return false
+            val reading = _reading.value?.takeIf { it.manga.id == manga.id } ?: return false
+            val origin = reading.chapters.firstOrNull { it.id == currentChapter } ?: return false
+            val ordered = reading.chapters.filter { it.group == origin.group }.sortedBy(Chapter::index)
+            val target = ordered.getOrNull(ordered.indexOfFirst { it.id == origin.id } + 1) ?: return false
+            return target.id == chapter.id && chapterSourceMangaId(manga.id, target) == owner
+        }
+        val initial = ReaderNextChapterPreparation(epoch, manga.id, currentChapter, chapter.id,
+            chapter.title, source, owner, ReaderNextChapterPreparationPhase.QUEUED)
+        _nextChapterPreparation.value = initial
         chapterPrefetchJob = viewModelScope.launch {
             try {
+                // Replacement work cannot acquire a fresh byte window until the old children settle.
+                previous?.cancelAndJoin()
                 val policy = ExperiencePolicyStore.get(application)
-                policy.state.map { Triple(it.crossChapter, it.prefetchAhead, it.nextChapterPrefetchBytes) }
-                    .distinctUntilChanged().collectLatest { (allowed, ahead, limit) ->
-                        if (!allowed || limit <= 0L) return@collectLatest
-                        fun currentSession() = epoch == readingRequestId &&
-                            _reading.value?.manga?.id == manga.id &&
-                            visibleReading?.first?.id == manga.id && visibleReading?.second?.id == currentChapter
-                        if (!currentSession()) return@collectLatest
+                policy.state.map { NextChapterLimits(it.crossChapter, it.prefetchAhead, it.nextChapterPrefetchBytes, it.foreground) }
+                    .distinctUntilChanged().collectLatest { (allowed, ahead, limit, foreground) ->
+                        if (!currentSession()) throw CancellationException("下一话准备已更新")
+                        if (!allowed || !foreground || limit <= 0L || ahead <= 0) {
+                            _nextChapterPreparation.value = initial.copy(phase = ReaderNextChapterPreparationPhase.DEFERRED,
+                                reason = if (!foreground) "阅读不在前台，下一话准备暂缓" else "当前策略未开启下一话原图准备")
+                            return@collectLatest
+                        }
+                        _nextChapterPreparation.value = initial
                         val upcoming = repository.cachedPages(owner, chapter.id) ?: withTimeout(25_000L) {
                             policy.withPrefetchAdmission(source, 1_048_576L, { false }) {
+                                if (currentSession()) _nextChapterPreparation.value = initial.copy(
+                                    phase = ReaderNextChapterPreparationPhase.MANIFEST)
                                 withTimeout(15_000L) { repository.pages(owner, chapter.id) }
                             }
                         }
-                        if (!currentSession()) return@collectLatest
+                        if (!currentSession()) throw CancellationException("下一话准备已更新")
+                        if (upcoming.isEmpty()) {
+                            _nextChapterPreparation.value = initial.copy(phase = ReaderNextChapterPreparationPhase.FAILED,
+                                reason = "下一话尚未返回图片目录")
+                            return@collectLatest
+                        }
                         val headers = repository.imageHeaders(owner, chapter.id).toMap()
                         val window = PrefetchByteBudget(limit)
-                        for (page in upcoming.take(minOf(ahead, 3))) {
-                            if (!currentSession() || !policy.state.value.crossChapter) break
-                            val available = downloads.resolvePrefetchPage(manga.id, chapter.id, page) ?: continue
-                            if (available.url.startsWith("file:")) continue
-                            if (source.startsWith("js_")) {
-                                if (prefetchScriptPage(application, owner, chapter.id, available, window, PrefetchWork()) == null) break
-                            } else if (!prefetchOriginalPage(application, available, headers, source, window)) break
+                        class NextPage(val page: Page, val ticket: PrefetchByteBudget) {
+                            lateinit var work: PrefetchWork
+                            var original: Page? = null
+                            var cacheKey: String? = null
+                            var ready: Boolean? = null
+                            var done = false
+                            var failure: String? = null
+                            var deferred: String? = null
+                        }
+                        val pages = upcoming.take(minOf(ahead, 3)).map { NextPage(it, window.child()) }
+                        var windowLive = true
+                        fun publish() {
+                            if (!windowLive || !currentSession()) return
+                            val pending = pages.filterNot { it.done }
+                            val observations = pages.associateWith { it.work.snapshot() }
+                            val activity = observations.values.toList()
+                            val active = activity.count { it.admitted && !it.settled }
+                            val queued = pending.count { item -> observations.getValue(item).let { !it.admitted || it.settled } }
+                            val ready = pages.count { it.ready == true }
+                            val failed = pages.count { it.done && it.ready != true && it.failure != null }
+                            val deferred = pages.count { it.done && it.ready != true && it.failure == null }
+                            val phase = when {
+                                ready == pages.size -> ReaderNextChapterPreparationPhase.READY
+                                active > 0 -> ReaderNextChapterPreparationPhase.PREPARING
+                                queued > 0 -> ReaderNextChapterPreparationPhase.QUEUED
+                                failed > 0 -> ReaderNextChapterPreparationPhase.FAILED
+                                else -> ReaderNextChapterPreparationPhase.DEFERRED
+                            }
+                            _nextChapterPreparation.value = initial.copy(phase = phase, totalPages = upcoming.size,
+                                requestedPages = pages.size, originalReadyPages = ready, queuedPages = queued,
+                                activePages = active,
+                                resolvingPages = activity.count { it.admitted && !it.settled && it.stage == PrefetchStage.RESOLVING },
+                                downloadingPages = activity.count { it.admitted && !it.settled && it.stage == PrefetchStage.DOWNLOADING },
+                                checkingPages = activity.count { it.admitted && !it.settled && it.stage == PrefetchStage.CHECKING },
+                                failedPages = failed, deferredPages = deferred,
+                                receivedBytes = activity.sumOf { it.receivedBytes },
+                                reason = when {
+                                    queued > 0 && active == 0 -> "等待当前页或可用准备资源"
+                                    failed > 0 -> pages.firstOrNull { it.failure != null }?.failure
+                                    deferred > 0 -> pages.firstOrNull { it.deferred != null }?.deferred
+                                        ?: "原图已不在缓存中，翻章时按需读取"
+                                    else -> null
+                                })
+                        }
+                        pages.forEach { item -> item.work = PrefetchWork(policy::wakeAdmissions) {
+                            viewModelScope.launch { publish() }
+                        } }
+                        suspend fun inspect(item: NextPage, original: Page): ReaderPreparedArtifacts =
+                            item.work.during(PrefetchStage.CHECKING) {
+                                item.work.admission(PrefetchStage.CHECKING, null)
+                                inspectReaderPreparedArtifacts(application, original, headers, source, item.cacheKey)
+                            }
+                        try {
+                            coroutineScope {
+                                val jobs = pages.map { item -> launch {
+                                    try {
+                                        withTimeout(25_000L) {
+                                            val available = downloads.resolvePrefetchPage(manga.id, chapter.id, item.page)
+                                            if (available == null) { item.deferred = "下一话原图暂不可准备"; return@withTimeout }
+                                            item.original = available
+                                            item.cacheKey = readerPageCacheKey(available, headers, source)
+                                            val cached = inspect(item, available)
+                                            item.ready = cached.originalPresent
+                                            if (cached.originalPresent == true) {
+                                                if (!available.url.startsWith("file:")) cached.originalBytes?.let(item.ticket::accept)
+                                                return@withTimeout
+                                            }
+                                            if (!currentSession() || !policy.state.value.crossChapter) return@withTimeout
+                                            if (source == "jmcomic") {
+                                                item.deferred = "此来源原图需进入下一话后准备"
+                                                return@withTimeout
+                                            }
+                                            if (source.startsWith("js_")) {
+                                                item.original = prefetchScriptPage(application, owner, chapter.id, available,
+                                                    item.ticket, item.work)
+                                            } else {
+                                                val result = prefetchOriginalPageResult(application, available, headers, source,
+                                                    item.ticket, item.work)
+                                                item.cacheKey = result.diskCacheKey ?: item.cacheKey
+                                                if (result.failure != null) item.failure = "下一话图片准备失败，翻章时可重试"
+                                                else if (!result.received) item.deferred = "当前资源或来源限制，下一话稍后准备"
+                                            }
+                                            if (!currentSession()) return@withTimeout
+                                            item.original?.let { original ->
+                                                val artifacts = inspect(item, original)
+                                                item.ready = artifacts.originalPresent
+                                                artifacts.originalBytes?.let { bytes ->
+                                                    if (item.ticket.used < bytes) item.ticket.accept(bytes - item.ticket.used)
+                                                    else item.ticket.release(item.ticket.used - bytes)
+                                                }
+                                            }
+                                        }
+                                    } catch (_: TimeoutCancellationException) { item.deferred = "下一话准备等待超时，翻章时按需读取" }
+                                    catch (cancel: CancellationException) { throw cancel }
+                                    catch (_: PrefetchBudgetExceeded) { item.deferred = "下一话准备窗口容量已用完" }
+                                    catch (_: ExperienceAdmissionDeferred) { item.deferred = "当前页优先，下一话准备暂缓" }
+                                    catch (_: OutOfMemoryError) { item.deferred = "内存压力下暂缓下一话准备" }
+                                    catch (_: Exception) { item.failure = "下一话图片准备失败，翻章时可重试" }
+                                    finally { item.done = true; publish() }
+                                } }
+                                publish()
+                                while (currentSession()) {
+                                    if (jobs.all { it.isCompleted }) {
+                                        // Completed requests are not a claim that their cache artifacts still exist.
+                                        pages.forEach { item -> item.original?.let { original ->
+                                            item.ready = inspect(item, original).originalPresent
+                                        } }
+                                        publish()
+                                        delay(2_000L)
+                                    } else {
+                                        publish()
+                                        delay(250L)
+                                    }
+                                }
+                                jobs.forEach { it.cancel() }
+                                if (!currentSession()) throw CancellationException("下一话准备已更新")
+                            }
+                        } finally {
+                            windowLive = false
+                            // coroutineScope settles every transfer before returning these child byte tickets.
+                            pages.forEach { it.ticket.close() }
+                            window.close()
                         }
                     }
+            } catch (_: TimeoutCancellationException) {
+                if (currentSession()) _nextChapterPreparation.value = initial.copy(
+                    phase = ReaderNextChapterPreparationPhase.DEFERRED, reason = "下一话目录准备等待超时")
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (_: Exception) {
-                // Optional next-chapter work has no current-reader error state.
-                // SourceHttp still retains any source-wide rate-limit pause.
+                if (currentSession()) _nextChapterPreparation.value = initial.copy(
+                    phase = ReaderNextChapterPreparationPhase.FAILED, reason = "下一话目录准备失败，翻章时可重试")
+            } finally {
+                if (request == chapterPrefetchRequest && chapterPrefetchKey == key && !currentSession()) {
+                    chapterPrefetchKey = null
+                    _nextChapterPreparation.value = null
+                }
             }
         }
     }
@@ -2627,8 +2800,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         cancelLibraryReading()
         readingRequestId++
         readingCatalogJob?.cancel()
-        chapterPrefetchJob?.cancel()
-        chapterPrefetchKey = null
+        cancelNextChapterPrefetch()
         _reading.value = null
         visibleReading = null
     }
@@ -3021,8 +3193,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         if (_reading.value?.manga?.id != manga.id) return
         if (visibleReading?.second?.id != chapter.id) {
             if (visibleReading != null) cancelReaderSourceStandbys()
-            chapterPrefetchJob?.cancel()
-            chapterPrefetchKey = null
+            cancelNextChapterPrefetch()
         }
         visibleReading = manga to chapter
         if (chapter.sourceId != "copy" || SourceKeys.isEncoded(chapter.id) || manga.sourceId != "copy") return

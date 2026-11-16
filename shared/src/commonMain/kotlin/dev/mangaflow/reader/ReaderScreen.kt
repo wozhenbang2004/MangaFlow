@@ -290,6 +290,7 @@ fun ReaderScreen(
     sourceResumePolicy: String = "ask",
     onSourceResumePolicy: (String) -> Unit = {},
     sourceStandbys: List<ReaderSourceStandby> = emptyList(),
+    nextChapterPreparation: dev.mangaflow.data.ReaderNextChapterPreparation? = null,
     onWarmSourceStandbys: (Chapter, Int, Int) -> Unit = { _, _, _ -> },
     onPrefetchPageFailed: (Chapter, Page) -> Unit = { _, _ -> },
     onCancelSourceStandbys: () -> Unit = {},
@@ -486,6 +487,9 @@ fun ReaderScreen(
         mutableStateOf(if (localImport) emptyMap() else
             repository.imageHeaders(chapterSourceMangaId(manga.id, chapter), chapterId).toMap())
     }
+    val preparationTracker = remember(sourceIdentity, pages, headers, preferences.mode, preferences.panelLayoutKey,
+        preferences.doublePage, preferences.coverAlone) { ReaderPreparationTracker(chapter.sourceId, pages.size) }
+    val preparation by preparationTracker.state.collectAsStateWithLifecycle()
     val chapterDownload = remember(downloadStore, manga.id, chapterId) { downloadStore.observeChapter(manga.id, chapterId) }
     val initialDownload = remember(downloadStore, manga.id, chapterId) {
         downloadStore.entries.value.firstOrNull { it.manga.id == manga.id && it.chapter.id == chapterId }
@@ -510,14 +514,24 @@ fun ReaderScreen(
     val resolvePage: ReaderPageResolver = remember(manga.id, chapterId, chapter.sourceId,
         chapter.sourceMangaId, downloadStore, adultImageContext) {
         { page, onBytes ->
-            val local = downloadStore.resolveReaderPage(manga.id, readingChapterId, page)
+            val work = currentCoroutineContext()[ReaderPreparationWorkContext]?.work
+            val local = if (work == null) downloadStore.resolveReaderPage(manga.id, readingChapterId, page)
+                else work.during(PrefetchStage.RESOLVING) {
+                    experience.withResolveAdmission({ true }, { work.admission(PrefetchStage.RESOLVING, it) }) {
+                        downloadStore.resolveReaderPage(manga.id, readingChapterId, page)
+                    }
+                }
             if (local.url.startsWith("file:")) local else {
                 val owner = chapterSourceMangaId(manga.id, chapter)
-                val resolved = resolveScriptPage(adultImageContext, owner, readingChapterId, local)
-                val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved, onBytes = onBytes)
+                val resolved = resolveScriptPage(adultImageContext, owner, readingChapterId, local, work = work)
+                val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved, onBytes = onBytes, work = work)
                 if (dev.mangaflow.data.SourceKeys.decodeChapter(owner, readingChapterId).sourceId == "jmcomic")
-                    experience.withImageAdmission(reader = true) {
+                    if (work == null) experience.withImageAdmission(reader = true) {
                         materializeJmPage(adultImageContext, owner, readingChapterId, materialized) ?: materialized
+                    } else work.during(PrefetchStage.DOWNLOADING) {
+                        experience.withImageAdmission(reader = true, onWaiting = { work.admission(PrefetchStage.DOWNLOADING, it) }) {
+                            materializeJmPage(adultImageContext, owner, readingChapterId, materialized) ?: materialized
+                        }
                     }
                 else materialized
             }
@@ -540,6 +554,7 @@ fun ReaderScreen(
         }
     val retryPage: ReaderPageResolver = remember(manga.id, chapterId, sourceIdentity, repository, downloadStore, adultImageContext) {
         { sourcePage, onBytes ->
+            val work = currentCoroutineContext()[ReaderPreparationWorkContext]?.work
             val requestedIdentity = manga.id to sourceIdentity
             if (localImport) throw IllegalStateException("本地文件已损坏，请删除后重新导入")
             val expectedEntry = downloadStore.entryFor(manga.id, readingChapterId)
@@ -564,11 +579,15 @@ fun ReaderScreen(
             } else downloadStore.retryReaderPage(manga.id, readingChapterId, sourcePage)
             if (retried.url.startsWith("file:")) retried else {
                 val owner = chapterSourceMangaId(manga.id, chapter)
-                val resolved = resolveScriptPage(adultImageContext, owner, readingChapterId, retried)
-                val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved, onBytes = onBytes)
+                val resolved = resolveScriptPage(adultImageContext, owner, readingChapterId, retried, work = work)
+                val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved, onBytes = onBytes, work = work)
                 if (dev.mangaflow.data.SourceKeys.decodeChapter(owner, readingChapterId).sourceId == "jmcomic")
-                    experience.withImageAdmission(reader = true) {
+                    if (work == null) experience.withImageAdmission(reader = true) {
                         materializeJmPage(adultImageContext, owner, readingChapterId, materialized) ?: materialized
+                    } else work.during(PrefetchStage.DOWNLOADING) {
+                        experience.withImageAdmission(reader = true, onWaiting = { work.admission(PrefetchStage.DOWNLOADING, it) }) {
+                            materializeJmPage(adultImageContext, owner, readingChapterId, materialized) ?: materialized
+                        }
                     }
                 else materialized
             }
@@ -886,7 +905,8 @@ fun ReaderScreen(
             } ?: false
         }.focusable(enabled = keyboardReady)
 
-    CompositionLocalProvider(LocalReaderActionFinished provides { if (desktop) keyboardFocusRestore++ }) {
+    CompositionLocalProvider(LocalReaderActionFinished provides { if (desktop) keyboardFocusRestore++ },
+        LocalReaderPreparationTracker provides preparationTracker) {
     ReaderWorkspace(
         panelVisible = dockedPanels && (showSettings || showChapters),
         panelWidth = panelWidth,
@@ -1402,6 +1422,10 @@ fun ReaderScreen(
                 !chapterChangeRequested && !showReaderActions && !readerActionsPresent,
             sessionKey = sourceIdentity, store = experience, budget = experienceBudget,
             standbys = currentSourceStandbys, alternativeCount = alternativeSources.size, backdrop = readerBackdrop,
+            preparation = preparation,
+            nextChapterPreparation = nextChapterPreparation?.takeIf {
+                it.workId == manga.id && it.currentChapterId == chapter.id && it.chapterId == nextChapter?.id
+            },
             topClearance = with(LocalDensity.current) {
                 (if (controlsVisible) (topControlsHeightPx - readerStatusInsets().getTop(this))
                     .coerceAtLeast(0).toDp().coerceAtLeast(60.dp) else 0.dp) +
@@ -1412,6 +1436,10 @@ fun ReaderScreen(
                     .coerceAtLeast(0).toDp().coerceAtLeast(112.dp) else 0.dp
             }),
             onInspectingChange = { readerStatusInspecting = it },
+            onOpenSources = if (alternativeSources.isEmpty()) null else ({
+                sourceTriggerAnchor = null
+                sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true
+            }),
         )
 
         if (!controlsVisible && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF) Text(
@@ -1991,7 +2019,8 @@ internal data class ReaderPagePrefetch(val request: Disposable, val transfer: Re
 
 private class ReaderPrefetchCacheRecovery(var recovered: Boolean = false)
 
-private data class LoadedReaderImage(val diskCacheKey: String?, val previewSize: IntSize)
+private data class LoadedReaderImage(val diskCacheKey: String?, val previewSize: IntSize,
+    val memoryCacheKey: coil3.memory.MemoryCache.Key? = null)
 
 private fun IntSize.readerAspectRatio(): Float = (width.toFloat() / height).coerceAtLeast(.005f)
 
@@ -2013,6 +2042,7 @@ internal fun AdjacentPagePrefetch(
     val context = LocalContext.current
     val imageLoader = SingletonImageLoader.get(imagePlatformContext(context))
     val experience = remember(context) { ExperiencePolicyStore.get(context) }
+    val tracker = LocalReaderPreparationTracker.current
     val budget by experience.state.collectAsStateWithLifecycle()
     val overrides by experience.overrides.collectAsStateWithLifecycle()
     val currentBudget by rememberUpdatedState(budget)
@@ -2026,7 +2056,8 @@ internal fun AdjacentPagePrefetch(
     val currentLoaded by rememberUpdatedState(loadedPages)
     val prefetchEnabled by rememberUpdatedState(enabled)
     val readerActive by rememberUpdatedState(foregroundActive)
-    LaunchedEffect(pages, headers, mode, imageLoader, resolvePage, scriptPrefetch, sourceId, groups, viewportHeight) {
+    LaunchedEffect(pages, headers, mode, imageLoader, resolvePage, scriptPrefetch, sourceId, groups, viewportHeight, tracker) {
+        val owner = Any()
         val requestScope = this
         val resolvedAttempts = mutableSetOf<Int>()
         val resolvedPages = mutableStateMapOf<Int, Page>()
@@ -2034,6 +2065,21 @@ internal fun AdjacentPagePrefetch(
         val resolutionTokens = mutableMapOf<Int, PrefetchWork>()
         val originalFinished = mutableSetOf<Int>()
         val workTokens = mutableMapOf<Int, PrefetchWork>()
+        val allTickets = mutableMapOf<Pair<Int, PrefetchStage>, Long>()
+        val memoryKeys = mutableMapOf<Int, coil3.memory.MemoryCache.Key>()
+        var inspectTargets = emptySet<Int>()
+        var inspectVisible = emptySet<Int>()
+        fun token(index: Int, stage: PrefetchStage): PrefetchWork {
+            val ticket = tracker?.begin(index, stage, owner) ?: 0L
+            allTickets[index to stage] = ticket
+            return PrefetchWork(experience::wakeAdmissions, observe = {
+                tracker?.observe(index, ticket, it)
+                tracker?.transfer(index, ticket, it)
+            })
+        }
+        fun end(index: Int, stage: PrefetchStage, phase: ReaderPreparationPhase, reason: String? = null) {
+            allTickets[index to stage]?.let { tracker?.end(index, it, stage, phase, reason) }
+        }
         val scriptRequests = mutableStateMapOf<Int, Job>()
         val checks = mutableStateMapOf<Int, Job>()
         val checkTokens = mutableMapOf<Int, PrefetchWork>()
@@ -2055,13 +2101,13 @@ internal fun AdjacentPagePrefetch(
             deferredChecks.remove(index)
         }
         fun stop(index: Int) {
-            resolutionJobs.remove(index)?.cancel()
-            resolutionTokens.remove(index)
-            requests.remove(index)?.request?.dispose()
-            scriptRequests.remove(index)?.cancel()
-            workTokens.remove(index)
-            checks.remove(index)?.cancel()
-            checkTokens.remove(index)
+            // Retain ownership until each cancelled child has actually settled. A fast return
+            // to this page must not start a duplicate transport while the old one releases.
+            tracker?.retire(index)
+            resolutionJobs[index]?.cancel()
+            requests[index]?.request?.dispose()
+            scriptRequests[index]?.cancel()
+            checks[index]?.cancel()
         }
         var previousPosition = Float.NaN
         var previousTime = monotonicTimeMillis()
@@ -2071,6 +2117,34 @@ internal fun AdjacentPagePrefetch(
         var budgetOwner: Set<Int> = emptySet()
         var budgetLimit = -1L
         var byteWindow = PrefetchByteBudget(0L)
+        val progressSampler = requestScope.launch {
+            var cacheAt = 0L
+            while (true) {
+                listOf(PrefetchStage.RESOLVING to resolutionTokens, PrefetchStage.DOWNLOADING to workTokens,
+                    PrefetchStage.CHECKING to checkTokens).forEach { (stage, tokens) ->
+                    tokens.forEach { (index, work) ->
+                        val snapshot = work.snapshot()
+                        allTickets[index to stage]?.let { ticket ->
+                            tracker?.observe(index, ticket, snapshot); tracker?.transfer(index, ticket, snapshot)
+                        }
+                    }
+                }
+                val now = monotonicTimeMillis()
+                if (now - cacheAt >= 2_000L) {
+                    cacheAt = now
+                    for (index in inspectTargets - inspectVisible) {
+                        val retained = retainedPages[index]
+                        val resource = retained?.page ?: resolvedPages[index] ?: continue
+                        val artifact = inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
+                            retained?.diskCacheKey, memoryKeys[index])
+                        if (index in inspectTargets && index !in inspectVisible)
+                            tracker?.artifact(index, artifact.originalPresent, artifact.originalBytes, artifact.previewResident)
+                    }
+                }
+                tracker?.sample()
+                delay(250L)
+            }
+        }
         try {
             snapshotFlow {
                 val (first, last) = visible()
@@ -2138,17 +2212,24 @@ internal fun AdjacentPagePrefetch(
                     return selected
                 }
                 fun eligible(index: Int) = window.enabled && window.visibleReady && index in pages.indices &&
-                    index !in window.composed && index !in visiblePages &&
+                    index !in visiblePages &&
                     (pages[index].url.startsWith("file:") || pages[index].url.startsWith("https:") ||
                         pages[index].url.startsWith("http:") ||
                         sourceId.startsWith("js_") && pages[index].sourceImageToken.isNotBlank())
-                val networkDesired = if (window.bytes > 0L) (candidates(ahead, true) +
-                    candidates(window.behind, false)).filter(::eligible).toSet() else emptySet()
+                val aheadTargets = candidates(ahead, true).filter { it in pages.indices }
+                val behindTargets = candidates(window.behind, false).filter { it in pages.indices }
+                val networkDesired = if (window.bytes > 0L) (aheadTargets + behindTargets).filter(::eligible).toSet() else emptySet()
                 // Local/Coil originals can decode while offline or while HTTP prefetch is disabled.
                 val memoryWindow = if (window.decodeEnabled && window.decoded > 0)
                     candidates(window.decoded, true).filter(::eligible).toSet() else emptySet()
                 val desired = networkDesired + memoryWindow
-                val retained = desired + foreground + promoted + if (window.enabled) window.composed else emptySet()
+                inspectTargets = desired + visiblePages
+                inspectVisible = visiblePages
+                tracker?.window(owner, window.first, window.last, direction, aheadTargets, behindTargets,
+                    networkDesired, memoryWindow, window.foregroundActive,
+                    when { !window.enabled -> "阅读暂缓"; !window.visibleReady -> "当前页优先"
+                        window.bytes <= 0L -> currentBudget.reason; else -> null })
+                val retained = desired + foreground + promoted
                 (pending() + checks.keys).filter { it !in retained }.forEach(::stop)
                 resolvedAttempts.retainAll(retained)
                 resolvedPages.keys.retainAll(retained)
@@ -2175,11 +2256,14 @@ internal fun AdjacentPagePrefetch(
                 for (index in desired) {
                     if (index in resolvedAttempts || index in resolutionJobs) continue
                     if (resolutionJobs.size >= window.resolveParallel) break
-                    val token = PrefetchWork(experience::wakeAdmissions)
+                    val token = token(index, PrefetchStage.RESOLVING)
                     val job = requestScope.launch(start = CoroutineStart.LAZY) {
                         val owned = currentCoroutineContext()[Job]
                         try {
-                            val resource = experience.withResolveAdmission({ token.isForeground }) { resolvePage(pages[index]) }
+                            val resource = token.during(PrefetchStage.RESOLVING) {
+                                experience.withResolveAdmission({ token.isForeground },
+                                    { token.admission(PrefetchStage.RESOLVING, it) }) { resolvePage(pages[index]) }
+                            }
                             currentCoroutineContext().ensureActive()
                             if (resolutionJobs[index] !== owned) return@launch
                             if (resource != null) {
@@ -2189,15 +2273,19 @@ internal fun AdjacentPagePrefetch(
                                     originalFinished += index
                                 }
                             }
+                            end(index, PrefetchStage.RESOLVING, if (resource != null) ReaderPreparationPhase.COMPLETE
+                                else ReaderPreparationPhase.DEFERRED, if (resource == null) "已有下载负责本页" else null)
                             resolvedAttempts += index
                         } catch (cancelled: CancellationException) { throw cancelled }
                         catch (failure: Exception) {
                             if (resolutionJobs[index] === owned) {
                                 if (isReaderPrefetchFailure(failure)) pageFailed(index, failure.message.orEmpty())
+                                end(index, PrefetchStage.RESOLVING, ReaderPreparationPhase.FAILED, readerPageErrorLabel(failure.message.orEmpty()))
                                 resolvedAttempts += index
                             }
                         } finally {
-                            if (resolutionJobs[index] === owned) { resolutionJobs.remove(index); resolutionTokens.remove(index) }
+                            if (resolutionJobs[index] === owned) { resolutionJobs.remove(index); resolutionTokens.remove(index)
+                                allTickets[index to PrefetchStage.RESOLVING]?.let { tracker?.finish(it) } }
                         }
                     }
                     resolutionJobs[index] = job
@@ -2211,7 +2299,7 @@ internal fun AdjacentPagePrefetch(
                     if (transfers().size >= window.parallel) break
                     if (experience.estimatedPageBytes(resource.url) > byteWindow.remaining) break
                     val windowBytes = byteWindow
-                    val token = PrefetchWork(experience::wakeAdmissions)
+                    val token = token(index, PrefetchStage.DOWNLOADING)
                     if (sourceId.startsWith("js_")) {
                         val job = requestScope.launch(start = CoroutineStart.LAZY) {
                             val owned = currentCoroutineContext()[Job]
@@ -2220,18 +2308,25 @@ internal fun AdjacentPagePrefetch(
                                 currentCoroutineContext().ensureActive()
                                 if (scriptRequests[index] !== owned) return@launch
                                 if (local != null) originalReady(index, local, readerPageCacheKey(local, headers, sourceId))
+                                end(index, PrefetchStage.DOWNLOADING, if (local != null) ReaderPreparationPhase.COMPLETE
+                                    else ReaderPreparationPhase.DEFERRED, if (local == null) "原图尚未准备" else null)
                                 originalFinished += index
                             } catch (cancelled: CancellationException) { throw cancelled }
                             catch (_: PrefetchBudgetExceeded) {
                                 windowBytes.exhaust()
-                                if (scriptRequests[index] === owned) originalFinished += index
+                                if (scriptRequests[index] === owned) {
+                                    end(index, PrefetchStage.DOWNLOADING, ReaderPreparationPhase.DEFERRED, "原图窗口容量已满")
+                                    originalFinished += index
+                                }
                             } catch (failure: Exception) {
                                 if (scriptRequests[index] === owned) {
                                     if (isReaderPrefetchFailure(failure)) pageFailed(index, failure.message.orEmpty())
+                                    end(index, PrefetchStage.DOWNLOADING, ReaderPreparationPhase.FAILED, readerPageErrorLabel(failure.message.orEmpty()))
                                     originalFinished += index
                                 }
                             } finally {
-                                if (scriptRequests[index] === owned) { scriptRequests.remove(index); workTokens.remove(index) }
+                                if (scriptRequests[index] === owned) { scriptRequests.remove(index); workTokens.remove(index)
+                                    allTickets[index to PrefetchStage.DOWNLOADING]?.let { tracker?.finish(it) } }
                             }
                         }
                         scriptRequests[index] = job
@@ -2241,6 +2336,8 @@ internal fun AdjacentPagePrefetch(
                     }
                     if (sourceId == "jmcomic" || !resource.url.startsWith("https:")) {
                         // The native JM decryptor remains foreground-owned.
+                        end(index, PrefetchStage.DOWNLOADING, ReaderPreparationPhase.DEFERRED, "此来源在实际阅读时恢复原图")
+                        allTickets[index to PrefetchStage.DOWNLOADING]?.let { tracker?.finish(it) }
                         originalFinished += index
                         continue
                     }
@@ -2267,11 +2364,14 @@ internal fun AdjacentPagePrefetch(
                             } else if (result is ErrorResult && isReaderPrefetchFailure(result.throwable)) {
                                 pageFailed(index, result.throwable.message.orEmpty())
                             }
+                            end(index, PrefetchStage.DOWNLOADING, if (result is SuccessResult) ReaderPreparationPhase.COMPLETE
+                                else ReaderPreparationPhase.FAILED, (result as? ErrorResult)?.throwable?.message?.let(::readerPageErrorLabel))
                             originalFinished += index
                         } catch (cancelled: CancellationException) {
                             currentCoroutineContext().ensureActive()
                         } finally {
-                            if (requests[index] === ownedRequest) { requests.remove(index); workTokens.remove(index) }
+                            if (requests[index] === ownedRequest) { requests.remove(index); workTokens.remove(index)
+                                allTickets[index to PrefetchStage.DOWNLOADING]?.let { tracker?.finish(it) } }
                         }
                     }
                 }
@@ -2288,7 +2388,7 @@ internal fun AdjacentPagePrefetch(
                         (warmMemory && previewChecks[index] == (size to epoch)) ||
                         now < (deferredChecks[index] ?: 0L)) continue
                     if (checks.size >= window.decodeParallel) break
-                    val token = PrefetchWork(experience::wakeAdmissions)
+                    val token = token(index, PrefetchStage.CHECKING)
                     val check = requestScope.launch(start = CoroutineStart.LAZY) {
                         val owned = currentCoroutineContext()[Job]
                         try {
@@ -2301,6 +2401,13 @@ internal fun AdjacentPagePrefetch(
                                 ReaderDimensionCache.put(readerPageCacheKey(pages[index], headers, sourceId), it)
                                 dimensionsKnown(index, it)
                             }
+                            result.memoryCacheKey?.let { memoryKeys[index] = it }
+                            end(index, PrefetchStage.CHECKING, when (result.status) {
+                                ReaderPagePreflightStatus.READY -> ReaderPreparationPhase.COMPLETE
+                                ReaderPagePreflightStatus.UNVERIFIED -> if (warmMemory) ReaderPreparationPhase.DEFERRED else ReaderPreparationPhase.SKIPPED
+                                ReaderPagePreflightStatus.DEFERRED -> ReaderPreparationPhase.DEFERRED
+                                ReaderPagePreflightStatus.FAILED -> ReaderPreparationPhase.FAILED
+                            }, if (result.status == ReaderPagePreflightStatus.DEFERRED) "等待可用解码资源" else null)
                             when (result.status) {
                                 ReaderPagePreflightStatus.READY, ReaderPagePreflightStatus.UNVERIFIED,
                                 ReaderPagePreflightStatus.FAILED -> {
@@ -2314,7 +2421,8 @@ internal fun AdjacentPagePrefetch(
                                 ReaderPagePreflightStatus.DEFERRED -> deferredChecks[index] = monotonicTimeMillis() + 2_000L
                             }
                         } catch (cancelled: CancellationException) { throw cancelled }
-                        finally { if (checks[index] === owned) { checks.remove(index); checkTokens.remove(index) } }
+                        finally { if (checks[index] === owned) { checks.remove(index); checkTokens.remove(index)
+                            allTickets[index to PrefetchStage.CHECKING]?.let { tracker?.finish(it) } } }
                     }
                     checks[index] = check
                     checkTokens[index] = token
@@ -2322,6 +2430,8 @@ internal fun AdjacentPagePrefetch(
                 }
             }
         } finally {
+            progressSampler.cancel()
+            tracker?.close(owner)
             val pendingResolutions = resolutionJobs.values.toList()
             resolutionJobs.clear()
             pendingResolutions.forEach { it.cancel() }
@@ -2375,6 +2485,8 @@ private fun ReaderPage(
     onChapterSwipeReadyChanged: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
+    val preparationTracker = LocalReaderPreparationTracker.current
+    val experience = remember(context) { ExperiencePolicyStore.get(context) }
     val density = LocalDensity.current
     val screenHeight = LocalMangaWindow.current.height.coerceAtLeast(1.dp)
     // Request callbacks retain their own page/URL owner even if a later manifest replaces this slot.
@@ -2410,9 +2522,40 @@ private fun ReaderPage(
     val attempt = remember(page, headers, sourceId, reload, bypassPrefetchCache) { ReaderLoadAttempt() }
     val transferObserver = remember(attempt) { ReaderTransferObserver() }
     var transportProgress by remember(attempt) { mutableStateOf(transferObserver.snapshot()) }
-    val pendingPrefetch = remember(attempt) { prefetch }
-    val attemptPrefetch = remember(attempt) { pendingPrefetch.takeIf { reload == 0 } }
-    var waitingForPrefetch by remember(attempt, pendingPrefetch) { mutableStateOf(pendingPrefetch != null) }
+    val latestPrefetch by rememberUpdatedState(prefetch)
+    var pendingPrefetch by remember(attempt) { mutableStateOf<ReaderPagePrefetch?>(null) }
+    var handoffCaptured by remember(attempt) { mutableStateOf(false) }
+    val attemptPrefetch = pendingPrefetch.takeIf { reload == 0 }
+    var waitingForPrefetch by remember(attempt) { mutableStateOf(false) }
+    var preparationTicket by remember(attempt, preparationTracker) { mutableStateOf<Long?>(null) }
+    val preparationWork = remember(attempt, preparationTracker) {
+        PrefetchWork(experience::wakeAdmissions, observe = { snapshot ->
+            preparationTicket?.let {
+                preparationTracker?.observe(page.index, it, snapshot)
+                preparationTracker?.transfer(page.index, it, snapshot)
+            }
+        })
+    }
+    DisposableEffect(attempt, preparationTracker) {
+        onDispose { preparationTicket?.let { preparationTracker?.finish(it) } }
+    }
+    LaunchedEffect(attempt, pageVisible) {
+        if (pageVisible && attempt.acceptsResult) {
+            preparationTicket = preparationTracker?.begin(page.index, PrefetchStage.QUEUED)
+            preparationWork.promote()
+            if (!handoffCaptured) {
+                // A composed future page may acquire a prefetch after its first composition.
+                // Freeze the exact request at first visibility, including explicit retry settlement.
+                pendingPrefetch = latestPrefetch
+                waitingForPrefetch = pendingPrefetch != null
+                if (reload == 0) pendingPrefetch?.work?.promote()
+                handoffCaptured = true
+            }
+        } else {
+            preparationTicket?.let { preparationTracker?.finish(it) }
+            preparationTicket = null
+        }
+    }
     var handedOffPrefetchProgress by remember(attempt) { mutableStateOf<ReaderTransferSnapshot?>(null) }
     var error by remember(attempt) { mutableStateOf<String?>(null) }
     var loading by remember(attempt) { mutableStateOf(true) }
@@ -2421,6 +2564,21 @@ private fun ReaderPage(
     var resolvedPage by remember(attempt) { mutableStateOf<Page?>(null) }
     val pageTransfer by rememberReaderPageTransfer(attempt, page, observePageTransfer,
         enabled = pageVisible && loading && error == null && resolvedPage == null)
+    LaunchedEffect(attempt, pageVisible, handoffCaptured) {
+        if (!pageVisible || !handoffCaptured) return@LaunchedEffect
+        while (true) {
+            val value = if (waitingForPrefetch) attemptPrefetch?.work?.snapshot() else preparationWork.snapshot()
+            val ticket = preparationTicket
+            if (value != null && ticket != null) {
+                preparationTracker?.observe(page.index, ticket, value)
+                preparationTracker?.transfer(page.index, ticket, value)
+            }
+            if (ticket != null && !waitingForPrefetch) pageTransfer?.let { preparationTracker?.download(page.index, ticket, it) }
+            preparationTracker?.handoff(page.index, waitingForPrefetch)
+            preparationTracker?.sample()
+            delay(250L)
+        }
+    }
     DisposableEffect(attempt) { onDispose { attempt.active = false } }
     LaunchedEffect(prefetchFailure, attempt) {
         if (prefetchFailure != null && !bypassPrefetchCache && (loading || error != null)) {
@@ -2459,6 +2617,8 @@ private fun ReaderPage(
                 if (idle >= READER_PAGE_WAIT_MILLIS) {
                     attempt.stopped = true
                     error = "本页连接超时"
+                    preparationTicket?.let { preparationTracker?.end(page.index, it, preparationWork.snapshot().stage,
+                        ReaderPreparationPhase.FAILED, "本页连接超时") }
                     loading = false
                     loadChanged(false)
                     break
@@ -2475,8 +2635,8 @@ private fun ReaderPage(
     var detailStatus by remember(originalCacheIdentity, reload) { mutableStateOf<ReaderDetailStatus?>(null) }
     var detailRetry by remember(originalCacheIdentity, reload) { mutableIntStateOf(0) }
     var loadedImage by remember(originalCacheIdentity, reload) { mutableStateOf<LoadedReaderImage?>(null) }
-    LaunchedEffect(attempt, attempt.stopped) {
-        if (!attempt.acceptsResult) return@LaunchedEffect
+    LaunchedEffect(attempt, attempt.stopped, pageVisible, handoffCaptured) {
+        if (!attempt.acceptsResult || !pageVisible || !handoffCaptured || resolvedPage != null) return@LaunchedEffect
         loadChanged(false)
         loading = true
         error = null
@@ -2485,7 +2645,10 @@ private fun ReaderPage(
             failedMaterializedUrl?.let { discardFailedScriptImage(context, it) }
             failedMaterializedUrl = null
             val receiveBytes: (Long) -> Unit = { count -> if (attempt.acceptsResult) transferObserver.onBytes(count) }
-            val resource = if (reload > 0) retrySource(page, receiveBytes) else resolve(page, receiveBytes)
+            val resource = withContext(ReaderPreparationWorkContext(preparationWork)) {
+                if (reload > 0) retrySource(page, receiveBytes) else resolve(page, receiveBytes)
+            }
+            preparationTicket?.let { preparationTracker?.end(page.index, it, PrefetchStage.RESOLVING, ReaderPreparationPhase.COMPLETE) }
             currentCoroutineContext().ensureActive()
             if (!attempt.acceptsResult) return@LaunchedEffect
             // Start the image immediately; original-size IO can finish alongside its decode.
@@ -2506,6 +2669,8 @@ private fun ReaderPage(
             if (attempt.acceptsResult) {
                 loading = false
                 error = failure.message ?: "图片暂时无法读取"
+                preparationTicket?.let { preparationTracker?.end(page.index, it, preparationWork.snapshot().stage,
+                    ReaderPreparationPhase.FAILED, readerPageErrorLabel(error.orEmpty())) }
             }
         }
     }
@@ -2523,14 +2688,15 @@ private fun ReaderPage(
         hasDimensions = true
     }
     val delayedLoading = rememberDelayedBusy(loading)
-    LaunchedEffect(attempt, pendingPrefetch, attempt.stopped) {
-        if (!attempt.acceptsResult) return@LaunchedEffect
-        if (pendingPrefetch != null) {
+    LaunchedEffect(attempt, pendingPrefetch, attempt.stopped, handoffCaptured) {
+        if (!attempt.acceptsResult || !handoffCaptured) return@LaunchedEffect
+        val oldPrefetch = pendingPrefetch
+        if (oldPrefetch != null) {
             // An explicit retry owns a fresh request after this exact old transfer releases.
-            if (reload > 0) pendingPrefetch.request.dispose()
+            if (reload > 0) oldPrefetch.request.dispose()
             try {
                 // This suspends only this page's handoff; other prefetch jobs keep their own lanes.
-                pendingPrefetch.request.job.await()
+                oldPrefetch.request.job.await()
                 currentCoroutineContext().ensureActive()
                 if (!attempt.acceptsResult) return@LaunchedEffect
                 // Optional failure only releases the handoff. The foreground image request reports its own result.
@@ -2556,6 +2722,7 @@ private fun ReaderPage(
         val request = remember(resource, headers, attempt, previewWidth, previewHeight) {
             resource?.let { requested -> readerImageRequest(context, requested, headers, sourceId)
                 .readerTransferProgress(transferObserver)
+                .readerPreparationWork(preparationWork)
                 .apply {
                     // Retry a suspect cached original until a foreground network decode succeeds.
                     // Never evict a key that another visible request may already have replaced.
@@ -2577,7 +2744,7 @@ private fun ReaderPage(
                         val width = result.image.width
                         val height = result.image.height
                         if (width > 0 && height > 0) {
-                            loadedImage = LoadedReaderImage(result.diskCacheKey, IntSize(width, height))
+                            loadedImage = LoadedReaderImage(result.diskCacheKey, IntSize(width, height), result.memoryCacheKey)
                         }
                         loading = false
                         if (width > 0 && height > 0 && bypassPrefetchCache && requested.url.startsWith("https:") &&
@@ -2602,7 +2769,7 @@ private fun ReaderPage(
                 )
                 .build() }
         }
-        LaunchedEffect(resource, loadedImage) {
+        LaunchedEffect(resource, loadedImage, pageVisible) {
             val image = loadedImage ?: return@LaunchedEffect
             if (resource != null) {
                 readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource,
@@ -2612,6 +2779,18 @@ private fun ReaderPage(
                     observedDimensions = size
                     dimensionsMeasured(size)
                 }
+            }
+        }
+        LaunchedEffect(attempt, resource, loadedImage, pageVisible) {
+            if (!pageVisible || resource == null) return@LaunchedEffect
+            while (attempt.acceptsResult) {
+                val artifact = inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
+                    loadedImage?.diskCacheKey, loadedImage?.memoryCacheKey)
+                if (attempt.acceptsResult) {
+                    preparationTracker?.artifact(page.index, artifact.originalPresent, artifact.originalBytes, artifact.previewResident)
+                    preparationTracker?.sample()
+                }
+                delay(2_000L)
             }
         }
         val imageError = error
@@ -2635,7 +2814,7 @@ private fun ReaderPage(
         val pageModifier = if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth().height(naturalHeight)
             .onSizeChanged { measuredHeight = it.height }
         Box(pageModifier.clipToBounds(), contentAlignment = Alignment.Center) {
-            if (request != null && !awaitingPrefetch && imageError == null) key(reload) {
+            if (request != null && !awaitingPrefetch && imageError == null && (pageVisible || loadedImage != null)) key(reload) {
                 if (paged) {
                     val imageState = rememberZoomableImageState()
                     LaunchedEffect(imageState) {

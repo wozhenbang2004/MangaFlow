@@ -60,6 +60,10 @@ import dev.mangaflow.reader.ReaderImageRecovery
 import dev.mangaflow.reader.ReaderLoadAttempt
 import dev.mangaflow.reader.ReaderPageResolver
 import dev.mangaflow.reader.ReaderPagePrefetch
+import dev.mangaflow.reader.LocalReaderPreparationTracker
+import dev.mangaflow.reader.ReaderPreparationWorkContext
+import dev.mangaflow.reader.ReaderPreparationPhase
+import dev.mangaflow.reader.readerPageErrorLabel
 import dev.mangaflow.reader.AdjacentPagePrefetch
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.reader.isReaderPrefetchFailure
@@ -83,6 +87,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 
@@ -126,6 +131,8 @@ internal fun GuidedPanelReader(
     bottomClearancePx: Int,
 ) {
     val context = LocalContext.current
+    val preparationTracker = LocalReaderPreparationTracker.current
+    val experience = remember(context) { ExperiencePolicyStore.get(context) }
     val pageFailed by rememberUpdatedState(onPrefetchFailure)
     val prefetchFailures = remember(pages, headers, sourceId) { mutableStateMapOf<Int, String>() }
     val prefetchRequests = remember(pages, headers, sourceId) { mutableStateMapOf<Int, ReaderPagePrefetch>() }
@@ -145,7 +152,17 @@ internal fun GuidedPanelReader(
     val currentPage = pages[pageIndex]
     var imageRetry by remember(pageIndex, currentPage.index, currentPage.url, headers, sourceId) { mutableIntStateOf(0) }
     val attempt = remember(pageIndex, currentPage.index, currentPage.url, headers, sourceId, imageRetry) { ReaderLoadAttempt() }
-    val transferObserver = remember(attempt) { ReaderTransferObserver() }
+    val preparationPageIndex = remember(attempt) { pageIndex }
+    var preparationTicket by remember(attempt, preparationTracker) { mutableStateOf<Long?>(null) }
+    val preparationWork = remember(attempt, preparationTracker) {
+        PrefetchWork(experience::wakeAdmissions, observe = { snapshot ->
+            preparationTicket?.let {
+                preparationTracker?.observe(preparationPageIndex, it, snapshot)
+                preparationTracker?.transfer(preparationPageIndex, it, snapshot)
+            }
+        })
+    }
+    val transferObserver = remember(attempt) { ReaderTransferObserver(preparationWork) }
     val attemptPrefetch = remember(attempt) { prefetchRequests[pageIndex].takeIf { imageRetry == 0 } }
     var waitingForPrefetch by remember(attempt) { mutableStateOf(attemptPrefetch != null) }
     var handedOffPrefetchProgress by remember(attempt) { mutableStateOf<ReaderTransferSnapshot?>(null) }
@@ -158,6 +175,40 @@ internal fun GuidedPanelReader(
     var imageReady by remember(attempt) { mutableStateOf(false) }
     val pageTransfer by rememberReaderPageTransfer(attempt, currentPage, observePageTransfer,
         enabled = active && !imageReady && error == null && resource == null)
+    LaunchedEffect(attempt, active, preparationTracker) {
+        if (!active) return@LaunchedEffect
+        val index = preparationPageIndex
+        preparationWork.promote()
+        val ticket = preparationTracker?.begin(index, PrefetchStage.QUEUED)
+        preparationTicket = ticket
+        var inspectedAt = 0L
+        try {
+            while (attempt.acceptsResult) {
+                val progress = if (waitingForPrefetch) attemptPrefetch?.work?.snapshot() else preparationWork.snapshot()
+                if (ticket != null && progress != null) {
+                    preparationTracker?.observe(index, ticket, progress)
+                    preparationTracker?.transfer(index, ticket, progress)
+                }
+                if (ticket != null && !waitingForPrefetch) pageTransfer?.let { preparationTracker?.download(index, ticket, it) }
+                preparationTracker?.handoff(index, waitingForPrefetch)
+                val now = monotonicTimeMillis()
+                val resolved = resource
+                if (resolved != null && now - inspectedAt >= 2_000L) {
+                    inspectedAt = now
+                    val artifactKeys = preparationWork.snapshot()
+                    val artifacts = inspectReaderPreparedArtifacts(context, resolved, headers, sourceId,
+                        artifactKeys.diskCacheKey, artifactKeys.memoryCacheKey)
+                    if (attempt.acceptsResult) preparationTracker?.artifact(index, artifacts.originalPresent,
+                        artifacts.originalBytes, artifacts.previewResident)
+                }
+                preparationTracker?.sample()
+                delay(250L)
+            }
+        } finally {
+            ticket?.let { preparationTracker?.finish(it) }
+            preparationTicket = null
+        }
+    }
     val waitClock = remember(attempt, active, imageReady) { TimeSource.Monotonic.markNow() }
     var slowLoading by remember(waitClock) { mutableStateOf(false) }
     var skipDetection by remember(attempt) { mutableStateOf(false) }
@@ -289,7 +340,10 @@ internal fun GuidedPanelReader(
                 waitingForPrefetch = false
             }
             val receiveBytes: (Long) -> Unit = { count -> if (attempt.acceptsResult) transferObserver.onBytes(count) }
-            val resolved = resource ?: if (imageRetry > 0) retry(page, receiveBytes) else resolve(page, receiveBytes)
+            val resolved = resource ?: withContext(ReaderPreparationWorkContext(preparationWork)) {
+                if (imageRetry > 0) retry(page, receiveBytes) else resolve(page, receiveBytes)
+            }
+            preparationTicket?.let { preparationTracker?.end(preparationPageIndex, it, PrefetchStage.RESOLVING, ReaderPreparationPhase.COMPLETE) }
             currentCoroutineContext().ensureActive()
             if (!attempt.acceptsResult || !requestedRun.acceptsResult || latestDetectionRun !== requestedRun) return@LaunchedEffect
             resource = resolved
@@ -312,6 +366,8 @@ internal fun GuidedPanelReader(
             if (!attempt.acceptsResult || !requestedRun.acceptsResult || latestDetectionRun !== requestedRun) return@LaunchedEffect
             // The page still renders independently. A failed analysis never traps the reader.
             error = if (resource == null) failure.message ?: "这一页暂时无法读取" else null
+            if (resource == null) preparationTicket?.let { preparationTracker?.end(preparationPageIndex, it,
+                preparationWork.snapshot().stage, ReaderPreparationPhase.FAILED, readerPageErrorLabel(error.orEmpty())) }
             detection = PanelDetection(listOf(PanelBox.FULL), PanelEngine.CLASSIC.name,
                 "分镜识别暂不可用，保留整页；可重新识别或继续翻页")
             overview = true

@@ -272,7 +272,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             maxWaitMillis = maxWaitMillis, waiting = { backgroundWait(source) }, onWaiting = onWaiting, block = block)
 
     internal suspend fun <T> withImageAdmission(
-        reader: Boolean, source: String? = null, block: suspend () -> T,
+        reader: Boolean, source: String? = null, onWaiting: (AdmissionWait?) -> Unit = {}, block: suspend () -> T,
     ): T {
         if (reader && source != null) synchronized(lock) {
             sourceReaderWaiters[source] = (sourceReaderWaiters[source] ?: 0) + 1
@@ -295,7 +295,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                 },
                 source = source,
                 waiting = { if (source == null) AdmissionWait(AdmissionWaitReason.GLOBAL_LIMIT) else backgroundWait(source) },
-                block = block,
+                onWaiting = onWaiting, block = block,
             )
         } finally {
             if (reader && source != null) synchronized(lock) {
@@ -308,7 +308,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
 
     /** JS/native metadata resolution is separate from transport and pixel decoding. */
     internal suspend fun <T> withResolveAdmission(
-        promoted: () -> Boolean = { true }, block: suspend () -> T,
+        promoted: () -> Boolean = { true }, onWaiting: (AdmissionWait?) -> Unit = {}, block: suspend () -> T,
     ): T {
         val foreground = promoted()
         var enteredOptional = false
@@ -323,7 +323,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                 },
                 enter = { activeResolves++; enteredOptional = !promoted(); if (enteredOptional) activeOptionalResolves++ },
                 leave = { activeResolves--; if (enteredOptional) activeOptionalResolves-- },
-                abandon = { !promoted() && !canResolveOptional() }, block = block,
+                abandon = { !promoted() && !canResolveOptional() }, onWaiting = onWaiting, block = block,
             )
         } finally {
             synchronized(lock) {
@@ -335,7 +335,8 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
 
     /** Local bytes use the same decode permits and need no source or network reservation. */
     internal suspend fun <T> withDecodeAdmission(
-        optional: Boolean = false, promoted: () -> Boolean = { false }, block: suspend () -> T,
+        optional: Boolean = false, promoted: () -> Boolean = { false },
+        onWaiting: (AdmissionWait?) -> Unit = {}, block: suspend () -> T,
     ): T {
         val started = monotonicTimeMillis()
         val foreground = !optional || promoted()
@@ -351,7 +352,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                 },
                 enter = { activeDecodes++; enteredOptional = optional && !promoted(); if (enteredOptional) activeOptionalDecodes++ },
                 leave = { activeDecodes--; if (enteredOptional) activeOptionalDecodes-- },
-                abandon = { optional && !promoted() && !canDecodeOptional() },
+                abandon = { optional && !promoted() && !canDecodeOptional() }, onWaiting = onWaiting,
             ) {
                 synchronized(lock) {
                     measurements.recordDecodeQueue(monotonicTimeMillis() - started)
@@ -388,8 +389,9 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     }
 
     internal suspend fun <T> withPrefetchAdmission(
-        source: String, estimatedBytes: Long, promoted: () -> Boolean, block: suspend () -> T,
-    ): T = withOptionalAdmission(source, estimatedBytes, promoted, browseOnly = false, block = block)
+        source: String, estimatedBytes: Long, promoted: () -> Boolean,
+        onWaiting: (AdmissionWait?) -> Unit = {}, block: suspend () -> T,
+    ): T = withOptionalAdmission(source, estimatedBytes, promoted, browseOnly = false, onWaiting = onWaiting, block = block)
 
     /** Speculation uses the existing prefetch/source permits and disappears as reading starts. */
     internal suspend fun <T> withBrowseWarmupAdmission(
@@ -397,7 +399,8 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     ): T = withOptionalAdmission(source, estimatedBytes, { false }, browseOnly = true, block = block)
 
     private suspend fun <T> withOptionalAdmission(
-        source: String, estimatedBytes: Long, promoted: () -> Boolean, browseOnly: Boolean, block: suspend () -> T,
+        source: String, estimatedBytes: Long, promoted: () -> Boolean, browseOnly: Boolean,
+        onWaiting: (AdmissionWait?) -> Unit = {}, block: suspend () -> T,
     ): T {
         val reserved = estimatedBytes.coerceAtLeast(EXPERIENCE_MIB)
         return admit(
@@ -414,7 +417,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                 mutableState.value.prefetchBytes < reserved || !mutableState.value.foreground ||
                     browseOnly && (!mutableState.value.browseWarmup || readerUsers > 0)
             },
-            block = block,
+            onWaiting = onWaiting, block = block,
         )
     }
     internal fun wakeAdmissions(): Unit = synchronized(lock) { revision.value++; Unit }

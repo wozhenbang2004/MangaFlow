@@ -292,6 +292,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val sourceManagement by model.sourceManagement.collectAsStateWithLifecycle()
     val sourceOperation by model.chapterSourceOperation.collectAsStateWithLifecycle()
     val sourceStandbys by model.readerSourceStandbys.collectAsStateWithLifecycle()
+    val nextChapterPreparation by model.nextChapterPreparation.collectAsStateWithLifecycle()
     val sourceResumeChoice by model.sourceResumeChoice.collectAsStateWithLifecycle()
     val sourceResumePolicy by model.sourceResumePolicy.collectAsStateWithLifecycle()
     val sourceCatalogErrors by model.repository.sourceErrors.collectAsStateWithLifecycle()
@@ -947,6 +948,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         onReadVariant = model::readReaderChapterVariant,
                         onQuickReadVariant = model::quickReadReaderChapterVariant,
                         sourceStandbys = sourceStandbys,
+                        nextChapterPreparation = nextChapterPreparation,
                         onWarmSourceStandbys = { chapter, index, count ->
                             if (model.reading.value === current.session)
                                 model.warmReaderSourceStandbys(current.session.manga, chapter, index, count)

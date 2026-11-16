@@ -1,12 +1,16 @@
 package dev.mangaflow.data
 
 import coil3.SingletonImageLoader
+import coil3.memory.MemoryCache
 import dev.mangaflow.data.plugins.prefetchScriptPage
 import dev.mangaflow.data.plugins.scriptSourceImageEpoch
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.PrefetchBudgetExceeded
 import dev.mangaflow.experience.PrefetchByteBudget
 import dev.mangaflow.experience.PrefetchWork
+import dev.mangaflow.experience.PrefetchStage
+import dev.mangaflow.experience.AdmissionWait
+import dev.mangaflow.experience.AdmissionWaitReason
 import dev.mangaflow.experience.ReaderPagePreflightStatus
 import dev.mangaflow.experience.prefetchOriginalPageResult
 import dev.mangaflow.experience.preflightReaderPage
@@ -56,7 +60,8 @@ internal class ReaderSourceStandbyController(
     private data class Window(val target: Int, val indices: List<Int>)
     private data class Stamp(val bytes: Long, val modifiedAt: Long?)
     private data class Prepared(val manifest: Page, val original: Page, val cacheKey: String?,
-        val stamp: Stamp, val decoded: Boolean)
+        val stamp: Stamp, val decoded: Boolean, val previewKey: MemoryCache.Key? = null,
+        val inspectedAt: Long = wallTimeMillis())
     private data class Stopped(val reason: String, val failed: Boolean, val retryOnRelease: Boolean = false,
         val at: Long = monotonicTimeMillis())
     private val mutableState = MutableStateFlow<List<ReaderSourceStandby>>(emptyList())
@@ -103,8 +108,19 @@ internal class ReaderSourceStandbyController(
                 it.standbyPages, it.standbyMemoryWarmup) }
                 .distinctUntilChanged().collectLatest { limits ->
                 if (generation != request) return@collectLatest
-                mutableState.value = emptyList()
-                if (!limits.foreground || limits.sources <= 0 || limits.bytes <= 0L) return@collectLatest
+                val eligible = candidates.filter(current)
+                val selected = select(eligible, policy, limits.sources.coerceAtLeast(0))
+                val allowed = limits.foreground && limits.sources > 0 && limits.bytes > 0L
+                mutableState.value = eligible.map { variant -> standby(workId, chapter, variant).let { row ->
+                    if (allowed && variant in selected) row else row.copy(phase = ReaderSourceStandbyPhase.DEFERRED,
+                        reason = when {
+                            !limits.foreground -> "阅读不在前台，暂停可选备用准备"
+                            limits.sources <= 0 -> "备用来源数量已设为零"
+                            limits.bytes <= 0L -> "备用来源容量已设为零"
+                            else -> "超出本轮备用来源数量，优先准备其他来源"
+                        })
+                } }
+                if (!allowed) return@collectLatest
                 if (maximum != limits.bytes) {
                     maximum = limits.bytes
                     bytes = PrefetchByteBudget(maximum)
@@ -113,8 +129,6 @@ internal class ReaderSourceStandbyController(
                 // still reserves the foreground lane and enforces actual source/request ceilings.
                 delay(limits.delayMillis)
                 if (generation != request) return@collectLatest
-                val selected = select(candidates.filter(current), policy, limits.sources)
-                mutableState.value = selected.map { standby(workId, chapter, it) }
                 coroutineScope {
                     selected.forEachIndexed { order, variant -> launch {
                         val saved = retained.getOrPut(variant.storageId) { linkedMapOf() }
@@ -157,7 +171,9 @@ internal class ReaderSourceStandbyController(
             scriptSourceImageEpoch(context, variant.sourceId) == sourceEpoch
         fun update(change: (ReaderSourceStandby) -> ReaderSourceStandby) {
             if (!active()) return
-            mutableState.update { rows -> rows.map { if (it.variantId == variant.storageId) change(it) else it } }
+            mutableState.update { rows -> if (!active()) rows else rows.map {
+                if (it.variantId == variant.storageId) change(it) else it
+            } }
         }
         var sourceRequestTimedOut = false
         try {
@@ -165,7 +181,11 @@ internal class ReaderSourceStandbyController(
             val pages = withTimeout(25_000L) {
                 repository.cachedPages(owner, variant.storageId) ?: policy.withPrefetchAdmission(
                     variant.sourceId, 1_048_576L, { false },
+                    onWaiting = { wait -> update { it.copy(
+                        phase = if (wait == null) ReaderSourceStandbyPhase.RESOLVING else ReaderSourceStandbyPhase.QUEUED,
+                        reason = wait?.let(::waitingReason)) } },
                 ) {
+                    update { it.copy(phase = ReaderSourceStandbyPhase.RESOLVING, reason = null) }
                     try { withTimeout(15_000L) { repository.pages(owner, variant.storageId) } }
                     catch (timeout: TimeoutCancellationException) {
                         sourceRequestTimedOut = true
@@ -186,48 +206,86 @@ internal class ReaderSourceStandbyController(
                 val pending = mutableMapOf<Int, Job>()
                 val stopped = mutableMapOf<Int, Stopped>()
                 val reservations = mutableMapOf<Int, PrefetchByteBudget>()
+                val workTokens = mutableMapOf<Int, PrefetchWork>()
+                val pageStages = mutableMapOf<Int, ReaderSourceStandbyPhase>()
                 val capacityRevision = MutableStateFlow(0L)
                 val windowLock = Mutex()
                 var window: Window? = null
+                var windowId = 0L
+                fun resident(saved: Prepared?): Boolean = saved?.previewKey?.let { exact ->
+                    // Inspection must not touch the cache access clock and keep idle previews alive.
+                    SingletonImageLoader.get(imagePlatformContext(context)).memoryCache?.keys?.contains(exact)
+                } == true
                 fun publish() {
                     val visible = window ?: return
-                    val target = prepared[visible.target]
-                    val problem = stopped[visible.target]
-                    val phase = when {
-                        target?.decoded == true -> ReaderSourceStandbyPhase.READY
-                        target != null -> ReaderSourceStandbyPhase.MANIFEST_READY
-                        visible.target in pending -> ReaderSourceStandbyPhase.PREPARING
-                        problem?.failed == true -> ReaderSourceStandbyPhase.FAILED
-                        problem != null -> ReaderSourceStandbyPhase.DEFERRED
-                        else -> ReaderSourceStandbyPhase.MANIFEST_READY
+                    val views = visible.indices.map { index ->
+                        val saved = prepared[index]
+                        val problem = stopped[index]
+                        val task = pending[index]
+                        val work = workTokens[index]?.snapshot()
+                        val phase = when {
+                            task != null && !task.isCancelled -> when {
+                                work?.admitted == true -> when (work.stage) {
+                                    PrefetchStage.QUEUED -> ReaderSourceStandbyPhase.QUEUED
+                                    PrefetchStage.RESOLVING -> ReaderSourceStandbyPhase.RESOLVING
+                                    PrefetchStage.DOWNLOADING -> ReaderSourceStandbyPhase.DOWNLOADING
+                                    PrefetchStage.CHECKING -> ReaderSourceStandbyPhase.CHECKING
+                                }
+                                work?.wait != null -> ReaderSourceStandbyPhase.QUEUED
+                                else -> pageStages[index] ?: ReaderSourceStandbyPhase.QUEUED
+                            }
+                            saved != null -> ReaderSourceStandbyPhase.READY
+                            task != null -> ReaderSourceStandbyPhase.QUEUED
+                            problem?.failed == true -> ReaderSourceStandbyPhase.FAILED
+                            problem != null -> ReaderSourceStandbyPhase.DEFERRED
+                            else -> ReaderSourceStandbyPhase.QUEUED
+                        }
+                        ReaderSourceStandbyPage(index, phase, saved != null, resident(saved),
+                            saved?.stamp?.bytes ?: 0L, work?.receivedBytes ?: 0L, work?.expectedBytes,
+                            saved?.inspectedAt, when {
+                                task?.isCancelled == true -> "等待上一次窗口请求结算"
+                                work?.wait != null && task != null -> waitingReason(work.wait)
+                                problem != null -> problem.reason
+                                saved != null && !limits.warmMemory -> "原图已缓存，小图预解码已关闭"
+                                saved != null && !resident(saved) -> "原图已缓存，小图当前未驻留"
+                                else -> null
+                            })
                     }
-                    val memoryPresent = target?.let {
-                        val identity = readerPageCacheKey(it.original, headers, variant.sourceId)
-                        SingletonImageLoader.get(imagePlatformContext(context)).memoryCache?.keys?.any { key ->
-                            key.key == identity
-                        } == true
-                    } == true
-                    update { it.copy(phase = phase, targetPageIndex = visible.target, totalPages = pages.size,
+                    val target = views.first { it.index == visible.target }
+                    update { it.copy(phase = target.phase, targetPageIndex = visible.target, totalPages = pages.size,
                         requestedPages = visible.indices.size,
-                        preparedPages = visible.indices.count { index -> index in prepared },
+                        preparedPages = views.count { page -> page.originalPresent },
                         decodedPages = visible.indices.count { index -> prepared[index]?.decoded == true },
-                        memoryWarmed = memoryPresent, targetPrepared = target != null,
-                        activePages = visible.indices.count { index -> index in pending },
-                        reason = when {
-                            target != null && !limits.warmMemory -> "原图已存磁盘，小图预解码已关闭"
-                            target != null && !target.decoded -> "原图已存磁盘，尚未完成小图预解码"
-                            target == null -> problem?.reason
-                            else -> null
-                        }) }
+                        memoryWarmed = target.previewResident, targetPrepared = target.originalPresent,
+                        activePages = visible.indices.count { index -> pending[index]?.isCancelled == false &&
+                            workTokens[index]?.snapshot()?.admitted == true },
+                        reason = target.reason, windowId = windowId,
+                        queuedPages = views.count { page -> page.phase == ReaderSourceStandbyPhase.QUEUED },
+                        resolvingPages = views.count { page -> page.phase == ReaderSourceStandbyPhase.RESOLVING },
+                        downloadingPages = views.count { page -> page.phase == ReaderSourceStandbyPhase.DOWNLOADING },
+                        checkingPages = views.count { page -> page.phase == ReaderSourceStandbyPhase.CHECKING },
+                        failedPages = views.count { page -> page.phase == ReaderSourceStandbyPhase.FAILED },
+                        deferredPages = views.count { page -> page.phase == ReaderSourceStandbyPhase.DEFERRED },
+                        settlingPages = pending.count { (index, _) -> index !in visible.indices },
+                        cachedOriginalBytes = views.sumOf { page -> page.cachedOriginalBytes },
+                        previewResidentPages = views.count { page -> page.previewResident },
+                        targetOriginalPresent = target.originalPresent, targetPreviewResident = target.previewResident,
+                        receivedBytes = views.sumOf { page -> page.receivedBytes },
+                        expectedBytes = views.map { page -> page.expectedBytes }.takeIf { values -> values.all { value -> value != null } }
+                            ?.sumOf { value -> value ?: 0L },
+                        cacheInspectedAtMillis = views.mapNotNull { page -> page.cacheInspectedAtMillis }.minOrNull(),
+                        windowPages = views) }
                 }
                 suspend fun refreshRetained(indices: List<Int>) {
                     for (index in indices) {
                         val saved = prepared[index] ?: continue
-                        if (stamp(saved.original, saved.cacheKey, headers, variant.sourceId) != saved.stamp &&
-                            prepared[index] === saved) {
+                        val currentStamp = stamp(saved.original, saved.cacheKey, headers, variant.sourceId)
+                        if (currentStamp != saved.stamp && prepared[index] === saved) {
                             prepared.remove(index)
                             if (index !in pending) reservations.remove(index)?.close()
                             stopped[index] = Stopped("原图缓存已回收或更新，等待重新准备", false)
+                        } else if (prepared[index] === saved) {
+                            prepared[index] = saved.copy(inspectedAt = wallTimeMillis())
                         }
                     }
                 }
@@ -245,7 +303,9 @@ internal class ReaderSourceStandbyController(
                             if (size < limits.pages && previous in pages.indices) add(previous)
                         }
                     }
-                    window = Window(target, wanted)
+                    val nextWindow = Window(target, wanted)
+                    if (window != nextWindow) windowId++
+                    window = nextWindow
                     // Keep overlap alive; fast page turns only cancel work that really left the window.
                     pending.filterKeys { it !in wanted }.values.toList().forEach { it.cancel() }
                     reservations.keys.filter { it !in wanted && it !in pending }.forEach { index ->
@@ -253,6 +313,7 @@ internal class ReaderSourceStandbyController(
                         // completes; its own finally block releases the captured ticket.
                         reservations.remove(index)?.close()
                     }
+                    workTokens.keys.filter { it !in wanted && it !in pending }.forEach { workTokens.remove(it); pageStages.remove(it) }
                     refreshRetained(wanted)
                     currentCoroutineContext().ensureActive()
                     if (!active()) return@withLock
@@ -276,7 +337,10 @@ internal class ReaderSourceStandbyController(
                             continue
                         }
                         reservations[index] = ticket
-                        if (saved != null && (!warm || saved.decoded)) continue
+                        if (saved != null && (!warm || resident(saved))) continue
+                        val token = PrefetchWork()
+                        workTokens[index] = token
+                        pageStages[index] = ReaderSourceStandbyPhase.QUEUED
                         lateinit var task: Job
                         task = launch(start = CoroutineStart.LAZY) {
                             try {
@@ -286,20 +350,25 @@ internal class ReaderSourceStandbyController(
                                 val original = if (old != null) old.original else {
                                     // Native cache-only inspection reuses existing originals before
                                     // deciding whether this window needs another actual transfer.
+                                    pageStages[index] = ReaderSourceStandbyPhase.CHECKING
+                                    publish()
                                     val cached = if (!variant.sourceId.startsWith("js_")) preflightReaderPage(
                                         context, input, headers, variant.sourceId, 512, 1024, warmMemory = false,
+                                        work = token,
                                     ) else null
                                     if (cached?.dimensions != null) input else {
                                         if (ticket.remaining <= 0L) throw PrefetchBudgetExceeded()
+                                        pageStages[index] = ReaderSourceStandbyPhase.QUEUED
+                                        publish()
                                         if (variant.sourceId == "jmcomic") {
                                             stopped[index] = Stopped("此来源暂不支持后台原图准备，切源后按需加载", false)
                                             null
                                         } else if (variant.sourceId.startsWith("js_")) {
                                             withTimeout(25_000L) { prefetchScriptPage(context, owner,
-                                                variant.storageId, input, ticket, PrefetchWork()) }
+                                                variant.storageId, input, ticket, token) }
                                         } else {
                                             val fetched = withTimeout(25_000L) { prefetchOriginalPageResult(
-                                                context, input, headers, variant.sourceId, ticket) }
+                                                context, input, headers, variant.sourceId, ticket, token) }
                                             when {
                                                 fetched.received -> input
                                                 fetched.failure != null -> {
@@ -316,30 +385,59 @@ internal class ReaderSourceStandbyController(
                                 }
                                 currentCoroutineContext().ensureActive()
                                 if (!active() || index !in window?.indices.orEmpty() || original == null) return@launch
+                                pageStages[index] = ReaderSourceStandbyPhase.CHECKING
+                                publish()
                                 val checked = withTimeout(15_000L) { preflightReaderPage(context,
                                     original, headers, variant.sourceId, 512, 1024,
-                                    old?.cacheKey, warmMemory = warm) }
+                                    old?.cacheKey, warmMemory = false, work = token) }
                                 currentCoroutineContext().ensureActive()
                                 if (!active() || index !in window?.indices.orEmpty()) return@launch
                                 val local = stamp(original, checked.diskCacheKey, headers, variant.sourceId)
                                 currentCoroutineContext().ensureActive()
                                 if (!active() || index !in window?.indices.orEmpty()) return@launch
                                 when {
-                                    checked.status == ReaderPagePreflightStatus.FAILED ->
+                                    checked.status == ReaderPagePreflightStatus.FAILED -> {
+                                        prepared.remove(index)
                                         stopped[index] = Stopped("已缓存图片未通过读取检查，可在切源后重试", true)
-                                    local != null -> {
+                                    }
+                                    local != null && checked.dimensions != null -> {
                                         if (ticket.used < local.bytes) ticket.accept(local.bytes - ticket.used)
                                         else ticket.release(ticket.used - local.bytes)
                                         prepared.remove(index)
                                         prepared[index] = Prepared(input, original, checked.diskCacheKey,
-                                            local, checked.status == ReaderPagePreflightStatus.READY || old?.decoded == true)
+                                            local, old?.decoded == true, old?.previewKey)
                                         while (prepared.size > 32) {
                                             val oldest = prepared.keys.firstOrNull { it !in window?.indices.orEmpty() } ?: break
                                             prepared.remove(oldest)
                                         }
                                         stopped.remove(index)
+                                        // Original readiness does not wait for optional preview decoding.
+                                        publish()
+                                        if (warm && !resident(prepared[index])) {
+                                            val preview = withTimeout(15_000L) { preflightReaderPage(context,
+                                                original, headers, variant.sourceId, 512, 1024,
+                                                checked.diskCacheKey, warmMemory = true, work = token) }
+                                            currentCoroutineContext().ensureActive()
+                                            if (!active() || index !in window?.indices.orEmpty()) return@launch
+                                            val saved = prepared[index]
+                                            if (saved != null && stamp(original, saved.cacheKey, headers, variant.sourceId) == saved.stamp) {
+                                                if (preview.status == ReaderPagePreflightStatus.READY) {
+                                                    prepared[index] = saved.copy(decoded = true, previewKey = preview.memoryCacheKey,
+                                                        inspectedAt = wallTimeMillis())
+                                                } else stopped[index] = Stopped(when (preview.status) {
+                                                    ReaderPagePreflightStatus.FAILED -> "原图已缓存，小图预解码失败，切源后按需读取"
+                                                    else -> "原图已缓存，当前资源限制暂缓小图预解码"
+                                                }, false)
+                                            } else {
+                                                prepared.remove(index)
+                                                stopped[index] = Stopped("原图缓存已回收或更新，等待重新准备", false)
+                                            }
+                                        }
                                     }
-                                    else -> stopped[index] = Stopped("原图未保留在缓存中，暂不能确认备用就绪", false)
+                                    else -> {
+                                        prepared.remove(index)
+                                        stopped[index] = Stopped("原图尚未通过缓存读取检查，暂不能确认备用就绪", false)
+                                    }
                                 }
                             } catch (timeout: TimeoutCancellationException) {
                                 currentCoroutineContext().ensureActive()
@@ -361,6 +459,10 @@ internal class ReaderSourceStandbyController(
                                     ticket.close()
                                     if (!wantedNow) capacityRevision.value++
                                 }
+                                if (!wantedNow && workTokens[index] === token) {
+                                    workTokens.remove(index)
+                                    pageStages.remove(index)
+                                }
                                 // An off-window cancellation may settle after the reader already
                                 // returned. Restart that desired page only after its old owner is
                                 // gone; ordinary failures retain their bounded stopped state.
@@ -378,13 +480,20 @@ internal class ReaderSourceStandbyController(
                     combine(position, capacityRevision) { at, _ -> at }.collect { updateWindow(it) }
                 }
                 try {
+                    var inspectedAt = monotonicTimeMillis()
                     while (currentCoroutineContext().isActive && active()) {
-                        delay(2_000L)
-                        windowLock.withLock { refreshRetained(window?.indices.orEmpty()); publish() }
+                        delay(if (pending.isEmpty()) 2_000L else 250L)
+                        windowLock.withLock {
+                            if (monotonicTimeMillis() - inspectedAt >= 2_000L) {
+                                refreshRetained(window?.indices.orEmpty())
+                                inspectedAt = monotonicTimeMillis()
+                            }
+                            publish()
+                        }
                         if (bytes.remaining > 0L && stopped.values.any { it.retryOnRelease })
                             updateWindow(position.value)
                     }
-                    mutableState.update { rows -> rows.filterNot { it.variantId == variant.storageId } }
+                    if (generation == request) mutableState.update { rows -> rows.filterNot { it.variantId == variant.storageId } }
                 } finally {
                     positions.cancel()
                     val tasks = pending.values.toList()
@@ -434,5 +543,19 @@ internal class ReaderSourceStandbyController(
 
     private fun standby(workId: String, chapter: Chapter, variant: ChapterVariant) =
         ReaderSourceStandby(workId, chapter.id, variant.storageId, variant.sourceId,
-            variant.sourceName, ReaderSourceStandbyPhase.PREPARING)
+            variant.sourceName, ReaderSourceStandbyPhase.QUEUED)
+
+    private fun waitingReason(wait: AdmissionWait): String = when (wait.reason) {
+        AdmissionWaitReason.NO_NETWORK -> "等待网络恢复"
+        AdmissionWaitReason.STORAGE_LOW -> "可用空间不足，等待释放容量"
+        AdmissionWaitReason.THERMAL -> "设备温度保护，暂缓备用准备"
+        AdmissionWaitReason.MEMORY_PRESSURE -> "内存保护，暂缓小图准备"
+        AdmissionWaitReason.BACKGROUND_RESTRICTED -> "等待阅读回到前台"
+        AdmissionWaitReason.READING_PRIORITY -> "当前阅读优先，备用请求排队"
+        AdmissionWaitReason.SOURCE_BACKOFF -> "来源暂退避，等待重试窗口"
+        AdmissionWaitReason.SOURCE_LIMIT -> "等待此来源的并发名额"
+        AdmissionWaitReason.GLOBAL_LIMIT -> "等待共享预读名额或容量"
+        AdmissionWaitReason.CHAPTER_LIMIT -> "等待本章并发名额"
+        AdmissionWaitReason.FAIR_QUEUE -> "按公平队列等待其他页面"
+    }
 }

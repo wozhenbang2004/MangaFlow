@@ -70,7 +70,7 @@ internal data class ReaderTransferSnapshot(
 )
 
 /** Owned by one reader attempt, including any native/script image materialization before Coil. */
-internal class ReaderTransferObserver {
+internal class ReaderTransferObserver(val preparationWork: PrefetchWork? = null) {
     private val lock = StorageLock()
     private var current = ReaderTransferSnapshot()
 
@@ -95,12 +95,58 @@ internal class ReaderTransferObserver {
 
 internal fun ImageRequest.Builder.readerTransferProgress(observer: ReaderTransferObserver) = apply {
     extras[readerTransferKey] = observer
+    observer.preparationWork?.let { extras[workTokenKey] = it }
 }
+internal fun ImageRequest.Builder.readerPreparationWork(work: PrefetchWork) = apply { extras[workTokenKey] = work }
+
+internal enum class PrefetchStage { QUEUED, RESOLVING, DOWNLOADING, CHECKING }
+internal data class PrefetchWorkSnapshot(
+    val stage: PrefetchStage = PrefetchStage.QUEUED,
+    val admitted: Boolean = false,
+    val wait: AdmissionWait? = null,
+    val receivedBytes: Long = 0L,
+    val expectedBytes: Long? = null,
+    val lastProgressAt: Long? = null,
+    val settled: Boolean = false,
+    val succeeded: Boolean? = null,
+    val diskCacheKey: String? = null,
+    val memoryCacheKey: MemoryCache.Key? = null,
+)
 
 /** Ownership can promote one displayed page without lifting the rest of its byte window. */
-internal class PrefetchWork(private val promoted: () -> Unit = {}) {
+internal class PrefetchWork(private val promoted: () -> Unit = {},
+    private val observe: (PrefetchWorkSnapshot) -> Unit = {}) {
     private val lock = StorageLock()
     private val foreground = atomic(false)
+    private var activity = PrefetchWorkSnapshot()
+    fun snapshot(): PrefetchWorkSnapshot = synchronized(lock) { activity }
+    private fun update(notify: Boolean = true, change: (PrefetchWorkSnapshot) -> PrefetchWorkSnapshot) {
+        val next = synchronized(lock) { change(activity).also { activity = it } }
+        if (notify) observe(next)
+    }
+    fun admission(stage: PrefetchStage, wait: AdmissionWait?) = update {
+        it.copy(stage = stage, admitted = wait == null, wait = wait, settled = false, succeeded = null)
+    }
+    fun queued(stage: PrefetchStage) = update {
+        it.copy(stage = stage, admitted = false, wait = null, settled = false, succeeded = null)
+    }
+    suspend fun <T> during(stage: PrefetchStage, block: suspend () -> T): T {
+        queued(stage)
+        var success = false
+        return try { block().also { success = true } }
+        finally { update { it.copy(stage = stage, admitted = false, wait = null, settled = true, succeeded = success) } }
+    }
+    fun imageArtifact(diskCacheKey: String?, memoryCacheKey: MemoryCache.Key?) = update {
+        it.copy(diskCacheKey = diskCacheKey, memoryCacheKey = memoryCacheKey)
+    }
+    fun beginBody(expectedBytes: Long?) = update {
+        it.copy(receivedBytes = 0L, expectedBytes = expectedBytes?.takeIf { count -> count >= 0L })
+    }
+    fun onBytes(count: Long) {
+        if (count <= 0L) return
+        update(notify = false) { it.copy(receivedBytes = it.receivedBytes + count.coerceAtMost(Long.MAX_VALUE - it.receivedBytes),
+            lastProgressAt = monotonicTimeMillis()) }
+    }
     val isForeground: Boolean get() = foreground.value
     fun promote() {
         val changed = synchronized(lock) { foreground.compareAndSet(false, true) }
@@ -264,7 +310,33 @@ internal data class ReaderPagePreflight(
     val dimensions: IntSize? = null,
     val diskCacheKey: String? = null,
     val failure: Throwable? = null,
+    val memoryCacheKey: MemoryCache.Key? = null,
 )
+
+internal data class ReaderPreparedArtifacts(val originalPresent: Boolean?, val originalBytes: Long?,
+    val previewResident: Boolean?)
+
+/** Inspect this exact artifact locally. Do not execute an image request or touch a memory LRU entry. */
+internal suspend fun inspectReaderPreparedArtifacts(
+    context: PlatformContext, page: Page, headers: Map<String, String>, source: String,
+    diskCacheKey: String? = null, memoryCacheKey: MemoryCache.Key? = null,
+): ReaderPreparedArtifacts = withContext(Dispatchers.IO) {
+    val loader = SingletonImageLoader.get(imagePlatformContext(context))
+    val preview = memoryCacheKey?.let { key -> loader.memoryCache?.keys?.contains(key) }
+    try {
+        val local = readerFilePath(page.url)
+        val bytes = if (local != null) StorageFile(local).takeIf { it.isFile }?.length()
+        else loader.diskCache?.let { cache ->
+            cache.openSnapshot(diskCacheKey ?: readerPageCacheKey(page, headers, source))?.use {
+                cache.fileSystem.metadata(it.data).size
+            }
+        }
+        val present = bytes != null && bytes > 0L && readerImageDimensions(loader, page,
+            diskCacheKey ?: readerPageCacheKey(page, headers, source), refresh = true) != null
+        ReaderPreparedArtifacts(present, bytes?.takeIf { present }, preview)
+    } catch (cancelled: CancellationException) { throw cancelled }
+    catch (_: Exception) { ReaderPreparedArtifacts(null, null, preview) }
+}
 private class PrefetchCacheUnavailable : IOException("预取原图已不在缓存中")
 
 private data class WarmPreviewKey(val identity: String, val size: Size)
@@ -368,7 +440,8 @@ private suspend fun inspectReaderPage(
     currentCoroutineContext().ensureActive()
     return when (result) {
         is SuccessResult -> if (result.image.width > 0 && result.image.height > 0)
-            ReaderPagePreflight(ReaderPagePreflightStatus.READY, dimensions, result.diskCacheKey ?: key)
+            ReaderPagePreflight(ReaderPagePreflightStatus.READY, dimensions, result.diskCacheKey ?: key,
+                memoryCacheKey = result.memoryCacheKey)
         else ReaderPagePreflight(ReaderPagePreflightStatus.FAILED, dimensions, key,
             IOException("预取图片尺寸无效"))
         is ErrorResult -> {
@@ -434,7 +507,8 @@ private class ExperienceDecoderFactory(private val policy: ExperiencePolicyStore
         return Decoder {
             val optional = options.extras[workKey] == ExperienceImageWork.PREFETCH
             val work = options.extras[workTokenKey]
-            policy.withDecodeAdmission(optional, { work?.isForeground == true }) {
+            suspend fun decode(): DecodeResult? = policy.withDecodeAdmission(optional,
+                { work?.isForeground == true }, { work?.admission(PrefetchStage.CHECKING, it) }) {
                 val started = monotonicTimeMillis()
                 var decodedBytes = 0L
                 var cancelled = false
@@ -459,6 +533,7 @@ private class ExperienceDecoderFactory(private val policy: ExperiencePolicyStore
                         optional && work?.isForeground != true)
                 }
             }
+            if (work != null) work.during(PrefetchStage.CHECKING) { decode() } else decode()
         }
     }
 }
@@ -476,6 +551,7 @@ private class ExperienceImageEvents(
         bytes = runCatching { source.fileOrNull()?.let { source.fileSystem.metadata(it).size } }.getOrNull()
     }
     override fun onSuccess(request: ImageRequest, result: SuccessResult) {
+        work?.imageArtifact(result.diskCacheKey, result.memoryCacheKey)
         if (request.extras[cacheOnlyKey] == true) return
         policy.recordImage(monotonicTimeMillis() - started, result.dataSource == DataSource.MEMORY_CACHE,
             result.dataSource == DataSource.DISK, prefetch && work?.isForeground != true, key, bytes)
@@ -496,16 +572,20 @@ private class ExperienceImageNetworkClient(
         val token = request.extras[workTokenKey]
         val source = request.extras[sourceKey] ?: experienceOrigin(request.url)
         suspend fun transfer(): T = performRequest(request, block)
-        return if (optional && token?.isForeground != true) {
-            try {
-                token?.ifOptional { if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded() }
-                policy.withPrefetchAdmission(source,
-                    policy.estimatedPageBytes(request.url), { token?.isForeground == true }) { transfer() }
-            } catch (_: PrefetchPromoted) {
-                policy.withImageAdmission(reader = true, source = source) { transfer() }
-            }
-        } else policy.withImageAdmission(reader = request.extras[workKey] == ExperienceImageWork.READER ||
-            token?.isForeground == true, source = source) { transfer() }
+        suspend fun scheduled(): T {
+            val waiting: (AdmissionWait?) -> Unit = { token?.admission(PrefetchStage.DOWNLOADING, it) }
+            return if (optional && token?.isForeground != true) {
+                try {
+                    token?.ifOptional { if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded() }
+                    policy.withPrefetchAdmission(source,
+                        policy.estimatedPageBytes(request.url), { token?.isForeground == true }, waiting) { transfer() }
+                } catch (_: PrefetchPromoted) {
+                    policy.withImageAdmission(reader = true, source = source, onWaiting = waiting) { transfer() }
+                }
+            } else policy.withImageAdmission(reader = request.extras[workKey] == ExperienceImageWork.READER ||
+                token?.isForeground == true, source = source, onWaiting = waiting) { transfer() }
+        }
+        return if (token != null) token.during(PrefetchStage.DOWNLOADING) { scheduled() } else scheduled()
     }
 
     private suspend fun <T> performRequest(request: NetworkRequest, block: suspend (NetworkResponse) -> T): T {
@@ -535,6 +615,7 @@ private class ExperienceImageNetworkClient(
                     val length = if (encoding.isNullOrEmpty() || encoding.equals("identity", true))
                         response.headers["Content-Length"]?.toLongOrNull() else null
                     readerTransfer?.beginBody(length)
+                    token?.beginBody(length)
                 }
                 if (optional) {
                     requireNotNull(token).ifOptional {
@@ -558,7 +639,7 @@ private class ExperienceImageNetworkClient(
                                 sink.write(source, byteCount)
                                 if (byteCount > 0L) {
                                     received += byteCount
-                                    if (successfulBody) readerTransfer?.onBytes(byteCount)
+                                    if (successfulBody) { readerTransfer?.onBytes(byteCount); token?.onBytes(byteCount) }
                                 }
                             }
                             override fun flush() = sink.flush()
