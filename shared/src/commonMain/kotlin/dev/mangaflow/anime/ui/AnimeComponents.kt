@@ -66,6 +66,11 @@ internal fun animeSourceName(id: String): String = when (id) {
     else -> id.removePrefix("anime-")
 }
 
+internal fun animeSourceName(id: String, state: AnimeScreenState): String =
+    state.sourceExtensions.firstOrNull { it.id == id }?.name
+        ?: state.sourceResults.firstOrNull { it.providerId == id }?.name
+        ?: animeSourceName(id)
+
 internal fun animeProviderName(id: String): String = when (id) {
     "anime-bangumi", "bangumi" -> "Bangumi"
     "anime-anilist", "anilist" -> "AniList"

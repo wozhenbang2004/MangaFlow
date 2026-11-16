@@ -5,48 +5,103 @@ import dev.mangaflow.anime.AnimeDetail
 import dev.mangaflow.anime.AnimeEpisode
 import dev.mangaflow.anime.AnimeEpisodeKind
 import dev.mangaflow.anime.AnimeSubject
+import dev.mangaflow.anime.AnimeBrowseMode
+import dev.mangaflow.anime.AnimeDocumentCodec
+import dev.mangaflow.experience.ContentCacheKind
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.platform.PlatformContext
 
 /** Official Bangumi v0 contract: bangumi/api/open-api/v0.yaml, read 2026-11-16. */
+data class AnimeMetadataPage(val items: List<AnimeSubject>, val page: Int, val hasMore: Boolean)
+
 class AnimeMetadataRepository(context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
+    private val cache = AnimeMetadataCache.get(context)
 
-    suspend fun discover(): List<AnimeSubject> {
+    suspend fun discover(): List<AnimeSubject> = browse().items
+    suspend fun search(query: String): List<AnimeSubject> = browse(query = query).items
+
+    suspend fun cachedBrowse(mode: AnimeBrowseMode, query: String, page: Int, year: Int?, tag: String,
+        weekday: Int?): AnimeMetadataPage? = cache.read(browseKey(mode, query, page, year, tag, weekday))?.let {
+            runCatching { decodePage(it.text) }.getOrNull()
+        }
+
+    suspend fun browse(mode: AnimeBrowseMode = AnimeBrowseMode.POPULAR, query: String = "", page: Int = 1,
+        year: Int? = null, tag: String = "", weekday: Int? = null): AnimeMetadataPage {
+        require(page > 0 && (page - 1L) * PAGE_SIZE <= Int.MAX_VALUE) { "分页位置无效。" }
+        require(year == null || year in 1..9998) { "请输入有效年份。" }
+        require(weekday == null || weekday in 1..7)
+        val key = browseKey(mode, query, page, year, tag, weekday)
+        val kind = when {
+            query.isNotBlank() -> ContentCacheKind.SEARCH
+            mode == AnimeBrowseMode.POPULAR -> ContentCacheKind.RANKING
+            else -> ContentCacheKind.DISCOVERY
+        }
+        cache.read(key)?.takeIf { cache.isFresh(it, kind) }?.let {
+            runCatching { decodePage(it.text) }.getOrNull()?.let { cached -> return cached }
+        }
+        val cacheGeneration = cache.generation
         val http = AnimeHttp(BANGUMI_PROVIDER)
         return try {
-            http.json(BANGUMI_API.newBuilder().addPathSegment("subjects")
-                .addQueryParameter("type", "2").addQueryParameter("sort", "rank")
-                .addQueryParameter("limit", "24").addQueryParameter("offset", "0").build(),
-                AnimeSourceStage.METADATA)
-                .requiredArray("data", BANGUMI_PROVIDER, AnimeSourceStage.METADATA).objects()
-                .mapNotNull(::bangumiSubject)
+            val result = if (mode == AnimeBrowseMode.CALENDAR && query.isBlank()) {
+                require(tag.isBlank()) { "每日番表暂不支持标签筛选，请切换排行或新番。" }
+                val rows = JSONArray(http.request(animePublicUrl("https://api.bgm.tv/calendar"), AnimeSourceStage.METADATA).text)
+                val items = rows.objects().flatMap { day ->
+                    val dayId = day.optJSONObject("weekday")?.optInt("id")
+                    if (weekday != null && weekday != dayId) emptyList() else
+                        day.requiredArray("items", BANGUMI_PROVIDER, AnimeSourceStage.METADATA).objects()
+                            .mapNotNull(::bangumiSubject).map { it.copy(airWeekday = dayId?.takeIf { value -> value in 1..7 }) }
+                }.filter { year == null || it.year == year }.distinctBy { it.id }
+                AnimeMetadataPage(items, 1, false)
+            } else {
+                val offset = (page - 1L) * PAGE_SIZE
+                val document = if (query.isNotBlank() || tag.isNotBlank()) {
+                    val filter = JSONObject().put("type", JSONArray(listOf(2)))
+                    if (tag.isNotBlank()) filter.put("tag", JSONArray(listOf(tag.trim())))
+                    if (year != null) filter.put("air_date", JSONArray(listOf(">=${year.toString().padStart(4, '0')}-01-01",
+                        "<${(year + 1).toString().padStart(4, '0')}-01-01")))
+                    http.json(BANGUMI_API.newBuilder().addPathSegments("search/subjects")
+                        .addQueryParameter("limit", PAGE_SIZE.toString()).addQueryParameter("offset", offset.toString()).build(),
+                        AnimeSourceStage.METADATA, "POST", JSONObject().put("keyword", query.trim())
+                            .put("sort", if (query.isNotBlank()) "match" else "rank").put("filter", filter))
+                } else {
+                    val url = BANGUMI_API.newBuilder().addPathSegment("subjects")
+                        .addQueryParameter("type", "2").addQueryParameter("sort", if (mode == AnimeBrowseMode.NEWEST) "date" else "rank")
+                        .addQueryParameter("limit", PAGE_SIZE.toString()).addQueryParameter("offset", offset.toString())
+                    year?.let { url.addQueryParameter("year", it.toString()) }
+                    http.json(url.build(), AnimeSourceStage.METADATA)
+                }
+                val rows = document.requiredArray("data", BANGUMI_PROVIDER, AnimeSourceStage.METADATA).objects()
+                val total = document.optLong("total", -1L)
+                AnimeMetadataPage(rows.mapNotNull(::bangumiSubject), page,
+                    rows.isNotEmpty() && if (total >= 0) offset + rows.size < total else rows.size >= PAGE_SIZE)
+            }
+            cache.write(key, encodePage(result), cacheGeneration)
+            result
         } finally { http.close() }
     }
 
-    suspend fun search(query: String): List<AnimeSubject> {
-        val keyword = query.trim()
-        require(keyword.isNotEmpty()) { "请输入番剧名称。" }
-        val http = AnimeHttp(BANGUMI_PROVIDER)
-        return try {
-            http.json(BANGUMI_API.newBuilder().addPathSegments("search/subjects")
-                .addQueryParameter("limit", "50").addQueryParameter("offset", "0").build(),
-                AnimeSourceStage.METADATA, "POST", JSONObject().put("keyword", keyword).put("sort", "match")
-                    .put("filter", JSONObject().put("type", JSONArray(listOf(2)))))
-                .requiredArray("data", BANGUMI_PROVIDER, AnimeSourceStage.METADATA).objects()
-                .mapNotNull(::bangumiSubject)
-        } finally { http.close() }
+    suspend fun cachedDetail(subject: AnimeSubject): AnimeDetail? = cache.read("detail:${subject.id}")?.let {
+        runCatching { AnimeDocumentCodec.detail(JSONObject(it.text)) }.getOrNull()?.takeIf { detail -> detail.subject.id == subject.id }
     }
 
     suspend fun detail(subject: AnimeSubject): AnimeDetail {
-        val id = animeNumericId(subject.externalIds["bangumi"] ?: subject.id.removePrefix("bangumi:"))
+        require(subject.id.startsWith("bangumi:")) { "请选择有效的番剧条目。" }
+        val id = animeNumericId(subject.id.removePrefix("bangumi:"))
+        val key = "detail:${subject.id}"
+        cache.read(key)?.takeIf { cache.isFresh(it, ContentCacheKind.DETAILS) }?.let {
+            runCatching { AnimeDocumentCodec.detail(JSONObject(it.text)) }.getOrNull()
+                ?.takeIf { detail -> detail.subject.id == subject.id }?.let { detail -> return detail }
+        }
+        val cacheGeneration = cache.generation
         val http = AnimeHttp(BANGUMI_PROVIDER)
         return try {
             val canonical = bangumiSubject(http.json(BANGUMI_API.newBuilder().addPathSegment("subjects")
                 .addPathSegment(id.toString()).build(), AnimeSourceStage.METADATA))
                 ?: throw AnimeSourceException(BANGUMI_PROVIDER, AnimeSourceStage.METADATA, "该条目不是动画，请重新选择正确的番剧或季度。")
+            check(canonical.id == subject.id) { "返回的番剧身份与请求不一致，请重新选择条目。" }
             AnimeDetail(canonical, bangumiEpisodes(http, id).map { episode ->
                 val number = episode.finiteNumber("sort")
                     ?: throw AnimeSourceException(BANGUMI_PROVIDER, AnimeSourceStage.METADATA, "番剧目录缺少剧集编号，暂时无法建立准确映射。")
@@ -59,9 +114,34 @@ class AnimeMetadataRepository(context: PlatformContext) {
                     durationMs = bangumiDuration(episode.text("duration")),
                     airDate = episode.text("airdate").takeIf { it.isNotBlank() && it != "0000-00-00" },
                 )
-            }.sortedWith(compareBy<AnimeEpisode> { it.kind.ordinal }.thenBy { it.number }.thenBy { it.id }))
+            }.sortedWith(compareBy<AnimeEpisode> { it.kind.ordinal }.thenBy { it.number }.thenBy { it.id })).also {
+                cache.write(key, AnimeDocumentCodec.detail(it).toString(), cacheGeneration)
+            }
         } finally { http.close() }
     }
+
+    suspend fun related(subject: AnimeSubject): List<AnimeSubject> {
+        require(subject.id.startsWith("bangumi:")) { "请选择有效的番剧条目。" }
+        val id = animeNumericId(subject.id.removePrefix("bangumi:"))
+        val http = AnimeHttp(BANGUMI_PROVIDER)
+        return try {
+            JSONArray(http.request(BANGUMI_API.newBuilder().addPathSegment("subjects").addPathSegment(id.toString())
+                .addPathSegment("subjects").build(), AnimeSourceStage.METADATA).text).objects()
+                .mapNotNull(::bangumiSubject).filterNot { it.id == subject.id }.distinctBy { it.id }
+        } finally { http.close() }
+    }
+
+    private fun browseKey(mode: AnimeBrowseMode, query: String, page: Int, year: Int?, tag: String, weekday: Int?) =
+        JSONObject().put("mode", mode.name).put("query", query.trim()).put("page", page)
+            .put("year", year).put("tag", tag.trim()).put("weekday", weekday).toString()
+    private fun encodePage(page: AnimeMetadataPage) = JSONObject().put("page", page.page)
+        .put("hasMore", page.hasMore).put("items", JSONArray(page.items.map { AnimeDocumentCodec.subject(it) })).toString()
+    private fun decodePage(text: String): AnimeMetadataPage {
+        val json = JSONObject(text)
+        return AnimeMetadataPage(json.getJSONArray("items").objects().map { AnimeDocumentCodec.subject(it) },
+            json.getInt("page"), json.getBoolean("hasMore"))
+    }
+    private companion object { const val PAGE_SIZE = 24 }
 }
 
 internal const val BANGUMI_PROVIDER = "anime-bangumi"
@@ -79,10 +159,13 @@ internal fun bangumiSubject(json: JSONObject): AnimeSubject? {
         id = "bangumi:$id", title = name, originalTitle = json.text("name"),
         coverUrl = sourceCover("https://bgm.tv/", images?.text("large", "common", "medium").orEmpty()),
         description = Ksoup.parse(json.text("summary")).text(),
-        episodeCount = json.positiveInt("eps"),
-        year = json.text("date").take(4).toIntOrNull()?.takeIf { it in 1900..9999 },
+        episodeCount = json.positiveInt("eps") ?: json.positiveInt("eps_count"),
+        year = json.text("date", "air_date").take(4).toIntOrNull()?.takeIf { it in 1..9999 },
         tags = json.optJSONArray("tags")?.objects().orEmpty().map { it.text("name") }.filter { it.isNotBlank() }.distinct(),
         externalIds = mapOf("bangumi" to id.toString()),
+        airWeekday = json.optInt("air_weekday").takeIf { it in 1..7 },
+        rating = json.optJSONObject("rating")?.finiteNumber("score"),
+        rank = json.positiveInt("rank"),
     )
 }
 

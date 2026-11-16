@@ -874,7 +874,9 @@ private fun BackupRestoreDialog(
                         } ?: "未知时间"
                         Text(date, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                         Text(
-                            "${restore.info.favorites} 本收藏 · ${restore.info.history} 条阅读记录 · ${restore.info.bookmarks} 项画面收藏",
+                            "${restore.info.favorites} 本收藏 · ${restore.info.history} 条阅读记录 · ${restore.info.bookmarks} 项画面收藏" +
+                                (restore.info.animeEntries?.let { " · $it 部追番记录" } ?: " · 现有追番记录保留") +
+                                (restore.info.animeSources?.let { " · $it 个动漫源" } ?: ""),
                             style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
                         )
                         Text(

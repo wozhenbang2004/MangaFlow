@@ -64,14 +64,26 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     private val application = applicationContext(context)
     val operations = ApplicationOperations.get(application)
     val scope = operations.scope
+    private var animeForeground = true
     private val animeOwner = lazy {
         AnimeController(application, scope).also { controller ->
+            controller.setForeground(animeForeground)
             relayLink.updateSources(bodySources.entries.value.filter { it.enabled && !it.removed && it.isInstalled }
                 .associate { it.source.id to it.source.homeUrl } + controller.sourceHomes)
+            scope.launch {
+                controller.extensions.state.collect {
+                    relayLink.updateSources(bodySources.entries.value.filter { it.enabled && !it.removed && it.isInstalled }
+                        .associate { it.source.id to it.source.homeUrl } + controller.sourceHomes)
+                }
+            }
         }
     }
     val anime: AnimeController get() = animeOwner.value
     fun flushAnimePlayback() { if (animeOwner.isInitialized()) animeOwner.value.flushPlayback() }
+    fun setAnimeForeground(value: Boolean) {
+        animeForeground = value
+        if (animeOwner.isInitialized()) animeOwner.value.setForeground(value)
+    }
     val relayLink = RelayLinkController.get(application)
     private val sourcePreferences = preferences(application, "mangaflow_library")
     val copyRepository = CopyMangaRepository(identityProvider = { CopyAnonymousIdentityStore.load(application) },
@@ -121,6 +133,7 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val preparations = ChapterPreparationStore(application, repository, downloads, scope, ::awaitSourcesReady)
 
     init {
+        dev.mangaflow.anime.sources.AnimeMetadataCache.get(application)
         dev.mangaflow.storage.StorageCacheStore.get(application).apply {
             registerAuxiliaryOwner(browseCache.cacheOwner)
             registerAuxiliaryOwner(metricsRepository.cacheOwner)

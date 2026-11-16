@@ -26,6 +26,11 @@ private class AppleAnimePlayer(scope: CoroutineScope) : RoutedNativeAnimePlayer(
             "iOS 系统播放器无法读取 MKV / WebM，请选择 HLS 或 MP4 线路"
         }
     }
+    override fun validateLocalMedia(lease: AnimeLocalMediaLease) {
+        require(lease.entry.mimeType !in setOf("video/x-matroska", "video/webm")) {
+            "iOS 系统播放器无法读取这份 MKV / WebM 离线媒体，请使用 HLS 或 MP4 线路"
+        }
+    }
     override fun releaseNative() {
         super.releaseNative()
     }

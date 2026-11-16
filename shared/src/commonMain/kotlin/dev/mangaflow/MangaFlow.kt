@@ -59,11 +59,13 @@ fun MangaFlowHost(
         SideEffect { onModelReady(model) }
         val lifecycle = LocalLifecycleOwner.current.lifecycle
         DisposableEffect(lifecycle, model) {
+            model.services.setAnimeForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
             val observer = LifecycleEventObserver { _, event ->
                 if (event == Lifecycle.Event.ON_RESUME) model.services.resumePending()
+                if (event == Lifecycle.Event.ON_START) model.services.setAnimeForeground(true)
                 if (event == Lifecycle.Event.ON_STOP) {
                     model.flushPendingStorage()
-                    model.services.flushAnimePlayback()
+                    model.services.setAnimeForeground(false)
                 }
             }
             lifecycle.addObserver(observer)

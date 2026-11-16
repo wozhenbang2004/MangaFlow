@@ -2,6 +2,7 @@ package dev.mangaflow.anime.player
 
 import dev.mangaflow.anime.AnimePlaybackAsset
 import dev.mangaflow.anime.AnimeSubtitle
+import dev.mangaflow.anime.sources.animePublicUrl
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrl
 import dev.mangaflow.net.NetworkClient
@@ -61,6 +62,18 @@ internal class AnimeStreamBridge private constructor(
     private lateinit var server: AnimeLoopbackServer
     private var failure: String? = null
     val lastFailure: String? get() = synchronized(lock) { failure }
+    private var failureStatus: Int? = null
+    val lastFailureStatus: Int? get() = synchronized(lock) { failureStatus }
+    private var failureRetryable: Boolean? = null
+    val lastFailureRetryable: Boolean? get() = synchronized(lock) { failureRetryable }
+    private var attempt = 0L
+
+    fun beginAttempt() = synchronized(lock) {
+        attempt++
+        failure = null
+        failureStatus = null
+        failureRetryable = null
+    }
     lateinit var mediaUrl: String
         private set
     private val subtitles = linkedMapOf<String, String>()
@@ -90,6 +103,7 @@ internal class AnimeStreamBridge private constructor(
 
     private suspend fun handle(connection: AnimeLoopbackConnection) {
         val output = ResponseWriter(connection)
+        val ownedAttempt = synchronized(lock) { attempt }
         try {
             val request = readRequest(connection)
             if (request.method !in setOf("GET", "HEAD")) {
@@ -142,7 +156,13 @@ internal class AnimeStreamBridge private constructor(
                                 false
                             }
                             received.code !in 200..299 -> {
-                                synchronized(lock) { failure = "来源返回 HTTP ${received.code}，可刷新线路或选择其他来源" }
+                                synchronized(lock) {
+                                    if (ownedAttempt == attempt) {
+                                        failure = "来源返回 HTTP ${received.code}，可刷新线路或选择其他来源"
+                                        failureStatus = received.code
+                                        failureRetryable = received.code >= 500 || received.code == 408
+                                    }
+                                }
                                 output.error(received.code, "Upstream rejected this resource")
                                 false
                             }
@@ -152,7 +172,6 @@ internal class AnimeStreamBridge private constructor(
                                 false
                             }
                             else -> {
-                                synchronized(lock) { failure = null }
                                 val contentType = received.header("Content-Type").orEmpty().substringBefore(';').lowercase()
                                 require(contentType != "application/dash+xml") {
                                     "桌面和 iOS 的统一路由目前需要 HLS 或视频文件线路；请更换 DASH 线路"
@@ -219,7 +238,13 @@ internal class AnimeStreamBridge private constructor(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (error: Throwable) {
-            synchronized(lock) { failure = readablePlayerError(error) }
+            synchronized(lock) {
+                if (ownedAttempt == attempt) {
+                    failure = readablePlayerError(error)
+                    failureStatus = null
+                    failureRetryable = error !is IllegalArgumentException && error !is IllegalStateException
+                }
+            }
             if (!output.started) runCatching { output.error(502, "Unable to read this playback resource") }
         } finally {
             connection.close()
@@ -278,12 +303,13 @@ internal class AnimeStreamBridge private constructor(
         return resource.headers.filter { (name, _) ->
             name.lowercase() !in setOf("host", "connection", "content-length", "transfer-encoding",
                 "proxy-authorization", "proxy-authenticate", "upgrade", "range", "accept-encoding") &&
-                (sameOrigin || name.lowercase() !in setOf("authorization", "cookie"))
+                (sameOrigin || name.lowercase() in PUBLIC_HEADERS)
         }
     }
 
     companion object {
         private const val MAX_MANIFEST_BYTES = 4L * 1024 * 1024
+        private val PUBLIC_HEADERS = setOf("user-agent", "referer", "origin", "accept", "accept-language")
         suspend fun create(asset: AnimePlaybackAsset, scope: CoroutineScope): AnimeStreamBridge {
             var pending: AnimeStreamBridge? = null
             return try {
@@ -305,7 +331,7 @@ internal class AnimeStreamBridge private constructor(
                             val mayInheritCredentials = primary.host == url.host &&
                                 primary.port == url.port && primary.scheme == url.scheme
                             val inherited = asset.headers.filter { (name, _) ->
-                                mayInheritCredentials || name.lowercase() !in setOf("authorization", "cookie")
+                                mayInheritCredentials || name.lowercase() in PUBLIC_HEADERS
                             }
                             // Explicit subtitle credentials remain scoped to this URL's
                             // origin; cross-origin primary credentials are not inherited.
@@ -330,16 +356,12 @@ internal class AnimeStreamBridge private constructor(
 }
 
 private fun checkedUrl(value: String): HttpUrl {
-    val url = value.toHttpUrl()
-    require(url.isHttps && url.username.isEmpty() && url.password.isEmpty()) {
-        "播放资源必须使用不含内嵌账号密码的 HTTPS 地址"
-    }
-    return url
+    return animePublicUrl(value)
 }
 
-private data class LoopbackRequest(val method: String, val target: String, val headers: Map<String, String>)
+internal data class LoopbackRequest(val method: String, val target: String, val headers: Map<String, String>)
 
-private fun readRequest(connection: AnimeLoopbackConnection): LoopbackRequest {
+internal fun readRequest(connection: AnimeLoopbackConnection): LoopbackRequest {
     val bytes = Buffer()
     val chunk = ByteArray(2048)
     while (true) {
@@ -365,7 +387,7 @@ private fun readRequest(connection: AnimeLoopbackConnection): LoopbackRequest {
     }
 }
 
-private class ResponseWriter(private val connection: AnimeLoopbackConnection) {
+internal class ResponseWriter(private val connection: AnimeLoopbackConnection) {
     var started = false
         private set
     var finished = false

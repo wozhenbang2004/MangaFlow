@@ -7,6 +7,9 @@ import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.platform.storage.StorageAtomicFile
 import dev.mangaflow.platform.storage.StorageFile
 import dev.mangaflow.platform.storage.filesDir
+import dev.mangaflow.platform.storage.StorageLock
+import dev.mangaflow.background.ApplicationOperations
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,10 +35,16 @@ internal data class AnimeLibraryState(
     val progress: Map<String, AnimeWatchProgress> = emptyMap(),
     val trackingTargets: Map<String, String> = emptyMap(),
     val undo: AnimeUndo? = null,
+    val settings: AnimePlaybackSettings = AnimePlaybackSettings(),
+    val searchHistory: List<String> = emptyList(),
+    val dismissedResume: Map<String, Long> = emptyMap(),
+    val clearedHistoryAt: Map<String, Long> = emptyMap(),
+    /** Process-local authority. Old playback cannot write through a backup replacement. */
+    val restoreEpoch: Long = 0L,
 )
 
 /** One atomic document owns watch state and reviewed associations, including their undo receipt. */
-internal class AnimeLibraryStore(context: PlatformContext, scope: CoroutineScope) {
+internal class AnimeLibraryStore private constructor(context: PlatformContext, scope: CoroutineScope) {
     private val file = StorageAtomicFile(StorageFile(context.filesDir, "anime-library.json"))
     private val writer = Mutex()
     private val ready = CompletableDeferred<Unit>()
@@ -104,6 +113,7 @@ internal class AnimeLibraryStore(context: PlatformContext, scope: CoroutineScope
         writer.withLock {
             if (!isCurrent()) return@withLock
             val before = mutableState.value
+            if (progress.updatedAt <= (before.clearedHistoryAt[subject.id] ?: -1L)) return@withLock
             val entry = before.entries[subject.id] ?: AnimeLibraryEntry(subject)
             val previous = before.progress[progress.episodeId]
             if (previous != null && previous.updatedAt > progress.updatedAt) return@withLock
@@ -129,6 +139,67 @@ internal class AnimeLibraryStore(context: PlatformContext, scope: CoroutineScope
 
     fun trackingTarget(subjectId: String, providerId: String, ownerId: String): String? =
         mutableState.value.trackingTargets[trackingKey(subjectId, providerId, ownerId)]
+
+    fun progressFor(subjectId: String, episodeId: String): AnimeWatchProgress? {
+        val before = mutableState.value
+        return before.progress[episodeId]?.takeIf { (it.subjectId.isEmpty() || it.subjectId == subjectId) &&
+            it.updatedAt > (before.clearedHistoryAt[subjectId] ?: -1L) }
+    }
+
+    suspend fun setSettings(settings: AnimePlaybackSettings) = update { it.copy(settings = settings.validate()) }
+
+    suspend fun rememberSearch(query: String) = update {
+        val text = query.trim()
+        if (text.isEmpty()) it else it.copy(searchHistory = listOf(text) + it.searchHistory.filterNot { old -> old == text })
+    }
+
+    suspend fun clearSearchHistory() = update { it.copy(searchHistory = emptyList()) }
+
+    suspend fun dismissResume(subjectId: String) = update { before ->
+        val progress = before.entries[subjectId]?.resume
+        if (progress == null) before else before.copy(dismissedResume = before.dismissedResume + (subjectId to progress.updatedAt))
+    }
+
+    suspend fun clearWatchHistory(subjectId: String, removeEntry: Boolean = false) = update { before ->
+        val entry = before.entries[subjectId] ?: return@update before
+        val knownEpisodes = entry.completedEpisodeIds + listOfNotNull(entry.resume?.episodeId)
+        before.copy(entries = if (removeEntry) before.entries - subjectId else before.entries +
+            (subjectId to entry.copy(resume = null, revision = entry.revision + 1, updatedAt = wallTimeMillis())),
+            progress = before.progress.filterValues { it.subjectId != subjectId &&
+                !(it.subjectId.isEmpty() && it.episodeId in knownEpisodes) },
+            bindings = if (removeEntry) before.bindings.filterNot { it.subjectId == subjectId } else before.bindings,
+            trackingTargets = if (removeEntry) before.trackingTargets.filterKeys {
+                JSONObject(it).optString("subject") != subjectId
+            } else before.trackingTargets,
+            dismissedResume = before.dismissedResume - subjectId,
+            clearedHistoryAt = before.clearedHistoryAt + (subjectId to wallTimeMillis()),
+            undo = before.undo?.takeUnless { it.subjectId == subjectId })
+    }
+
+    suspend fun exportBackup(): JSONObject {
+        awaitReady()
+        return writer.withLock { JSONObject(encode(mutableState.value.copy(undo = null))) }
+    }
+
+    fun validateBackup(document: JSONObject): Int = decode(document.toString()).entries.size
+
+    suspend fun restoreBackup(document: JSONObject) {
+        val validated = decode(document.toString())
+        ready.await()
+        writer.withLock {
+            persist(validated.copy(undo = null, restoreEpoch = mutableState.value.restoreEpoch + 1))
+            readFailure = null
+        }
+    }
+
+    private suspend fun update(transform: (AnimeLibraryState) -> AnimeLibraryState) {
+        awaitReady()
+        writer.withLock {
+            val before = mutableState.value
+            val next = transform(before)
+            if (next != before) persist(next)
+        }
+    }
 
     suspend fun undo(): Boolean {
         awaitReady()
@@ -169,6 +240,10 @@ internal class AnimeLibraryStore(context: PlatformContext, scope: CoroutineScope
         .put("bindings", JSONArray(state.bindings.map(::encodeBinding)))
         .put("progress", JSONArray(state.progress.values.map(::encodeProgress)))
         .put("trackingTargets", JSONObject(state.trackingTargets))
+        .put("settings", encodeSettings(state.settings))
+        .put("searchHistory", JSONArray(state.searchHistory))
+        .put("dismissedResume", JSONObject(state.dismissedResume))
+        .put("clearedHistoryAt", JSONObject(state.clearedHistoryAt))
         .apply {
             state.undo?.let { undo ->
                 put("undo", JSONObject().put("subjectId", undo.subjectId)
@@ -180,23 +255,47 @@ internal class AnimeLibraryStore(context: PlatformContext, scope: CoroutineScope
     private fun decode(text: String): AnimeLibraryState {
         val json = JSONObject(text)
         check(json.getInt("format") == 1) { "追番记录版本无法识别。" }
-        val entries = objects(json.getJSONArray("entries")).map(::decodeEntry).associateBy { it.subject.id }
+        val entryRows = objects(json.getJSONArray("entries")).map(::decodeEntry)
+        val entries = entryRows.associateBy { it.subject.id }
+        require(entries.size == entryRows.size) { "备份中存在重复的番剧身份。" }
+        require(entries.values.all { entry -> entry.resume?.let {
+            it.subjectId.isEmpty() || it.subjectId == entry.subject.id
+        } != false }) { "续看记录属于另一部番，请检查备份。" }
         val bindings = objects(json.getJSONArray("bindings")).map(::decodeBinding)
-        val progress = objects(json.getJSONArray("progress")).map(::decodeProgress).associateBy { it.episodeId }
+        require(bindings.all { it.subjectId in entries && it.catalog.sourceId.isNotBlank() && it.catalog.id.isNotBlank() })
+        require(bindings.map { it.subjectId to it.catalog.sourceId }.distinct().size == bindings.size)
+        val progressRows = objects(json.getJSONArray("progress")).map(::decodeProgress)
+        val progress = progressRows.associateBy { it.episodeId }
+        require(progress.size == progressRows.size && progress.values.all { it.episodeId.isNotBlank() &&
+            (it.subjectId.isEmpty() || it.subjectId in entries) })
+        require(entries.values.all { entry -> entry.resume?.let { resume ->
+            progress[resume.episodeId]?.let { it.subjectId.isEmpty() || it.subjectId == entry.subject.id } != false
+        } != false }) { "观看位置与所属番剧不一致。" }
         val targets = json.optJSONObject("trackingTargets") ?: JSONObject()
         val undo = json.optJSONObject("undo")?.let {
             AnimeUndo(it.getString("subjectId"), it.optJSONObject("before")?.let(::decodeEntry),
                 objects(it.getJSONArray("bindings")).map(::decodeBinding), it.getLong("revision"))
         }
+        val dismissed = json.optJSONObject("dismissedResume") ?: JSONObject()
+        val cleared = json.optJSONObject("clearedHistoryAt") ?: JSONObject()
         return AnimeLibraryState(entries, bindings, progress,
-            targets.keys().asSequence().associateWith { targets.getString(it) }, undo)
+            targets.keys().asSequence().associateWith { key ->
+                val target = JSONObject(key)
+                require(target.getString("subject").isNotBlank() && target.getString("provider").isNotBlank() &&
+                    target.getString("owner").isNotBlank())
+                targets.getString(key)
+            }, undo,
+            settings = json.optJSONObject("settings")?.let(::decodeSettings) ?: AnimePlaybackSettings(),
+            searchHistory = strings(json.optJSONArray("searchHistory") ?: JSONArray()).filter { it.isNotBlank() }.distinct(),
+            dismissedResume = dismissed.keys().asSequence().associateWith { dismissed.getLong(it) },
+            clearedHistoryAt = cleared.keys().asSequence().associateWith { cleared.getLong(it) })
     }
 
     private fun encodeEntry(entry: AnimeLibraryEntry) = JSONObject()
         .put("subject", encodeSubject(entry.subject)).put("status", entry.status.name)
         .put("followed", entry.followed).put("completed", JSONArray(entry.completedEpisodeIds.toList()))
         .put("resume", entry.resume?.let(::encodeProgress)).put("updated", entry.updatedAt)
-        .put("revision", entry.revision)
+        .put("revision", entry.revision).put("folder", entry.folder).put("pinned", entry.pinned)
 
     private fun decodeEntry(json: JSONObject) = AnimeLibraryEntry(
         subject = decodeSubject(json.getJSONObject("subject")),
@@ -205,22 +304,11 @@ internal class AnimeLibraryStore(context: PlatformContext, scope: CoroutineScope
         completedEpisodeIds = strings(json.getJSONArray("completed")).toSet(),
         resume = json.optJSONObject("resume")?.let(::decodeProgress),
         updatedAt = json.getLong("updated"), revision = json.getLong("revision"),
+        folder = json.optString("folder"), pinned = json.optBoolean("pinned"),
     )
 
-    private fun encodeSubject(subject: AnimeSubject) = JSONObject().put("id", subject.id)
-        .put("title", subject.title).put("original", subject.originalTitle).put("cover", subject.coverUrl)
-        .put("description", subject.description).put("count", subject.episodeCount).put("year", subject.year)
-        .put("tags", JSONArray(subject.tags)).put("externalIds", JSONObject(subject.externalIds))
-
-    private fun decodeSubject(json: JSONObject): AnimeSubject {
-        val ids = json.optJSONObject("externalIds") ?: JSONObject()
-        return AnimeSubject(json.getString("id"), json.getString("title"),
-            json.optString("original"), json.optString("cover"), json.optString("description"),
-            if (json.isNull("count")) null else json.getInt("count"),
-            if (json.isNull("year")) null else json.getInt("year"),
-            strings(json.optJSONArray("tags") ?: JSONArray()),
-            ids.keys().asSequence().associateWith { ids.getString(it) })
-    }
+    private fun encodeSubject(subject: AnimeSubject) = AnimeDocumentCodec.subject(subject)
+    private fun decodeSubject(json: JSONObject) = AnimeDocumentCodec.subject(json)
 
     private fun encodeBinding(binding: AnimeSourceBinding) = JSONObject().put("subject", binding.subjectId)
         .put("source", binding.catalog.sourceId).put("id", binding.catalog.id)
@@ -245,14 +333,52 @@ internal class AnimeLibraryStore(context: PlatformContext, scope: CoroutineScope
     private fun encodeProgress(progress: AnimeWatchProgress) = JSONObject().put("episode", progress.episodeId)
         .put("asset", progress.assetId).put("source", progress.sourceId).put("position", progress.positionMs)
         .put("duration", progress.durationMs).put("updated", progress.updatedAt).put("completed", progress.completed)
+        .put("subject", progress.subjectId)
+        .put("localDownload", progress.localDownloadId)
 
     private fun decodeProgress(json: JSONObject) = AnimeWatchProgress(
         json.getString("episode"), json.getString("asset"), json.getString("source"),
         json.getLong("position").coerceAtLeast(0L), json.getLong("duration").coerceAtLeast(0L),
-        json.getLong("updated"), json.optBoolean("completed"))
+        json.getLong("updated"), json.optBoolean("completed"), json.optString("subject"),
+        json.optString("localDownload", null)?.also { require(it.matches(Regex("[a-f0-9]{64}"))) })
+
+    private fun encodeSettings(value: AnimePlaybackSettings) = JSONObject()
+        .put("autoPlayNext", value.autoPlayNext).put("prepareNextEpisode", value.prepareNextEpisode)
+        .put("skipOpeningSeconds", value.skipOpeningSeconds).put("skipEndingSeconds", value.skipEndingSeconds)
+        .put("longPressSpeed", value.longPressSpeed.toDouble()).put("backgroundAudio", value.backgroundAudio)
+        .put("automaticSourceRecovery", value.automaticSourceRecovery)
+        .put("bufferMinMs", value.bufferMinMs).put("bufferMaxMs", value.bufferMaxMs)
+        .put("bufferStartMs", value.bufferStartMs).put("bufferRebufferMs", value.bufferRebufferMs)
+        .put("automaticRecoveryAttempts", value.automaticRecoveryAttempts)
+
+    private fun decodeSettings(json: JSONObject): AnimePlaybackSettings {
+        val defaults = AnimePlaybackSettings()
+        return AnimePlaybackSettings(
+            autoPlayNext = json.optBoolean("autoPlayNext", defaults.autoPlayNext),
+            prepareNextEpisode = json.optBoolean("prepareNextEpisode", defaults.prepareNextEpisode),
+            skipOpeningSeconds = json.optInt("skipOpeningSeconds", defaults.skipOpeningSeconds),
+            skipEndingSeconds = json.optInt("skipEndingSeconds", defaults.skipEndingSeconds),
+            longPressSpeed = json.optDouble("longPressSpeed", defaults.longPressSpeed.toDouble()).toFloat(),
+            backgroundAudio = json.optBoolean("backgroundAudio", defaults.backgroundAudio),
+            automaticSourceRecovery = json.optBoolean("automaticSourceRecovery", defaults.automaticSourceRecovery),
+            bufferMinMs = json.optInt("bufferMinMs", defaults.bufferMinMs),
+            bufferMaxMs = json.optInt("bufferMaxMs", defaults.bufferMaxMs),
+            bufferStartMs = json.optInt("bufferStartMs", defaults.bufferStartMs),
+            bufferRebufferMs = json.optInt("bufferRebufferMs", defaults.bufferRebufferMs),
+            automaticRecoveryAttempts = json.optInt("automaticRecoveryAttempts", defaults.automaticRecoveryAttempts),
+        ).validate()
+    }
 
     private fun objects(array: JSONArray): List<JSONObject> = (0 until array.length()).map(array::getJSONObject)
     private fun strings(array: JSONArray): List<String> = (0 until array.length()).map(array::getString)
     private fun trackingKey(subjectId: String, providerId: String, ownerId: String): String =
         JSONObject().put("subject", subjectId).put("provider", providerId).put("owner", ownerId).toString()
+
+    companion object {
+        private val lock = StorageLock()
+        private val instances = mutableMapOf<String, AnimeLibraryStore>()
+        fun get(context: PlatformContext): AnimeLibraryStore = synchronized(lock) {
+            instances.getOrPut(context.filesDir.path) { AnimeLibraryStore(context, ApplicationOperations.get(context).scope) }
+        }
+    }
 }

@@ -1,4 +1,4 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, kotlin.io.encoding.ExperimentalEncodingApi::class)
 
 package dev.mangaflow.data.plugins
 
@@ -92,7 +92,7 @@ internal actual class JavascriptHttpSession actual constructor(
                 while (nativePauses.size > 128) nativePauses.remove(nativePauses.keys.first())
             }
             if (result.status == 429) throw SourceException("漫画源请求受限，请稍后重试。", retryAfterSeconds = retry)
-            if (result.status in setOf(301, 302, 303, 307, 308)) {
+            if (result.status in setOf(301, 302, 303, 307, 308) && input.optBoolean("followRedirects", true)) {
                 require(allowRedirects) { "来源登录请求发生重定向，请更新来源地址后重试。" }
                 require(!input.optBoolean("rejectRedirects", false)) { "源文件地址发生重定向，请使用最终 HTTPS 直链。" }
                 require(redirects < 3) { "漫画源重定向次数过多。" }
@@ -104,7 +104,8 @@ internal actual class JavascriptHttpSession actual constructor(
                 }
                 if (result.status == 303 || method == "POST" && result.status in setOf(301, 302)) { method = "GET"; body = ByteArray(0) }
                 url = target
-            } else return@withPermit JSONObject().put("body", result.body.decodeToString()).put("statusCode", result.status)
+            } else return@withPermit JSONObject().put("body", if (input.optString("responseEncoding").equals("base64", true))
+                kotlin.io.encoding.Base64.encode(result.body) else result.body.decodeToString()).put("statusCode", result.status)
                 .put("headers", JSONObject(result.headers)).put("url", url.toString()).toString()
         }
         error("漫画源重定向次数过多。")

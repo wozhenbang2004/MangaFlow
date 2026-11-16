@@ -98,8 +98,8 @@ internal actual class JavascriptHttpSession actual constructor(private val enabl
                     val builder = Request.Builder().url(url)
                     headers.forEach { (name, value) -> builder.header(name, value) }
                     builder.method(method, if (method in setOf("POST", "PUT", "PATCH")) body ?: ByteArray(0).toRequestBody(null) else body)
-                    val result = response(builder.build())
-                    if (result.status in REDIRECTS) {
+                    val result = response(builder.build(), input.optString("responseEncoding").equals("base64", true))
+                    if (result.status in REDIRECTS && input.optBoolean("followRedirects", true)) {
                         require(allowRedirects) { "来源登录请求发生重定向，请更新来源地址后重试。" }
                         require(!input.optBoolean("rejectRedirects", false)) { "源文件地址发生重定向，请使用最终 HTTPS 直链。" }
                         require(redirect < 3) { "漫画源重定向次数过多。" }
@@ -136,7 +136,7 @@ internal actual class JavascriptHttpSession actual constructor(private val enabl
             }
         }
 
-        private suspend fun response(request: Request): HttpResult = suspendCancellableCoroutine { continuation ->
+        private suspend fun response(request: Request, binaryBase64: Boolean = false): HttpResult = suspendCancellableCoroutine { continuation ->
             val call = client.newCall(request)
             continuation.invokeOnCancellation { call.cancel() }
             call.enqueue(object : Callback {
@@ -167,8 +167,8 @@ internal actual class JavascriptHttpSession actual constructor(private val enabl
                                     output.write(buffer, 0, size)
                                 }
                             }
-                            HttpResult(current.code, headers, output.toByteArray()
-                                .toString(source.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8))
+                            HttpResult(current.code, headers, if (binaryBase64) java.util.Base64.getEncoder().encodeToString(output.toByteArray())
+                                else output.toByteArray().toString(source.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8))
                         }
                         if (continuation.isActive) continuation.resume(value)
                     } catch (failure: Exception) {

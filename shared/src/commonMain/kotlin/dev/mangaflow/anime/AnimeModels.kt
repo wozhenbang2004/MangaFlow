@@ -13,6 +13,9 @@ data class AnimeSubject(
     val year: Int? = null,
     val tags: List<String> = emptyList(),
     val externalIds: Map<String, String> = emptyMap(),
+    val airWeekday: Int? = null,
+    val rating: Double? = null,
+    val rank: Int? = null,
 )
 
 enum class AnimeEpisodeKind { MAIN, SPECIAL, OPENING, ENDING, TRAILER, OTHER }
@@ -48,6 +51,8 @@ data class AnimeSourceEpisode(
     val kind: AnimeEpisodeKind = AnimeEpisodeKind.MAIN,
     val group: String = "",
     val edition: String = "",
+    /** Provider-owned opaque play flag. It is never interpreted as a media URL. */
+    val playbackData: String? = null,
 )
 
 data class AnimeSourceCatalog(val title: AnimeSourceTitle, val episodes: List<AnimeSourceEpisode>)
@@ -57,6 +62,14 @@ data class AnimeSubtitle(
     val url: String,
     val label: String,
     val language: String? = null,
+    val mimeType: String? = null,
+    val headers: Map<String, String> = emptyMap(),
+)
+
+data class AnimeResolution(
+    val id: String,
+    val label: String,
+    val url: String,
     val mimeType: String? = null,
     val headers: Map<String, String> = emptyMap(),
 )
@@ -77,6 +90,8 @@ data class AnimePlaybackAsset(
     val expiresAt: Long? = null,
     val sourceRevision: String = "1",
     val sessionEpoch: Long = 0L,
+    val resolutions: List<AnimeResolution> = emptyList(),
+    val startPositionMs: Long? = null,
 )
 
 enum class AnimeWatchStatus { WISH, WATCHING, COMPLETED, ON_HOLD, DROPPED }
@@ -89,6 +104,8 @@ data class AnimeWatchProgress(
     val durationMs: Long,
     val updatedAt: Long,
     val completed: Boolean = false,
+    val subjectId: String = "",
+    val localDownloadId: String? = null,
 )
 
 data class AnimeLibraryEntry(
@@ -100,6 +117,8 @@ data class AnimeLibraryEntry(
     val updatedAt: Long = 0L,
     /** Semantic edits only. Routine position checkpoints cannot invalidate a sync review. */
     val revision: Long = 0L,
+    val folder: String = "",
+    val pinned: Boolean = false,
 )
 
 data class AnimeSourceBinding(
@@ -116,6 +135,9 @@ data class AnimeSourceResult(
     val items: List<AnimeSourceTitle> = emptyList(),
     val loading: Boolean = false,
     val error: String? = null,
+    val page: Int = 0,
+    val hasMore: Boolean = false,
+    val loadingMore: Boolean = false,
 )
 
 data class AnimeEpisodeOption(
@@ -161,6 +183,34 @@ data class AnimePlaybackChoice(
     val previousSourceId: String,
 )
 
+enum class AnimeBrowseMode { POPULAR, NEWEST, CALENDAR }
+
+data class AnimePlaybackSettings(
+    val autoPlayNext: Boolean = true,
+    val prepareNextEpisode: Boolean = true,
+    val skipOpeningSeconds: Int = 0,
+    val skipEndingSeconds: Int = 0,
+    val longPressSpeed: Float = 2f,
+    val backgroundAudio: Boolean = false,
+    val automaticSourceRecovery: Boolean = false,
+    val bufferMinMs: Int = 50_000,
+    val bufferMaxMs: Int = 120_000,
+    val bufferStartMs: Int = 1_500,
+    val bufferRebufferMs: Int = 3_000,
+    val automaticRecoveryAttempts: Int = 2,
+) {
+    fun validate(): AnimePlaybackSettings {
+        require(skipOpeningSeconds >= 0 && skipEndingSeconds >= 0) { "跳过时长不能小于零。" }
+        require(longPressSpeed.isFinite() && longPressSpeed > 0f) { "长按速度必须大于零。" }
+        require(bufferMinMs >= 0 && bufferMaxMs > 0 && bufferMaxMs >= bufferMinMs && bufferStartMs >= 0 &&
+            bufferRebufferMs >= 0 && bufferStartMs <= bufferMinMs && bufferRebufferMs <= bufferMinMs) {
+            "缓冲上限应不小于下限；起播与重新缓冲应不大于下限。"
+        }
+        require(automaticRecoveryAttempts >= 0) { "自动恢复次数不能小于零。" }
+        return this
+    }
+}
+
 data class AnimeScreenState(
     val query: String = "",
     val catalog: List<AnimeSubject> = emptyList(),
@@ -189,4 +239,25 @@ data class AnimeScreenState(
     val preferredSourceId: String? = null,
     val sourceGroups: Map<String, String> = emptyMap(),
     val sourceRoutes: Map<String, dev.mangaflow.net.DownloadRouteMode> = emptyMap(),
+    val browseMode: AnimeBrowseMode = AnimeBrowseMode.POPULAR,
+    val catalogPage: Int = 0,
+    val catalogHasMore: Boolean = false,
+    val catalogLoadingMore: Boolean = false,
+    val catalogYear: Int? = null,
+    val catalogTag: String = "",
+    val calendarDay: Int? = null,
+    val detailFromCache: Boolean = false,
+    val relatedSubjects: List<AnimeSubject> = emptyList(),
+    val settings: AnimePlaybackSettings = AnimePlaybackSettings(),
+    val resumeEntry: AnimeLibraryEntry? = null,
+    val searchHistory: List<String> = emptyList(),
+    val sleepDeadlineMs: Long? = null,
+    val sleepAtEpisodeEnd: Boolean = false,
+    val nextEpisodeReady: Boolean = false,
+    val playbackResolutions: List<AnimeResolution> = emptyList(),
+    val selectedResolutionId: String? = null,
+    val canRestorePlayback: Boolean = false,
+    val sourceDanmakuAvailable: Boolean = false,
+    val sourceExtensions: List<dev.mangaflow.anime.sources.lanerc.LanercSourceListing> = emptyList(),
+    val sourceOperationIds: Set<String> = emptySet(),
 )

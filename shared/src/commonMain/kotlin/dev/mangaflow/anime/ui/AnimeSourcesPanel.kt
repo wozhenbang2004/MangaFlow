@@ -4,8 +4,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
@@ -49,6 +47,9 @@ internal fun AnimeSourcesPanel(
     var groups by remember(subject?.id) { mutableStateOf<Map<String, String>>(emptyMap()) }
     var mapping by remember(subject?.id, focusEpisode?.id) { mutableStateOf<EpisodeMappingDraft?>(null) }
     var expandedSource by remember(subject?.id, focusEpisode?.id) { mutableStateOf<String?>(null) }
+    var manageExpanded by remember(subject?.id, focusEpisode?.id) {
+        mutableStateOf(focusEpisode == null || state.episodeOptions[focusEpisode.id].orEmpty().none { it.confirmed })
+    }
     var episodeQuery by remember(focusEpisode?.id) { mutableStateOf("") }
     var mappingLimit by remember(expandedSource, episodeQuery) { mutableIntStateOf(40) }
     var allPreviewEpisodes by remember(state.previewCatalog?.title?.id) { mutableStateOf(false) }
@@ -114,7 +115,7 @@ internal fun AnimeSourcesPanel(
                                         tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                                         AnimeQuietLabel(state.sourceResults.firstOrNull {
-                                            it.providerId == preview.title.sourceId }?.name ?: animeSourceName(preview.title.sourceId))
+                                            it.providerId == preview.title.sourceId }?.name ?: animeSourceName(preview.title.sourceId, state))
                                         Text(preview.title.title, style = MaterialTheme.typography.titleSmall)
                                         AnimeQuietLabel(listOfNotNull(preview.title.year?.toString(),
                                             preview.title.episodeCount?.let { it.toString() + " 集" }).joinToString(" · "))
@@ -156,11 +157,27 @@ internal fun AnimeSourcesPanel(
                 } else {
                     LazyColumn(Modifier.weight(1f, fill = false), state = sourceScroll, contentPadding = PaddingValues(16.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        item {
-                            Text(if (focusEpisode == null) "已关联来源用于集数匹配；可否播放会在请求视频时确认。"
-                                else "先确认线路与本集映射，再播放。切换视频版本时会单独询问续看位置。",
-                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (focusEpisode != null) {
+                            val choices = state.episodeOptions[focusEpisode.id].orEmpty().filter { it.confirmed }
+                            item(key = "episode-sources") { AnimeSectionTitle("本集来源", focusEpisode.title) }
+                            items(choices, key = { "choice:" + it.sourceId + ":" + it.episode.id }) { option ->
+                                AnimeSelection(option.sourceName,
+                                    listOf(option.episode.group, option.episode.edition).filter { it.isNotBlank() }.distinct().joinToString(" · "),
+                                    selected = option.sourceId == state.preferredSourceId,
+                                    onClick = { onPlay(focusEpisode.id, option) })
+                            }
+                            if (choices.isEmpty()) item { AnimeQuietLabel("本集还没有确认的片源，请在下方选择作品与线路。") }
+                            item {
+                                MotionTextButton(onClick = { manageExpanded = !manageExpanded },
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+                                    Icon(if (manageExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.Tune,
+                                        null, Modifier.size(18.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(if (manageExpanded) "收起关联与搜索" else "关联其他来源 / 调整本集映射")
+                                }
+                            }
                         }
+                        if (manageExpanded || focusEpisode == null) {
                         if (state.sourceBindings.isNotEmpty()) item { AnimeSectionTitle("已关联") }
                         val waitingBindings = state.sourceBindings.filter { binding -> state.sourceCatalogs.none {
                             it.title.sourceId == binding.catalog.sourceId && it.title.id == binding.catalog.id
@@ -171,7 +188,7 @@ internal fun AnimeSourcesPanel(
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        Text(animeSourceName(sourceId), style = MaterialTheme.typography.titleSmall)
+                                        Text(animeSourceName(sourceId, state), style = MaterialTheme.typography.titleSmall)
                                         Text(binding.catalog.title, style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
@@ -186,7 +203,7 @@ internal fun AnimeSourcesPanel(
                         }
                         items(state.sourceCatalogs, key = { it.title.sourceId + "|" + it.title.id }) { catalog ->
                             val sourceId = catalog.title.sourceId
-                            val name = state.sourceResults.firstOrNull { it.providerId == sourceId }?.name ?: animeSourceName(sourceId)
+                            val name = state.sourceResults.firstOrNull { it.providerId == sourceId }?.name ?: animeSourceName(sourceId, state)
                             val sourceGroups = catalog.episodes.map { it.group }.distinct()
                             val selectedGroup = state.sourceGroups[sourceId]
                             val stagedGroup = groups[sourceId] ?: selectedGroup
@@ -294,9 +311,13 @@ internal fun AnimeSourcesPanel(
                                     when { result.loading -> "正在搜索"; result.error != null -> "暂未取得"
                                         else -> result.items.size.toString() + " 个候选" })
                                 if (result.error != null) {
-                                    AnimeMessage("暂未取得这个来源", result.error, action = "重试来源搜索",
-                                        icon = Icons.Outlined.ErrorOutline,
-                                        onAction = { controller.searchSources(query.trim()) })
+                                    Text(result.error, style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    MotionTextButton(onClick = { controller.retrySourceSearch(result.providerId) },
+                                        modifier = Modifier.heightIn(min = 44.dp)) {
+                                        Icon(Icons.Outlined.Refresh, null, Modifier.size(17.dp))
+                                        Spacer(Modifier.width(6.dp)); Text("重试这个来源")
+                                    }
                                     if (controller.sourceHomes[result.providerId] != null)
                                         MotionTextButton(onClick = { openWebsite(result.providerId) },
                                             modifier = Modifier.heightIn(min = 44.dp)) { Text("打开来源网站") }
@@ -310,7 +331,13 @@ internal fun AnimeSourcesPanel(
                                             if (linked) "已关联" else "查看目录后确认").joinToString(" · "),
                                         selected = linked, onClick = { controller.previewSource(title) })
                                 }
+                                if (result.hasMore) MotionTextButton(onClick = { controller.loadMoreSourceSearch(result.providerId) },
+                                    enabled = !result.loading && !result.loadingMore,
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+                                    Text(if (result.loadingMore) "正在加载" else "更多候选")
+                                }
                             }
+                        }
                         }
                     }
                 }

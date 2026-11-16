@@ -10,6 +10,8 @@ import dev.mangaflow.data.Manga
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.plugins.SourcePluginStore
+import dev.mangaflow.anime.AnimeLibraryStore
+import dev.mangaflow.anime.sources.lanerc.LanercSourceStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CancellationException
@@ -74,6 +76,9 @@ data class LibraryBackupInfo(
     val favorites: Int,
     val history: Int,
     val bookmarks: Int,
+    /** Null means this older backup leaves the current anime library intact. */
+    val animeEntries: Int? = null,
+    val animeSources: Int? = null,
 )
 
 /** Device-local reading state. Neither favorites nor reading history require a source account. */
@@ -366,6 +371,8 @@ class LibraryStore(context: Context) {
             val sourceStore = SourcePluginStore.get(application)
             sourceStore.ready.await()
             val sourcePackages = sourceStore.exportBackup()
+            val animeLibrary = AnimeLibraryStore.get(application).exportBackup()
+            val animeSourcePackages = LanercSourceStore.get(application).exportBackup()
             waitForProgressWriter()
             val root = synchronized(lock) {
                 val entries = JSONArray()
@@ -389,8 +396,9 @@ class LibraryStore(context: Context) {
                     .put("createdAt", wallTimeMillis())
                     .put("entries", entries)
             }
-            root.put("sourcePackages", sourcePackages).toString().also {
-                requireBackupSize(it, "阅读备份（含漫画源代码）超过 8 MiB，已停止导出。")
+            root.put("sourcePackages", sourcePackages).put("animeLibrary", animeLibrary)
+                .put("animeSourcePackages", animeSourcePackages).toString().also {
+                requireBackupSize(it, "备份（含追番记录与漫画源代码）超过 8 MiB，已停止导出。")
             }
         }
     }
@@ -457,6 +465,21 @@ class LibraryStore(context: Context) {
                     _backupRestored.value++
                     info
                 }
+                decoded.animeSourcePackages?.let { packages ->
+                    try { LanercSourceStore.get(application).restoreBackup(packages) }
+                    catch (failure: Exception) {
+                        throw IllegalStateException("书架与阅读设置已恢复；动漫来源恢复未完成，追番记录尚未替换。请检查存储空间后重试。", failure)
+                    }
+                }
+                decoded.animeLibrary?.let { document ->
+                    try { AnimeLibraryStore.get(application).restoreBackup(document) }
+                    catch (failure: Exception) {
+                        throw IllegalStateException("书架与阅读设置已恢复" +
+                            (if (decoded.animeSourcePackages != null) "，动漫来源也已恢复" else "") +
+                            "；追番恢复未完成，原追番文件仍然保留。请检查存储空间后重试。", failure)
+                    }
+                }
+                info
             }
         }
     }
@@ -499,6 +522,8 @@ class LibraryStore(context: Context) {
         val createdAt: Long,
         val values: Map<String, Any>,
         val sourcePackages: JSONArray?,
+        val animeLibrary: JSONObject?,
+        val animeSourcePackages: JSONArray?,
     )
 
     private suspend fun decodeBackup(encoded: String): DecodedBackup {
@@ -542,7 +567,17 @@ class LibraryStore(context: Context) {
             sourceStore.validateBackup(packages)
             packages
         } else null
-        return DecodedBackup(root.optLong("createdAt").coerceAtLeast(0L), values, sourcePackages)
+        val animeLibrary = if (root.has("animeLibrary")) {
+            val document = root.optJSONObject("animeLibrary") ?: error("备份中的追番记录格式无效。")
+            AnimeLibraryStore.get(application).validateBackup(document)
+            document
+        } else null
+        val animeSources = if (root.has("animeSourcePackages")) {
+            val packages = root.optJSONArray("animeSourcePackages") ?: error("备份中的动漫源列表格式无效。")
+            LanercSourceStore.get(application).validateBackup(packages)
+            packages
+        } else null
+        return DecodedBackup(root.optLong("createdAt").coerceAtLeast(0L), values, sourcePackages, animeLibrary, animeSources)
     }
 
     private fun requireBackupSize(encoded: String, message: String) {
@@ -559,6 +594,8 @@ class LibraryStore(context: Context) {
             createdAt = decoded.createdAt,
             favorites = arraySize("favorites"),
             history = arraySize("history"),
+            animeEntries = decoded.animeLibrary?.getJSONArray("entries")?.length(),
+            animeSources = decoded.animeSourcePackages?.length(),
             bookmarks = arraySize(PAGE_COLLECTIONS_KEY) + decoded.values.keys
                 .filter { it.startsWith(BOOKMARK_PREFIX) }
                 .sumOf { key ->

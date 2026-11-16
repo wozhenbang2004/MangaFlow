@@ -19,6 +19,7 @@ interface AnimeProvider {
     val id: String
     val name: String
     val homeUrl: String
+    val supportsSearchPagination: Boolean get() = true
     suspend fun search(query: String, page: Int = 1): List<AnimeSourceTitle>
     suspend fun catalog(title: AnimeSourceTitle): AnimeSourceCatalog
     suspend fun resolve(catalog: AnimeSourceCatalog, episode: AnimeSourceEpisode): AnimePlaybackAsset
@@ -26,7 +27,11 @@ interface AnimeProvider {
 
 class AnimeSourceRepository(context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
-    val providers: List<AnimeProvider> = listOf(TvtFunProvider(), AgeProvider(), GiriGiriProvider(), LmmProvider())
+    val extensions = dev.mangaflow.anime.sources.lanerc.LanercSourceStore.get(context)
+    private val nativeProviders: List<AnimeProvider> = listOf(TvtFunProvider(), AgeProvider(), GiriGiriProvider(), LmmProvider())
+    val providers: List<AnimeProvider> get() = nativeProviders + extensions.state.value
+        .filter { it.installed && it.enabled && it.kind == dev.mangaflow.anime.sources.lanerc.LanercSourceKind.VIDEO }
+        .map { dev.mangaflow.anime.sources.lanerc.LanercProvider(extensions, extensions.descriptor(it.id)) }
     fun provider(id: String): AnimeProvider? = providers.firstOrNull { it.id == id }
 }
 
@@ -343,6 +348,7 @@ private class GiriGiriProvider : RoutedAnimeProvider() {
 }
 
 private class LmmProvider : RoutedAnimeProvider() {
+    override val supportsSearchPagination = false
     override val id = "anime-lmm"
     override val name = "LMM 动漫"
     override val homeUrl = "https://www.lmm22.com/"

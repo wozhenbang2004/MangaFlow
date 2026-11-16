@@ -373,7 +373,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
         val catalogBytes = (catalogStore.sizeBytes() - items.filter { it.resource.backend == CacheBackend.CATALOG }
             .sumOf { it.bytes }).coerceAtLeast(0L)
         // Cold/unrecognized owners are measured but never reported as safely reclaimable.
-        val auxiliary = (listOf("browse-cache", "metadata-cache", "site-rankings").sumOf { folder ->
+        val auxiliary = (listOf("browse-cache", "metadata-cache", "site-rankings", "anime-metadata").sumOf { folder ->
             StorageFile(root, folder).listFiles().orEmpty().sumOf { if (it.isFile) it.length() else 0L }
         } - items.filter { it.resource.backend == CacheBackend.AUXILIARY }.sumOf { it.bytes }).coerceAtLeast(0L)
         val total = StorageCacheSnapshot(items, unknown, auxiliary, catalogBytes, 0L,
