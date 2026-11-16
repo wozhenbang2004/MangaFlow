@@ -88,6 +88,9 @@ fun AccountScreen(
     metadataLoading: Boolean = false,
     metadataError: String? = null,
     onRetryMetadata: (() -> Unit)? = null,
+    onWebsiteBegin: () -> Long = { 0L },
+    onWebsiteCancel: (Long) -> Unit = {},
+    onWebsiteCredential: (Long, String) -> Unit = { _, _ -> },
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     val profile = state.profile
@@ -99,6 +102,7 @@ fun AccountScreen(
     val appContext = LocalContext.current
     var registerNotice by remember { mutableStateOf<String?>(null) }
     var cookieMode by rememberSaveable { mutableStateOf(false) }
+    var websiteMode by rememberSaveable { mutableStateOf(false) }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var cookie by remember { mutableStateOf("") }
@@ -180,6 +184,16 @@ fun AccountScreen(
                 TextButton(onClick = { clearInputs(); onLogout() }, enabled = active && !busy) {
                     Text("退出并切换账号", style = MaterialTheme.typography.bodySmall)
                 }
+            } else if (websiteMode) {
+                Text("使用官方网页登录。密码由隔离网页处理，客户端只接收验证后的凭据。",
+                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 6.dp))
+                Box(Modifier.fillMaxWidth().height(430.dp)) {
+                    WebsiteAccountLogin(Modifier.fillMaxSize(), onWebsiteBegin, onWebsiteCancel, onWebsiteCredential)
+                }
+                TextButton(onClick = { websiteMode = false }, enabled = active && !busy) {
+                    Text("返回其他登录方式", style = MaterialTheme.typography.bodySmall)
+                }
             } else MotionTabContent(cookieMode, modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp), contentKey = { it }, order = { if (it) 1 else 0 }, fillContent = false, soft = true) { cookieScene ->
             val formActive = active && cookieScene == cookieMode
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -240,8 +254,13 @@ fun AccountScreen(
                     AccountError(message, state.busy, onRetry = if (state.canRetryConnection && !state.savedCredentialPresent) onRefresh else null)
                 }
             }
-            if (!state.savedCredentialPresent) {
+            if (!state.savedCredentialPresent && !websiteMode) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { clearInputs(); websiteMode = true },
+                        enabled = active && !busy,
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
+                        Text("网页登录", style = MaterialTheme.typography.bodySmall)
+                    }
                     TextButton(
                         onClick = { clearInputs(); cookieMode = !cookieMode }, enabled = active && !busy,
                         modifier = Modifier.heightIn(min = 48.dp),
