@@ -125,7 +125,7 @@ internal fun NetworkDownloadSettings(
                         DownloadRouteControl(category, backdrop = backdrop, enabled = active, compact = true)
                     }
                 }
-                Text("各源单独线路优先用于漫画章节。", style = MaterialTheme.typography.labelSmall,
+                Text("来源专用线路优先；动漫目录、视频播放和离线下载继承动漫策略。", style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -735,6 +735,7 @@ internal fun downloadCategoryLabel(category: DownloadCategory): String = when (c
     DownloadCategory.SOURCE_PACKAGES -> "扩展源安装"
     DownloadCategory.UPDATES -> "应用更新"
     DownloadCategory.WEBDAV -> "WebDAV 同步"
+    DownloadCategory.ANIME -> "动漫源、播放与下载"
 }
 
 internal fun proxyAddressLabel(endpoint: DownloadProxyEndpoint): String =
