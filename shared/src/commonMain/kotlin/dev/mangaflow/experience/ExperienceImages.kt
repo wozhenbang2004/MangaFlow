@@ -216,7 +216,9 @@ private fun readerPageHeaders(page: Page, headers: Map<String, String>): Map<Str
 
 /** Protected images cannot reuse an old session's mutable URL or credential-bearing cache entry. */
 internal fun readerPageCacheKey(page: Page, headers: Map<String, String>, source: String = ""): String {
-    val merged = readerPageHeaders(page, headers)
+    // An alternate page must never inherit the primary site's cookies or authorization.
+    val ownedHeaders = if (page.sourceRouteId.isNotBlank()) emptyMap() else headers
+    val merged = readerPageHeaders(page, ownedHeaders)
     val actualSource = page.sourceRouteId.ifBlank { source }
     val scoped = page.sourceRouteId.isNotBlank() || page.sourceRevision.isNotBlank() ||
         page.sourceSessionEpoch.isNotBlank() ||
@@ -248,7 +250,8 @@ internal fun readerPageRequest(
         .readerPriority(actualSource.takeIf { it.isNotBlank() })
         .memoryCacheKey(key).diskCacheKey(key)
         .httpHeaders(coil3.network.NetworkHeaders.Builder().apply {
-            readerPageHeaders(page, headers).forEach { (name, value) -> set(name, value) }
+            readerPageHeaders(page, if (page.sourceRouteId.isNotBlank()) emptyMap() else headers)
+                .forEach { (name, value) -> set(name, value) }
         }.build())
 }
 
