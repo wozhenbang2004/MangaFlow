@@ -13,7 +13,6 @@ import org.openani.mediamp.avkit.AVKitMediampPlayerFactory
 import platform.AVFAudio.AVAudioSession
 import platform.AVFAudio.AVAudioSessionCategoryPlayback
 import platform.AVFAudio.AVAudioSessionModeMoviePlayback
-import platform.AVFAudio.AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
 
 actual fun createAnimePlayer(context: PlatformContext, scope: CoroutineScope): AnimePlayer =
     AppleAnimePlayer(scope)
@@ -29,18 +28,16 @@ private class AppleAnimePlayer(scope: CoroutineScope) : RoutedNativeAnimePlayer(
     }
     override fun releaseNative() {
         super.releaseNative()
-        AVAudioSession.sharedInstance().setActive(false, AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation, null)
     }
     override suspend fun createBackend(): MediampPlayer {
         val audio = AVAudioSession.sharedInstance()
         check(audio.setCategory(AVAudioSessionCategoryPlayback, AVAudioSessionModeMoviePlayback, 0uL, null)) {
             "系统暂时无法开启媒体音频会话"
         }
-        check(audio.setActive(true, null)) { "系统暂时无法启用播放声音" }
+        // AVKit manages native buffer/stall controls; these Swift-only setters are
+        // not exposed as writable properties by Kotlin/Native's Objective-C bindings.
         return AVKitMediampPlayerFactory().create(
             parentCoroutineContext = playerScope.coroutineContext,
-            configurePlayer = { it.automaticallyWaitsToMinimizeStalling = true },
-            configurePlayerItem = { item, _ -> item.preferredForwardBufferDuration = 30.0 },
         )
     }
 }
