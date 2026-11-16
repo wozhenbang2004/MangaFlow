@@ -12,6 +12,7 @@ import dev.mangaflow.anime.sources.AnimeDiscoveryRepository
 import dev.mangaflow.anime.sources.AnimeSourceBrowseController
 import dev.mangaflow.anime.sources.AnimeSourceRepository
 import dev.mangaflow.anime.sources.AnimeTrackingRepository
+import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.SourceNetworkSettings
@@ -212,7 +213,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         scope.launch {
             routing.state.collect {
                 projectRoutes()
-                prepared?.takeIf { it.asset.route != DownloadRoutingStore.activeSourceSnapshot(it.option.sourceId) }?.let {
+                prepared?.takeIf { it.asset.route != DownloadRoutingStore.activeSourceSnapshot(it.option.sourceId, DownloadCategory.ANIME) }?.let {
                     clearPreparation()
                     active?.preparationAttempted = false
                 }
@@ -1519,7 +1520,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val settings = routing.state.value
         val ids = sourceHomes.keys + sources.extensions.state.value.map { it.id } + tracking.providerIds
         mutableState.update { it.copy(sourceRoutes = ids.associateWith { id ->
-            settings.sourceOverrides[id]?.mode ?: settings.defaultMode
+            settings.sourceOverrides[id]?.mode ?: settings.categoryOverrides[dev.mangaflow.net.DownloadCategory.ANIME]
+                ?: settings.defaultMode
         }) }
     }
 

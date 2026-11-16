@@ -13,7 +13,7 @@ import kotlinx.coroutines.flow.asStateFlow
 
 enum class DownloadCategory {
     CHAPTERS, STEAM_WALLPAPERS, STEAM_COMPONENT, FONTS, AI_MODELS,
-    COMPONENTS, SOURCE_PACKAGES, UPDATES, WEBDAV,
+    COMPONENTS, SOURCE_PACKAGES, UPDATES, WEBDAV, ANIME,
 }
 
 /** DIRECT uses an authorized Relay exit when bound; otherwise it only disables app proxies. */
@@ -289,8 +289,8 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
     companion object {
         private val lock = StorageLock()
         private var instance: DownloadRoutingStore? = null
-        internal fun activeSourceSnapshot(sourceId: String): DownloadRouteSnapshot =
-            synchronized(lock) { instance }?.sourceSnapshot(sourceId)
+        internal fun activeSourceSnapshot(sourceId: String, category: DownloadCategory? = null): DownloadRouteSnapshot =
+            synchronized(lock) { instance }?.sourceSnapshot(sourceId, category)
                 ?: DownloadRouteSnapshot(DownloadRouteMode.SYSTEM)
 
         /** Unowned images and catalogue APIs still obey the app-wide route at request start. */

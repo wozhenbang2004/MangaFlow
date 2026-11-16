@@ -2,6 +2,7 @@ package dev.mangaflow.anime.sources
 
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
+import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.HttpUrl
@@ -39,7 +40,7 @@ internal data class AnimeHttpResponse(val url: HttpUrl, val code: Int, val text:
  */
 internal class AnimeHttp(
     val sourceId: String,
-    val route: DownloadRouteSnapshot = DownloadRoutingStore.activeSourceSnapshot(sourceId),
+    val route: DownloadRouteSnapshot = DownloadRoutingStore.activeSourceSnapshot(sourceId, DownloadCategory.ANIME),
 ) : AutoCloseable {
     private val client = NetworkClient(route = route)
 

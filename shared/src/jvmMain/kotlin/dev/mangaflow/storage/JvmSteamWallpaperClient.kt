@@ -91,8 +91,12 @@ internal class JvmSteamWallpaperClient(
     @Volatile private var session: JsonObject? = null
     @Volatile private var savedSession: JsonObject? = null
     @Volatile private var savedSessionReadPending = false
+    private var restoreRetryJob: Job? = null
+    private var restoreFailures = 0
 
-    init { restoreSavedSession(allowInstall = false) }
+    // A saved Steam refresh token automatically prepares the required component and reconnects.
+    // Missing credentials never initiate a native download.
+    init { restoreSavedSession(allowInstall = true) }
 
     private fun restoreSavedSession(allowInstall: Boolean) {
         var restoredRecord: JsonObject? = null
@@ -121,6 +125,9 @@ internal class JvmSteamWallpaperClient(
     }
 
     override fun login() {
+        restoreRetryJob?.cancel()
+        restoreRetryJob = null
+        restoreFailures = 0
         if (closed || !_state.value.supported) return
         val saved = session ?: savedSession
         if (saved != null || savedSessionReadPending) {
@@ -136,6 +143,9 @@ internal class JvmSteamWallpaperClient(
     }
 
     override fun loginWithPassword(accountName: String, password: CharArray) {
+        restoreRetryJob?.cancel()
+        restoreRetryJob = null
+        restoreFailures = 0
         val account = accountName.trim()
         if (closed || !_state.value.supported ||
             account.isEmpty() || account.length > 128 || account.any(Char::isISOControl) ||
@@ -394,6 +404,8 @@ internal class JvmSteamWallpaperClient(
     }
 
     override fun cancelAuthentication() {
+        restoreRetryJob?.cancel()
+        restoreRetryJob = null
         stop(auth)
         if (!closed) _state.update { it.copy(restoring = false, authenticating = false,
             canResumeSession = canResumeSavedSession(), qrUrl = null,
@@ -414,6 +426,8 @@ internal class JvmSteamWallpaperClient(
     }
 
     override fun cancel() {
+        restoreRetryJob?.cancel()
+        restoreRetryJob = null
         lanes.forEach(::stop)
         if (!closed) _state.update { it.copy(restoring = false, preparing = false,
             canResumeSession = canResumeSavedSession(), componentBytes = 0,
@@ -428,6 +442,9 @@ internal class JvmSteamWallpaperClient(
 
     override fun logout() {
         if (closed) return
+        restoreRetryJob?.cancel()
+        restoreRetryJob = null
+        restoreFailures = 0
         lanes.forEach(::stop)
         val token = auth.generation.get()
         val previous = _state.value.account
@@ -474,6 +491,8 @@ internal class JvmSteamWallpaperClient(
 
     override fun close() {
         if (closed) return
+        restoreRetryJob?.cancel()
+        restoreRetryJob = null
         closed = true
         lanes.forEach(::stop)
         sessionEpoch.incrementAndGet()
@@ -657,9 +676,24 @@ internal class JvmSteamWallpaperClient(
                             transferLastActivity = if (failed) current.transferLastActivity else null)
                     }
                 } }
+                if (lane.kind == LaneKind.AUTH && restoring && session == null)
+                    scheduleSavedSessionRetry()
             }
         }
         lane.operation?.invokeOnCompletion { transientSecret?.fill('\u0000') }
+    }
+
+    /** Only transient failures are retried; native invalid-session responses remove the saved token. */
+    private fun scheduleSavedSessionRetry() {
+        if (closed || session != null || (savedSession == null && !savedSessionReadPending)) return
+        restoreRetryJob?.cancel()
+        val pause = (30_000L shl restoreFailures.coerceAtMost(5)).coerceAtMost(15L * 60_000L)
+        restoreFailures++
+        restoreRetryJob = scope.launch {
+            delay(pause)
+            if (!closed && session == null && (savedSession != null || savedSessionReadPending) &&
+                !_state.value.authenticating) restoreSavedSession(allowInstall = true)
+        }
     }
 
     private suspend fun ensureNative(lane: Lane, token: Long, lease: SessionLease?,
@@ -799,6 +833,9 @@ internal class JvmSteamWallpaperClient(
             writeSecret(app, SECRET_KEY, record.toString())
             requireCurrent(auth, token)
             session = record
+            restoreFailures = 0
+            restoreRetryJob?.cancel()
+            restoreRetryJob = null
             savedSession = null
             savedSessionReadPending = false
             sessionEpoch.incrementAndGet()

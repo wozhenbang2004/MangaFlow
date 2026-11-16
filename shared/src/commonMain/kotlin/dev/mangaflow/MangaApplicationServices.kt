@@ -79,6 +79,10 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
         }
     }
     val anime: AnimeController get() = animeOwner.value
+    // One process-owned Steam client restores encrypted refresh credentials on application
+    // startup rather than waiting for the wallpaper screen to be opened.
+    private val steamOwner = lazy { dev.mangaflow.storage.createSteamWallpaperClient(application) }
+    val steamWallpaperClient: dev.mangaflow.storage.SteamWallpaperClient get() = steamOwner.value
     fun flushAnimePlayback() { if (animeOwner.isInitialized()) animeOwner.value.flushPlayback() }
     fun setAnimeForeground(value: Boolean) {
         animeForeground = value
@@ -133,6 +137,7 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val preparations = ChapterPreparationStore(application, repository, downloads, scope, ::awaitSourcesReady)
 
     init {
+        scope.launch(Dispatchers.IO) { steamWallpaperClient }
         dev.mangaflow.anime.sources.AnimeMetadataCache.get(application)
         dev.mangaflow.storage.StorageCacheStore.get(application).apply {
             registerAuxiliaryOwner(browseCache.cacheOwner)

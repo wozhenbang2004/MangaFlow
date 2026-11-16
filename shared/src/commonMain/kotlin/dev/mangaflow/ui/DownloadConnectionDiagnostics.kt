@@ -14,6 +14,8 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.LockOpen
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -73,7 +75,7 @@ private fun NetworkAutoScheduleControls(controller: NetworkAutoCheckController, 
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("自动线路检测", style = MaterialTheme.typography.bodySmall)
-                Text(if (schedule.enabled) "每 ${schedule.intervalMinutes} 分钟 · ${schedule.concurrency} 并发 · ${if (schedule.autoApply) "自动择优" else "只记录"}"
+                Text(if (schedule.enabled) "每 ${schedule.intervalMinutes} 分钟 · ${schedule.concurrency} 并发 · ${if (schedule.autoApply) "检测后自动应用" else "只记录"} · 锁定 ${schedule.lockedTargetIds.size}"
                     else "已暂停 · 手动检测仍可用",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             }
@@ -118,7 +120,7 @@ private fun NetworkAutoScheduleControls(controller: NetworkAutoCheckController, 
                         } else notice = "设置未能保存"
                     }, enabled = active) { Text("保存") }
                 }
-                Text("Android 由系统后台唤醒；系统省电策略可能延后。可用线路需两次验证，网络变化时不自动修改。",
+                Text("两次验证后自动应用未锁定的更优线路。锁定项只检测、不改动；Android 系统后台唤醒可能延后。",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             }
         }
@@ -134,6 +136,7 @@ internal fun NetworkAutoCheckWorkspace(
     onEvidence: (String?) -> Unit, onSettings: () -> Unit, onReceipt: (String) -> Unit,
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
+    val schedule by controller.schedule.collectAsStateWithLifecycle()
     val context = LocalMangaContext.current
     val runtimes = remember(context) { PanelRuntimeStore.get(context) }
     val runtimeStates by runtimes.states.collectAsStateWithLifecycle()
@@ -149,8 +152,10 @@ internal fun NetworkAutoCheckWorkspace(
     val canReview = state.complete && !state.historyOnly && !state.restoring && !state.applied &&
         !state.stale && !state.running && !state.applying && !saving
     fun current(row: NetworkAutoRow) = row.currentRoute?.mode
-    val changes = state.rows.mapNotNull { row -> recommendationChange(row, current(row))?.let { row.id to it } }.toMap()
-    val applicable = selected.filter { (id, mode) -> state.rows.firstOrNull { it.id == id }?.let { row ->
+    val changes = state.rows.filterNot { it.id in schedule.lockedTargetIds }
+        .mapNotNull { row -> recommendationChange(row, current(row))?.let { row.id to it } }.toMap()
+    val applicable = selected.filter { (id, mode) -> id !in schedule.lockedTargetIds &&
+        state.rows.firstOrNull { it.id == id }?.let { row ->
         row.canApply && routeResult(row, mode).verified() && mode != current(row)
     } == true }
     val available = state.rows.count { it.direct.verified() || it.proxy.verified() }
@@ -168,7 +173,8 @@ internal fun NetworkAutoCheckWorkspace(
         controller.start()
     }
     fun choose(row: NetworkAutoRow, mode: DownloadRouteMode) {
-        if (!latestActive || !canReview || !row.canApply || !routeResult(row, mode).verified()) return
+        if (!latestActive || !canReview || !row.canApply ||
+            row.id in schedule.lockedTargetIds || !routeResult(row, mode).verified()) return
         controller.stage(row.id, mode.takeIf { it != current(row) })
         notice = null
     }
@@ -230,6 +236,7 @@ internal fun NetworkAutoCheckWorkspace(
                                 NetworkAutoCheckRow(row, value, selected[row.id], metrics,
                                     stale = state.stale || state.historyOnly, historical = state.historyOnly,
                                     active = active, enabled = active && canReview,
+                                    locked = row.id in schedule.lockedTargetIds,
                                     expanded = expandedId == row.id,
                                     directRunning = "${row.id}:DIRECT" in state.activeProbeIds,
                                     proxyRunning = "${row.id}:PROXY" in state.activeProbeIds,
@@ -239,6 +246,11 @@ internal fun NetworkAutoCheckWorkspace(
                                         else recommendationChange(row, value)?.let { choose(row, it) }
                                     }, onChoose = { choose(row, it) }, onEvidence = { onEvidence(row.id) },
                                     onSettings = onSettings,
+                                    onLock = {
+                                        if (!controller.lockTarget(row.id, row.id !in schedule.lockedTargetIds))
+                                            notice = "来源自动锁定未保存"
+                                        else notice = null
+                                    },
                                     onPrepareSteam = {
                                         if (latestActive && steamNeedsPreparation(row, steam) && !steam.downloading) scope.launch {
                                             controller.invalidate("Steam 组件状态已变化，请准备完成后重新检测")
@@ -335,6 +347,7 @@ private fun NetworkAutoGroupHeading(group: NetworkAutoGroup, count: Int, metrics
         Row(Modifier.fillMaxWidth().heightIn(min = 32.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(when (group) {
                 NetworkAutoGroup.MANGA_SOURCES -> "漫画源"
+                NetworkAutoGroup.ANIME_SOURCES -> "动漫源与服务"
                 NetworkAutoGroup.RATING_SITES -> "评分站"
                 NetworkAutoGroup.DOWNLOADS -> "下载与服务"
             } + " · $count", Modifier.weight(1f).padding(start = 8.dp),
@@ -352,18 +365,21 @@ private fun NetworkAutoGroupHeading(group: NetworkAutoGroup, count: Int, metrics
 @Composable
 private fun NetworkAutoCheckRow(
     row: NetworkAutoRow, current: DownloadRouteMode?, selected: DownloadRouteMode?, metrics: AutoRowMetrics,
-    stale: Boolean, historical: Boolean, active: Boolean, enabled: Boolean, expanded: Boolean, directRunning: Boolean, proxyRunning: Boolean,
+    stale: Boolean, historical: Boolean, active: Boolean, enabled: Boolean, locked: Boolean,
+    expanded: Boolean, directRunning: Boolean, proxyRunning: Boolean,
     steam: PanelRuntimeState, onDetails: () -> Unit, onToggle: () -> Unit, onChoose: (DownloadRouteMode) -> Unit,
-    onEvidence: () -> Unit, onSettings: () -> Unit, onPrepareSteam: () -> Unit, onCancelSteam: () -> Unit,
+    onEvidence: () -> Unit, onSettings: () -> Unit, onLock: () -> Unit,
+    onPrepareSteam: () -> Unit, onCancelSteam: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    val recommended = recommendationChange(row, current)
+    val recommended = recommendationChange(row, current).takeUnless { locked }
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val inline = maxWidth >= metrics.name + 44.dp + metrics.cell * 2
         val sideBySide = maxWidth - 44.dp >= metrics.cell * 2 + 6.dp
         Column(Modifier.fillMaxWidth().alpha(if (stale) .6f else 1f)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (row.canApply) MotionIconButton(onToggle, enabled = enabled && (selected != null || recommended != null),
+                if (row.canApply) MotionIconButton(onToggle, enabled = enabled && !locked &&
+                    (selected != null || recommended != null),
                     modifier = Modifier.size(44.dp), tooltip = if (selected != null) "不修改${row.label}" else "选择${row.label}建议") {
                     Icon(if (selected != null) Icons.Outlined.CheckBox else Icons.Outlined.CheckBoxOutlineBlank,
                         if (selected != null) "已选${row.label}" else "未选${row.label}", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
@@ -374,6 +390,8 @@ private fun NetworkAutoCheckRow(
                     contentPadding = PaddingValues(horizontal = 2.dp)) {
                     Text(networkAutoRowTitle(row), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
                         maxLines = if (inline) 1 else 2, overflow = TextOverflow.Ellipsis)
+                    if (locked) Icon(Icons.Outlined.Lock, "禁止自动改线", Modifier.size(12.dp),
+                        tint = colors.onSurfaceVariant)
                     Spacer(Modifier.width(4.dp))
                     Text(when (current) { DownloadRouteMode.SYSTEM -> "系统"; DownloadRouteMode.DIRECT -> "直";
                         DownloadRouteMode.PROXY -> "代"; null -> "待设" }, style = MaterialTheme.typography.labelSmall,
@@ -384,29 +402,30 @@ private fun NetworkAutoCheckRow(
                         Modifier.size(12.dp), tint = colors.onSurfaceVariant)
                 }
                 if (inline) {
-                    NetworkAutoRouteCell(row.direct, DownloadRouteMode.DIRECT, selected, recommended, enabled, false,
+                    NetworkAutoRouteCell(row.direct, DownloadRouteMode.DIRECT, selected, recommended, enabled && !locked, false,
                         directRunning, onChoose, Modifier.width(metrics.cell))
-                    NetworkAutoRouteCell(row.proxy, DownloadRouteMode.PROXY, selected, recommended, enabled, false,
+                    NetworkAutoRouteCell(row.proxy, DownloadRouteMode.PROXY, selected, recommended, enabled && !locked, false,
                         proxyRunning, onChoose, Modifier.width(metrics.cell))
                 }
             }
             if (!inline) {
                 if (sideBySide) Row(Modifier.fillMaxWidth().padding(start = 44.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    NetworkAutoRouteCell(row.direct, DownloadRouteMode.DIRECT, selected, recommended, enabled, true,
+                    NetworkAutoRouteCell(row.direct, DownloadRouteMode.DIRECT, selected, recommended, enabled && !locked, true,
                         directRunning, onChoose, Modifier.weight(1f))
-                    NetworkAutoRouteCell(row.proxy, DownloadRouteMode.PROXY, selected, recommended, enabled, true,
+                    NetworkAutoRouteCell(row.proxy, DownloadRouteMode.PROXY, selected, recommended, enabled && !locked, true,
                         proxyRunning, onChoose, Modifier.weight(1f))
                 } else Column(Modifier.fillMaxWidth().padding(start = 44.dp)) {
-                    NetworkAutoRouteCell(row.direct, DownloadRouteMode.DIRECT, selected, recommended, enabled, true,
+                    NetworkAutoRouteCell(row.direct, DownloadRouteMode.DIRECT, selected, recommended, enabled && !locked, true,
                         directRunning, onChoose, Modifier.fillMaxWidth())
-                    NetworkAutoRouteCell(row.proxy, DownloadRouteMode.PROXY, selected, recommended, enabled, true,
+                    NetworkAutoRouteCell(row.proxy, DownloadRouteMode.PROXY, selected, recommended, enabled && !locked, true,
                         proxyRunning, onChoose, Modifier.fillMaxWidth())
                 }
             }
             CopyShelfReveal(expanded) {
                 Column(Modifier.fillMaxWidth().padding(start = 44.dp, end = 4.dp, bottom = 5.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(networkAutoRowReason(row, current, steam), style = MaterialTheme.typography.labelSmall,
+                    Text(if (locked) "已锁定自动修改 · 手动配置仍可更改" else networkAutoRowReason(row, current, steam),
+                        style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         if (row.category == DownloadCategory.STEAM_WALLPAPERS && steamNeedsPreparation(row, steam) &&
@@ -424,6 +443,12 @@ private fun NetworkAutoCheckRow(
                         } else if (listOfNotNull(row.direct, row.proxy).any { result -> result.status == NetworkAutoRouteStatus.NOT_CONFIGURED &&
                             listOf("代理", "授权", "端口").any { word -> word in result.message } }) {
                             MotionTextButton(onSettings, enabled = active) { Text("网络设置", style = MaterialTheme.typography.labelMedium) }
+                        }
+                        MotionIconButton(onClick = onLock, enabled = active && row.canApply,
+                            modifier = Modifier.size(44.dp),
+                            tooltip = if (locked) "解除自动改线锁定" else "锁定此项，自动检测不能修改线路") {
+                            Icon(if (locked) Icons.Outlined.Lock else Icons.Outlined.LockOpen,
+                                if (locked) "已锁定" else "允许自动优化", Modifier.size(17.dp))
                         }
                         Spacer(Modifier.weight(1f))
                         MotionTextButton(onEvidence, enabled = active) { Text("详细依据", style = MaterialTheme.typography.labelSmall) }
