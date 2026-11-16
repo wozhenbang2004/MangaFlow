@@ -63,10 +63,17 @@ def environment(values):
                 file.write(f"{key}={value}\n")
 
 
+class ReleaseSuperseded(RuntimeError):
+    """A newer main owns publication; this is not a build failure."""
+
+
 def require_current_main(sha):
     current = request(API + "/git/ref/heads/main")
     if current["object"]["sha"] != sha:
-        raise RuntimeError("A newer main revision is available; its workflow owns the next release.")
+        raise ReleaseSuperseded(
+            f"Release from {sha} was skipped: main is now {current['object']['sha']}; "
+            "the newer workflow owns publication. Any existing draft remains unpublished."
+        )
 
 
 def ref_commit(tag):
@@ -302,12 +309,22 @@ def main():
     metadata.add_argument("--runtime-dir", type=Path, required=True)
     modes.add_parser("publish")
     args = parser.parse_args()
-    if args.mode == "plan":
-        plan()
-    elif args.mode == "manifest":
-        manifest(args.apk, args.private_key, args.runtime_dir)
-    else:
-        publish()
+    try:
+        if args.mode == "plan":
+            plan()
+        elif args.mode == "manifest":
+            manifest(args.apk, args.private_key, args.runtime_dir)
+        else:
+            publish()
+    except ReleaseSuperseded as error:
+        # Only the exact stale-main guard is a successful skip. API, signing,
+        # asset, tag and publication errors must still fail the workflow.
+        environment({"RELEASE_SUPERSEDED": "true"})
+        print(f"::notice::{error}")
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with open(summary, "a", encoding="utf-8") as file:
+                file.write(f"## Release skipped\n\n{error}\n\nThis run did not publish a release.\n")
 
 
 if __name__ == "__main__":

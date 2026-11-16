@@ -41,7 +41,7 @@ jobs:
         run: python3 scripts/release.py plan
 
       - name: Archive source snapshot
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/mangaflow-source"
@@ -50,7 +50,7 @@ jobs:
             "$GITHUB_SHA"
 
       - name: Preserve source snapshot
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mangaflow-source-${{ github.run_number }}-${{ github.run_attempt }}
@@ -59,7 +59,7 @@ jobs:
           retention-days: 14
 
       - name: Require the permanent signing identity
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         env:
           KEYSTORE: ${{ secrets.MANGAFLOW_SIGNING_KEYSTORE_B64 }}
           PASSWORD: ${{ secrets.MANGAFLOW_SIGNING_PASSWORD }}
@@ -71,18 +71,18 @@ jobs:
           PY
 
       - name: Set up Java 17
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Reuse Gradle build state
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
 
       - name: Install Android build tools
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         run: |
           set -euo pipefail
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
@@ -92,7 +92,7 @@ jobs:
           "$SDKMANAGER" 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;27.2.12479018'
 
       - name: Check out pinned Steam protocol source
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: UnhingedSoftware/tapline
@@ -100,7 +100,7 @@ jobs:
           path: native/steam/tapline
           persist-credentials: false
       - name: Reuse Steam compiler dependencies
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -111,11 +111,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-steam-rust188-ndk272-v1-
       - name: Install pinned Rust toolchain
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         run: rustup toolchain install 1.88.0 --profile minimal --target aarch64-linux-android --target armv7-linux-androideabi --target i686-linux-android --target x86_64-linux-android
       - name: Android Lint (release)
         id: lint
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && github.event_name == 'workflow_dispatch' && inputs.full_lint == true
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true' && github.event_name == 'workflow_dispatch' && inputs.full_lint == true
         run: |
           set -euo pipefail
           chmod +x gradlew
@@ -143,7 +143,7 @@ jobs:
           retention-days: 14
 
       - name: Assemble release APK
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         run: |
           set -euo pipefail
           chmod +x gradlew
@@ -153,10 +153,10 @@ jobs:
             :app:assembleRelease :app:stageInferenceAars
 
       - name: Build optional Steam component
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         run: python3 scripts/build_steam.py --platform android
       - name: Preserve resolved Steam dependencies and licenses
-        if: always() && env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: always() && env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mangaflow-steam-android-${{ github.run_number }}-${{ github.run_attempt }}
@@ -166,7 +166,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
       - name: Package optional inference components
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         run: |
           python3 scripts/package_runtimes.py \
             --aar-dir app/build/outputs/inference-aars \
@@ -174,7 +174,7 @@ jobs:
             --apk app/build/outputs/apk/release/app-release-unsigned.apk
 
       - name: Preserve release mapping
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mangaflow-mapping-${{ env.RELEASE_VERSION_NAME }}-${{ github.run_attempt }}
@@ -183,7 +183,7 @@ jobs:
           retention-days: 14
 
       - name: Sign APK and update metadata
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         env:
           MANGAFLOW_SIGNING_KEYSTORE_B64: ${{ secrets.MANGAFLOW_SIGNING_KEYSTORE_B64 }}
           MANGAFLOW_SIGNING_PASSWORD: ${{ secrets.MANGAFLOW_SIGNING_PASSWORD }}
@@ -216,7 +216,7 @@ jobs:
             --runtime-dir dist/runtime-assets
 
       - name: Preserve release assets
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mangaflow-${{ github.run_number }}-${{ github.run_attempt }}
@@ -225,7 +225,7 @@ jobs:
           retention-days: 14
 
       - name: Publish GitHub release
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release.py publish
