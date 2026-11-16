@@ -42,10 +42,11 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
     Column(Modifier.fillMaxSize()) {
         BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
             val minimum = with(density) { (13.sp.toDp() * 2 + 32.dp) * tabs.size }
+            val availableWidth = maxWidth
             Box(Modifier.horizontalScroll(rememberScrollState())) {
                 MotionTabs(state.discoveryTab.ordinal, tabs,
                     onSelect = { controller.selectDiscoveryTab(AnimeDiscoveryTab.entries[it]) },
-                    modifier = Modifier.width(maxWidth.coerceAtLeast(minimum)), controlHeight = 44.dp,
+                    modifier = Modifier.width(availableWidth.coerceAtLeast(minimum)), controlHeight = 44.dp,
                     treatment = MotionTabTreatment.Soft, indicator = MaterialTheme.colorScheme.primary.copy(alpha = .12f),
                     foreground = MaterialTheme.colorScheme.primary,
                     itemContent = { index, _, color ->
@@ -327,10 +328,11 @@ private fun AnimeDiscoveryFilterPanel(visible: Boolean, tab: AnimeDiscoveryTab, 
                 })
                 AnimeTextField(year, { year = it; error = null }, "年份，留空不限")
                 BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    val availableWidth = maxWidth
                     Box(Modifier.horizontalScroll(rememberScrollState())) {
                         MotionTabs(season?.ordinal?.plus(1) ?: 0, listOf("不限", "冬季", "春季", "夏季", "秋季"),
                             onSelect = { season = AnimeSeason.entries.getOrNull(it - 1); error = null },
-                            modifier = Modifier.width(maxWidth.coerceAtLeast(300.dp)), controlHeight = 44.dp,
+                            modifier = Modifier.width(availableWidth.coerceAtLeast(300.dp)), controlHeight = 44.dp,
                             treatment = MotionTabTreatment.Soft)
                     }
                 }
