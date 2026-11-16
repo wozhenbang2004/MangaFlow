@@ -2,6 +2,10 @@
 
 package dev.mangaflow.net
 
+import dev.mangaflow.anime.sources.AnimeHttp
+import dev.mangaflow.anime.sources.AnimeSourceRepository
+import dev.mangaflow.anime.sources.AnimeSourceStage
+import dev.mangaflow.anime.sources.animePublicUrl
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.ConnectionProbeBudget
 import dev.mangaflow.data.ReviewProviders
@@ -44,10 +48,11 @@ internal class AutoTarget(
     val coverage: String, val timeoutMillis: Long = 70_000,
     val unsupported: NetworkAutoRouteResult? = null,
     val ratingId: String? = null,
+    val groupOverride: NetworkAutoGroup? = null,
     val parallelRoutes: Boolean = true,
     val probe: suspend (DownloadRouteSnapshot) -> AutoSample = { throw AutoProbeFailure(NetworkAutoRouteStatus.UNSUPPORTED, "此项没有可独立验证的目标") },
 ) {
-    val group: NetworkAutoGroup get() = when {
+    val group: NetworkAutoGroup get() = groupOverride ?: when {
         ratingId != null -> NetworkAutoGroup.RATING_SITES
         sourceId != null -> NetworkAutoGroup.MANGA_SOURCES
         else -> NetworkAutoGroup.DOWNLOADS
@@ -99,9 +104,10 @@ internal suspend fun autoTargets(context: PlatformContext, repository: UnifiedMa
             DownloadCategory.SOURCE_PACKAGES -> "扩展源安装"
             DownloadCategory.UPDATES -> "应用更新"
             DownloadCategory.WEBDAV -> "WebDAV 同步"
+            DownloadCategory.ANIME -> "动漫播放与下载"
         }
         val target = when (category) {
-            DownloadCategory.CHAPTERS -> null // Chapter networking is checked per real source, never as a fake aggregate response.
+            DownloadCategory.CHAPTERS, DownloadCategory.ANIME -> null // Individual sources are verified, not a misleading aggregate.
             DownloadCategory.STEAM_WALLPAPERS -> AutoTarget(id, label, category,
                 coverage = "Steam 匿名 CM 连接；不代表账号、所有权或壁纸资源可下载", timeoutMillis = 115_000) { route ->
                 val result = probeSteamNetwork(context, route)
@@ -233,6 +239,45 @@ internal suspend fun autoTargets(context: PlatformContext, repository: UnifiedMa
             AutoSample("目录响应可用；图片未验证")
         }
     }
+
+    // The anime category is inherited by both source discovery and frozen playback/download
+    // assets. Only real JSON API schema evidence can trigger an automatic source-route change.
+    val animeProviders = AnimeSourceRepository(context).providers
+        .distinctBy { it.id }
+    animeProviders.forEach { provider ->
+        targets += AutoTarget(id = "anime." + provider.id, label = provider.name,
+            category = DownloadCategory.ANIME, sourceId = provider.id,
+            groupOverride = NetworkAutoGroup.ANIME_SOURCES,
+            coverage = if (provider.id in AUTO_VERIFIED_ANIME_IDS)
+                "动漫来源真实匿名目录／搜索 API 的结构验证；不代表全部剧集可播"
+            else "第三方脚本的站点连通性；未验证解析结果，不自动修改路线",
+            timeoutMillis = 45_000L, parallelRoutes = true) { route ->
+            probeAnimeSource(provider.id, provider.homeUrl, route)
+        }
+    }
+    val animeOwnerIds = animeProviders.map { it.id }.toSet() + setOf(
+        "anime-bangumi", "anime-anilist", "anime-danmaku-dandanplay")
+    for ((id, label) in listOf(
+        "anime-bangumi" to "Bangumi 番剧资料",
+        "anime-anilist" to "AniList 番剧资料",
+        "anime-danmaku-dandanplay" to "弹弹play 弹幕")) {
+        targets += AutoTarget("anime.$id", label, category = DownloadCategory.ANIME,
+            sourceId = id, groupOverride = NetworkAutoGroup.ANIME_SOURCES,
+            coverage = "资料／弹幕服务的站点可达性；认证／完整 API 未验证，不自动改线路",
+            timeoutMillis = 25_000L) { route ->
+            val address = when (id) {
+                "anime-bangumi" -> "https://api.bgm.tv/"
+                "anime-anilist" -> "https://graphql.anilist.co/"
+                else -> "https://api.dandanplay.net/"
+            }
+            val http = AnimeHttp(id, route)
+            try {
+                http.request(animePublicUrl(address), AnimeSourceStage.METADATA)
+                throw AutoProbeFailure(NetworkAutoRouteStatus.PARTIAL,
+                    "站点已响应，未完成资料或弹幕接口校验，保留当前线路")
+            } finally { http.close() }
+        }
+    }
     ReviewProviders.all.forEach { provider ->
         targets += AutoTarget(ReviewProviders.routingId(provider.id), provider.name, ratingId = provider.id,
             coverage = "实际评分／映射服务的匿名榜单或漫画搜索及结构校验；不写评分缓存或关联", timeoutMillis = 35_000) { route ->
@@ -243,7 +288,8 @@ internal suspend fun autoTargets(context: PlatformContext, repository: UnifiedMa
         }
     }
     val knownReviewOwners = ReviewProviders.ids.map(ReviewProviders::routingId).toSet()
-    settings.sourceOverrides.keys.filter { id -> known.none { it.id == id } && id !in knownReviewOwners }.sorted().forEach { id ->
+    settings.sourceOverrides.keys.filter { id -> known.none { it.id == id } &&
+        id !in knownReviewOwners && id !in animeOwnerIds }.sorted().forEach { id ->
         val rating = id.removePrefix("review.").takeIf { id.startsWith("review.") }
         targets += AutoTarget(if (rating == null) "source.$id" else id,
             if (rating == null) "未安装来源" else "未注册评分站", sourceId = id.takeIf { rating == null }, ratingId = rating,
@@ -251,6 +297,40 @@ internal suspend fun autoTargets(context: PlatformContext, repository: UnifiedMa
                 message = "来源已移除或未安装，本次不修改其配置"))
     }
     return targets
+}
+
+
+private val AUTO_VERIFIED_ANIME_IDS = setOf("anime-tvtfun", "anime-age", "anime-girigiri", "anime-lmm")
+
+/** Probes never call a provider through its currently selected route instead of the candidate. */
+private suspend fun probeAnimeSource(id: String, home: String, route: DownloadRouteSnapshot): AutoSample {
+    if (id !in AUTO_VERIFIED_ANIME_IDS) {
+        val http = AnimeHttp(id, route)
+        try {
+            http.request(animePublicUrl(home), AnimeSourceStage.SEARCH)
+            throw AutoProbeFailure(NetworkAutoRouteStatus.PARTIAL,
+                "站点可达，但脚本搜索／视频解析未验证，保留原线路")
+        } finally { http.close() }
+    }
+    val address = when (id) {
+        "anime-tvtfun" -> "https://www.tvtfun.net/api/client/anime?keyword=anime&page=1&pageSize=1"
+        "anime-age" -> "https://api.agedm.io/v2/catalog?genre=all&label=all&letter=all&order=time&region=all&resource=all&season=all&status=all&year=all&page=1&size=1"
+        "anime-girigiri" -> "https://m3u8.girigirilove.com/api.php/Vod/get_list?vod_name=anime&offset=0&limit=1"
+        else -> "https://www.lmm22.com/index.php/ajax/suggest?mid=1&wd=anime"
+    }
+    val http = AnimeHttp(id, route)
+    try {
+        val root = http.json(animePublicUrl(address), AnimeSourceStage.SEARCH, referer = home)
+        val valid = when (id) {
+            "anime-tvtfun" -> root.optJSONObject("data")?.optJSONArray("items") != null
+            "anime-age" -> root.optJSONArray("videos") != null
+            "anime-girigiri" -> root.optJSONObject("info")?.optJSONArray("rows") != null
+            else -> root.optJSONArray("list") != null
+        }
+        if (!valid) throw AutoProbeFailure(NetworkAutoRouteStatus.FAILED,
+            "动漫搜索响应结构不匹配，不能判定线路可用")
+        return AutoSample("动漫匿名目录响应结构有效；不代表播放器资源可用")
+    } finally { http.close() }
 }
 
 internal suspend fun <T> withProbeClient(route: DownloadRouteSnapshot, action: suspend (NetworkClient) -> T): T {
