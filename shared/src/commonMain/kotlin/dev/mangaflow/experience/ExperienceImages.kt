@@ -217,6 +217,7 @@ private fun readerPageHeaders(page: Page, headers: Map<String, String>): Map<Str
 /** Protected images cannot reuse an old session's mutable URL or credential-bearing cache entry. */
 internal fun readerPageCacheKey(page: Page, headers: Map<String, String>, source: String = ""): String {
     val merged = readerPageHeaders(page, headers)
+    val actualSource = page.sourceRouteId.ifBlank { source }
     val scoped = page.sourceRevision.isNotBlank() || page.sourceSessionEpoch.isNotBlank() ||
         page.sourceImageToken.isNotBlank() || page.headerSecretRef.isNotBlank() ||
         page.headerSecretBinding.isNotBlank() || page.transform.isNotBlank() ||
@@ -225,7 +226,7 @@ internal fun readerPageCacheKey(page: Page, headers: Map<String, String>, source
     // Length prefixes retain exact boundaries; only the digest is retained in cache keys.
     val identity = buildString {
         fun field(value: String) { append(value.length).append(':').append(value) }
-        field("reader-owned-v1"); field(source); field(page.url); field(page.sourceRevision)
+        field("reader-owned-v1"); field(actualSource); field(page.url); field(page.sourceRevision)
         field(page.sourceSessionEpoch); field(page.sourceImageToken); field(page.headerSecretRef)
         field(page.headerSecretBinding); field(page.transform)
         merged.entries.sortedBy { it.key }.forEach { (name, value) -> field(name); field(value) }
@@ -239,10 +240,11 @@ internal fun readerPageCacheKey(page: Page, headers: Map<String, String>, source
 internal fun readerPageRequest(
     context: PlatformContext, page: Page, headers: Map<String, String>, source: String = "",
 ): ImageRequest.Builder {
-    val key = readerPageCacheKey(page, headers, source)
+    val actualSource = page.sourceRouteId.ifBlank { source }
+    val key = readerPageCacheKey(page, headers, actualSource)
     if (page.url.startsWith("file:")) dev.mangaflow.storage.StorageCacheStore.get(context).noteMemoryFile(page.url, key)
     return ImageRequest.Builder(imagePlatformContext(context)).data(page.url)
-        .readerPriority(source.takeIf { it.isNotBlank() })
+        .readerPriority(actualSource.takeIf { it.isNotBlank() })
         .memoryCacheKey(key).diskCacheKey(key)
         .httpHeaders(coil3.network.NetworkHeaders.Builder().apply {
             readerPageHeaders(page, headers).forEach { (name, value) -> set(name, value) }
