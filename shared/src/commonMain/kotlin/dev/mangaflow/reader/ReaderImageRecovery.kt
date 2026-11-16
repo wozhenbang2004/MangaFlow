@@ -83,6 +83,26 @@ internal fun isReaderPrefetchFailure(failure: Throwable): Boolean {
     return true
 }
 
+/** Keep local optional-work stops distinct from a failed image or unreachable source. */
+internal fun readerPrefetchErrorLabel(failure: Throwable): String {
+    var cause: Throwable? = failure
+    val chain = mutableListOf<Throwable>()
+    repeat(8) {
+        val current = cause ?: return@repeat
+        chain += current
+        cause = current.cause
+    }
+    return when {
+        chain.any { it is PrefetchBudgetExceeded } -> "预读容量暂受限"
+        chain.any { it is ExperienceAdmissionDeferred } -> "资源保护暂缓"
+        chain.any { it is PrefetchPromoted } -> "交由当前页继续"
+        chain.any { it is OutOfMemoryError } -> "内存保护暂缓"
+        chain.any { it is CancellationException } -> "预读已取消"
+        else -> chain.asReversed().map { readerPageErrorLabel(it.message.orEmpty()) }
+            .firstOrNull { it != "暂时无法加载" } ?: "图片预读未完成"
+    }
+}
+
 /** One foreground wait owns its cancellation; shared downloads retain their own owner. */
 internal class ReaderLoadAttempt {
     val startedAt: TimeMark = TimeSource.Monotonic.markNow()

@@ -409,6 +409,8 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
     val route = currentCoroutineContext()[ChapterDownloadTransport]?.route
         ?: DownloadRoutingStore.get(context).sourceSnapshot(source)
     val transferLock = SynchronizedObject()
+    val receipt = budget.child()
+    var completed = false
     var retained = 0L
     var received = 0L
     var closed = false
@@ -423,8 +425,12 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
                 received += count
                 work.ifOptional {
                     if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded()
-                    budget.accept(count)
                     policy.acceptPrefetchChunk(count, memoryBacked = true)
+                    try { receipt.accept(count) }
+                    catch (failure: Throwable) {
+                        policy.releasePrefetchBytes(count, memoryBacked = true)
+                        throw failure
+                    }
                     retained += count
                 }
             }
@@ -432,16 +438,17 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
         val path = dev.mangaflow.reader.readerFilePath(result.url)
         val size = path?.let { StorageFile(it).length() }
         val cacheHit = synchronized(transferLock) { received == 0L }
-        if (cacheHit && size != null) work.ifOptional { budget.accept(size) }
+        if (cacheHit && size != null) work.ifOptional { receipt.accept(size) }
         policy.recordImage(monotonicTimeMillis() - started, memory = false, disk = cacheHit,
             prefetch = !work.isForeground, key = page.url, bytes = size)
         return result
     }
     return try {
-        load()
+        load().also { completed = true }
     } finally {
         val released = synchronized(transferLock) { closed = true; retained.also { retained = 0L } }
         policy.releasePrefetchBytes(released, memoryBacked = true)
+        if (!completed) receipt.close()
     }
 }
 

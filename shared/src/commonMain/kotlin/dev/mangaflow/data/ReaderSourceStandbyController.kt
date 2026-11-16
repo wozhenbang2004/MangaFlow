@@ -11,6 +11,7 @@ import dev.mangaflow.experience.PrefetchWork
 import dev.mangaflow.experience.PrefetchStage
 import dev.mangaflow.experience.AdmissionWait
 import dev.mangaflow.experience.AdmissionWaitReason
+import dev.mangaflow.experience.ExperienceAdmissionDeferred
 import dev.mangaflow.experience.ReaderPagePreflightStatus
 import dev.mangaflow.experience.prefetchOriginalPageResult
 import dev.mangaflow.experience.preflightReaderPage
@@ -40,6 +41,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -47,6 +49,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** One optional owner; the repository and image cache remain the sole manifest/byte caches. */
 internal class ReaderSourceStandbyController(
@@ -63,10 +66,14 @@ internal class ReaderSourceStandbyController(
         val stamp: Stamp, val decoded: Boolean, val previewKey: MemoryCache.Key? = null,
         val inspectedAt: Long = wallTimeMillis())
     private data class Stopped(val reason: String, val failed: Boolean, val retryOnRelease: Boolean = false,
+        val retryWhenWritable: Boolean = false,
         val at: Long = monotonicTimeMillis())
     private val mutableState = MutableStateFlow<List<ReaderSourceStandby>>(emptyList())
     val state = mutableState.asStateFlow()
+    private val mutableAvailability = MutableStateFlow(ReaderSourceStandbyAvailability())
+    val availability = mutableAvailability.asStateFlow()
     private val position = MutableStateFlow(Position())
+    private val retryRevision = MutableStateFlow(0L)
     private var job: Job? = null
     private var key: String? = null
     private var request = 0L
@@ -77,11 +84,19 @@ internal class ReaderSourceStandbyController(
         job?.cancel()
         job = null
         mutableState.value = emptyList()
+        mutableAvailability.value = ReaderSourceStandbyAvailability()
+    }
+
+    /** A failed look-ahead may wake recovery, but cannot replace the live reader's cursor. */
+    fun nudge(workId: String, chapterId: String) {
+        val current = availability.value
+        if (key != null && current.workId == workId && current.chapterId == chapterId) retryRevision.value++
     }
 
     fun warm(
         sessionKey: String, workId: String, chapter: Chapter, candidates: List<ChapterVariant>,
-        pageIndex: Int, pageCount: Int, current: (ChapterVariant) -> Boolean,
+        pageIndex: Int, pageCount: Int, availability: ReaderSourceStandbyAvailability,
+        current: (ChapterVariant) -> Boolean,
     ) {
         val index = pageIndex.coerceAtLeast(0)
         val previous = position.value
@@ -91,8 +106,12 @@ internal class ReaderSourceStandbyController(
             index > previous.index -> 1
             else -> previous.direction
         })
-        if (key == sessionKey && job?.isActive == true) return
+        if (key == sessionKey && job?.isActive == true) {
+            mutableAvailability.value = availability
+            return
+        }
         clear()
+        mutableAvailability.value = availability
         if (candidates.isEmpty()) return
         key = sessionKey
         val generation = request
@@ -132,8 +151,20 @@ internal class ReaderSourceStandbyController(
                 coroutineScope {
                     selected.forEachIndexed { order, variant -> launch {
                         val saved = retained.getOrPut(variant.storageId) { linkedMapOf() }
-                        prepareSource(generation, variant, order, limits,
-                            bytes, saved, current)
+                        repeat(2) { attempt ->
+                            val retryAt = retryRevision.value
+                            prepareSource(generation, variant, order, limits, bytes, saved, current, refreshManifest = attempt > 0)
+                            if (generation != request || !current(variant) || attempt == 1) return@launch
+                            // A transient directory failure must not permanently poison this session.
+                            // Keep a finite retry and the existing source admission/cooldown authority.
+                            delay(5_000L)
+                            withTimeoutOrNull(25_000L) { retryRevision.first { it != retryAt } }
+                            if (generation != request || !current(variant)) return@launch
+                            mutableState.update { rows -> if (generation != request) rows else rows.map { row ->
+                                if (row.variantId == variant.storageId) row.copy(phase = ReaderSourceStandbyPhase.QUEUED,
+                                    reason = "重试备用来源目录，当前来源继续阅读") else row
+                            } }
+                        }
                     } }
                 }
             }
@@ -162,7 +193,7 @@ internal class ReaderSourceStandbyController(
     }
 
     private suspend fun prepareSource(generation: Long, variant: ChapterVariant, order: Int, limits: Limits, bytes: PrefetchByteBudget,
-        prepared: LinkedHashMap<Int, Prepared>, current: (ChapterVariant) -> Boolean,
+        prepared: LinkedHashMap<Int, Prepared>, current: (ChapterVariant) -> Boolean, refreshManifest: Boolean = false,
     ) {
         val policy = ExperiencePolicyStore.get(context)
         val owner = SourceKeys.manga(variant.sourceId, variant.mangaId)
@@ -179,14 +210,14 @@ internal class ReaderSourceStandbyController(
         try {
             if (!active()) return
             val pages = withTimeout(25_000L) {
-                repository.cachedPages(owner, variant.storageId) ?: policy.withPrefetchAdmission(
+                (if (refreshManifest) null else repository.cachedPages(owner, variant.storageId)) ?: policy.withPrefetchAdmission(
                     variant.sourceId, 1_048_576L, { false },
                     onWaiting = { wait -> update { it.copy(
                         phase = if (wait == null) ReaderSourceStandbyPhase.RESOLVING else ReaderSourceStandbyPhase.QUEUED,
                         reason = wait?.let(::waitingReason)) } },
                 ) {
                     update { it.copy(phase = ReaderSourceStandbyPhase.RESOLVING, reason = null) }
-                    try { withTimeout(15_000L) { repository.pages(owner, variant.storageId) } }
+                    try { withTimeout(15_000L) { repository.pages(owner, variant.storageId, forceRefresh = refreshManifest) } }
                     catch (timeout: TimeoutCancellationException) {
                         sourceRequestTimedOut = true
                         throw timeout
@@ -205,9 +236,12 @@ internal class ReaderSourceStandbyController(
             coroutineScope {
                 val pending = mutableMapOf<Int, Job>()
                 val stopped = mutableMapOf<Int, Stopped>()
+                val failures = mutableMapOf<Int, Int>()
                 val reservations = mutableMapOf<Int, PrefetchByteBudget>()
                 val workTokens = mutableMapOf<Int, PrefetchWork>()
                 val pageStages = mutableMapOf<Int, ReaderSourceStandbyPhase>()
+                var writable = policy.canWritePrefetch()
+                val writeRecovery = mutableSetOf<Int>()
                 val capacityRevision = MutableStateFlow(0L)
                 val windowLock = Mutex()
                 var window: Window? = null
@@ -283,7 +317,7 @@ internal class ReaderSourceStandbyController(
                         if (currentStamp != saved.stamp && prepared[index] === saved) {
                             prepared.remove(index)
                             if (index !in pending) reservations.remove(index)?.close()
-                            stopped[index] = Stopped("原图缓存已回收或更新，等待重新准备", false)
+                            stopped[index] = Stopped("原图缓存已回收或更新，等待重新准备", false, retryOnRelease = true)
                         } else if (prepared[index] === saved) {
                             prepared[index] = saved.copy(inspectedAt = wallTimeMillis())
                         }
@@ -314,6 +348,7 @@ internal class ReaderSourceStandbyController(
                         reservations.remove(index)?.close()
                     }
                     workTokens.keys.filter { it !in wanted && it !in pending }.forEach { workTokens.remove(it); pageStages.remove(it) }
+                    failures.keys.filter { it !in wanted && it !in pending }.forEach { failures.remove(it) }
                     refreshRetained(wanted)
                     currentCoroutineContext().ensureActive()
                     if (!active()) return@withLock
@@ -322,6 +357,7 @@ internal class ReaderSourceStandbyController(
                         val warm = limits.warmMemory && order < limits.decodedPages && index == target
                         if (index in pending) continue
                         val stop = stopped[index]
+                        if (saved == null && stop?.failed == true && (failures[index] ?: 0) >= 2) continue
                         if (saved == null && stop != null && !stop.retryOnRelease &&
                             monotonicTimeMillis() - stop.at < 30_000L) continue
                         val ticket = reservations[index] ?: bytes.child().also { child ->
@@ -372,11 +408,12 @@ internal class ReaderSourceStandbyController(
                                             when {
                                                 fetched.received -> input
                                                 fetched.failure != null -> {
-                                                    stopped[index] = Stopped("来源图片请求失败，可在切源后重试", true)
+                                                    stopped[index] = Stopped(failureReason(fetched.failure, catalog = false), true)
                                                     null
                                                 }
                                                 else -> {
-                                                    stopped[index] = Stopped("当前资源或来源限制，稍后准备", false)
+                                                    stopped[index] = Stopped("当前资源或来源限制，稍后准备", false,
+                                                        retryWhenWritable = fetched.deferred)
                                                     null
                                                 }
                                             }
@@ -411,6 +448,7 @@ internal class ReaderSourceStandbyController(
                                             prepared.remove(oldest)
                                         }
                                         stopped.remove(index)
+                                        failures.remove(index)
                                         // Original readiness does not wait for optional preview decoding.
                                         publish()
                                         if (warm && !resident(prepared[index])) {
@@ -443,17 +481,22 @@ internal class ReaderSourceStandbyController(
                                 currentCoroutineContext().ensureActive()
                                 stopped[index] = Stopped("备用图片准备超时，当前来源继续阅读", false)
                             } catch (cancel: CancellationException) { throw cancel }
+                            catch (deferred: ExperienceAdmissionDeferred) {
+                                stopped[index] = Stopped(waitingReason(deferred.wait), false, retryWhenWritable = true)
+                            }
                             catch (_: PrefetchBudgetExceeded) {
                                 // A body larger than this allowance must not be redownloaded on
                                 // every status tick. A later real reading window can try again.
                                 stopped[index] = Stopped("备用窗口容量不足，调大容量或继续翻页后再准备", false)
                             } catch (_: OutOfMemoryError) {
                                 stopped[index] = Stopped("内存保护暂停了小图准备", false)
-                            } catch (_: Exception) {
-                                stopped[index] = Stopped("来源图片暂不可用，可在切源后重试", true)
+                            } catch (failure: Exception) {
+                                stopped[index] = Stopped(failureReason(failure, catalog = false), true)
                             } finally {
                                 if (pending[index] === task) pending.remove(index)
                                 val wantedNow = index in window?.indices.orEmpty()
+                                if (stopped[index]?.failed == true && index !in prepared && !task.isCancelled)
+                                    failures[index] = (failures[index] ?: 0) + 1
                                 if (!wantedNow || index !in prepared) {
                                     if (reservations[index] === ticket) reservations.remove(index)
                                     ticket.close()
@@ -462,6 +505,7 @@ internal class ReaderSourceStandbyController(
                                 if (!wantedNow && workTokens[index] === token) {
                                     workTokens.remove(index)
                                     pageStages.remove(index)
+                                    failures.remove(index)
                                 }
                                 // An off-window cancellation may settle after the reader already
                                 // returned. Restart that desired page only after its old owner is
@@ -477,20 +521,37 @@ internal class ReaderSourceStandbyController(
                     publish()
                 }
                 val positions = launch {
-                    combine(position, capacityRevision) { at, _ -> at }.collect { updateWindow(it) }
+                    combine(position, capacityRevision, retryRevision) { at, _, _ -> at }.collect { updateWindow(it) }
                 }
                 try {
                     var inspectedAt = monotonicTimeMillis()
                     while (currentCoroutineContext().isActive && active()) {
                         delay(if (pending.isEmpty()) 2_000L else 250L)
+                        var resumeWrite = false
                         windowLock.withLock {
+                            val writableNow = policy.canWritePrefetch()
+                            val wanted = window?.indices.orEmpty()
+                            if (!writable && writableNow) writeRecovery.addAll(wanted)
+                            if (!writableNow) writeRecovery.clear()
+                            writable = writableNow
+                            for (index in writeRecovery.toList()) {
+                                if (index in wanted && index in pending) continue
+                                if (index in wanted && stopped[index]?.retryWhenWritable == true && stopped[index]?.failed == false) {
+                                    stopped.remove(index)
+                                    resumeWrite = true
+                                }
+                                writeRecovery.remove(index)
+                            }
                             if (monotonicTimeMillis() - inspectedAt >= 2_000L) {
                                 refreshRetained(window?.indices.orEmpty())
                                 inspectedAt = monotonicTimeMillis()
                             }
                             publish()
                         }
-                        if (bytes.remaining > 0L && stopped.values.any { it.retryOnRelease })
+                        if (resumeWrite || bytes.remaining > 0L && stopped.any { (index, stop) ->
+                                index in window?.indices.orEmpty() && (stop.retryOnRelease ||
+                                    stop.failed && (failures[index] ?: 0) < 2 && monotonicTimeMillis() - stop.at >= 30_000L)
+                            })
                             updateWindow(position.value)
                     }
                     if (generation == request) mutableState.update { rows -> rows.filterNot { it.variantId == variant.storageId } }
@@ -515,8 +576,12 @@ internal class ReaderSourceStandbyController(
         } catch (cancel: CancellationException) { throw cancel }
         catch (_: PrefetchBudgetExceeded) {
             update { it.copy(phase = ReaderSourceStandbyPhase.DEFERRED, reason = "当前资源预算暂停备用来源") }
-        } catch (_: Exception) {
-            update { it.copy(phase = ReaderSourceStandbyPhase.FAILED, reason = "备用来源目录暂不可用") }
+        } catch (deferred: ExperienceAdmissionDeferred) {
+            update { it.copy(phase = ReaderSourceStandbyPhase.DEFERRED, reason = waitingReason(deferred.wait)) }
+        } catch (_: OutOfMemoryError) {
+            update { it.copy(phase = ReaderSourceStandbyPhase.DEFERRED, reason = "内存保护暂缓了备用目录准备") }
+        } catch (failure: Exception) {
+            update { it.copy(phase = ReaderSourceStandbyPhase.FAILED, reason = failureReason(failure, catalog = true)) }
         }
     }
 
@@ -557,5 +622,20 @@ internal class ReaderSourceStandbyController(
         AdmissionWaitReason.GLOBAL_LIMIT -> "等待共享预读名额或容量"
         AdmissionWaitReason.CHAPTER_LIMIT -> "等待本章并发名额"
         AdmissionWaitReason.FAIR_QUEUE -> "按公平队列等待其他页面"
+    }
+
+    /** Redacted classifications only; provider messages may contain request URLs or credentials. */
+    private fun failureReason(failure: Throwable, catalog: Boolean): String {
+        val scope = if (catalog) "备用目录" else "备用图片"
+        val status = (failure as? SourceException)?.httpStatus
+        return when {
+            status == 401 || status == 209 || status == 210 || failure.message.orEmpty().contains("登录") -> "$scope 需要登录或账号授权"
+            status == 429 || (failure as? SourceException)?.retryAfterSeconds?.let { it > 0 } == true -> "$scope 被来源限流，等待退避后再试"
+            status != null -> "$scope 请求未成功 · HTTP $status"
+            Regex("(?i)timeout|connect|dns|network|超时|连接|网络").containsMatchIn(failure.message.orEmpty()) -> "$scope 网络连接未成功"
+            Regex("不支持|不兼容|能力").containsMatchIn(failure.message.orEmpty()) -> "$scope 当前能力不兼容"
+            Regex("解析|格式|JSON|目录为空|图片处理").containsMatchIn(failure.message.orEmpty()) -> "$scope 解析或格式检查失败"
+            else -> "$scope 读取失败，可在切源后重试"
+        }
     }
 }

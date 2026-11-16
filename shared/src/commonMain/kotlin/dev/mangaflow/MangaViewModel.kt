@@ -13,6 +13,8 @@ import dev.mangaflow.experience.ReaderPreparedArtifacts
 import dev.mangaflow.experience.readerPageCacheKey
 import dev.mangaflow.experience.ExperienceAdmissionDeferred
 import dev.mangaflow.data.ReaderSourceStandbyController
+import dev.mangaflow.data.ReaderSourceStandbyAvailability
+import dev.mangaflow.data.ReaderSourceStandbyAvailabilityPhase
 import dev.mangaflow.data.ReaderNextChapterPreparation
 import dev.mangaflow.data.ReaderNextChapterPreparationPhase
 import dev.mangaflow.data.approximateReaderPage
@@ -307,6 +309,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     val nextChapterPreparation = _nextChapterPreparation.asStateFlow()
     private val readerStandbys = ReaderSourceStandbyController(application, repository, viewModelScope)
     val readerSourceStandbys = readerStandbys.state
+    val readerSourceStandbyAvailability = readerStandbys.availability
     private val _chapterSourceOperation = MutableStateFlow(ChapterSourceOperation())
     val chapterSourceOperation = _chapterSourceOperation.asStateFlow()
     private val _sourceResumeChoice = MutableStateFlow<SourceResumeChoice?>(null)
@@ -2502,17 +2505,38 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val epoch = readingRequestId
         val logical = current.logicalId.ifBlank { current.id }
         val configuration = repository.sourceConfigurationKey()
-        val confirmed = unifiedChapters.linkedSources(manga.id).filter { it.confirmedAt > 0L }
+        val links = unifiedChapters.linkedSources(manga.id)
+        val confirmed = links.filter { it.confirmedAt > 0L }
             .map { it.manga.id }.toSet() + manga.id
         val enabled = repository.enabledSources()
-        val candidates = current.variants.filter { variant ->
-            variant.storageId != current.id && variant.sourceId in enabled &&
-                SourceKeys.manga(variant.sourceId, variant.mangaId) in confirmed
-        }.distinctBy { it.sourceId }
+        val alternatives = current.variants.filter { it.storageId != current.id }.distinctBy { it.sourceId }
+        val confirmedAlternatives = alternatives.filter { SourceKeys.manga(it.sourceId, it.mangaId) in confirmed }
+        val candidates = confirmedAlternatives.filter { it.sourceId in enabled }
+        val currentOwner = chapterSourceMangaId(manga.id, current)
+        val knownOwners = (links.map { it.manga.id } + manga.id).filter { it != currentOwner }.toSet()
+        val confirmedOwners = confirmed.filter { it != currentOwner }
+        val availabilityPhase = when {
+            candidates.isNotEmpty() -> ReaderSourceStandbyAvailabilityPhase.ELIGIBLE
+            session.chaptersLoading -> ReaderSourceStandbyAvailabilityPhase.IDLE
+            confirmedAlternatives.isNotEmpty() -> ReaderSourceStandbyAvailabilityPhase.DISABLED
+            alternatives.isNotEmpty() -> ReaderSourceStandbyAvailabilityPhase.UNCONFIRMED
+            confirmedOwners.isNotEmpty() -> ReaderSourceStandbyAvailabilityPhase.NO_MATCHING_CHAPTER
+            knownOwners.isNotEmpty() -> ReaderSourceStandbyAvailabilityPhase.UNCONFIRMED
+            else -> ReaderSourceStandbyAvailabilityPhase.NO_ALTERNATIVES
+        }
+        val availability = ReaderSourceStandbyAvailability(manga.id, current.id, availabilityPhase,
+            alternatives.size, knownOwners.size, confirmedAlternatives.size, candidates.size, when (availabilityPhase) {
+                ReaderSourceStandbyAvailabilityPhase.ELIGIBLE -> null
+                ReaderSourceStandbyAvailabilityPhase.IDLE -> "目录仍在补全，备用章节待核对"
+                ReaderSourceStandbyAvailabilityPhase.NO_ALTERNATIVES -> "此作品尚未关联可用的备用来源"
+                ReaderSourceStandbyAvailabilityPhase.NO_MATCHING_CHAPTER -> "已有关联来源，但本章没有已确认匹配的备用章节"
+                ReaderSourceStandbyAvailabilityPhase.UNCONFIRMED -> "备用来源关联尚未确认，确认后才能准备"
+                ReaderSourceStandbyAvailabilityPhase.DISABLED -> "本章已确认的备用来源适配器均未启用"
+            })
         val epochs = candidates.associate { it.sourceId to scriptSourceImageEpoch(application, it.sourceId) }
         val key = "$epoch\u0000${manga.id}\u0000${current.id}\u0000$logical\u0000$configuration\u0000" +
             candidates.joinToString("|") { "${it.storageId}:${epochs[it.sourceId]}" }
-        readerStandbys.warm(key, manga.id, current, candidates, pageIndex, pageCount) { variant ->
+        readerStandbys.warm(key, manga.id, current, candidates, pageIndex, pageCount, availability) { variant ->
             val active = _reading.value
             epoch == readingRequestId && active != null && active.manga.id == manga.id &&
                 repository.sourceConfigurationKey() == configuration &&
@@ -2529,7 +2553,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val current = session.chapters.firstOrNull { it.id == chapter.id } ?: return
         val pages = repository.cachedPages(chapterSourceMangaId(manga.id, current), current.id) ?: return
         if (pages.none { it == page }) return
-        warmReaderSourceStandbys(manga, current, pages.indexOf(page), pages.size)
+        readerStandbys.nudge(manga.id, current.id)
     }
 
     private data class NextChapterLimits(val allowed: Boolean, val ahead: Int, val bytes: Long, val foreground: Boolean)

@@ -592,6 +592,10 @@ private class ExperienceImageNetworkClient(
         val started = monotonicTimeMillis()
         val optional = request.extras[workKey] == ExperienceImageWork.PREFETCH
         val budget = request.extras[bytesKey]
+        // Keep a failed/cancelled receipt from consuming the rest of this shared window.
+        // Successful original bytes stay charged to the caller's window until it is released.
+        val receipt = if (optional) budget?.child() else null
+        var completed = false
         val token = request.extras[workTokenKey]
         val readerTransfer = request.extras[readerTransferKey]
         var received = 0L
@@ -631,8 +635,13 @@ private class ExperienceImageNetworkClient(
                                 if (optional) {
                                     requireNotNull(token).ifOptional {
                                         if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded()
-                                        budget?.accept(byteCount) ?: throw PrefetchBudgetExceeded()
+                                        val windowReceipt = receipt ?: throw PrefetchBudgetExceeded()
                                         policy.acceptPrefetchChunk(byteCount)
+                                        try { windowReceipt.accept(byteCount) }
+                                        catch (failure: Throwable) {
+                                            policy.releasePrefetchBytes(byteCount)
+                                            throw failure
+                                        }
                                         accepted += byteCount
                                     }
                                 }
@@ -656,7 +665,7 @@ private class ExperienceImageNetworkClient(
                     override fun close() = body.close()
                 }
                 block(response.copy(body = bounded))
-            }
+            }.also { completed = true }
         } catch (cancelled: CancellationException) {
             interrupted = true
             throw cancelled
@@ -669,6 +678,7 @@ private class ExperienceImageNetworkClient(
         } finally {
             owned?.close?.invoke()
             if (accepted > 0L) policy.releasePrefetchBytes(accepted)
+            if (!completed) receipt?.close()
             // Cancellations and local budget stops do not count as a slow/failing source.
             if ((!interrupted || code == 429 || code == 503) && (code != null || failed)) policy.recordTransfer(request.extras[sourceKey] ?: experienceOrigin(request.url), code,
                 received, monotonicTimeMillis() - started, retry, failed)

@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Reader preparation failure repair · active 2026-11-16
+
+Current user rejection, inspected screenshots1000121884/85/86 and acceptance are DESIGN READING-REPAIR-01–05. Main3e5bab9 is confirmed current; isolated MangaFlow-reader-repair is the only active write tree. Screenshot evidence is ten forward originals failed, visible Copy image usable, next page still transfers, and unexplained standby0/0. The actual phone exception is unavailable; source defects can explain this pattern but are not a device diagnosis.
+
+Current stage SOURCE_COMPLETE. Independent source review has no remaining concrete blocker. relay_ipc fixed pending-shrink optional admission and per-response budget receipts in ExperienceCaches/Images/ScriptImagePipeline; manga_locate owns standby controller/model and exact VM warm/failure hooks; manga_ui owns status disclosure; root owns ReaderScreen bounded recovery/eligibility/glue, ReaderImageRecovery safe labels, Guided recovery callback, App state glue and docs/integration. reference_check is independent read-only. Source boundaries preserve exact cache/session/route/native image ownership, existing source registrations and background network history. No overlapping writers, tests/local builds/probes or synthetic previews.
+
+Next exact action: publish the complete reviewed source once against actual latest main with expected-head protection, confirm normal CI activation, then stop without waiting for artifacts. Do not claim installed repair or speed until real evidence. Required checks cover child-receipt refunds, typed pause/failure and finite retries, local DownloadStore recheck, clearing only validated failed-cache markers, standby live-cursor/variant refresh and actual availability labels. No status-only follow-up push or unrelated redesign.
+
 ## Live reading preparation progress · active 2026-11-16
 
 Current user voice request, scope and adopted acceptance are DESIGN READING-LIVE-01–07: icon-led information during real reading must show actual advance preparation, independent stage concurrency and per-source alternate readiness, rather than coarse application-wide request/cache lights. Root explained the global/current-window mismatch and actual visible versus precomposed ownership gap. Existing approximate standby preparation is not silently upgraded to automatic same-page repair.

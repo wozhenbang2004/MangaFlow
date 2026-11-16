@@ -88,9 +88,11 @@ internal class ExperienceDiskCache(
     override val size: Long get() = synchronized(lock) { delegate?.size ?: 0L }
     override val maxSize: Long get() = synchronized(lock) { if (delegate == null) 0L else applied }
     val resizePending: Boolean get() = synchronized(lock) { target != applied || error != null }
-    /** A queued growth keeps the existing bounded journal usable while reader leases finish. */
+    /** Pending budget publication must not block writes already below the new target. */
     val acceptsPrefetchWrites: Boolean get() = synchronized(lock) {
-        !closed && error == null && delegate != null && applied > 0L && target >= applied && (delegate?.size ?: 0L) < target
+        // Reader snapshots may hold leases through an entire session. The stable journal and
+        // coordinator still enforce actual capacity while publishing a smaller target waits.
+        !closed && error == null && delegate != null && target > 0L && (delegate?.size ?: 0L) < target
     }
     val resizeError: String? get() = synchronized(lock) { error }
     // The shared storage owner performs value-aware eviction. An independent Coil LRU

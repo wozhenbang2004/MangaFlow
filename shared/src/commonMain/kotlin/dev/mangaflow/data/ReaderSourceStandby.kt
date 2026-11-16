@@ -7,6 +7,22 @@ enum class ReaderSourceStandbyPhase {
     PREPARING, MANIFEST_READY, QUEUED, RESOLVING, DOWNLOADING, CHECKING, READY, FAILED, DEFERRED,
 }
 
+enum class ReaderSourceStandbyAvailabilityPhase {
+    IDLE, NO_ALTERNATIVES, NO_MATCHING_CHAPTER, UNCONFIRMED, DISABLED, ELIGIBLE,
+}
+
+/** Candidate eligibility for this exact chapter, independent of transfer or cache readiness. */
+data class ReaderSourceStandbyAvailability(
+    val workId: String = "",
+    val chapterId: String = "",
+    val phase: ReaderSourceStandbyAvailabilityPhase = ReaderSourceStandbyAvailabilityPhase.IDLE,
+    val alternativeCount: Int = 0,
+    val linkedCount: Int = 0,
+    val confirmedCount: Int = 0,
+    val enabledCount: Int = 0,
+    val reason: String? = null,
+)
+
 /** A native alternate page in the current approximate window, never a cross-edition replacement. */
 data class ReaderSourceStandbyPage(
     val index: Int,

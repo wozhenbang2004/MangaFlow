@@ -386,6 +386,7 @@ internal fun GuidedPanelReader(
         enabled = active && imageReady && error == null && detection != null,
         foregroundActive = active,
         sourceId = sourceId, viewportWidth = { viewport.width }, viewportHeight = viewport.height,
+        onPageRecovered = { index -> prefetchFailures.remove(index) },
         onPageFailure = { index, failure ->
             if (active && attempt.acceptsResult && index in pages.indices) {
                 prefetchFailures[index] = failure
