@@ -621,7 +621,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
             SettingsToggle("连续失败切整章", custom.recovery.autoSwitch, Icons.Outlined.SwapHoriz) {
                 change(custom.copy(recovery = custom.recovery.copy(autoSwitch = it)))
             }
-            SettingsToggle("锁定当前来源", custom.recovery.sourceLocked, Icons.Outlined.Lock) {
+            SettingsToggle("暂停自动补页与自动切源（全局）", custom.recovery.sourceLocked, Icons.Outlined.Lock) {
                 change(custom.copy(recovery = custom.recovery.copy(sourceLocked = it)))
             }
             if (usage.throttledSources > 0) ExperienceHint("限流 · " + usage.throttledSources + " 源")
