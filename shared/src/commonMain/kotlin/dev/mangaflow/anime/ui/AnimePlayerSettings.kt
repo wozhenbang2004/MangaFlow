@@ -251,7 +251,7 @@ internal fun AnimePlayerSettings(
                             item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 listOf(15, 30, 60).forEach { minutes -> MotionTextButton(onClick = { controller.setSleepTimer(minutes) },
                                     modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("$minutes 分钟") } }
-                            }
+                            } }
                             item { AnimeTextField(minutesDraft, { minutesDraft = it; error = null }, "自定义分钟数") }
                             item { MotionButton(onClick = {
                                 val minutes = minutesDraft.trim().toIntOrNull()
