@@ -135,10 +135,10 @@ internal fun ContentProfileAccountScreen(
                     Text(if (account.signedIn) account.displayName.ifBlank { source.name + " · 已登录" } else source.name,
                         Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
                     MotionTextButton(onClick = { onInspect(source.id) }, enabled = !busy) { Text("来源设置", fontSize = 11.sp) }
-                    if (account.signedIn) MotionTextButton(onClick = { operate {
+                    if (account.signedIn || account.hasCredentials) MotionTextButton(onClick = { operate {
                         repository.sourceLogout(source.id); account = repository.sourceAccountState(source.id)
                         books = emptyList(); folders = emptyList(); folderId = null; onSessionChange()
-                    } }, enabled = !busy) { Text("退出", fontSize = 11.sp) }
+                    } }, enabled = !busy) { Text(if (account.signedIn) "退出" else "清除凭据", fontSize = 11.sp) }
                 }
             }
             if (!account.signedIn) item {
@@ -146,10 +146,10 @@ internal fun ContentProfileAccountScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
                     if (capabilities.passwordLogin && capabilities.cookieFields.isNotEmpty()) Row {
                         MotionTextButton(onClick = { cookieMode = false; cookieValues = emptyList() }, enabled = !busy) { Text("账号密码", fontSize = 12.sp) }
-                        MotionTextButton(onClick = { cookieMode = true; password = "" }, enabled = !busy) { Text("Cookie", fontSize = 12.sp) }
+                        MotionTextButton(onClick = { cookieMode = true; password = "" }, enabled = !busy) { Text(capabilities.credentialLabel, fontSize = 12.sp) }
                     }
                     if (useCookies) {
-                        Text("填写此来源的 Cookie，验证成功后保存登录状态。", fontSize = 11.sp, color = colors.onSurfaceVariant)
+                        Text("填写此来源的 ${capabilities.credentialLabel}，验证成功后保存登录状态。", fontSize = 11.sp, color = colors.onSurfaceVariant)
                         capabilities.cookieFields.forEachIndexed { index, field ->
                             val value = cookieValues.getOrNull(index).orEmpty()
                             BasicTextField(value, { changed ->

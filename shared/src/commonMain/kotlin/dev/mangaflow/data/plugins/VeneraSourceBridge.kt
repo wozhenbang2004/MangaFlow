@@ -175,6 +175,15 @@ internal val VENERA_SOURCE_BRIDGE: String = """
     init() {}
   }
   globalThis.ComicSource=ComicSource;
+  // Only the reviewed native API contract gets this account path, not arbitrary script URLs.
+  // Credential retention/removal is source-scoped, never dependent on today's script version.
+  const managedApiKey = () => __mfMetadata.key==='nhentai';
+  const hasManagedApiKey = () => managedApiKey() && !!pref('get','setting:apiKey');
+  function nativeApiAccount(provider) {
+    return __mfMetadata.key==='nhentai' && __mfMetadata.version==='1.1.0' &&
+      __mfMetadata.upstreamCodeDigest==='0f68757f89d493926cbf4c039c256d34365d0639aaa6996acbcde7c162257982' &&
+      !__mfMetadata.locallyModified && provider.apiBaseUrl==='https://nhentai.net/api/v2';
+  }
   function validate(provider) {
     if(!(provider instanceof ComicSource) || provider.key!==__mfMetadata.key) throw new Error('ComicSource identity mismatch');
     if(typeof provider.comic?.loadInfo!=='function' || typeof provider.comic?.loadEp!=='function') throw new Error('ComicSource requires comic.loadInfo/loadEp');
@@ -271,12 +280,12 @@ internal val VENERA_SOURCE_BRIDGE: String = """
         if(hasLoader(provider.categoryComics) || provider.category?.parts?.length) features.push('CATEGORIES');
         if(hasLoader(provider.categoryComics?.ranking)) features.push('RANKING');
         const passwordLogin=typeof provider.account?.login==='function';
-        const cookieFields=typeof provider.account?.loginWithCookies?.validate==='function'?provider.account.loginWithCookies.fields || []:[];
+        const cookieFields=nativeApiAccount(provider)?['API Key']:typeof provider.account?.loginWithCookies?.validate==='function'?provider.account.loginWithCookies.fields || []:[];
         if(cookieFields.length>16 || cookieFields.some(field=>typeof field!=='string' || !field || field.length>160)) throw new Error('Invalid source login fields');
-        if(passwordLogin || cookieFields.length) features.push('ACCOUNT');
+        if(passwordLogin || cookieFields.length || hasManagedApiKey()) features.push('ACCOUNT');
         if(typeof provider.favorites?.loadComics==='function' || typeof provider.favorites?.loadNext==='function') features.push('FAVORITES');
         if(typeof provider.comic?.loadComments==='function') features.push('COMMENTS');
-        result={features,loginRequired:__mfMetadata.key==='picacg',passwordLogin,cookieFields}; break;
+        result={features,loginRequired:__mfMetadata.key==='picacg',passwordLogin,cookieFields,credentialLabel:nativeApiAccount(provider)?'API Key':'Cookie'}; break;
       }
       case 'feeds': result=await feeds(provider); break;
       case 'searchFilters': result=filters(provider.search?.optionList); break;
@@ -361,7 +370,7 @@ internal val VENERA_SOURCE_BRIDGE: String = """
         result={url,headers:imageHeaders,transform};
         break;
       }
-      case 'accountState': result={signedIn:provider.isLogged,displayName:pref('get','session:username') || ''}; break;
+      case 'accountState': result={signedIn:provider.isLogged,displayName:pref('get','session:username') || '',hasCredentials:provider.isLogged || hasManagedApiKey()}; break;
       case 'login': case 'loginCookies': {
         stagedPreferences=new Map();
         try {
@@ -370,6 +379,18 @@ internal val VENERA_SOURCE_BRIDGE: String = """
           if(method==='login') {
             if(typeof provider.account?.login!=='function') fail('account login');
             value=await provider.account.login(String(args[0]),String(args[1]));
+          } else if(nativeApiAccount(provider)) {
+            const values=args[0],key=Array.isArray(values) && values.length===1?String(values[0]).trim():'';
+            if(!key || key.length>4096 || /[\u0000-\u0020\u007f;]/.test(key)) throw new Error('Invalid API key');
+            // Do not merge old cookies or accept a redirect: the submitted key alone must
+            // authorize the reviewed read-only account endpoint before replacing a session.
+            const response=dec(await __mfHttp(enc({method:'GET',url:'https://nhentai.net/api/v2/favorites?page=1',
+              headers:{'Accept':'application/json','Authorization':'Key '+key},body:null})));
+            if(response.statusCode!==200) throw new Error('Account verification HTTP '+response.statusCode);
+            const payload=dec(response.body);
+            if(!payload || !Array.isArray(payload.result) || (payload.num_pages!=null && (!Number.isFinite(payload.num_pages) || payload.num_pages<0)))
+              throw new Error('Account verification returned an invalid response');
+            pref('set','setting:apiKey',key); pref('remove','data:accessToken'); value=true;
           } else {
             const login=provider.account?.loginWithCookies,values=args[0];
             if(typeof login?.validate!=='function') fail('cookie login');
@@ -382,7 +403,7 @@ internal val VENERA_SOURCE_BRIDGE: String = """
         } finally { stagedPreferences=null; }
         break;
       }
-      case 'logout': { try { await provider.account?.logout?.(); } finally { pref('clearSession','session'); cookieCache.clear(); } result=true; break; }
+      case 'logout': { try { await provider.account?.logout?.(); } finally { if(managedApiKey()) pref('remove','setting:apiKey'); pref('clearSession','session'); cookieCache.clear(); } result=true; break; }
       case 'favoriteFolders': {
         if(typeof provider.favorites?.loadComics!=='function' && typeof provider.favorites?.loadNext!=='function') fail('site favorites');
         if(!provider.favorites.multiFolder) result=[{id:'default',title:'站点收藏'}];
@@ -413,9 +434,10 @@ internal val VENERA_SOURCE_BRIDGE: String = """
         const rows=value.comments || value.data || [];
         result={items:rows.map((row,index)=>({id:String(row.id ?? ('local:'+Number(args[1])+':'+index)),author:String(row.userName || ''),content:String(row.content || ''),avatar:String(row.avatar || ''),time:String(row.time || ''),likes:Number(row.score || 0)})),hasMore:Number(args[1])<Number(value.maxPage || 1)}; break;
       }
-      case 'settings': result=Object.entries(provider.settings || {}).filter(([key,spec])=>spec.mangaflowSupported!==false && ['input','select','switch'].includes(spec.type)).map(([key,spec])=>({key,title:String(provider.translate(spec.title || key)),value:String(provider.loadSetting(key) ?? ''),type:spec.type,choices:(spec.options || []).map(option)})); break;
+      case 'settings': result=Object.entries(provider.settings || {}).filter(([key,spec])=>!(managedApiKey() && key==='apiKey') && spec.mangaflowSupported!==false && ['input','select','switch'].includes(spec.type)).map(([key,spec])=>({key,title:String(provider.translate(spec.title || key)),value:String(provider.loadSetting(key) ?? ''),type:spec.type,choices:(spec.options || []).map(option)})); break;
       case 'saveSetting': {
         const key=String(args[0]), spec=provider.settings?.[key], value=String(args[1]);
+        if(managedApiKey() && key==='apiKey') throw new Error('Validate this credential through the account controls');
         if(!spec || spec.mangaflowSupported===false || !['input','select','switch'].includes(spec.type) || value.length>4096) fail('setting');
         if(spec.type==='select' && !(spec.options || []).map(option).some(choice=>choice.id===value)) throw new Error('Invalid source setting choice');
         if(typeof spec.validator==='function') { const error=await spec.validator(value); if(error) throw new Error('Invalid source setting'); }

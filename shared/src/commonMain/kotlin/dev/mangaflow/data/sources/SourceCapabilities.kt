@@ -12,6 +12,7 @@ data class SourceCapabilities(
     val loginRequired: Boolean = false,
     val passwordLogin: Boolean = true,
     val cookieFields: List<String> = emptyList(),
+    val credentialLabel: String = "Cookie",
 ) {
     fun supports(feature: SourceFeature): Boolean = feature in features
 }
@@ -44,7 +45,8 @@ data class SourceFeed(val id: String, val title: String, val kind: SourceFeedKin
     val filters: List<SourceFilter> = emptyList())
 data class SourceBrowseRequest(val feedId: String = "latest", val page: Int = 0,
     val options: List<String> = emptyList())
-data class SourceAccountState(val signedIn: Boolean = false, val displayName: String = "")
+data class SourceAccountState(val signedIn: Boolean = false, val displayName: String = "",
+    val hasCredentials: Boolean = signedIn)
 data class SourceFavoriteFolder(val id: String, val title: String)
 data class SourceComment(val id: String, val author: String, val content: String,
     val avatar: String = "", val time: String = "", val likes: Int = 0)

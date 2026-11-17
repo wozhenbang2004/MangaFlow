@@ -76,7 +76,7 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
             value.optJSONArray("cookieFields")?.let { fields ->
                 require(fields.length() <= 16) { "来源登录字段过多。" }
                 (0 until fields.length()).map { fields.getString(it).also { name -> require(name.length in 1..160) } }
-            }.orEmpty()).also { declaredCapabilities = it }
+            }.orEmpty(), value.optString("credentialLabel", "Cookie").take(40)).also { declaredCapabilities = it }
     }
 
     override suspend fun feeds(): List<SourceFeed> {
@@ -109,7 +109,8 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
     override suspend fun accountState(): SourceAccountState {
         if (!venera) return super.accountState()
         val value = call("accountState", JSONArray()).getJSONObject("result")
-        return SourceAccountState(value.optBoolean("signedIn", false), value.optString("displayName"))
+        return SourceAccountState(value.optBoolean("signedIn", false), value.optString("displayName"),
+            value.optBoolean("hasCredentials", value.optBoolean("signedIn", false)))
     }
 
     override suspend fun login(username: String, password: String) {

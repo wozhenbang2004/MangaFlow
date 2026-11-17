@@ -4,6 +4,8 @@ import coil3.compose.AsyncImage
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import androidx.compose.foundation.background
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -12,6 +14,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.*
@@ -318,6 +321,7 @@ internal fun SourceCapabilityDetailsSheet(
     var settings by remember(source.id) { mutableStateOf<List<SourceSetting>>(emptyList()) }
     var folders by remember(source.id) { mutableStateOf<List<SourceFavoriteFolder>>(emptyList()) }
     var account by remember(source.id) { mutableStateOf(SourceAccountState()) }
+    var accountRevision by remember(source.id) { mutableIntStateOf(0) }
     var busy by remember(source.id) { mutableStateOf(false) }
     var message by remember(source.id) { mutableStateOf<String?>(null) }
     var updateAvailable by remember(source.id) { mutableStateOf(false) }
@@ -336,14 +340,26 @@ internal fun SourceCapabilityDetailsSheet(
             capabilities = repository.sourceCapabilities(source.id)
             settings = repository.sourceSettings(source.id)
             if (capabilities.supports(SourceFeature.ACCOUNT)) account = repository.sourceAccountState(source.id)
-            if (manga != null && account.signedIn && capabilities.supports(SourceFeature.FAVORITES)) folders = repository.sourceFavoriteFolders(source.id)
         } catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { message = "部分来源信息未能读取，可重试检测。" }
     }
+    LaunchedEffect(source.id, source.revision, manga?.id, account, accountRevision, capabilities) {
+        folders = emptyList()
+        if (manga != null && account.signedIn && capabilities.supports(SourceFeature.FAVORITES)) {
+            try {
+                val loaded = repository.sourceFavoriteFolders(source.id)
+                currentCoroutineContext().ensureActive()
+                folders = loaded
+            }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { message = "站点收藏夹未能读取，请重新打开来源设置重试。" }
+        }
+    }
     MotionBottomSheet(backdrop = backdrop, onDismissRequest = onDismiss) { dismiss ->
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = (LocalMangaWindow.current.height - 96.dp).coerceAtLeast(120.dp)),
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            item {
+        Column(Modifier.fillMaxWidth().heightIn(max = (LocalMangaWindow.current.height - 96.dp).coerceAtLeast(120.dp))
+            .verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(source.name, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                     MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭") { Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp)) }
@@ -356,7 +372,13 @@ internal fun SourceCapabilityDetailsSheet(
                 SourceNetworkSettingsControl(source.id, enabled = !busy)
                 SourceConnectionChecks(repository, listOf(source), active = !busy)
             }
-            if (source.id.startsWith("js_") && plugins != null) item {
+            if (capabilities.supports(SourceFeature.ACCOUNT)) Column {
+                SourceAccountControls(source, repository, capabilities, account, enabled = !busy,
+                    onBusy = { busy = it }, onAccountChanged = {
+                        account = it; folders = emptyList(); accountRevision++; onSourceChanged()
+                    })
+            }
+            if (source.id.startsWith("js_") && plugins != null) Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     MotionTextButton(onClick = { operate { updateAvailable = plugins.checkUpdate(source.id) != null
                         message = if (updateAvailable) "有可用更新" else "已是当前仓库版本" } }, enabled = !busy) { Text("检查更新", fontSize = 12.sp) }
@@ -364,18 +386,18 @@ internal fun SourceCapabilityDetailsSheet(
                 }
             }
             if (manga != null && account.signedIn && capabilities.supports(SourceFeature.FAVORITES)) {
-                item { Text("站点收藏", style = MaterialTheme.typography.titleSmall)
+                Column { Text("站点收藏", style = MaterialTheme.typography.titleSmall)
                     Text("与本机书架分别保存", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                items(folders, key = { "favorite:" + it.id }) { folder ->
+                folders.forEach { folder -> key("favorite:" + folder.id) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text(folder.title, Modifier.weight(1f), fontSize = 12.sp)
                         MotionTextButton(onClick = { operate { repository.sourceSetFavorite(source.id, manga.id, folder.id, true); message = "已加入站点收藏" } }, enabled = !busy) { Text("加入", fontSize = 11.sp) }
                         MotionTextButton(onClick = { operate { repository.sourceSetFavorite(source.id, manga.id, folder.id, false); message = "已移出站点收藏，本机书架保留" } }, enabled = !busy) { Text("移出", fontSize = 11.sp) }
                     }
-                }
+                } }
             }
-            if (settings.isNotEmpty()) item { Text("来源设置", style = MaterialTheme.typography.titleSmall) }
-            items(settings, key = { "setting:" + it.key }) { setting ->
+            if (settings.isNotEmpty()) Column { Text("来源设置", style = MaterialTheme.typography.titleSmall) }
+            settings.forEach { setting -> key("setting:" + setting.key) {
                 var value by remember(source.id, setting.key, setting.value) { mutableStateOf(setting.value) }
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(setting.title, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -403,8 +425,8 @@ internal fun SourceCapabilityDetailsSheet(
                     if (value != setting.value) MotionTextButton(onClick = { operate {
                         repository.saveSourceSetting(source.id, setting.key, value); settings = repository.sourceSettings(source.id); message = "设置已保存"; onSourceChanged() } }, enabled = !busy) { Text("保存", fontSize = 12.sp) }
                 }
-            }
-            message?.let { item { Text(it, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+            } }
+            message?.let { Column { Text(it, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
         }
     }
 }
