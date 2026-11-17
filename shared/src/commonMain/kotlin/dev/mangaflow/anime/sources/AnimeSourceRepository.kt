@@ -334,6 +334,10 @@ private class AgeProvider : RoutedAnimeProvider() {
             val json = http.json(api.newBuilder().addPathSegment("detail").addPathSegment(key).build(),
                 AnimeSourceStage.CATALOG, referer = referer)
             val video = json.requiredObject("video", id, AnimeSourceStage.CATALOG)
+            // Public detail contract includes its work ID (JSON number or string).
+            // Do not expose another work's playlists if an upstream redirect/cache misroutes it.
+            if (video.text("id") != key) throw AnimeSourceException(id, AnimeSourceStage.CATALOG,
+                "AGE 返回的作品标识与所选作品不一致，未采用这些播放线路，请重新搜索。")
             val playlists = video.requiredObject("playlists", id, AnimeSourceStage.CATALOG)
             val labels = json.optJSONObject("player_label_arr")
             val parser = json.optJSONObject("player_jx")?.text("zj").orEmpty()
@@ -359,7 +363,8 @@ private class AgeProvider : RoutedAnimeProvider() {
             }
             requireEpisodes(title.copy(title = video.text("name").ifBlank { title.title },
                 coverUrl = sourceCover(homeUrl, video.text("cover")).ifBlank { title.coverUrl },
-                year = video.positiveInt("year") ?: title.year), episodes)
+                year = video.positiveInt("year") ?: title.year,
+                externalIds = title.externalIds + ("age" to key)), episodes)
         } finally { http.close() }
     }
 }

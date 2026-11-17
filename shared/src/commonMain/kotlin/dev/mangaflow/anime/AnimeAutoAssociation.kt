@@ -65,7 +65,7 @@ internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalo
     }
     // AGE's adapter constructs these routes exclusively from one requested work's
     // video.playlists response. Unknown routes or unequal episode labels stay manual.
-    if (catalog.title.sourceId == "anime-age") {
+    if (catalog.title.sourceId == "anime-age" && catalog.title.externalIds["age"] == catalog.title.id) {
         val knownRoutes = setOf("xigua", "ffm3u8", "bfzym3u8", "wjm3u8", "lzm3u8")
         fun route(group: String) = group.substringAfterLast(" [", "").removeSuffix("]")
         val routes = eligible.keys.map(::route)
