@@ -39,7 +39,7 @@ internal actual class AccountTokenStore actual constructor(context: Context) {
                     val channel = AccountChannel.entries.singleOrNull { it.value == saved.opt("channel") }
                         ?: invalidSavedSession()
                     val token = AccountTokenInput.validate(saved.opt("token") as? String ?: invalidSavedSession())
-                    StoredAccountCredential(token, channel)
+                    StoredAccountCredential(token, channel, (saved.opt("username") as? String).orEmpty(), (saved.opt("nickname") as? String).orEmpty())
                 }
             }
             finally { plain.fill(0) }
@@ -49,7 +49,8 @@ internal actual class AccountTokenStore actual constructor(context: Context) {
 
     actual fun write(credential: StoredAccountCredential) = synchronized(lock) {
         val plain = JSONObject().put("token", AccountTokenInput.validate(credential.token))
-            .put("channel", credential.channel.value).toString().toByteArray(Charsets.UTF_8)
+            .put("channel", credential.channel.value)
+            .put("username", credential.username).put("nickname", credential.nickname).toString().toByteArray(Charsets.UTF_8)
         try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, existingKey() ?: createKey())

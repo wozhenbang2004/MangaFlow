@@ -15,12 +15,14 @@ internal actual class AccountTokenStore actual constructor(private val context: 
             val value = JSONObject(text)
             val channel = AccountChannel.entries.singleOrNull { it.value == value.optString("channel") }
                 ?: throw IllegalArgumentException("Unknown account channel")
-            return StoredAccountCredential(AccountTokenInput.validate(value.getString("token")), channel)
+            return StoredAccountCredential(AccountTokenInput.validate(value.getString("token")), channel,
+                (value.opt("username") as? String).orEmpty(), (value.opt("nickname") as? String).orEmpty())
         } catch (_: Exception) { throw SourceException("保存的登录凭据已失效，请重新登录。") }
     }
     actual fun write(credential: StoredAccountCredential) {
         val text = JSONObject().put("token", AccountTokenInput.validate(credential.token))
-            .put("channel", credential.channel.value).toString()
+            .put("channel", credential.channel.value)
+            .put("username", credential.username).put("nickname", credential.nickname).toString()
         writeSecret(context, KEY, text)
     }
     actual fun clear() { deleteSecret(context, KEY) }

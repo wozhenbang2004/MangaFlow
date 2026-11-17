@@ -2,7 +2,7 @@ package dev.mangaflow.account
 
 import dev.mangaflow.data.Manga
 
-data class AccountProfile(val username: String, val nickname: String)
+data class AccountProfile(val username: String, val nickname: String, val locallyRestored: Boolean = false)
 
 /** Account pages use a zero-based page index. */
 data class CloudPage<T>(val items: List<T>, val hasMore: Boolean)

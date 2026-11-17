@@ -3041,6 +3041,16 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         accountRepository.loginWithPassword(username, password)
     }
 
+    fun cancelAccountLogin() {
+        accountRestoreRetryJob?.cancel()
+        accountRestoreRetryJob = null
+        accountRequestId++
+        accountJob?.cancel()
+        accountRepository.cancelLoginAttempt()
+        // Local-only restoration refreshes the preserved credential receipt.
+        restoreAccount()
+    }
+
     fun loginWithCookie(input: String) = authenticate { accountRepository.loginWithCookie(input) }
 
     fun beginWebsiteLogin(): Long {
@@ -3194,7 +3204,11 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             try {
                 val profile = action()
                 if (requestId != accountRequestId) return@launch
-                _account.value = AccountUiState(profile = profile, busy = false)
+                val legacySaved = restoring && profile == null && accountRepository.hasSavedLogin()
+                if (requestId != accountRequestId) return@launch
+                _account.value = AccountUiState(profile = profile, busy = false,
+                    savedCredentialPresent = legacySaved,
+                    error = if (legacySaved) "旧登录凭据仍安全保留；请用账号密码重新登录以确认身份，收藏与历史未删除。" else null)
                 if (profile != null) {
                     accountRestoreFailures = 0
                     accountRestoreRetryJob?.cancel()

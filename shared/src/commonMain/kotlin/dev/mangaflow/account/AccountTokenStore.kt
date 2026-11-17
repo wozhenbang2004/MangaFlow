@@ -3,7 +3,8 @@ package dev.mangaflow.account
 import dev.mangaflow.platform.PlatformContext
 
 internal enum class AccountChannel(val value: String) { WEB("web"), APP("app"), WEB_API("web_api"), WEBSITE("website"), RELAY_WEB("relay_web") }
-internal class StoredAccountCredential(val token: String, val channel: AccountChannel)
+internal class StoredAccountCredential(val token: String, val channel: AccountChannel,
+    val username: String = "", val nickname: String = "")
 
 /** Every platform stores authenticated credentials through its native protected storage. */
 internal expect class AccountTokenStore(context: PlatformContext) {

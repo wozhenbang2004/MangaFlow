@@ -18,7 +18,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusDirection
@@ -48,7 +47,6 @@ import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.ChapterProgress
 import dev.mangaflow.ui.glass.mangaHazeSource
-import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionButton as Button
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
@@ -61,9 +59,9 @@ fun AccountScreen(
     state: AccountUiState,
     repository: MangaRepository,
     onLoginWithPassword: (String, String) -> Unit,
-    onLoginWithCookie: (String) -> Unit,
     active: Boolean,
     onLogout: () -> Unit,
+    onCancelLogin: () -> Unit,
     onRefresh: () -> Unit,
     onMoreFavorites: () -> Unit,
     onMoreHistory: () -> Unit,
@@ -88,9 +86,6 @@ fun AccountScreen(
     metadataLoading: Boolean = false,
     metadataError: String? = null,
     onRetryMetadata: (() -> Unit)? = null,
-    onWebsiteBegin: () -> Long = { 0L },
-    onWebsiteCancel: (Long) -> Unit = {},
-    onWebsiteCredential: (Long, String) -> Unit = { _, _ -> },
     onGoShelf: () -> Unit = {},
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
@@ -100,18 +95,12 @@ fun AccountScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     val focus = LocalFocusManager.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val appContext = LocalContext.current
-    var registerNotice by remember { mutableStateOf<String?>(null) }
-    var cookieMode by rememberSaveable { mutableStateOf(false) }
-    var websiteMode by rememberSaveable { mutableStateOf(false) }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    var cookie by remember { mutableStateOf("") }
     var showSecret by remember { mutableStateOf(false) }
     var submitting by remember { mutableStateOf(false) }
     val clearSecrets = {
         password = ""
-        cookie = ""
         showSecret = false
     }
     val clearInputs = {
@@ -130,20 +119,12 @@ fun AccountScreen(
     }
     val busy = state.busy || submitting
     val submitPassword = {
-        if (active && !cookieMode && !state.busy && !submitting && username.isNotBlank() && password.isNotEmpty()) {
+        if (active && !state.busy && !submitting && username.isNotBlank() && password.isNotEmpty()) {
             val submittedUsername = username.trim()
             val submittedPassword = password
             submitting = true
             clearInputs()
             onLoginWithPassword(submittedUsername, submittedPassword)
-        }
-    }
-    val submitCookie = {
-        if (active && cookieMode && !state.busy && !submitting && cookie.isNotBlank()) {
-            val credential = cookie.trim()
-            submitting = true
-            clearInputs()
-            onLoginWithCookie(credential)
         }
     }
 
@@ -178,47 +159,18 @@ fun AccountScreen(
             if (state.savedCredentialPresent) {
                 Text(if (state.autoRestorePending)
                     "账号凭据已安全保留，客户端会自动重试恢复连接，无需重复登录。"
-                    else "账号凭据已保留，但服务端未接受本次验证。请重新授权或更换账号。",
+                    else "旧凭据仍安全保留，请用密码登录确认身份；不会自动验证或同步。",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 12.dp))
-                Button(onClick = onRefresh, enabled = active && !busy,
+                if (state.autoRestorePending) Button(onClick = onRefresh, enabled = active && !busy,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     shape = RoundedCornerShape(16.dp)) { Text("立即重试（可选）") }
                 TextButton(onClick = { clearInputs(); onLogout() }, enabled = active && !busy) {
                     Text("退出并切换账号", style = MaterialTheme.typography.bodySmall)
                 }
-            } else if (websiteMode) {
-                Text("使用官方网页登录。密码由隔离网页处理，客户端只接收验证后的凭据。",
-                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 6.dp))
-                Box(Modifier.fillMaxWidth().height(430.dp)) {
-                    WebsiteAccountLogin(Modifier.fillMaxSize(), onWebsiteBegin, onWebsiteCancel, onWebsiteCredential)
-                }
-                TextButton(onClick = { websiteMode = false }, enabled = active && !busy) {
-                    Text("返回其他登录方式", style = MaterialTheme.typography.bodySmall)
-                }
-            } else MotionTabContent(cookieMode, modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp), contentKey = { it }, order = { if (it) 1 else 0 }, fillContent = false, soft = true) { cookieScene ->
-            val formActive = active && cookieScene == cookieMode
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (cookieScene) {
-                OutlinedTextField(
-                    value = cookie, onValueChange = { if (formActive) cookie = it },
-                    modifier = Modifier.fillMaxWidth(), enabled = formActive && !busy, singleLine = true,
-                    label = { Text("Cookie 或 Token") },
-                    visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = { SecretVisibility(showSecret, formActive && !busy) { showSecret = !showSecret } },
-                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false,
-                        keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { submitCookie() }),
-                    shape = RoundedCornerShape(18.dp), colors = accountInputColors(),
-                )
-                Button(
-                    onClick = submitCookie, enabled = formActive && !busy && cookie.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = colors.primary, contentColor = colors.onPrimary,
-                        disabledContainerColor = colors.surfaceVariant, disabledContentColor = colors.onSurfaceVariant),
-                ) { Text("导入登录状态") }
-            } else {
+            }
+            if (!state.savedCredentialPresent || !state.autoRestorePending) Column(Modifier.fillMaxWidth().padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                val formActive = active
                 OutlinedTextField(
                     value = username, onValueChange = { if (formActive) username = it },
                     modifier = Modifier.fillMaxWidth(), enabled = formActive && !busy, singleLine = true,
@@ -246,10 +198,9 @@ fun AccountScreen(
                         disabledContainerColor = colors.surfaceVariant, disabledContentColor = colors.onSurfaceVariant),
                 ) { Text("登录") }
             }
-            } }
             CopyShelfReveal(state.busy) {
                 Box(Modifier.padding(bottom = 12.dp)) {
-                    AccountBusyRow("正在验证账号…") { if (active && state.busy) { clearInputs(); onLogout() } }
+                    AccountBusyRow("正在登录账号…") { if (active && state.busy) { clearInputs(); onCancelLogin() } }
                 }
             }
             CopyShelfValue(state.error) { message ->
@@ -257,33 +208,7 @@ fun AccountScreen(
                     AccountError(message, state.busy, onRetry = if (state.canRetryConnection && !state.savedCredentialPresent) onRefresh else null)
                 }
             }
-            if (!state.savedCredentialPresent && !websiteMode) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { clearInputs(); websiteMode = true },
-                        enabled = active && !busy,
-                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
-                        Text("网页登录", style = MaterialTheme.typography.bodySmall)
-                    }
-                    TextButton(
-                        onClick = { clearInputs(); cookieMode = !cookieMode }, enabled = active && !busy,
-                        modifier = Modifier.heightIn(min = 48.dp),
-                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
-                    ) { Text(if (cookieMode) "使用账号密码" else "导入 Cookie / Token",
-                        style = MaterialTheme.typography.bodySmall) }
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = {
-                        clearInputs()
-                        registerNotice = if (openUrl(appContext, "https://www.mangacopy.com/web/login/?url=person/home")) null
-                            else "无法打开注册页面，请检查浏览器"
-                    }, enabled = active && !busy,
-                        modifier = Modifier.heightIn(min = 48.dp),
-                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
-                        Text("官网注册", style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-                registerNotice?.let { Text(it, style = MaterialTheme.typography.labelSmall,
-                    color = colors.error, modifier = Modifier.padding(bottom = 8.dp)) }
-            }
+
         }
         if (desktop) Box(Modifier.widthIn(max = 480.dp).fillMaxSize().align(Alignment.TopCenter)) {
             DesktopVerticalScrollbar(loginScroll,
@@ -297,8 +222,9 @@ fun AccountScreen(
                 Column(Modifier.widthIn(max = 480.dp).fillMaxWidth()
                     .padding(horizontal = 20.dp, vertical = 20.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("拷贝已连接", style = MaterialTheme.typography.titleMedium)
-                    Text("本机与拷贝收藏已汇入同一个书架；云端独有作品无需导入即可查看。删除、同步与阅读进度仍分别管理。",
+                    Text(if (profile.locallyRestored) "本地会话已恢复" else "拷贝已连接", style = MaterialTheme.typography.titleMedium)
+                    Text(if (profile.locallyRestored) "尚未联网确认有效性，收藏和历史请求会显示各自实际结果。"
+                        else "本机与拷贝收藏已汇入同一个书架；云端独有作品无需导入即可查看。删除、同步与阅读进度仍分别管理。",
                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                     Button(onClick = onGoShelf, enabled = active,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),

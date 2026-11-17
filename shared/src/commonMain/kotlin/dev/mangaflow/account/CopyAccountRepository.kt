@@ -105,11 +105,9 @@ class CopyAccountRepository(context: Context) {
                 ensureVersion(expected)
                 val pending = synchronized(sessionLock) { pendingLogin?.takeIf { it.lease.version == expected } }
                 if (pending != null) {
-                    if (monotonicTimeMillis() >= pending.expiresAt) {
-                        clearPending(pending)
-                        throw SourceException("本次登录验证已超时，请重新输入账号密码。")
-                    }
-                    return@withLock finishLogin(pending)
+                    // Legacy manual-import attempts cannot resume a profile GET
+                    // through the password-only login/restoration entry point.
+                    clearPending(pending)
                 }
                 if (restorationControl.getBoolean("logout_pending", false)) {
                     synchronized(sessionLock) { if (version == expected) logoutRequested = true }
@@ -128,8 +126,14 @@ class CopyAccountRepository(context: Context) {
                 ensureVersion(expected)
                 if (credential == null) return@withLock null
                 val lease = SessionLease(expected, credential, committed = false)
-                val account = verify(lease)
-                commit(lease, account, persist = false)
+                // Restore only locally recorded identity; never submit a password
+                // or call the unrelated profile endpoint during restoration.
+                // Older credentials remain stored until an explicit login/logout.
+                if (credential.username.length !in 1..160 || credential.username.any(Char::isISOControl) ||
+                    credential.nickname.length !in 1..160 || credential.nickname.any(Char::isISOControl)) {
+                    return@withLock null
+                }
+                commit(lease, AccountProfile(credential.username, credential.nickname, locallyRestored = true), persist = false)
             }
         }
     }
@@ -181,7 +185,19 @@ class CopyAccountRepository(context: Context) {
                 ensureVersion(expected)
                 val lease = SessionLease(expected,
                     StoredAccountCredential(token, AccountChannel.RELAY_WEB), committed = false)
-                finishLogin(retainLogin(lease))
+                // HTTP 200 + application code 200 + a valid token confirm login.
+                // An independent profile endpoint must not veto that response.
+                // Missing optional display fields fall back to the submitted name,
+                // not fabricated server profile data.
+                val returnedName = data.text("username")
+                val returnedNickname = data.text("nickname").ifBlank { data.text("name") }
+                val accountName = returnedName.takeIf {
+                    it.length in 1..160 && !it.any(Char::isISOControl)
+                } ?: name
+                val nickname = returnedNickname.takeIf {
+                    it.length in 1..160 && !it.any(Char::isISOControl)
+                } ?: accountName
+                commit(lease, AccountProfile(accountName, nickname), persist = true)
             }
         }
     }
@@ -734,6 +750,9 @@ class CopyAccountRepository(context: Context) {
 
     private fun collected(data: JSONObject): Boolean? = data.integer("collect")?.takeIf { it >= 0 }?.let { it > 0 }
 
+    /** Cancel only the in-flight attempt; retain encrypted credentials and account data. */
+    fun cancelLoginAttempt() { beginAttempt() }
+
     private fun beginAttempt(): Long = synchronized(sessionLock) {
         version++
         pendingLogin = null
@@ -797,7 +816,7 @@ class CopyAccountRepository(context: Context) {
         return synchronized(sessionLock) {
             if (version != lease.version) staleSession()
             if (persist) {
-                store.write(lease.credential)
+                store.write(StoredAccountCredential(lease.token, lease.channel, account.username, account.nickname))
                 if (!restorationControl.edit().putBoolean("logout_pending", false).commit())
                     throw SourceException("账号已验证，但设备尚未确认保存登录状态，请重试。")
             }
