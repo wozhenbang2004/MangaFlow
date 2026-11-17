@@ -42,6 +42,22 @@ internal fun autoPlayGroup(detail: AnimeDetail, requested: AnimeEpisode, catalog
 internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog): List<String> {
     if (catalog.notice != null || catalog.episodes.isEmpty()) return emptyList()
     val groups = catalog.episodes.groupBy { it.group }
+    // TvTFun's typed automatic group owns a season's real episode feed. Explicit
+    // stations may cover only aired episodes, so their unequal coverage must not
+    // invalidate that feed. Multiple seasons/editions still require user choice.
+    if (catalog.title.sourceId == "anime-tvtfun") {
+        val automatic = groups.filterValues { rows -> rows.all { it.playbackData == "automatic" } }
+        if (automatic.isNotEmpty()) {
+            if (automatic.size != 1 || catalog.episodes.map { it.edition }.distinct().size != 1)
+                return emptyList()
+            val (name, rows) = automatic.entries.single()
+            if (rows.first().edition.isBlank() || rows.any { it.number == null || !it.number.isFinite() } ||
+                rows.map { it.kind to it.number }.distinct().size != rows.size ||
+                rows.count { it.number == requested.number && it.kind == requested.kind } != 1)
+                return emptyList()
+            return listOf(name)
+        }
+    }
     if (groups.size == 1) {
         val (name, rows) = groups.entries.single()
         if (rows.count { it.number == requested.number && it.kind == requested.kind } == 1 &&

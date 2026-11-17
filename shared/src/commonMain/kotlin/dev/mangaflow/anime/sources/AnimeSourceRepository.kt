@@ -98,7 +98,7 @@ private abstract class RoutedAnimeProvider : AnimeProvider {
 }
 
 private class TvtFunProvider : RoutedAnimeProvider() {
-    override val revision = "2026-11-17-lazy-episodes"
+    override val revision = "2026-11-17-typed-episodes"
     override val id = "anime-tvtfun"
     override val name = "TvTFun"
     override val homeUrl = "https://www.tvtfun.net/"
@@ -158,6 +158,10 @@ private class TvtFunProvider : RoutedAnimeProvider() {
                     val number = ep.finiteNumber("number")
                     if (epId.isBlank() || number == null) return@flatMap emptyList()
                     val label = ep.text("title").ifBlank { "第 ${animeEpisodeLabel(number)} 集" }
+                    // The API carries Bangumi episode type independently of its display title.
+                    // OP/ED can both be numbered 1; treating their names as MAIN creates ambiguity.
+                    val kind = if (ep.has("type") && !ep.isNull("type")) bangumiEpisodeKind(ep.getInt("type"))
+                        else sourceEpisodeKind(label)
                     val embedded = ep.optJSONArray("sources")?.objects().orEmpty()
                     // Every real episode belongs to the automatic group, even when only some
                     // rows embed stations. Group choice must not hide the rest of the season.
@@ -165,7 +169,7 @@ private class TvtFunProvider : RoutedAnimeProvider() {
                         .addPathSegment(animeEpisodeLabel(number)).addQueryParameter("episodeId", epId).build()
                     val automaticEpisode = AnimeSourceEpisode(
                         id = "$seasonKey:$epId:auto", title = label, url = automaticUrl.toString(), number = number,
-                        kind = sourceEpisodeKind(label), group = "$seasonLabel · 自动线路 [$seasonKey]",
+                        kind = kind, group = "$seasonLabel · 自动线路 [$seasonKey]",
                         edition = seasonLabel, playbackData = "automatic",
                     )
                     listOf(automaticEpisode) + embedded.mapIndexedNotNull { lineIndex, line ->
@@ -178,7 +182,7 @@ private class TvtFunProvider : RoutedAnimeProvider() {
                             .addQueryParameter("sourceId", lineId).build()
                         AnimeSourceEpisode(
                             id = "$seasonKey:$epId:$lineId", title = label, url = url.toString(), number = number,
-                            kind = sourceEpisodeKind(label), group = "$seasonLabel · $lineLabel [$seasonKey/$lineKey]",
+                            kind = kind, group = "$seasonLabel · $lineLabel [$seasonKey/$lineKey]",
                             edition = seasonLabel,
                         )
                     }
