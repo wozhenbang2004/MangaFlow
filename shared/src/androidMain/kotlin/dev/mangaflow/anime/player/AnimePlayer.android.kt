@@ -74,6 +74,7 @@ import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
