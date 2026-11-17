@@ -31,10 +31,22 @@ internal data class ReaderPreparationPage(
     val receivedBytes: Long = 0L, val expectedBytes: Long? = null,
     val promoted: Boolean = false, val joining: Boolean = false,
 )
+/** Session-local diagnostics contain only counts, revisions and monotonic durations. */
+internal data class ReaderObservationScan(
+    val round: Long, val startWindow: Long, val endWindow: Long,
+    val candidates: Int, val inspected: Int = 0, val elapsedMillis: Long = 0L,
+    val interrupted: Boolean = false,
+)
+internal data class ReaderObservationDiagnostics(
+    val unobserved: Int = 0, val expired: Int = 0, val uncertain: Int = 0,
+    val absent: Int = 0, val present: Int = 0,
+    val scanning: ReaderObservationScan? = null, val recentScans: List<ReaderObservationScan> = emptyList(),
+)
 internal data class ReaderPreparationState(
     val sourceId: String = "", val pageCount: Int = 0, val firstVisible: Int = 0, val lastVisible: Int = -1,
     val direction: Int = 1, val windowRevision: Long = 0L, val active: Boolean = false,
     val pauseReason: String? = null, val pages: List<ReaderPreparationPage> = emptyList(),
+    val observations: ReaderObservationDiagnostics = ReaderObservationDiagnostics(),
 ) {
     val aheadTarget get() = pages.count { it.role == ReaderPreparationRole.AHEAD }
     val behindTarget get() = pages.count { it.role == ReaderPreparationRole.BEHIND }
@@ -61,11 +73,16 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
     private val tickets = mutableMapOf<Pair<Int, PrefetchStage>, Long>()
     private val activeTickets = mutableSetOf<Long>()
     private val ticketOwners = mutableMapOf<Long, Any?>()
+    private var scanRound = 0L
+    private var scanStartedAt = 0L
+    private var scanning: ReaderObservationScan? = null
+    private var recentScans = emptyList<ReaderObservationScan>()
     private val mutableState = MutableStateFlow(snapshot)
     val state = mutableState.asStateFlow()
 
     fun window(owner: Any, first: Int, last: Int, direction: Int, ahead: List<Int>, behind: List<Int>,
         network: Set<Int>, decoded: Set<Int>, active: Boolean, reason: String?) = synchronized(lock) {
+        if (this.owner !== owner) finishScanLocked(interrupted = true)
         this.owner = owner
         val roles = linkedMapOf<Int, ReaderPreparationRole>()
         (first..last).filter { it in 0 until pageCount }.forEach { roles[it] = ReaderPreparationRole.VISIBLE }
@@ -100,6 +117,7 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
         owned.forEach { ticketOwners.remove(it) }
         tickets.entries.removeAll { it.value in owned }
         if (this.owner === owner) {
+            finishScanLocked(interrupted = true)
             this.owner = null
             // Layout effects can restart without changing this tracker's exact chapter,
             // page list or headers. Keep only their still-expiring artifact observations;
@@ -128,6 +146,20 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
         if (ticket !in activeTickets || value.stage == PrefetchStage.QUEUED || index !in rows) return@synchronized
         val key = index to value.stage
         if ((tickets[key] ?: Long.MIN_VALUE) > ticket) return@synchronized
+        // A terminal foreground callback knows why a request stopped. The sampler's
+        // settled-failure transport summary cannot replace that diagnosis with
+        // a generic deferred state. A new active attempt or a newer ticket may proceed.
+        if (tickets[key] == ticket && value.settled && value.succeeded != true) {
+            val row = rows[index]
+            val previous = when (value.stage) {
+                PrefetchStage.RESOLVING -> row?.resolve
+                PrefetchStage.DOWNLOADING -> row?.original
+                PrefetchStage.CHECKING -> row?.decode
+                else -> null
+            }
+            if (previous?.reason != null && previous.phase in setOf(
+                    ReaderPreparationPhase.FAILED, ReaderPreparationPhase.DEFERRED)) return@synchronized
+        }
         tickets[key] = ticket
         val phase = when {
             value.settled && value.succeeded == true -> ReaderPreparationPhase.COMPLETE
@@ -183,6 +215,32 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
         rows[index]?.let { rows[index] = it.copy(originalPresent = original, originalBytes = bytes,
             previewResident = preview, inspectedAt = now, freshUntil = now + freshnessMillis) }
     }
+    fun beginObservationScan(owner: Any, candidates: Int): Long? = synchronized(lock) {
+        if (this.owner !== owner) return@synchronized null
+        finishScanLocked(interrupted = true)
+        scanStartedAt = monotonicTimeMillis()
+        scanning = ReaderObservationScan(++scanRound, snapshot.windowRevision, snapshot.windowRevision, candidates)
+        publishLocked()
+        scanRound
+    }
+    fun inspectedObservation(owner: Any, round: Long?) = synchronized(lock) {
+        if (this.owner === owner && round != null && scanning?.round == round)
+            scanning = scanning?.let { it.copy(inspected = it.inspected + 1) }
+    }
+    fun finishObservationScan(owner: Any, round: Long?, interrupted: Boolean) = synchronized(lock) {
+        if (this.owner === owner && round != null && scanning?.round == round) {
+            finishScanLocked(interrupted)
+            publishLocked()
+        }
+    }
+    private fun finishScanLocked(interrupted: Boolean) {
+        scanning?.let { scan ->
+            recentScans = (recentScans + scan.copy(endWindow = snapshot.windowRevision,
+                elapsedMillis = (monotonicTimeMillis() - scanStartedAt).coerceAtLeast(0L),
+                interrupted = interrupted)).takeLast(8)
+        }
+        scanning = null
+    }
     fun sample() = synchronized(lock) { publishLocked() }
     private fun updateStep(index: Int, stage: PrefetchStage, step: ReaderPreparationStep) {
         val row = rows[index] ?: return
@@ -195,7 +253,18 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
     }
     private fun publishLocked() {
         val now = monotonicTimeMillis()
-        snapshot = snapshot.copy(pages = rows.values.sortedBy { it.pageIndex }.map { row ->
+        // Count original-artifact observations before expiry masks their value. Never change
+        // the value or deadline to make a readiness count look stable.
+        val candidates = rows.values.filter { it.role != ReaderPreparationRole.VISIBLE }
+        val unobserved = candidates.count { it.inspectedAt == null }
+        val expired = candidates.count { it.inspectedAt != null && (it.freshUntil ?: 0L) < now }
+        val fresh = candidates.filter { it.inspectedAt != null && (it.freshUntil ?: 0L) >= now }
+        val observations = ReaderObservationDiagnostics(unobserved, expired,
+            fresh.count { it.originalPresent == null }, fresh.count { it.originalPresent == false },
+            fresh.count { it.originalPresent == true },
+            scanning?.copy(endWindow = snapshot.windowRevision,
+                elapsedMillis = (now - scanStartedAt).coerceAtLeast(0L)), recentScans)
+        snapshot = snapshot.copy(observations = observations, pages = rows.values.sortedBy { it.pageIndex }.map { row ->
             if (row.freshUntil?.let { now <= it } == true) row
             else row.copy(originalPresent = null, previewResident = null, originalBytes = null)
         })

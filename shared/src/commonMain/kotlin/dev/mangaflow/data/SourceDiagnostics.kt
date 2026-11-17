@@ -14,6 +14,22 @@ data class SourceHealth(val sourceId: String, val stage: SourceStage, val lastAt
     val lastSuccessAt: Long = 0, val checking: Boolean = false, val failure: SourceFailureKind? = null,
     val message: String = "", val operationId: Long = 0)
 
+internal data class SourceFailureSummary(val kind: SourceFailureKind, val message: String)
+
+/** Classify this operation only; never expose arbitrary exception text, URLs or credentials. */
+internal fun sourceFailureSummary(stage: SourceStage, failure: Exception): SourceFailureSummary {
+    val type = when {
+        (failure as? SourceException)?.httpStatus == 401 || failure.message.orEmpty().contains("登录") -> SourceFailureKind.LOGIN
+        failure is TimeoutCancellationException || Regex("(?i)timeout|connect|dns|network|超时|连接|网络").containsMatchIn(failure.message.orEmpty()) -> SourceFailureKind.NETWORK
+        (failure as? SourceException)?.httpStatus != null -> SourceFailureKind.RESPONSE
+        Regex("不支持|不兼容|能力").containsMatchIn(failure.message.orEmpty()) -> SourceFailureKind.UNSUPPORTED
+        Regex("解析|格式|JSON|目录为空").containsMatchIn(failure.message.orEmpty()) -> SourceFailureKind.PARSING
+        else -> SourceFailureKind.UNKNOWN
+    }
+    val code = (failure as? SourceException)?.httpStatus?.let { " · HTTP $it" }.orEmpty()
+    return SourceFailureSummary(type, stage.label + " · " + type.label + code)
+}
+
 /** Contains only redacted operation summaries, never request bodies, URLs, credentials or cookies. */
 internal class SourceDiagnostics {
     private val sequence = atomic(0L)
@@ -43,18 +59,9 @@ internal class SourceDiagnostics {
                 mutable.update { old -> if (old[id]?.operationId == token) old + (id to old.getValue(id).copy(checking = false)) else old }
                 throw failure
             }
-            val type = when {
-                (failure as? SourceException)?.httpStatus == 401 || failure.message.orEmpty().contains("登录") -> SourceFailureKind.LOGIN
-                failure is TimeoutCancellationException || Regex("(?i)timeout|connect|dns|network|超时|连接|网络").containsMatchIn(failure.message.orEmpty()) -> SourceFailureKind.NETWORK
-                (failure as? SourceException)?.httpStatus != null -> SourceFailureKind.RESPONSE
-                Regex("不支持|不兼容|能力").containsMatchIn(failure.message.orEmpty()) -> SourceFailureKind.UNSUPPORTED
-                Regex("解析|格式|JSON|目录为空").containsMatchIn(failure.message.orEmpty()) -> SourceFailureKind.PARSING
-                else -> SourceFailureKind.UNKNOWN
-            }
-            val code = (failure as? SourceException)?.httpStatus?.let { " · HTTP $it" }.orEmpty()
-            val message = stage.label + " · " + type.label + code
+            val summary = sourceFailureSummary(stage, failure)
             mutable.update { old -> if (old[id]?.operationId == token)
-                old + (id to old.getValue(id).copy(checking = false, failure = type, message = message)) else old }
+                old + (id to old.getValue(id).copy(checking = false, failure = summary.kind, message = summary.message)) else old }
             throw failure
         }
     }

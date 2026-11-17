@@ -9,6 +9,8 @@ import dev.mangaflow.data.RankAudience
 import dev.mangaflow.data.RankPeriod
 import dev.mangaflow.data.SearchTarget
 import dev.mangaflow.data.SourceException
+import dev.mangaflow.data.SourceStage
+import dev.mangaflow.data.sourceFailureSummary
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.sources.*
 import dev.mangaflow.data.Manga
@@ -408,7 +410,8 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                             } catch (failure: Exception) {
                                 if (failure is CancellationException && failure !is TimeoutCancellationException) throw failure
                                 if (expected != generation || !active || owner != scopeKey()) return@withPermit
-                                val message = repository.sourceHealth.value[id]?.message?.takeIf { it.isNotBlank() } ?: "来源读取失败，请重试"
+                                val stage = if (value.isSearch) SourceStage.SEARCH else SourceStage.CATALOGUE
+                                val message = sourceFailureSummary(stage, failure).message
                                 lanes[id] = FederatedSearchSource(id, infos.getValue(id).name, error = message, failedPage = page)
                             }
                             publish()

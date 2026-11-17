@@ -2349,15 +2349,22 @@ internal fun AdjacentPagePrefetch(
                     cacheAt = now
                     val freshnessMillis = currentBudget.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 2_000L +
                         previousScanMillis * 2L
-                    for (index in inspectTargets - inspectVisible) {
-                        val retained = retainedPages[index]
-                        val resource = retained?.page ?: resolvedPages[index] ?: continue
-                        val artifact = inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
-                            retained?.diskCacheKey, memoryKeys[index])
-                        if (index in inspectTargets && index !in inspectVisible)
-                            tracker?.artifact(index, artifact.originalPresent, artifact.originalBytes, artifact.previewResident,
-                                freshnessMillis = freshnessMillis, owner = owner)
-                    }
+                    val scanTargets = inspectTargets - inspectVisible
+                    val scan = tracker?.beginObservationScan(owner, scanTargets.size)
+                    var scanCompleted = false
+                    try {
+                        for (index in scanTargets) {
+                            val retained = retainedPages[index]
+                            val resource = retained?.page ?: resolvedPages[index] ?: continue
+                            val artifact = inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
+                                retained?.diskCacheKey, memoryKeys[index])
+                            tracker?.inspectedObservation(owner, scan)
+                            if (index in inspectTargets && index !in inspectVisible)
+                                tracker?.artifact(index, artifact.originalPresent, artifact.originalBytes, artifact.previewResident,
+                                    freshnessMillis = freshnessMillis, owner = owner)
+                        }
+                        scanCompleted = true
+                    } finally { tracker?.finishObservationScan(owner, scan, interrupted = !scanCompleted) }
                     previousScanMillis = monotonicTimeMillis() - now
                 }
                 tracker?.sample()
@@ -3257,8 +3264,13 @@ private fun ReaderPageImage(
                             reload++
                         } else {
                             loading = false
-                            error = result.throwable.message ?: "图片暂时无法读取"
+                            error = readerPrefetchErrorLabel(result.throwable)
                             sourceFailure(result.throwable)
+                            preparationTicket?.let { ticket ->
+                                preparationTracker?.end(page.index, ticket, preparationWork.snapshot().stage,
+                                    if (isReaderPrefetchFailure(result.throwable)) ReaderPreparationPhase.FAILED
+                                    else ReaderPreparationPhase.DEFERRED, error)
+                            }
                         }
                     } },
                 )

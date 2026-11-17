@@ -307,7 +307,7 @@ internal fun ReaderExperienceStatus(
                         val currentPage = if (preparation.lastVisible >= preparation.firstVisible && preparation.pageCount > 0)
                             "${pageRange(preparation.firstVisible, preparation.lastVisible)} / ${preparation.pageCount}" else "—"
                         Column(Modifier.fillMaxWidth().motionInputGate(bodyEnabled)) {
-                            StatusReveal(scopeHelp[shownSection] == true) { ReaderStatusLegend(shownSection, budget) }
+                            StatusReveal(scopeHelp[shownSection] == true) { ReaderStatusLegend(shownSection, budget, preparation) }
                             when (shownSection) {
                                 ReaderStatusSection.PREPARATION -> {
                                     StatusContext(currentPage)
@@ -514,7 +514,7 @@ private fun StatusReveal(expanded: Boolean, content: @Composable ColumnScope.() 
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceBudget) {
+private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceBudget, preparation: ReaderPreparationState) {
     val status = mangaStatusColors()
     FlowRow(Modifier.fillMaxWidth().padding(vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -541,6 +541,12 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
                 StatusToken(Icons.Outlined.PhotoSizeSelectLarge, "预解码配置", "${budget.decodedPrefetchPages} 页")
             }
             StatusExplanation(budget.reason)
+            val observation = preparation.observations
+            StatusExplanation("预读与回看观测：未核实 ${observation.unobserved} · 过期 ${observation.expired} · 核验不确定 ${observation.uncertain} · 未检出有效原图 ${observation.absent}")
+            (observation.scanning ?: observation.recentScans.lastOrNull())?.let { scan ->
+                StatusExplanation("本次阅读采样 #${scan.round} · 窗口 ${scan.startWindow}→${scan.endWindow} · 已检查 ${scan.inspected}/${scan.candidates} · ${scan.elapsedMillis} ms · " +
+                    if (observation.scanning != null) "进行中" else if (scan.interrupted) "已中断" else "已结束")
+            }
         }
         ReaderStatusSection.WORK -> {
             StatusExplanation("进行中只计已获名额的任务，不是线程数；完成按页计，不代表预览仍在内存。底栏三格依次表示解析、原图、解码状态，不是百分比。")

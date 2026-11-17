@@ -3654,3 +3654,11 @@ User (Sentinel_46e12f4a0754819183c1948f4f0c96f4): “bug 一大堆默认线路�
 - Preview presence uses plain cache wording rather than “驻留”. Remove the last-reclamation history timestamp from the normal cache detail; capacity and actual reclamation totals remain available.
 - Actual active status uses a thin indeterminate progress line, not a fabricated percentage. Disabled motion renders a static activity mark. Preserve existing retained reader popover, placement, source/page identity and all preparation/cache policy.
 - This change is source-reviewed only; no local build, automated test or device acceptance is claimed.
+
+### Reader image failure diagnosis (2026-11-17)
+
+Final foreground image failures explicitly finish their captured preparation stage as failed or resource-deferred, using the existing failure classifier. A settled non-success work sample cannot erase an explicit same-ticket diagnosis; new active attempts, newer tickets and genuine success still update normally. Reader-safe error summaries distinguish decode, local-storage and route errors without rendering raw URLs or exception text. The JM screenshots show prepared originals and unavailable images, but do not establish a decoder-performance, network or provider root cause. This slice fixes misleading diagnosis only, not verified image rendering.
+
+### BROWSE-FAILURE-01 — Operation-owned safe errors
+
+Discovery/search source rows classify their own caught exception, not the latest shared source-health slot: concurrent successful or newer operations must not replace a failed lane's cause. Reuse the existing fixed-label classifier and numeric HTTP status only; never render raw exception messages, URLs, response bodies or credentials. Cancellation and request-generation guards remain unchanged. The screenshot's generic failure does not establish a login, network or parser cause for any specific source. This correction changes diagnosis only, not adapters, authentication, transport, or retry behavior. Static review only; no local build/test or device verification.
