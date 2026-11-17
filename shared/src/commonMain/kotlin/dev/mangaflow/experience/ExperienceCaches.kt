@@ -99,6 +99,20 @@ internal class ExperienceMemoryCache(private val cache: MemoryCache, private val
         updateExpiryDeadline(now)
         cache.keys.map { it.key }.toSet()
     }
+    /** Manual cache cleanup removes reusable references, never native/display ownership. */
+    internal fun removeReviewed(keys: Set<String>) = synchronized(lock) {
+        val now = monotonicTimeMillis()
+        val before = cache.size
+        var removed = 0
+        try {
+            cache.keys.filter { it.key in keys }.forEach { key ->
+                if (cache.remove(key)) { accessed.remove(key); removed++ }
+            }
+        } finally {
+            recordRemoval(Removal.CLEARED, removed, before, now)
+            updateExpiryDeadline(now)
+        }
+    }
     override fun clear() { clearAndMeasure() }
     fun clearAndMeasure(): Long = synchronized(lock) {
         val before = cache.size

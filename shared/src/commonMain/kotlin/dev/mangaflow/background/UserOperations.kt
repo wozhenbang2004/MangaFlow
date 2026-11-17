@@ -81,18 +81,18 @@ internal fun ApplicationOperations.clearStorageCache(
         var failed = 0
         var accountingComplete = false
         try {
-            val result = store.clear(reviewed, clearLegacy, legacyRevision, legacyStamp)
+            val result = store.clear(reviewed, clearLegacy, legacyRevision, legacyStamp,
+                removeMemory = { keys ->
+                    imageLoader.memoryCache?.let { memory ->
+                        if (memory is dev.mangaflow.experience.ExperienceMemoryCache) memory.removeReviewed(keys)
+                        else memory.keys.filter { it.key in keys }.forEach { memory.remove(it) }
+                    }
+                })
             freed += result.freedBytes
             skipped += result.skipped
             failed += result.failed
             accountingComplete = true
-            // Evict only decoded variants belonging to originals actually removed by this review.
-            withContext(Dispatchers.IO) {
-                imageLoader.memoryCache?.let { memory ->
-                    memory.keys.filter { it.key in result.removedKeys ||
-                        it.key.removePrefix("manga-cover:") in result.removedKeys }.forEach { memory.remove(it) }
-                }
-            }
+
 
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel

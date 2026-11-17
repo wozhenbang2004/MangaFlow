@@ -120,6 +120,12 @@ internal class AndroidAnimePlayer(
     private var receivedBytes = AtomicLong(0L)
     private var lastSampleBytes = 0L
     private var lastSampleAt = 0L
+    private var bufferingSince: Long? = null
+    private var bufferingProgressAt = 0L
+    private var bufferingBytes = 0L
+    private var bufferingPosition = 0L
+    private var bufferingEnd = 0L
+    private var bufferingTimedOut = false
     private val trackBindings = mutableMapOf<String, Pair<TrackGroup, Int>>()
     private var trackGroups = emptyList<TrackGroup>()
     private var trackRevision = 0L
@@ -339,7 +345,7 @@ internal class AndroidAnimePlayer(
             override fun onEvents(player: Player, events: Player.Events) { synchronize(generation, exo) }
             override fun onPlayerError(error: PlaybackException) { recoverOrFail(generation, exo, error) }
             override fun onRenderedFirstFrame() {
-                if (!isCurrent(generation) || engine.value !== exo || nativeVideoRecoveryFailed) return
+                if (!isCurrent(generation) || engine.value !== exo || nativeVideoRecoveryFailed || bufferingTimedOut) return
                 if (nativeVideoOnly) nativeVideoRestored = true
                 publish(generation) { it.copy(firstFrameRendered = true,
                     videoEnhancement = if (nativeVideoOnly && options.videoEnhancement != AnimeVideoEnhancementMode.OFF)
@@ -348,7 +354,7 @@ internal class AndroidAnimePlayer(
                 ) }
             }
             override fun onTracksChanged(tracks: Tracks) {
-                if (!isCurrent(generation) || engine.value !== exo || nativeVideoRecoveryFailed) return
+                if (!isCurrent(generation) || engine.value !== exo || nativeVideoRecoveryFailed || bufferingTimedOut) return
                 publishTracks(generation, tracks)
                 if (!nativeVideoOnly && tracks.groups.any { group ->
                     group.type == C.TRACK_TYPE_VIDEO && (0 until group.length).any { index ->
@@ -395,6 +401,7 @@ internal class AndroidAnimePlayer(
         polling = playerScope.launch(Dispatchers.Main.immediate) {
             while (isActive && isCurrent(generation)) {
                 synchronize(generation, exo)
+                checkBufferingProgress(generation, exo)
                 delay(250L)
             }
         }
@@ -447,7 +454,7 @@ internal class AndroidAnimePlayer(
         phase: AnimeVideoEnhancementPhase = AnimeVideoEnhancementPhase.FAILED,
         detail: String = "图形处理已停止，本次播放已退回原画；重新打开媒体可重试",
     ): Boolean {
-        if (!isCurrent(generation) || engine.value !== exo || nativeVideoOnly || enhancementRecoveryUsed) return false
+        if (!isCurrent(generation) || engine.value !== exo || nativeVideoOnly || enhancementRecoveryUsed || bufferingTimedOut) return false
         enhancementRecoveryUsed = true
         nativeVideoRecoveryPending = true
         nativeVideoRestored = false
@@ -512,9 +519,54 @@ internal class AndroidAnimePlayer(
         fail(generation, IOException("原生画面未能恢复，请重试当前媒体", failure), sourceRecoveryAllowed = false)
     }
 
+    private fun resetBufferingObservation() {
+        bufferingSince = null
+        bufferingProgressAt = 0L
+    }
+
+    /** Observes actual transport/buffer progress, not a guessed download percentage. */
+    private fun checkBufferingProgress(generation: Long, exo: ExoPlayer) {
+        if (!isCurrent(generation) || engine.value !== exo || bufferingTimedOut) return
+        if (localLease != null || nativeVideoRecoveryPending || nativeVideoRecoveryFailed ||
+            (nativeVideoOnly && !nativeVideoRestored) || recovery?.isActive == true ||
+            !(foreground || state.value.inPictureInPicture) || !exo.playWhenReady ||
+            exo.playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE ||
+            exo.playerError != null || exo.playbackState != Player.STATE_BUFFERING) {
+            resetBufferingObservation()
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        val bytes = receivedBytes.get()
+        val position = exo.currentPosition
+        val end = exo.bufferedPosition
+        val since = bufferingSince
+        if (since == null) {
+            bufferingSince = now
+            bufferingProgressAt = now
+        } else if (bytes > bufferingBytes || end > bufferingEnd || position != bufferingPosition) {
+            bufferingProgressAt = now
+        }
+        bufferingBytes = bytes
+        bufferingPosition = position
+        bufferingEnd = end
+        if (since == null || (now - bufferingProgressAt < 30_000L && now - since < 120_000L)) return
+        bufferingTimedOut = true // Set before stop's synchronous callbacks can republish READY.
+        var cancelled = false
+        try { exo.stop() }
+        catch (cancel: CancellationException) { cancelled = true; throw cancel }
+        catch (_: Exception) { /* A native stop failure must not hide the observed timeout. */ }
+        finally {
+            if (!cancelled && isCurrent(generation) && engine.value === exo) {
+                fail(generation, IOException(if (now - bufferingProgressAt >= 30_000L)
+                    "这条线路缓冲已持续 30 秒没有数据或播放进展，请重试或换个来源"
+                    else "这条线路持续缓冲超过 2 分钟，暂未达到起播条件，请重试或换个来源"))
+            }
+        }
+    }
+
     private fun synchronize(generation: Long, exo: ExoPlayer) {
         if (!isCurrent(generation) || engine.value !== exo) return
-        if (nativeVideoRecoveryPending || nativeVideoRecoveryFailed) return
+        if (nativeVideoRecoveryPending || nativeVideoRecoveryFailed || bufferingTimedOut) return
         if (exo.playerError != null) return // The typed error callback alone owns recovery/error publication.
         val now = SystemClock.elapsedRealtime()
         val elapsed = now - lastSampleAt
@@ -566,7 +618,7 @@ internal class AndroidAnimePlayer(
 
     private fun recoverOrFail(generation: Long, exo: ExoPlayer, error: PlaybackException) {
         if (!isCurrent(generation) || engine.value !== exo || lastPlaybackError === error) return
-        if (nativeVideoRecoveryPending || nativeVideoRecoveryFailed) return
+        if (nativeVideoRecoveryPending || nativeVideoRecoveryFailed || bufferingTimedOut) return
         lastPlaybackError = error
         // Until its first actual frame, this engine is still the one bounded graphics-recovery
         // attempt. An asynchronous failure here must not mark the source bad or spend its retries.
@@ -694,6 +746,7 @@ internal class AndroidAnimePlayer(
     }
 
     override fun setForegroundNative(foreground: Boolean, backgroundAudio: Boolean) {
+        resetBufferingObservation()
         val exo = engine.value ?: return
         val videoDisabled = !foreground && backgroundAudio
         if ((C.TRACK_TYPE_VIDEO in exo.trackSelectionParameters.disabledTrackTypes) != videoDisabled) {
@@ -739,13 +792,15 @@ internal class AndroidAnimePlayer(
     override fun setPlayingNative(playing: Boolean) {
         engine.value?.playWhenReady = playing
     }
-    override fun seekNative(positionMs: Long) { engine.value?.seekTo(positionMs) }
+    override fun seekNative(positionMs: Long) { resetBufferingObservation(); engine.value?.seekTo(positionMs) }
     override fun setSpeedNative(speed: Float): Float {
         val exo = engine.value ?: return speed
         exo.setPlaybackSpeed(speed)
         return exo.playbackParameters.speed
     }
     override fun releaseNative() {
+        resetBufferingObservation()
+        bufferingTimedOut = false
         recovery?.cancel()
         recovery = null
         recoveryNotice = null

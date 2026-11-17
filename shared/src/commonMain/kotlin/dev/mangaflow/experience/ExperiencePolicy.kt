@@ -378,7 +378,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             }
             publish()
         }
-        dev.mangaflow.storage.StorageCacheStore.get(app).attachMemoryReclaimer(memory::removeOutsideWindow)
+        dev.mangaflow.storage.StorageCacheStore.get(app).attachMemoryReclaimer(memory::removeOutsideWindow) { memory.keys.map { it.key }.toSet() }
         refreshCacheUsage()
     }
 

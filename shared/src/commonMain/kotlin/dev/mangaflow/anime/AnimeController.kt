@@ -151,7 +151,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         var endingSkipped: Boolean = false,
         var preparationAttempted: Boolean = false,
         var recoveryHandled: Boolean = false,
-        var observedPlayback: Boolean = false,
         var stablePlaybackSince: Long? = null,
         var stableRecoveryReset: Boolean = false,
         val automaticIntent: Boolean = false,
@@ -1701,9 +1700,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             engine.state.collect { snapshot ->
                 val owner = active ?: return@collect
                 if (!belongsTo(owner, snapshot)) return@collect
-                if (snapshot.firstFrameRendered == true || (snapshot.firstFrameRendered == null && snapshot.isPlaying &&
-                    snapshot.phase == AnimePlayerPhase.READY && !snapshot.isBuffering))
-                    owner.observedPlayback = true
                 danmaku.updatePosition(playbackKey(owner), snapshot.positionMs, snapshot.isPlaying)
                 if (downloadsOwner.isInitialized()) downloads.setPlaybackBusy(snapshot.isBuffering ||
                     snapshot.phase == AnimePlayerPhase.OPENING || mutableState.value.resolving)
@@ -1832,10 +1828,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (mutableState.value.settings.automaticRecoveryAttempts == 0) return
         if (!sourceRecoveryWindowStarted) {
             sourceRecoveryWindowStarted = true
-            // No first frame: retain the original opening budget. A previously playing
-            // episode gets one bounded recovery window, not a fresh window per bad source.
-            if (owner.observedPlayback)
-                autoPlaybackDeadline = monotonicTimeMillis() + 45_000L
+            // Native preparation has its own buffering limit. Its first terminal failure
+            // gets one recovery window even when no frame rendered; never renew per source.
+            autoPlaybackDeadline = monotonicTimeMillis() + 45_000L
         }
         if (monotonicTimeMillis() >= autoPlaybackDeadline) {
             mutableState.update { it.copy(playbackRecoveryStopReason = "本轮自动换线已到时限；可重试继续尝试本集片源。") }

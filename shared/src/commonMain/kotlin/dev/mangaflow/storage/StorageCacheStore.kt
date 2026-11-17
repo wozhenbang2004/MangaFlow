@@ -87,6 +87,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
     private var rangeVersion = -1L
     private val detachedMemory = mutableMapOf<String, Pair<CacheResource, Set<String>>>()
     private var reclaimMemory: ((Set<String>) -> Set<String>)? = null
+    private var snapshotMemoryKeys: (() -> Set<String>)? = null
     private var nextWindow = 0L
     private var memoryRangeMaintenance: Job? = null
     private var memoryRangeRequested = false
@@ -162,13 +163,11 @@ class StorageCacheStore private constructor(context: PlatformContext) {
             if (version < rangeVersion) return
             rangeVersion = version
             memoryRangeCleanup = memory; diskRangeCleanup = disk
-            if (!memory) detachedMemory.clear()
-            if (!memory && !disk) retiredRangeKeys.clear()
         }
         requestMaintenance()
     }
-    internal fun attachMemoryReclaimer(reclaimer: (Set<String>) -> Set<String>) {
-        synchronized(lock) { reclaimMemory = reclaimer }
+    internal fun attachMemoryReclaimer(reclaimer: (Set<String>) -> Set<String>, snapshotKeys: () -> Set<String>) {
+        synchronized(lock) { reclaimMemory = reclaimer; snapshotMemoryKeys = snapshotKeys }
         requestMaintenance()
     }
     /** Empty/uninitialized windows keep the chapter protected; a published range is exact. */
@@ -363,7 +362,11 @@ class StorageCacheStore private constructor(context: PlatformContext) {
             if (rangeOwner != null) rangeOwners[token] = rangeOwner
         } }
         return { synchronized(lock) {
-            if (token in rangeOwners && (memoryRangeCleanup || diskRangeCleanup)) retiredRangeKeys += windowSeen[token].orEmpty()
+            if (token in rangeOwners) {
+                retiredRangeKeys += windowSeen[token].orEmpty()
+                // Overflow drops only historical authorization, never the cached image.
+                while (retiredRangeKeys.size > MAX_ENTRIES) retiredRangeKeys.remove(retiredRangeKeys.first())
+            }
             windows.remove(token); windowKeys.remove(token); windowOwners.remove(token)
             rangeOwners.remove(token); readingRanges.remove(token); windowPages.remove(token); windowSeen.remove(token); rangeManifestReady.remove(token)
             revision++
@@ -528,7 +531,8 @@ class StorageCacheStore private constructor(context: PlatformContext) {
     /** Clear exactly the reviewed snapshot; new or changed entries are not silently swept in. */
     internal suspend fun clear(items: List<StoredCacheItem>, clearLegacy: Boolean = false,
         legacyRevision: Long? = null, legacyStamp: String? = null, rangeOnly: Boolean = false,
-        maintenanceFence: CacheMaintenanceFence? = null): CacheClearResult = withContext(Dispatchers.IO) {
+        maintenanceFence: CacheMaintenanceFence? = null,
+        removeMemory: ((Set<String>) -> Unit)? = null): CacheClearResult = withContext(Dispatchers.IO) {
         ready.await()
         mutation.withLock {
             var freed = 0L; var skipped = 0; var failed = 0
@@ -573,9 +577,28 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                     freed += removedBytes
                     removedKeys += resource.key
                     synchronized(lock) {
-                        val aliases = memoryKeys.remove(resource.id).orEmpty().toSet()
-                        if (memoryRangeCleanup && rangeCandidate(resource.id))
-                            detachedMemory[resource.id] = resource to (aliases + resource.key)
+                        val aliases = memoryKeys[resource.id].orEmpty().toSet()
+                        // Manual disk cleanup must not evict aliases retained by another live
+                        // reader while the disk operation was in flight. Keep Store -> Memory
+                        // lock order, matching range maintenance, and retain identity until checked.
+                        if (removeMemory != null) {
+                            val all = (records.values + detachedMemory.values.map { it.first } + resource)
+                                .distinctBy { it.id }
+                            fun keysOf(item: CacheResource) = setOf(item.key) + memoryKeys[item.id].orEmpty() +
+                                detachedMemory[item.id]?.second.orEmpty()
+                            val blocked = all.filter { protected(it, wallTimeMillis()) ||
+                                it.id != resource.id && it.id !in retiredRangeKeys &&
+                                    windowPages.values.none { pages -> it.id in pages }
+                            }.flatMap(::keysOf).toMutableSet()
+                            val known = all.map { it.id }.toSet()
+                            memoryKeys.filterKeys { it !in known }.values.forEach { blocked += it }
+                            fun variants(keys: Set<String>) = keys + keys.map { "manga-cover:$it" }
+                            try { removeMemory(variants(aliases + resource.key) - variants(blocked)) }
+                            catch (cancel: CancellationException) { throw cancel }
+                            catch (_: Exception) { failed++ }
+                        }
+                        memoryKeys.remove(resource.id)
+                        if (rangeCandidate(resource.id)) rememberDetachedMemory(resource, aliases + resource.key)
                         records.remove(resource.id)
                         if (resource.id !in detachedMemory) retiredRangeKeys.remove(resource.id)
                         removedKeys += aliases
@@ -628,7 +651,41 @@ class StorageCacheStore private constructor(context: PlatformContext) {
             }
         }
     }
+    /** Keep exact identities across an off/on toggle, not an unbounded cache history. */
+    private fun rememberDetachedMemory(resource: CacheResource, keys: Set<String>) {
+        fun chars(item: Pair<CacheResource, Set<String>>): Long {
+            val r = item.first
+            return listOf(r.id, r.key, r.mangaId, r.chapterId, r.sourceId, r.auxiliaryOwnerId)
+                .sumOf { it.length.toLong() } + item.second.sumOf { it.length.toLong() }
+        }
+        val existing = detachedMemory[resource.id]
+        val retainedKeys = existing?.second.orEmpty() + keys
+        val item = resource to retainedKeys
+        val used = detachedMemory.values.sumOf(::chars) - (existing?.let(::chars) ?: 0L)
+        val aliases = detachedMemory.values.sumOf { it.second.size } - (existing?.second?.size ?: 0)
+        // If metadata cannot fit, fail closed: ordinary TTL/LRU still owns that reference.
+        if (existing == null && detachedMemory.size >= MAX_DETACHED_ENTRIES ||
+            retainedKeys.size > MAX_DETACHED_ALIASES_PER_ENTRY || aliases + retainedKeys.size > MAX_DETACHED_ALIASES ||
+            used + chars(item) > MAX_DETACHED_CHARS) return
+        detachedMemory[resource.id] = item
+    }
+    private fun pruneDetachedMemory() {
+        // Missing/unavailable cache is not evidence that its references disappeared.
+        val present = try { snapshotMemoryKeys?.invoke() } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { null }
+        if (present != null) {
+            val iterator = detachedMemory.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                val retained = entry.value.second.filterTo(mutableSetOf()) { it in present }
+                if (retained.isEmpty()) iterator.remove()
+                else entry.setValue(entry.value.first to retained)
+            }
+        }
+        retiredRangeKeys.removeAll { it !in records && it !in detachedMemory }
+    }
     private fun reclaimRangeMemory(): Boolean = synchronized(lock) {
+        pruneDetachedMemory()
         if (!memoryRangeCleanup) return@synchronized false
         val resources = (records.values + detachedMemory.values.map { it.first }).distinctBy { it.id }
         fun keysFor(resource: CacheResource): Set<String> = setOf(resource.key) + memoryKeys[resource.id].orEmpty() +
@@ -771,6 +828,10 @@ class StorageCacheStore private constructor(context: PlatformContext) {
     companion object {
         private const val MIB = 1024L * 1024
         private const val MAX_ENTRIES = 20_000
+        private const val MAX_DETACHED_ENTRIES = 2_048
+        private const val MAX_DETACHED_ALIASES_PER_ENTRY = 64
+        private const val MAX_DETACHED_ALIASES = 8_192
+        private const val MAX_DETACHED_CHARS = 1_048_576L
         private const val MAX_INDEX_BYTES = 24L * MIB
         private const val FILE_HANDOFF_MILLIS = 30_000L
         private val instancesLock = StorageLock()
