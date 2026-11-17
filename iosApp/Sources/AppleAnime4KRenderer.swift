@@ -8,11 +8,18 @@ import UIKit
 /** Uses the AVPlayer supplied by Mediamp; this host never opens a media URL. */
 final class MangaFlowAnime4KFactory: NSObject, AppleAnimeEnhancementFactory {
     func create(player: AVPlayer, listener: AppleAnimeEnhancementListener) -> AppleAnimeEnhancementRenderer {
+        #if targetEnvironment(simulator)
+        // The simulator SDK cannot compile the drawable presentation callback.
+        // GPU completion alone is not evidence that an enhanced frame was shown.
+        return MangaFlowOriginalVideoRenderer(player: player, listener: listener,
+            reason: "模拟器无法确认 Metal 画面呈现，继续使用原画")
+        #else
         if #available(iOS 15.0, *), let device = MTLCreateSystemDefaultDevice(), device.supportsFamily(.apple3) {
             return MangaFlowAnime4KRenderer(player: player, listener: listener, device: device)
         }
         return MangaFlowOriginalVideoRenderer(player: player, listener: listener,
             reason: "Anime4K 需要 iOS 15 及支持 Metal 浮点纹理的设备，继续使用原画")
+        #endif
     }
 }
 
@@ -706,6 +713,10 @@ private final class MangaFlowAnime4KRenderer: NSObject, AppleAnimeEnhancementRen
     }
 
     func draw(in view: MTKView) {
+        #if targetEnvironment(simulator)
+        // The factory selects native video on the simulator, so this GPU path is never admitted.
+        return
+        #else
         guard canRender, inFlight == 0, let frame = pendingDraw, let plan = plan,
               let textureCache = textureCache, let queue = commandQueue, let drawable = view.currentDrawable else { return }
         pendingDraw = nil
@@ -751,6 +762,7 @@ private final class MangaFlowAnime4KRenderer: NSObject, AppleAnimeEnhancementRen
         }
         command.present(drawable)
         command.commit()
+        #endif
     }
 
     private func finish(_ receipt: Anime4KPresentationReceipt) {

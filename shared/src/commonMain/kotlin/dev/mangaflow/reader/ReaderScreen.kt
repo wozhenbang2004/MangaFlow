@@ -2578,7 +2578,10 @@ internal fun AdjacentPagePrefetch(
                         job.start()
                         continue
                     }
-                    if (!resource.url.startsWith("https:")) {
+                    // A canonical source may explicitly supply HTTP image URLs. Do not
+                    // discard them after eligibility already admitted them; this does not
+                    // downgrade an HTTPS URL or bypass the active source route.
+                    if (!resource.url.startsWith("https:") && !resource.url.startsWith("http:")) {
                         end(index, PrefetchStage.DOWNLOADING, ReaderPreparationPhase.DEFERRED, "此来源需进入阅读后准备")
                         allTickets[index to PrefetchStage.DOWNLOADING]?.let { tracker?.finish(it) }
                         originalFinished += index
