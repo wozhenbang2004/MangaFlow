@@ -377,6 +377,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             }
             publish()
         }
+        dev.mangaflow.storage.StorageCacheStore.get(app).attachMemoryReclaimer(memory::removeOutsideWindow)
         refreshCacheUsage()
     }
 
@@ -1264,6 +1265,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
             storage.setBudget(next.diskCacheBytes, version)
             storage.setRetention(retention.imageRetentionHours, version)
+            storage.setRangeCleanup(retention.memoryOutsideWindowCleanup, retention.diskOutsideWindowCleanup, version)
             storage.setRuntime(next.runtime, version)
         }
     }

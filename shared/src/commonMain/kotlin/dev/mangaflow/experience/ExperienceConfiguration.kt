@@ -154,6 +154,8 @@ data class ExperienceMemoryCacheUsage(
     val evictedBytes: Long,
     val clearedEntries: Long,
     val clearedBytes: Long,
+    val rangeEntries: Long = 0L,
+    val rangeBytes: Long = 0L,
 )
 
 data class ExperienceUsage(

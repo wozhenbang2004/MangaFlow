@@ -519,15 +519,16 @@ fun ReaderScreen(
     }
     val activeDownload by chapterDownload.collectAsStateWithLifecycle(initialValue = initialDownload)
     val storageCache = remember(adultImageContext) { dev.mangaflow.storage.StorageCacheStore.get(adultImageContext) }
+    val cacheRangeOwner = remember(storageCache, manga.id, chapterId, pages, headers) { Any() }
     // The retained reader owns this chapter even while settings are overlaid or the app is paused.
-    DisposableEffect(storageCache, manga.id, chapterId, active) {
-        val release = if (active) storageCache.protectReading(manga.id, chapterId, chapterSourceMangaId(manga.id, chapter)) else ({})
+    DisposableEffect(storageCache, manga.id, chapterId, active, cacheRangeOwner) {
+        val release = if (active) storageCache.protectReading(manga.id, chapterId, chapterSourceMangaId(manga.id, chapter), cacheRangeOwner) else ({})
         onDispose { release() }
     }
-    LaunchedEffect(storageCache, manga.id, chapterId, pages, headers) {
+    LaunchedEffect(storageCache, manga.id, chapterId, pages, headers, active) {
         storageCache.registerPages(manga.id, chapterId,
             dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(manga.id, chapter), chapterId).sourceId,
-            pages, headers)
+            pages, headers, rangeOwner = cacheRangeOwner)
     }
     val background = preferences.theme.background()
     val colors = MaterialTheme.colorScheme
@@ -995,6 +996,7 @@ fun ReaderScreen(
 
     CompositionLocalProvider(LocalReaderActionFinished provides { if (desktop) keyboardFocusRestore++ },
         LocalReaderPreparationTracker provides preparationTracker,
+        LocalReaderCacheRangeOwner provides cacheRangeOwner,
         LocalReaderPageRepair provides ReaderRepairRenderContext(repairState, repairs) { index, waiting ->
             if (waiting) rescuePages[index] = true else rescuePages.remove(index)
         }) {
@@ -2335,6 +2337,8 @@ internal fun AdjacentPagePrefetch(
     val imageLoader = SingletonImageLoader.get(imagePlatformContext(context))
     val experience = remember(context) { ExperiencePolicyStore.get(context) }
     val tracker = LocalReaderPreparationTracker.current
+    val cacheRangeOwner = LocalReaderCacheRangeOwner.current
+    val rangeStore = remember(context) { dev.mangaflow.storage.StorageCacheStore.get(context) }
     val budget by experience.state.collectAsStateWithLifecycle()
     val overrides by experience.overrides.collectAsStateWithLifecycle()
     val currentBudget by rememberUpdatedState(budget)
@@ -2352,7 +2356,7 @@ internal fun AdjacentPagePrefetch(
     val currentLoaded by rememberUpdatedState(loadedPages)
     val prefetchEnabled by rememberUpdatedState(enabled)
     val readerActive by rememberUpdatedState(foregroundActive)
-    LaunchedEffect(pages, headers, mode, imageLoader, resolvePage, scriptPrefetch, sourceId, groups, viewportHeight, tracker) {
+    LaunchedEffect(pages, headers, mode, imageLoader, resolvePage, scriptPrefetch, sourceId, groups, viewportHeight, tracker, cacheRangeOwner, rangeStore) {
         val owner = Any()
         val requestScope = this
         val resolvedAttempts = mutableSetOf<Int>()
@@ -2439,6 +2443,7 @@ internal fun AdjacentPagePrefetch(
         fun transfers(): Set<Int> = (requests.keys + scriptRequests.keys).toSet()
         fun pending(): Set<Int> = transfers() + resolutionJobs.keys
         fun originalReady(index: Int, page: Page, diskKey: String?) {
+            cacheRangeOwner?.let { rangeStore.registerReadingResource(it, index, page, diskKey) }
             retainedPages[index] = PrefetchedReaderPage(page, diskKey)
             originalEpochs[index] = (originalEpochs[index] ?: 0) + 1
             inspected.remove(index)
@@ -2620,6 +2625,7 @@ internal fun AdjacentPagePrefetch(
                 // its independent decoded-page setting is larger. Keep that admitted work's
                 // exact resources without inflating the original-readiness target count.
                 val retained = observationWindow + desired + promoted
+                cacheRangeOwner?.let { rangeStore.updateReadingRange(it, retained + window.composed) }
                 resolvedAttempts.retainAll(retained)
                 resolvedPages.keys.retainAll(retained)
                 originalFinished.retainAll(retained)
@@ -3085,6 +3091,8 @@ private fun ReaderPageImage(
 ) {
     val context = LocalContext.current
     val preparationTracker = LocalReaderPreparationTracker.current
+    val imageRangeOwner = LocalReaderCacheRangeOwner.current
+    val imageRangeStore = remember(context) { dev.mangaflow.storage.StorageCacheStore.get(context) }
     val experience = remember(context) { ExperiencePolicyStore.get(context) }
     val imageRuntime by remember(experience) { experience.state.map { it.runtime }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = experience.state.value.runtime)
@@ -3406,9 +3414,11 @@ private fun ReaderPageImage(
                 )
                 .build() }
         }
-        LaunchedEffect(resource, loadedImage, pageVisible) {
+        LaunchedEffect(resource, loadedImage, pageVisible, imageRangeOwner) {
             val image = loadedImage ?: return@LaunchedEffect
             if (resource != null) {
+                imageRangeOwner?.let { imageRangeStore.registerReadingResource(it, logicalPageIndex, resource,
+                    image.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId)) }
                 readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource,
                     image.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId),
                     originalPage = page.takeIf { reload == 0 || resource.url == page.url }, refresh = true,

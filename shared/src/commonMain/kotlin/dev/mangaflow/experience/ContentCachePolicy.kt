@@ -25,6 +25,8 @@ data class ContentCachePreferences(
     /** Zero keeps the existing capacity/LRU policy without an additional idle/age limit. */
     val memoryIdleMinutes: Int = 2,
     val imageRetentionHours: Int = 0,
+    val memoryOutsideWindowCleanup: Boolean = true,
+    val diskOutsideWindowCleanup: Boolean = false,
 ) {
     val enabled: Boolean get() = storage != ContentCacheStorage.DISABLED
     val storeOnDisk: Boolean get() = storage == ContentCacheStorage.MEMORY_AND_DISK

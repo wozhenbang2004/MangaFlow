@@ -30,6 +30,8 @@ internal class ExperienceMemoryCache(private val cache: MemoryCache, private val
     private var expiredBytes = 0L
     private var evictedEntries = 0L
     private var evictedBytes = 0L
+    private var rangeEntries = 0L
+    private var rangeBytes = 0L
     private var clearedEntries = 0L
     private var clearedBytes = 0L
     private var lastReclaimedAt: Long? = null
@@ -83,6 +85,20 @@ internal class ExperienceMemoryCache(private val cache: MemoryCache, private val
         trimCapacity(minOf(size, limit).coerceAtLeast(0L), now)
         updateExpiryDeadline(now)
     }
+    /** Drops reusable references only; displayed/native images retain their own ownership. */
+    internal fun removeOutsideWindow(keys: Set<String>) = synchronized(lock) {
+        val now = monotonicTimeMillis()
+        val before = cache.size
+        var removed = 0
+        cache.keys.filter { it.key in keys }.forEach { key ->
+            // A recently reused entry may belong to another view not in the reader registry.
+            val last = accessed[key] ?: return@forEach
+            if (now - last > 30_000L && cache.remove(key)) { accessed.remove(key); removed++ }
+        }
+        recordRemoval(Removal.RANGE, removed, before, now)
+        updateExpiryDeadline(now)
+        cache.keys.map { it.key }.toSet()
+    }
     override fun clear() { clearAndMeasure() }
     fun clearAndMeasure(): Long = synchronized(lock) {
         val before = cache.size
@@ -98,7 +114,7 @@ internal class ExperienceMemoryCache(private val cache: MemoryCache, private val
         trimExpired(now)
         ExperienceMemoryCacheUsage(cache.size, limit, cache.keys.size,
             (idleMillis / 60_000L).toInt(), now, nextExpiry(), lastReclaimedAt,
-            expiredEntries, expiredBytes, evictedEntries, evictedBytes, clearedEntries, clearedBytes)
+            expiredEntries, expiredBytes, evictedEntries, evictedBytes, clearedEntries, clearedBytes, rangeEntries, rangeBytes)
     }
     private fun trimExpired(now: Long) {
         if (idleMillis > 0L) {
@@ -125,12 +141,16 @@ internal class ExperienceMemoryCache(private val cache: MemoryCache, private val
         accessed.keys.retainAll(retained)
         recordRemoval(Removal.CAPACITY, (entries - retained.size).coerceAtLeast(0), before, now)
     }
-    private enum class Removal { EXPIRED, CAPACITY, CLEARED }
+    private enum class Removal { EXPIRED, CAPACITY, CLEARED, RANGE }
     private fun recordRemoval(reason: Removal, count: Int, before: Long, now: Long) {
         val bytes = (before - cache.size).coerceAtLeast(0L)
         if (count == 0 && bytes == 0L) return
         lastReclaimedAt = now
         when (reason) {
+            Removal.RANGE -> {
+                rangeEntries = addCount(rangeEntries, count.toLong())
+                rangeBytes = addCount(rangeBytes, bytes)
+            }
             Removal.EXPIRED -> {
                 expiredEntries = addCount(expiredEntries, count.toLong())
                 expiredBytes = addCount(expiredBytes, bytes)

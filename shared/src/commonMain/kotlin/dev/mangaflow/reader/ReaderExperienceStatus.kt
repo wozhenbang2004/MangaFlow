@@ -570,10 +570,10 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
             StatusToken(Icons.Outlined.Tune, "备用配置", "${budget.standbySources} 源 · ${budget.standbyPages} 页 / 源")
         }
         ReaderStatusSection.CACHE -> {
-            StatusIconValue(Icons.Outlined.GridView, "离窗", "仅停未被接手的预读")
+            StatusIconValue(Icons.Outlined.GridView, "范围", "移出范围的缓存引用单独计数")
             StatusIconValue(Icons.Outlined.Timer, "过期", "从写入 / 命中起算")
             StatusIconValue(Icons.Outlined.SwapHoriz, "淘汰", "容量不足时先移旧图")
-            StatusExplanation("∞ 关闭时间过期。累计回收是缓存引用；当前画面、进程内存与磁盘原图各自保留。")
+            StatusExplanation("∞ 关闭时间过期。累计回收只计已移出的缓存引用，不代表进程内存已释放；当前画面与磁盘原图另计。")
             StatusExplanation("图片磁盘为共享缓存；独立源文件与离线用量见存储管理。")
         }
     }
@@ -1188,18 +1188,19 @@ private fun CacheOverview(store: ExperiencePolicyStore, expanded: ReaderWork?, e
                 })
         }
         StatusExplanation(when (idle) {
-            null -> "离窗不即删 · 等待缓存采样"
-            0 -> "离窗不即删 · 按容量淘汰"
+            null -> "等待解码缓存采样；范围移出与闲置到期分别计数"
+            0 -> "闲置到期关闭；范围移出与容量淘汰仍单独计数"
             else -> "到期时间按最近采样估算；再次使用会延后，不是整批清空。"
         })
-        val reclaimReserve = listOf(memory?.evictedBytes, memory?.expiredBytes, memory?.clearedBytes)
+        val reclaimReserve = listOf(memory?.rangeBytes, memory?.evictedBytes, memory?.expiredBytes, memory?.clearedBytes)
             .map { it?.let(::experienceCacheSize) ?: "—" }
-            .plus(listOf(memory?.evictedEntries, memory?.expiredEntries, memory?.clearedEntries).map { it?.let { count -> "$count 项" } ?: "—" })
+            .plus(listOf(memory?.rangeEntries, memory?.evictedEntries, memory?.expiredEntries, memory?.clearedEntries).map { it?.let { count -> "$count 项" } ?: "—" })
             .maxByOrNull { it.length } ?: "—"
-        StatusMetricSlots(reclaimReserve, Modifier.padding(vertical = 6.dp), count = 3) { index ->
+        StatusMetricSlots(reclaimReserve, Modifier.padding(vertical = 6.dp), count = 4) { index ->
             when (index) {
-                0 -> CacheReclaimMetric(Icons.Outlined.SwapHoriz, "淘汰", memory?.evictedBytes, memory?.evictedEntries)
-                1 -> CacheReclaimMetric(Icons.Outlined.Timer, "到期", memory?.expiredBytes, memory?.expiredEntries)
+                0 -> CacheReclaimMetric(Icons.Outlined.GridView, "范围", memory?.rangeBytes, memory?.rangeEntries)
+                1 -> CacheReclaimMetric(Icons.Outlined.SwapHoriz, "淘汰", memory?.evictedBytes, memory?.evictedEntries)
+                2 -> CacheReclaimMetric(Icons.Outlined.Timer, "到期", memory?.expiredBytes, memory?.expiredEntries)
                 else -> CacheReclaimMetric(Icons.Outlined.CleaningServices, "清空", memory?.clearedBytes, memory?.clearedEntries)
             }
         }
@@ -1267,7 +1268,7 @@ private fun CacheMemoryLifecycle(memory: ExperienceMemoryCacheUsage?, configured
     val idle = memory?.idleMinutes
     val expiry = when { idle == null -> "—"; idle > 0 -> "$idle min"; else -> "∞" }
     val released = memory?.let { sample ->
-        listOf(sample.expiredBytes, sample.evictedBytes, sample.clearedBytes).fold(0L) { total, bytes ->
+        listOf(sample.rangeBytes, sample.expiredBytes, sample.evictedBytes, sample.clearedBytes).fold(0L) { total, bytes ->
             total + minOf(bytes.coerceAtLeast(0L), Long.MAX_VALUE - total)
         }
     }
@@ -1277,12 +1278,12 @@ private fun CacheMemoryLifecycle(memory: ExperienceMemoryCacheUsage?, configured
         contentPadding = PaddingValues(start = 30.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
         modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).semantics(mergeDescendants = true) {
             contentDescription = (when {
-                idle == null -> "内存缓存尚未采样；配置为" + if (configuredIdleMinutes == 0) "仅按容量淘汰" else "闲置 $configuredIdleMinutes 分钟过期"
-                idle == 0 -> "闲置过期关闭，按容量淘汰"
+                idle == null -> "内存缓存尚未采样；配置为" + if (configuredIdleMinutes == 0) "关闭闲置到期" else "闲置 $configuredIdleMinutes 分钟过期"
+                idle == 0 -> "闲置过期关闭；容量淘汰仍生效，范围清理按设置执行"
                 else -> "闲置 $idle 分钟后过期"
             }) +
-                "；当前解码缓存条目 ${memory?.entries ?: "未知"}；本次到期、容量与清空累计回收 " +
-                (released?.let(::experienceCacheSize) ?: "未知") + "；点击查看回收详情"
+                "；当前解码缓存条目 ${memory?.entries ?: "未知"}；本进程内范围、到期、容量与清空累计移出缓存引用 " +
+                (released?.let(::experienceCacheSize) ?: "未知") + "；不代表进程内存已释放；点击查看回收详情"
         }) {
         FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)) {

@@ -42,6 +42,7 @@ internal fun encodeExperienceOverrides(o: ExperienceOverrides) = buildJsonObject
         put("popularity", c.popularityMinutes); put("comments", c.commentMinutes); put("failure", c.failureMinutes)
         put("retention", c.retentionHours); put("memoryEntries", c.snapshotMemoryEntries); put("diskMiB", c.snapshotDiskMiB)
         put("memoryIdle", c.memoryIdleMinutes); put("imageAge", c.imageRetentionHours)
+        put("memoryOutsideWindow", c.memoryOutsideWindowCleanup); put("diskOutsideWindow", c.diskOutsideWindowCleanup)
     })
 }.toString()
 
@@ -98,6 +99,8 @@ internal fun decodeExperienceOverrides(value: String?): ExperienceOverrides = ru
                 failureMinutes = number("failure", defaults.failureMinutes), retentionHours = number("retention", defaults.retentionHours),
                 snapshotMemoryEntries = number("memoryEntries", defaults.snapshotMemoryEntries), snapshotDiskMiB = number("diskMiB", defaults.snapshotDiskMiB),
                 memoryIdleMinutes = number("memoryIdle", defaults.memoryIdleMinutes), imageRetentionHours = number("imageAge", defaults.imageRetentionHours),
+                memoryOutsideWindowCleanup = c["memoryOutsideWindow"]?.jsonPrimitive?.booleanOrNull ?: defaults.memoryOutsideWindowCleanup,
+                diskOutsideWindowCleanup = c["diskOutsideWindow"]?.jsonPrimitive?.booleanOrNull ?: defaults.diskOutsideWindowCleanup,
             ).bounded()
         } ?: ContentCachePreferences(),
     )
