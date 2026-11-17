@@ -548,7 +548,8 @@ fun ReaderScreen(
         remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId, downloadStore, adultImageContext) {
             { page, budget, work ->
                 val local = downloadStore.resolvePrefetchPage(manga.id, readingChapterId, page)
-                if (local == null || local.url.startsWith("file:")) local else {
+                    ?: throw ReaderPrefetchDownloadOwned()
+                if (local.url.startsWith("file:")) local else {
                     val owner = chapterSourceMangaId(manga.id, chapter)
                     if (dev.mangaflow.data.SourceKeys.decodeChapter(owner, readingChapterId).sourceId == "jmcomic")
                         prefetchJmPage(adultImageContext, owner, readingChapterId, local, budget, work)
@@ -2140,6 +2141,9 @@ internal data class ReaderPagePrefetch(val request: Disposable, val transfer: Re
 
 private class ReaderPrefetchCacheRecovery(var recovered: Boolean = false)
 
+/** A download took ownership after initial resolution; only a local lookup may retry. */
+private class ReaderPrefetchDownloadOwned : Exception("已有下载负责本页")
+
 private data class LoadedReaderImage(val diskCacheKey: String?, val previewSize: IntSize,
     val memoryCacheKey: coil3.memory.MemoryCache.Key? = null)
 
@@ -2193,6 +2197,8 @@ internal fun AdjacentPagePrefetch(
         // The concrete byte-window owner is the retry generation, including a promoted
         // request that finishes after a newer optional window has already been installed.
         val budgetDeferred = mutableMapOf<Int, PrefetchByteBudget>()
+        val transientDeferred = mutableMapOf<Pair<Int, PrefetchStage>, PrefetchResourceBusy>()
+        val capacityDeferred = mutableMapOf<Pair<Int, PrefetchStage>, PrefetchCapacityExceeded>()
         var recoveryKey: PrefetchRecoveryKey? = null
         val workTokens = mutableMapOf<Int, PrefetchWork>()
         val allTickets = mutableMapOf<Pair<Int, PrefetchStage>, Long>()
@@ -2200,6 +2206,8 @@ internal fun AdjacentPagePrefetch(
         var inspectTargets = emptySet<Int>()
         var inspectVisible = emptySet<Int>()
         fun token(index: Int, stage: PrefetchStage): PrefetchWork {
+            transientDeferred.remove(index to stage)
+            capacityDeferred.remove(index to stage)
             if (stage == PrefetchStage.DOWNLOADING) budgetDeferred.remove(index)
             val ticket = tracker?.begin(index, stage, owner) ?: 0L
             allTickets[index to stage] = ticket
@@ -2214,17 +2222,27 @@ internal fun AdjacentPagePrefetch(
         fun failed(index: Int, stage: PrefetchStage, failure: Throwable, windowBudget: PrefetchByteBudget? = null) {
             val key = index to stage
             val sourceFailure = isReaderPrefetchFailure(failure)
+            transientDeferred.remove(key)
+            capacityDeferred.remove(key)
+            var resourceCause: Throwable? = failure
+            repeat(8) {
+                (resourceCause as? PrefetchResourceBusy)?.let { transientDeferred[key] = it }
+                (resourceCause as? PrefetchCapacityExceeded)?.let { capacityDeferred[key] = it }
+                resourceCause = resourceCause?.cause
+            }
             if (stage == PrefetchStage.DOWNLOADING) {
                 budgetDeferred.remove(index)
                 var cause: Throwable? = failure
                 repeat(8) {
-                    if (cause is PrefetchBudgetExceeded && windowBudget != null) budgetDeferred[index] = windowBudget
+                    if (cause is PrefetchBudgetExceeded && key !in capacityDeferred && windowBudget != null) budgetDeferred[index] = windowBudget
                     cause = cause?.cause
                 }
             }
             val reason = readerPrefetchErrorLabel(failure)
             end(index, stage, if (sourceFailure) ReaderPreparationPhase.FAILED else ReaderPreparationPhase.DEFERRED, reason)
-            if (sourceFailure) { resourceDeferred -= key; pageFailed(index, reason) } else resourceDeferred += key
+            if (sourceFailure) { resourceDeferred -= key; pageFailed(index, reason) }
+            else if (key in capacityDeferred) resourceDeferred -= key
+            else resourceDeferred += key
             val attempts = (retryAttempts[key] ?: 0L) + 1L
             retryAttempts[key] = attempts
             // Local protection is not a source retry. It resumes only after a real budget change;
@@ -2442,6 +2460,8 @@ internal fun AdjacentPagePrefetch(
                 retryAfter.keys.removeAll { it.first !in retained }
                 resourceDeferred.removeAll { it.first !in retained }
                 budgetDeferred.keys.retainAll(retained)
+                transientDeferred.keys.removeAll { it.first !in retained }
+                capacityDeferred.keys.removeAll { it.first !in retained }
                 if (window.bytes < budgetLimit) {
                     transfers().filter { it !in foreground && it !in promoted }.forEach(::stop)
                 }
@@ -2467,10 +2487,32 @@ internal fun AdjacentPagePrefetch(
                         retryAfter[key] = now
                     }
                 }
+                // Self-release cannot authorize another request. Each failed attempt waits
+                // for a foreign release from a blocked pool plus full replay headroom; its
+                // one scheduled retry is delayed and still passes normal window admission.
+                for ((key, failure) in transientDeferred.toMap()) {
+                    if (key.first in desired && key.first !in pending() && window.visibleReady &&
+                        window.foregroundActive && writable && experience.canRetryPrefetchResource(failure)) {
+                        transientDeferred.remove(key)
+                        retryAfter[key] = maxOf(retryAfter[key] ?: 0L,
+                            now + window.runtime.prefetchRetryBaseSeconds.coerceAtLeast(1).toLong() * 1_000L)
+                    }
+                }
+                // Known empty-pool insufficiency is not restarted by a direction, parallelism
+                // or arbitrary budget change. Keep the demand until a real attempt begins,
+                // and recheck at dispatch so a cap shrink during the delay cannot bypass it.
+                for ((key, failure) in capacityDeferred) {
+                    if (key.first in desired && key.first !in pending() && key !in retryAfter &&
+                        window.visibleReady && window.foregroundActive && writable &&
+                        experience.canRetryPrefetchCapacity(failure)) {
+                        retryAfter[key] = now + window.runtime.prefetchRetryBaseSeconds.coerceAtLeast(1).toLong() * 1_000L
+                    }
+                }
                 for ((key, readyAt) in retryAfter.toMap()) {
                     val (index, stage) = key
                     if (now < readyAt || index !in desired || !window.visibleReady ||
                         !window.foregroundActive || stage == PrefetchStage.DOWNLOADING && !writable || index in pending()) continue
+                    if (capacityDeferred[key]?.let { !experience.canRetryPrefetchCapacity(it) } == true) continue
                     when (stage) {
                         PrefetchStage.RESOLVING -> resolvedAttempts.remove(index)
                         PrefetchStage.DOWNLOADING -> originalFinished.remove(index)
@@ -2482,6 +2524,9 @@ internal fun AdjacentPagePrefetch(
                 for (index in desired) {
                     if (index in resolvedAttempts || index in resolutionJobs) continue
                     if (resolutionJobs.size >= window.resolveParallel) break
+                    if (capacityDeferred[index to PrefetchStage.RESOLVING]?.let {
+                            !experience.canRetryPrefetchCapacity(it)
+                        } == true) continue
                     val token = token(index, PrefetchStage.RESOLVING)
                     val job = requestScope.launch(start = CoroutineStart.LAZY) {
                         val owned = currentCoroutineContext()[Job]
@@ -2536,6 +2581,11 @@ internal fun AdjacentPagePrefetch(
                     if (!writable) break
                     val resource = resolvedPages[index] ?: continue
                     if (index in transfers() || index in originalFinished) continue
+                    // A due retry may have waited for a request slot after clearing finished.
+                    // Keep its demand authoritative until this actual dispatch, not just the timer.
+                    if (capacityDeferred[index to PrefetchStage.DOWNLOADING]?.let {
+                            !experience.canRetryPrefetchCapacity(it)
+                        } == true) continue
                     if (transfers().size >= window.parallel) break
                     if (experience.estimatedPageBytes(resource.url) > byteWindow.remaining) break
                     val windowBytes = byteWindow
@@ -2547,20 +2597,38 @@ internal fun AdjacentPagePrefetch(
                                 val local = scriptPrefetch(pages[index], windowBytes, token)
                                 currentCoroutineContext().ensureActive()
                                 if (scriptRequests[index] !== owned) return@launch
-                                if (local != null) originalReady(index, local, readerPageCacheKey(local, headers, sourceId))
+                                if (local != null) {
+                                    originalReady(index, local, readerPageCacheKey(local, headers, sourceId))
+                                    // A recovered script/JM original is complete, not a pending
+                                    // resource failure to restart when another budget changes.
+                                    val key = index to PrefetchStage.DOWNLOADING
+                                    retryAttempts.remove(key); retryAfter.remove(key); resourceDeferred.remove(key)
+                                }
                                 end(index, PrefetchStage.DOWNLOADING, if (local != null) ReaderPreparationPhase.COMPLETE
                                     else ReaderPreparationPhase.DEFERRED, if (local == null) "原图尚未准备" else null)
                                 originalFinished += index
                             } catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: ReaderPrefetchDownloadOwned) {
+                                if (scriptRequests[index] === owned) {
+                                    // Retry enters scriptPrefetch's local ownership lookup first.
+                                    // Never bypass the download's frozen route or count this as a
+                                    // source failure; its record can finish or disappear later.
+                                    end(index, PrefetchStage.DOWNLOADING, ReaderPreparationPhase.DEFERRED,
+                                        "已有下载负责本页")
+                                    originalFinished += index
+                                    retryAfter[index to PrefetchStage.DOWNLOADING] = monotonicTimeMillis() +
+                                        currentBudget.runtime.prefetchRetryBaseSeconds.coerceAtLeast(1).toLong() * 1000L
+                                }
+                            }
                             catch (pressure: OutOfMemoryError) {
                                 if (scriptRequests[index] === owned) {
                                     failed(index, PrefetchStage.DOWNLOADING, pressure, windowBytes)
                                     originalFinished += index
                                 }
                             }
-                            catch (_: PrefetchBudgetExceeded) {
+                            catch (deferred: PrefetchBudgetExceeded) {
                                 if (scriptRequests[index] === owned) {
-                                    failed(index, PrefetchStage.DOWNLOADING, PrefetchBudgetExceeded(), windowBytes)
+                                    failed(index, PrefetchStage.DOWNLOADING, deferred, windowBytes)
                                     originalFinished += index
                                 }
                             } catch (failure: Exception) {
@@ -2984,6 +3052,9 @@ private fun ReaderPageImage(
                 if (idle >= waitLimit) {
                     attempt.stopped = true
                     val observed = if (waitingForPrefetch) attemptPrefetch?.work?.snapshot() else preparationWork.snapshot()
+                    // Stop only this page's captured optional Coil transfer. Cancellation is
+                    // not completion: its owner retains the request and permits until it exits.
+                    pendingPrefetch?.request?.dispose()
                     // Native mutex waits and image processing have separate stages; only
                     // admitted transport inactivity can count as a source timeout.
                     val sourceTimeout = readerTimeoutIsSource(observed, pageTransfer)
@@ -3072,7 +3143,9 @@ private fun ReaderPageImage(
             if (reload > 0) oldPrefetch.request.dispose()
             try {
                 // This suspends only this page's handoff; other prefetch jobs keep their own lanes.
-                oldPrefetch.request.job.await()
+                // Join completion, including cancellation cleanup, before permitting the
+                // replacement image request. Never infer owner release from dispose().
+                oldPrefetch.request.job.join()
                 currentCoroutineContext().ensureActive()
                 if (!attempt.acceptsResult) return@LaunchedEffect
                 // Optional failure only releases the handoff. The foreground image request reports its own result.
@@ -3130,7 +3203,14 @@ private fun ReaderPageImage(
                     } },
                     onError = { _, result -> if (attempt.acceptsResult) {
                         loadChanged(false)
-                        if (requested.url.startsWith("file:") &&
+                        if (isReaderAdmissionDeferred(result.throwable)) {
+                            // A resource wait must not trigger missing-file recovery or
+                            // source failure. Keep the original; retry remains explicit.
+                            loading = false
+                            error = "本页资源等待超时，请重试"
+                            preparationTicket?.let { preparationTracker?.end(page.index, it,
+                                PrefetchStage.CHECKING, ReaderPreparationPhase.DEFERRED, error) }
+                        } else if (requested.url.startsWith("file:") &&
                             (page.url.startsWith("https:") || page.sourceImageToken.isNotEmpty()) && !fileRecoveryAttempted) {
                             // Files can be removed by the download screen while this image is visible.
                             // Recover just this image from its retained source address.
@@ -3310,6 +3390,7 @@ private fun ReaderPageImage(
                     onControls = onShowControls,
                     onStop = {
                         attempt.stopped = true; error = "已停止等待"; loading = false; loadChanged(false)
+                        pendingPrefetch?.request?.dispose()
                     },
                 )
             }

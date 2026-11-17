@@ -76,6 +76,17 @@ import kotlin.time.TimeSource
 
 internal typealias ReaderPageResolver = suspend (Page, ((Long) -> Unit)?) -> Page
 
+/** A decoder queue deadline does not invalidate already downloaded original bytes. */
+internal fun isReaderAdmissionDeferred(failure: Throwable): Boolean {
+    var cause: Throwable? = failure
+    repeat(8) {
+        val current = cause ?: return false
+        if (current is ExperienceAdmissionDeferred) return true
+        cause = current.cause
+    }
+    return false
+}
+
 /** An optional budget, cancellation or foreground promotion says nothing about source health. */
 internal fun isReaderPrefetchFailure(failure: Throwable): Boolean {
     var cause: Throwable? = failure

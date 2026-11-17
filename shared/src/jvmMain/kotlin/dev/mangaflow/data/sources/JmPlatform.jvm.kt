@@ -17,6 +17,7 @@ import dev.mangaflow.experience.PrefetchBudgetExceeded
 import dev.mangaflow.experience.PrefetchPromoted
 import dev.mangaflow.experience.PrefetchByteBudget
 import dev.mangaflow.experience.PrefetchStage
+import dev.mangaflow.experience.PrefetchResourceOwner
 import dev.mangaflow.experience.PrefetchWork
 import dev.mangaflow.experience.imageTimeouts
 import dev.mangaflow.net.DownloadRoutingStore
@@ -578,6 +579,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
         }
         var completed = false
         var retainedWire = 0L
+        val resourceOwner = PrefetchResourceOwner()
         val started = monotonicTimeMillis()
         try {
             releaseCache = storage.leaseFile(dev.mangaflow.storage.CacheBackend.JM,
@@ -650,9 +652,9 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                                 observers.forEach { it(count) }
                                 token.ifOptional {
                                     if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded()
-                                    policy.acceptPrefetchChunk(count)
+                                    policy.acceptPrefetchChunk(count, resourceOwner)
                                     try { receipt?.accept(count) }
-                                    catch (failure: Throwable) { policy.releasePrefetchBytes(count); throw failure }
+                                    catch (failure: Throwable) { policy.releasePrefetchBytes(count, resourceOwner); throw failure }
                                     retainedWire += count
                                 }
                             }
@@ -695,7 +697,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                                 throw failure
                             } finally {
                                 if (imageTransfer === transfer) imageTransfer = null
-                                policy.releasePrefetchBytes(retainedWire)
+                                policy.releasePrefetchBytes(retainedWire, resourceOwner)
                                 retainedWire = 0L
                                 if (!ignoreFeedback && caller.isActive && imageEpoch == epoch && probeSession == session)
                                     policy.recordTransfer(info.id, responseCode, received,
@@ -720,7 +722,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                         policy.withDecodeAdmission(optional = budget != null, promoted = { token.isForeground },
                             onWaiting = { token.admission(PrefetchStage.CHECKING, it) }) {
                             current()
-                            val inspectLease = policy.reserveMaterialization(raw.length() * 2L, !token.isForeground)
+                            val inspectLease = policy.reserveMaterialization(raw.length() * 2L, !token.isForeground, resourceOwner)
                             val bounds = try { readNativeReaderSize(raw.path, runtime) } finally { inspectLease() }
                                 ?: throw SourceException("禁漫返回的内容不是可读取的图片。")
                             val pixels = bounds.width.toLong() * bounds.height
@@ -731,7 +733,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                             // Input/output pixels plus encoded input/output copies are a conservative
                             // work reservation, never reported as already-resident process memory.
                             val reserve = raw.length() * 2L + if (restoresPixels) pixels * 24L else 0L
-                            val decodeLease = policy.reserveMaterialization(reserve, !token.isForeground)
+                            val decodeLease = policy.reserveMaterialization(reserve, !token.isForeground, resourceOwner)
                             try {
                                 val bytes = runInterruptible {
                                     val input = jmCacheIo { raw.readBytes() }
@@ -765,7 +767,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                 }
             }
         } finally {
-            policy.releasePrefetchBytes(retainedWire)
+            policy.releasePrefetchBytes(retainedWire, resourceOwner)
             if (!completed) receipt?.close()
             releaseCache()
             synchronized(imageActivityLock) {

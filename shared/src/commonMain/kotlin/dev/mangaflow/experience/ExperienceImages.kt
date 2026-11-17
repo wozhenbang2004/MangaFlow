@@ -216,7 +216,24 @@ internal class PrefetchByteBudget(private val maximum: Long, private val parent:
         }
     }
 }
-internal class PrefetchBudgetExceeded : IOException("本次预取已达到资源预算")
+internal open class PrefetchBudgetExceeded : IOException("本次预取已达到资源预算")
+/** One transport/materialization attempt; fields are owned by ExperiencePolicyStore's lock. */
+internal class PrefetchResourceOwner {
+    var streaming = 0L
+    var materialization = 0L
+    var streamingReleases = 0L
+    var materializationReleases = 0L
+}
+/** Full replay demand, with external-only release generations for the blocked resource pools. */
+internal class PrefetchResourceBusy(
+    val owner: PrefetchResourceOwner,
+    val streamingGeneration: Long?, val materializationGeneration: Long?,
+    val streamingBytes: Long, val materializationBytes: Long,
+) : PrefetchBudgetExceeded()
+/** This attempt cannot fit an empty shared pool until its configured/effective cap grows. */
+internal class PrefetchCapacityExceeded(
+    val streamingBytes: Long = 0L, val materializationBytes: Long = 0L,
+) : PrefetchBudgetExceeded()
 internal fun experienceOrigin(url: String) = url.toHttpUrlOrNull()?.host ?: "local"
 
 private val publicImageHeaders = setOf("referer", "user-agent", "accept", "accept-language", "accept-encoding", "origin")
@@ -548,7 +565,9 @@ private class ExperienceDecoderFactory(private val policy: ExperiencePolicyStore
             val optional = options.extras[workKey] == ExperienceImageWork.PREFETCH
             val work = options.extras[workTokenKey]
             suspend fun decode(): DecodeResult? = policy.withDecodeAdmission(optional,
-                { work?.isForeground == true }, { work?.admission(PrefetchStage.CHECKING, it) }) {
+                { work?.isForeground == true }, { work?.admission(PrefetchStage.CHECKING, it) },
+                maxWaitMillis = if (options.extras[workKey] == ExperienceImageWork.READER && work?.isForeground == true)
+                    policy.state.value.recovery.imageTimeoutSeconds.coerceAtLeast(1).toLong() * 1_000L else null) {
                 val started = monotonicTimeMillis()
                 var decodedBytes = 0L
                 var cancelled = false
@@ -669,6 +688,7 @@ private class ExperienceImageNetworkClient(
         val readerTransfer = request.extras[readerTransferKey]
         var received = 0L
         var accepted = 0L
+        val resourceOwner = PrefetchResourceOwner()
         var code: Int? = null
         var retry: String? = null
         var failed = false
@@ -707,10 +727,10 @@ private class ExperienceImageNetworkClient(
                                     requireNotNull(token).ifOptional {
                                         if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded()
                                         val windowReceipt = receipt ?: throw PrefetchBudgetExceeded()
-                                        policy.acceptPrefetchChunk(byteCount)
+                                        policy.acceptPrefetchChunk(byteCount, resourceOwner)
                                         try { windowReceipt.accept(byteCount) }
                                         catch (failure: Throwable) {
-                                            policy.releasePrefetchBytes(byteCount)
+                                            policy.releasePrefetchBytes(byteCount, resourceOwner)
                                             throw failure
                                         }
                                         accepted += byteCount
@@ -749,7 +769,7 @@ private class ExperienceImageNetworkClient(
         } finally {
             owned?.close?.invoke()
             system?.second?.invoke()
-            if (accepted > 0L) policy.releasePrefetchBytes(accepted)
+            if (accepted > 0L) policy.releasePrefetchBytes(accepted, resourceOwner)
             if (!completed) receipt?.close()
             // Cancellations and local budget stops do not count as a slow/failing source.
             if ((!interrupted || code == 429 || code == 503) && (code != null || failed)) policy.recordTransfer(request.extras[sourceKey] ?: experienceOrigin(request.url), code,

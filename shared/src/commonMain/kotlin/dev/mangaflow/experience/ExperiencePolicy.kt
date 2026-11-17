@@ -73,6 +73,8 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var activePrefetch = 0
     private var prefetchReserved = 0L
     private var prefetchStreamingBytes = 0L
+    private var streamingReleaseGeneration = 0L
+    private var materializationReleaseGeneration = 0L
     private var materializationStreamingBytes = 0L
     private var materializationReservedBytes = 0L
     private var queued = 0
@@ -578,7 +580,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     /** Local bytes use the same decode permits and need no source or network reservation. */
     internal suspend fun <T> withDecodeAdmission(
         optional: Boolean = false, promoted: () -> Boolean = { false },
-        onWaiting: (AdmissionWait?) -> Unit = {}, block: suspend () -> T,
+        onWaiting: (AdmissionWait?) -> Unit = {}, maxWaitMillis: Long? = null, block: suspend () -> T,
     ): T {
         val started = monotonicTimeMillis()
         val foreground = !optional || promoted()
@@ -595,6 +597,8 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                 enter = { activeDecodes++; enteredOptional = optional && !promoted(); if (enteredOptional) activeOptionalDecodes++ },
                 leave = { activeDecodes--; if (enteredOptional) activeOptionalDecodes-- },
                 abandon = { optional && !promoted() && !canDecodeOptional() }, onWaiting = onWaiting,
+                // Bound only admission. Running decoders keep their permit until they exit.
+                maxWaitMillis = maxWaitMillis,
             ) {
                 synchronized(lock) {
                     measurements.recordDecodeQueue(monotonicTimeMillis() - started)
@@ -918,31 +922,72 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         updateUsage()
     }
     internal fun estimatedPageBytes(key: String): Long = synchronized(lock) { measurements.estimate(key) }
-    internal fun acceptPrefetchChunk(bytes: Long, memoryBacked: Boolean = false) = synchronized(lock) {
-        if (bytes > mutableState.value.prefetchBytes - prefetchStreamingBytes ||
-            memoryBacked && bytes > mutableState.value.materializationBytes - materializationStreamingBytes - materializationReservedBytes)
-            throw PrefetchBudgetExceeded()
+    internal fun acceptPrefetchChunk(bytes: Long, owner: PrefetchResourceOwner, memoryBacked: Boolean = false) = synchronized(lock) {
+        val budget = mutableState.value
+        val streamNeed = owner.streaming + bytes
+        val materialNeed = owner.materialization + if (memoryBacked) bytes else 0L
+        // Include this attempt's earlier chunks: a too-large image must not become a
+        // transient failure merely because its final chunk would fit an empty pool.
+        if (streamNeed > budget.prefetchBytes || memoryBacked && materialNeed > budget.materializationBytes)
+            throw PrefetchCapacityExceeded(streamNeed, if (memoryBacked) materialNeed else 0L)
+        val streamBlocked = bytes > budget.prefetchBytes - prefetchStreamingBytes
+        val materialBlocked = memoryBacked && bytes > budget.materializationBytes -
+            materializationStreamingBytes - materializationReservedBytes
+        if (streamBlocked || materialBlocked) throw PrefetchResourceBusy(owner,
+            if (streamBlocked) streamingReleaseGeneration - owner.streamingReleases else null,
+            if (materialBlocked) materializationReleaseGeneration - owner.materializationReleases else null,
+            streamNeed, materialNeed)
         prefetchStreamingBytes += bytes
-        if (memoryBacked) materializationStreamingBytes += bytes
+        owner.streaming += bytes
+        if (memoryBacked) { materializationStreamingBytes += bytes; owner.materialization += bytes }
     }
-    internal fun releasePrefetchBytes(bytes: Long, memoryBacked: Boolean = false) = synchronized(lock) {
+    internal fun releasePrefetchBytes(bytes: Long, owner: PrefetchResourceOwner, memoryBacked: Boolean = false) = synchronized(lock) {
         prefetchStreamingBytes -= bytes
-        if (memoryBacked) materializationStreamingBytes -= bytes
+        owner.streaming -= bytes
+        if (memoryBacked) { materializationStreamingBytes -= bytes; owner.materialization -= bytes }
+        if (bytes > 0L) {
+            streamingReleaseGeneration++; owner.streamingReleases++
+            if (memoryBacked) { materializationReleaseGeneration++; owner.materializationReleases++ }
+        }
+    }
+    internal fun canRetryPrefetchResource(failure: PrefetchResourceBusy): Boolean = synchronized(lock) {
+        val externalRelease = failure.streamingGeneration?.let {
+            it != streamingReleaseGeneration - failure.owner.streamingReleases
+        } == true || failure.materializationGeneration?.let {
+            it != materializationReleaseGeneration - failure.owner.materializationReleases
+        } == true
+        externalRelease &&
+            (failure.streamingBytes == 0L || failure.streamingBytes <= mutableState.value.prefetchBytes - prefetchStreamingBytes) &&
+            (failure.materializationBytes == 0L || failure.materializationBytes <= mutableState.value.materializationBytes -
+                materializationStreamingBytes - materializationReservedBytes)
+    }
+    internal fun canRetryPrefetchCapacity(failure: PrefetchCapacityExceeded): Boolean = synchronized(lock) {
+        // The failed demand exceeded at least one empty-pool cap. Reaching that exact
+        // demand therefore requires real upward capacity recovery, not arbitrary jitter.
+        (failure.streamingBytes == 0L || failure.streamingBytes <= mutableState.value.prefetchBytes - prefetchStreamingBytes) &&
+            (failure.materializationBytes == 0L || failure.materializationBytes <= mutableState.value.materializationBytes -
+                materializationStreamingBytes - materializationReservedBytes)
     }
     /** Temporary image working-set reservation, independent from transferred/original-window bytes. */
-    internal fun reserveMaterialization(bytes: Long, optional: Boolean): () -> Unit = synchronized(lock) {
+    internal fun reserveMaterialization(bytes: Long, optional: Boolean, owner: PrefetchResourceOwner): () -> Unit = synchronized(lock) {
         require(bytes >= 0L && bytes <= Long.MAX_VALUE - materializationReservedBytes)
+        val needed = owner.materialization + bytes
+        if (optional && needed > mutableState.value.materializationBytes)
+            throw PrefetchCapacityExceeded(materializationBytes = needed)
         if (optional && bytes > mutableState.value.materializationBytes - materializationStreamingBytes - materializationReservedBytes)
-            throw PrefetchBudgetExceeded()
-        // A reservation is not evidence of allocated/resident bytes. Keep the observed usage
-        // and forecast basis unchanged while sharing this allowance with real script buffers.
+            throw PrefetchResourceBusy(owner, null,
+                materializationReleaseGeneration - owner.materializationReleases, owner.streaming, needed)
+        // A reservation is not evidence of allocated/resident process memory.
         materializationReservedBytes += bytes
+        owner.materialization += bytes
         var held = true
         val release: () -> Unit = {
             synchronized(lock) {
                 if (held) {
                     held = false
                     materializationReservedBytes -= bytes
+                    owner.materialization -= bytes
+                    if (bytes > 0L) { materializationReleaseGeneration++; owner.materializationReleases++ }
                 }
             }
         }

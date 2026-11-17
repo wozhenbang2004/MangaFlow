@@ -10,8 +10,10 @@ import dev.mangaflow.data.sources.nativeJmImageEpoch
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.PrefetchByteBudget
 import dev.mangaflow.experience.PrefetchStage
+import dev.mangaflow.experience.PrefetchResourceOwner
 import dev.mangaflow.experience.PrefetchWork
 import dev.mangaflow.experience.PrefetchPromoted
+import dev.mangaflow.experience.PrefetchCapacityExceeded
 import dev.mangaflow.experience.PrefetchBudgetExceeded
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
@@ -333,7 +335,7 @@ internal suspend fun materializeScriptPage(
                                     val length = responseHeaders.entries.firstOrNull { it.key.equals("Content-Length", true) }
                                         ?.value?.toLongOrNull()
                                     if (length != null && length > policy.state.value.materializationBytes)
-                                        throw PrefetchBudgetExceeded()
+                                        throw PrefetchCapacityExceeded(streamingBytes = length, materializationBytes = length)
                                     val encoding = responseHeaders.entries.firstOrNull { it.key.equals("Content-Encoding", true) }
                                         ?.value?.trim()
                                     // Darwin's optional image path buffers the HTTP message before
@@ -416,6 +418,7 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
         ?: DownloadRoutingStore.get(context).sourceSnapshot(source)
     val transferLock = SynchronizedObject()
     val receipt = budget.child()
+    val resourceOwner = PrefetchResourceOwner()
     var completed = false
     var retained = 0L
     var received = 0L
@@ -431,10 +434,10 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
                 received += count
                 work.ifOptional {
                     if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded()
-                    policy.acceptPrefetchChunk(count, memoryBacked = true)
+                    policy.acceptPrefetchChunk(count, resourceOwner, memoryBacked = true)
                     try { receipt.accept(count) }
                     catch (failure: Throwable) {
-                        policy.releasePrefetchBytes(count, memoryBacked = true)
+                        policy.releasePrefetchBytes(count, resourceOwner, memoryBacked = true)
                         throw failure
                     }
                     retained += count
@@ -453,7 +456,7 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
         load().also { completed = true }
     } finally {
         val released = synchronized(transferLock) { closed = true; retained.also { retained = 0L } }
-        policy.releasePrefetchBytes(released, memoryBacked = true)
+        policy.releasePrefetchBytes(released, resourceOwner, memoryBacked = true)
         if (!completed) receipt.close()
     }
 }

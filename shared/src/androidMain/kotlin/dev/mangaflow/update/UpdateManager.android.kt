@@ -228,7 +228,11 @@ actual class UpdateManager private constructor(private val context: Context) {
             val release = verifyManifest(Base64.decode(task.payload.getString("envelope"), Base64.DEFAULT))
             require(release.sha256 == task.payload.getString("sha256") && release.versionCode == task.payload.getLong("versionCode"))
             _state.value = UpdateState(UpdatePhase.DOWNLOADING, release, total = release.bytes, message = "正在后台下载安装包…")
-            require(release.versionCode > versionCode(installed())) { "此版本已安装，请重新检查更新" }
+            val installedVersion = versionCode(installed())
+            require(release.versionCode > installedVersion) {
+                if (release.versionCode == installedVersion) "此版本已安装，请重新检查更新"
+                else "下载任务版本低于当前版本，已阻止降级；请重新检查更新"
+            }
             if (!root.isDirectory && !root.mkdirs()) throw IOException("无法创建更新目录")
             val target = readyFile(release)
             if (target.isFile && runCatching { validateApk(target, release) }.isSuccess) {
@@ -752,7 +756,12 @@ actual class UpdateManager private constructor(private val context: Context) {
         val candidate = context.packageManager.getPackageArchiveInfo(file.absolutePath, signatureFlags()) ?: throw IOException("无法读取安装包")
         val current = installed()
         require(candidate.packageName == context.packageName && versionCode(candidate) == release.versionCode && candidate.versionName == release.versionName) { "安装包版本或应用身份不匹配" }
-        require(versionCode(candidate) > versionCode(current)) { "此更新版本已安装" }
+        val candidateVersion = versionCode(candidate)
+        val installedVersion = versionCode(current)
+        require(candidateVersion > installedVersion) {
+            if (candidateVersion == installedVersion) "此更新版本已安装"
+            else "安装包版本低于当前版本，已阻止降级；请重新检查更新"
+        }
         val before = signatures(current).map { it.toList() }.toSet()
         val after = signatures(candidate).map { it.toList() }.toSet()
         require(before.isNotEmpty() && before == after) { "安装包签名与当前应用不一致" }
