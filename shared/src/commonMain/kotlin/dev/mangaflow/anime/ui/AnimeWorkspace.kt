@@ -81,6 +81,8 @@ internal fun AnimeWorkspace(
     var browseCandidateVideo by remember { mutableStateOf(false) }
     var pendingAssociation by remember { mutableStateOf<AnimeSourceAssociation?>(null) }
     var sourceEpisode by remember { mutableStateOf<AnimeEpisode?>(null) }
+    var pendingManualPlaybackId by remember { mutableStateOf<String?>(null) }
+    var disclosedAutoSelectionGeneration by remember { mutableStateOf<Long?>(null) }
     var trackingVisible by remember { mutableStateOf(false) }
     var reviewsVisible by remember { mutableStateOf(false) }
     var openingSubject by remember { mutableStateOf<AnimeSubject?>(null) }
@@ -137,11 +139,13 @@ internal fun AnimeWorkspace(
         }
     }
     LaunchedEffect(state.detail?.subject?.id) {
+        pendingManualPlaybackId = null
         sourceEpisode = null
         sourcesVisible = false
     }
 
     fun closePlayback() {
+        pendingManualPlaybackId = null
         playerFullscreen = false
         playbackIntent = null
         playbackFailure = null
@@ -220,11 +224,23 @@ internal fun AnimeWorkspace(
         open(subject)
         if (candidates.isNotEmpty()) controller.stageSearchCandidates(subject.id, candidates)
     }
+    fun dismissSources() {
+        pendingManualPlaybackId = null
+        sourcesVisible = false
+        controller.cancelPlaybackResolution()
+    }
     fun showSources(episode: AnimeEpisode? = null) {
+        pendingManualPlaybackId = null
+        if (state.resolving) {
+            awaitingResolve = false
+            playbackFailure = "已暂停自动准备，可重试或手动选择片源。"
+        }
+        controller.cancelPlaybackResolution()
         sourceEpisode = episode
         sourcesVisible = true
     }
     fun requestPlayback(episode: AnimeEpisode, option: AnimeEpisodeOption?) {
+        pendingManualPlaybackId = null
         playbackIntent = AnimePlaybackIntent(episode, option)
         playbackFailure = null
         awaitingResolve = true
@@ -232,14 +248,13 @@ internal fun AnimeWorkspace(
         controller.play(episode.id, option)
     }
     fun play(episode: AnimeEpisode) {
-        val option = state.episodeOptions[episode.id].orEmpty().firstOrNull { it.confirmed }
-        if (option != null) requestPlayback(episode, option) else showSources(episode)
+        requestPlayback(episode, null)
     }
     fun back() {
         when {
             toolsVisible -> { toolsVisible = false; pendingTool = null }
             downloadsVisible -> downloadsVisible = false
-            sourcesVisible -> sourcesVisible = false
+            sourcesVisible -> dismissSources()
             trackingVisible -> trackingVisible = false
             reviewsVisible -> reviewsVisible = false
             searchExpanded -> { searchExpanded = false; browseCandidate = null; browseCandidateVideo = false }
@@ -277,6 +292,31 @@ internal fun AnimeWorkspace(
                 awaitingResolve = false
             } else if (state.pendingPlayback != null || playback.phase != AnimePlayerPhase.IDLE) awaitingResolve = false
         }
+    }
+    // Automatic matching only discloses manual association when the controller cannot prove it.
+    // Dismissing this panel abandons the one-shot continuation, not the saved source bindings.
+    LaunchedEffect(state.autoPlaySelectionEpisodeId, state.autoPlaySelectionGeneration, active) {
+        val id = state.autoPlaySelectionEpisodeId
+        if (id == null) {
+            disclosedAutoSelectionGeneration = null
+        } else if (active && disclosedAutoSelectionGeneration != state.autoPlaySelectionGeneration) {
+            val episode = state.detail?.episodes?.firstOrNull { it.id == id } ?: return@LaunchedEffect
+            disclosedAutoSelectionGeneration = state.autoPlaySelectionGeneration
+            pendingManualPlaybackId = id
+            playbackIntent = AnimePlaybackIntent(episode)
+            playbackFailure = state.sourceError ?: "未能确认本集的对应片源，请选择后继续。"
+            awaitingResolve = false
+            sourceEpisode = episode
+            sourcesVisible = true
+        }
+    }
+    LaunchedEffect(pendingManualPlaybackId, state.episodeOptions, state.resolving, sourcesVisible, active) {
+        val id = pendingManualPlaybackId ?: return@LaunchedEffect
+        if (!active || !sourcesVisible || state.resolving) return@LaunchedEffect
+        val episode = state.detail?.episodes?.firstOrNull { it.id == id } ?: return@LaunchedEffect
+        val option = state.episodeOptions[id].orEmpty().firstOrNull { it.confirmed } ?: return@LaunchedEffect
+        sourcesVisible = false
+        requestPlayback(episode, option)
     }
     LaunchedEffect(state.detail, state.detailLoading, state.detailError, recheckRequest) {
         val review = recheckRequest
@@ -511,7 +551,7 @@ internal fun AnimeWorkspace(
     AnimeDownloadsPanel(downloadsVisible, controller, state, backdrop,
         onDismiss = { downloadsVisible = false }, onPlay = ::playDownload)
     AnimeSourcesPanel(sourcesVisible, state, controller, backdrop, sourceEpisode,
-        onDismiss = { sourcesVisible = false }, onPlay = { episodeId, option ->
+        onDismiss = ::dismissSources, onPlay = { episodeId, option ->
             sourcesVisible = false
             state.detail?.episodes?.firstOrNull { it.id == episodeId }?.let { requestPlayback(it, option) }
         })

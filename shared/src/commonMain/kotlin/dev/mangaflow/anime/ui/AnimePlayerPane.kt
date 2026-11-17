@@ -239,7 +239,7 @@ internal fun AnimePlayerPane(
                     )
                 })
                 if (!playback.inPictureInPicture) Box(Modifier.motionInputGate(active && !locked && !obscured && !settingsPresent)) {
-                    AnimeVideoStatus(state.resolving, failure, playback, next, onRetry, onSources, onEpisode,
+                    AnimeVideoStatus(state.resolving, state.autoMatching, failure, playback, next, onRetry, onSources, onEpisode,
                         onKeepPlayback = onKeepPlayback,
                         canKeepPlayback = playback.phase == AnimePlayerPhase.READY && (state.resolving || resolutionError != null),
                         onRestorePlayback = onRestorePlayback, canRestorePlayback = state.canRestorePlayback)
@@ -324,13 +324,14 @@ internal fun AnimePlayerPane(
 }
 
 @Composable
-private fun AnimeVideoStatus(resolving: Boolean, failure: String?, playback: AnimePlayerState,
+private fun AnimeVideoStatus(resolving: Boolean, autoMatching: Boolean, failure: String?, playback: AnimePlayerState,
     next: AnimeEpisode?, onRetry: () -> Unit, onSources: () -> Unit, onEpisode: (AnimeEpisode) -> Unit,
     onKeepPlayback: () -> Unit, canKeepPlayback: Boolean,
     onRestorePlayback: () -> Unit, canRestorePlayback: Boolean) {
     when {
         resolving -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            PlayerStageMessage("正在取得播放地址", null)
+            PlayerStageMessage(if (autoMatching) "正在匹配片源" else "正在取得播放地址",
+                if (autoMatching) "自动核对作品与集数" else null)
             if (canKeepPlayback) MotionTextButton(onClick = onKeepPlayback, modifier = Modifier.heightIn(min = 44.dp)) {
                 Text("取消换源，保留当前播放", color = Color.White)
             }

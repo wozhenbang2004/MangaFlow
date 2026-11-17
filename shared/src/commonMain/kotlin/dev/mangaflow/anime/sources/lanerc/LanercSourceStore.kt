@@ -161,6 +161,8 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             val next = LanercInstalledPackage(id, code, digest, version, expected?.enabled ?: true,
                 randomUuid(), expected?.optionsJson ?: "{}", expected?.code, expected?.digest, expected?.version,
                 optionsKey = expected?.optionsKey.orEmpty())
+            stage = "准备组件"
+            LanercEnginePreparation.awaitReady(application)
             stage = "兼容验证"
             runtime.validate(next, descriptor)
             stage = "保存"
