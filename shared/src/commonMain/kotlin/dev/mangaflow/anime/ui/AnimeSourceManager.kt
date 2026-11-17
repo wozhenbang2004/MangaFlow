@@ -16,6 +16,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
+import dev.mangaflow.anime.sources.lanerc.SourcePreparationPhase
+import dev.mangaflow.anime.sources.lanerc.SourcePreparationState
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 
@@ -61,8 +63,8 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                     LazyColumn(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(16.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (tab == 0) item {
-                            AnimeSectionTitle("内置来源", "TvTFun · AGE · GiriGiriLove · LMM")
-                            AnimeQuietLabel("内建来源已随应用准备；扩展来源可在此管理。", Modifier.padding(bottom = 12.dp))
+                            AnimeSectionTitle("内置与自动来源")
+                            AnimeQuietLabel("内置来源随包可用；支持的扩展会自动准备，无需逐个安装。", Modifier.padding(bottom = 12.dp))
                         }
                         if (tab == 1) {
                             item(key = "builtin-browse-heading") { AnimeSectionTitle("内置资料") }
@@ -77,7 +79,10 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                         items(listings, key = { it.id }) { item ->
                             val busy = item.id in state.sourceOperationIds
                             AnimeSelection(item.name, when {
+                                item.bundledAlternativeId != null -> "已有内置实现 · 无需重复安装"
+                                item.automaticPreparation -> animePreparationLabel(state.sourcePreparation[item.id])
                                 busy -> "正在处理"
+                                item.preparationUnavailableReason != null -> "协议待适配 · 查看原因"
                                 !item.installable -> when (item.kind.name) {
                                     "COMIC" -> "漫画协议 · 动漫模块不支持"
                                     "UNKNOWN" -> "协议待适配 · 暂不可用"
@@ -95,17 +100,37 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                         }
                         if (listings.isEmpty() && tab != 1) item { AnimeMessage("这一类暂无来源") }
                     }
-                    if (tab == 0) MotionButton(onClick = controller::installVideoSources,
-                        enabled = state.sourceOperationIds.isEmpty() && listings.any { it.installable && !it.installed },
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
-                        Text(if (state.sourceOperationIds.isEmpty()) "安装视频来源" else "正在安装来源")
+                    val automaticStates = state.sourcePreparation.values
+                    val preparing = automaticStates.any { it.phase in setOf(SourcePreparationPhase.PENDING,
+                        SourcePreparationPhase.PREPARING, SourcePreparationPhase.RETRYING) }
+                    if (automaticStates.any { it.phase == SourcePreparationPhase.FAILED }) {
+                        MotionButton(onClick = controller::retryAutomaticSources,
+                            enabled = state.sourceOperationIds.isEmpty(),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
+                            Text("重试未完成的自动准备")
+                        }
+                    } else if (preparing) {
+                        AnimeQuietLabel("正在后台准备来源，不影响已就绪来源的使用。",
+                            Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
                     }
                 } else {
-                    val busy = selected.id in state.sourceOperationIds
+                    val preparation = state.sourcePreparation[selected.id]
+                    val busy = selected.id in state.sourceOperationIds || preparation?.phase in
+                        setOf(SourcePreparationPhase.PENDING, SourcePreparationPhase.PREPARING, SourcePreparationPhase.RETRYING)
                     LazyColumn(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(20.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         item {
                             AnimeQuietLabel(animeExtensionKind(selected.kind.name) + if (selected.installed) " · " + selected.version else "")
+                        }
+                        if (selected.automaticPreparation) item {
+                            AnimeQuietLabel(animePreparationLabel(preparation))
+                            if (!preparation?.message.isNullOrBlank()) AnimeQuietLabel(preparation?.message.orEmpty())
+                        }
+                        if (selected.preparationUnavailableReason != null) item {
+                            AnimeQuietLabel(selected.preparationUnavailableReason)
+                        }
+                        if (selected.bundledAlternativeId != null) item {
+                            AnimeQuietLabel("此站已有随包内置实现，无需重复安装脚本。")
                         }
                         val search = state.sourceResults.firstOrNull { it.providerId == selected.id }
                         val catalogueError = state.sourceCatalogErrors[selected.id]
@@ -141,6 +166,21 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                             }
                             item { CompactMenuAction(Icons.Outlined.DeleteOutline, "移除脚本", enabled = !busy,
                                 destructive = true, onClick = { removeConfirm = true }) }
+                        } else if (selected.automaticPreparation) item {
+                            if (preparation?.phase == SourcePreparationPhase.FAILED) {
+                                MotionTextButton(onClick = controller::retryAutomaticSources, enabled = !busy) {
+                                    Text("重试未完成的自动准备")
+                                }
+                            } else if (preparation?.phase == SourcePreparationPhase.DISABLED) {
+                                AnimeQuietLabel("此来源已停用，自动重试不会覆盖你的选择。")
+                                MotionTextButton(onClick = { controller.restoreAutomaticSource(selected.id) }, enabled = !busy) {
+                                    Text("重新准备此来源")
+                                }
+                            } else {
+                                AnimeQuietLabel("无需手动安装，准备状态会自动更新。")
+                            }
+                        } else if (selected.bundledAlternativeId != null) {
+                            // The native implementation is already provided; do not offer duplicate script install.
                         } else if (selected.installable) item {
                             MotionButton(onClick = { controller.installSource(selected.id) }, enabled = !busy,
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
@@ -199,4 +239,14 @@ private fun animeExtensionCapability(function: String): String? = when (function
     "danmu" -> "弹幕"
     "login" -> "来源登录"
     else -> null
+}
+
+private fun animePreparationLabel(state: SourcePreparationState?): String = when (state?.phase) {
+    SourcePreparationPhase.PENDING -> "等待自动准备"
+    SourcePreparationPhase.PREPARING -> "正在自动准备"
+    SourcePreparationPhase.RETRYING -> "等待自动重试"
+    SourcePreparationPhase.READY -> "已准备 · 已启用"
+    SourcePreparationPhase.DISABLED -> "已停用"
+    SourcePreparationPhase.FAILED -> "自动准备未完成 · 可统一重试"
+    null -> "正在读取准备状态"
 }

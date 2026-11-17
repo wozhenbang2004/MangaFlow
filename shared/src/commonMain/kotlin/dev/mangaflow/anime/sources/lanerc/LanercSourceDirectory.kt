@@ -32,6 +32,9 @@ data class LanercSourceListing(
     val installable: Boolean = true,
     val revision: String? = null,
     val hasPrivateOptions: Boolean = false,
+    val automaticPreparation: Boolean = false,
+    val preparationUnavailableReason: String? = null,
+    val bundledAlternativeId: String? = null,
 )
 
 internal data class LanercInstalledPackage(

@@ -282,4 +282,5 @@ data class AnimeScreenState(
     val sourceDanmakuAvailable: Boolean = false,
     val sourceExtensions: List<dev.mangaflow.anime.sources.lanerc.LanercSourceListing> = emptyList(),
     val sourceOperationIds: Set<String> = emptySet(),
+    val sourcePreparation: Map<String, dev.mangaflow.anime.sources.lanerc.SourcePreparationState> = emptyMap(),
 )

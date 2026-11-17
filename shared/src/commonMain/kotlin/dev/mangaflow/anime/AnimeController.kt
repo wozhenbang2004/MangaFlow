@@ -187,6 +187,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             catch (failure: Exception) { notice(failure.message ?: "追番记录未能读取。") }
         }
         scope.launch {
+            sources.extensions.preparation.collect { preparation ->
+                mutableState.update { it.copy(sourcePreparation = preparation) }
+            }
+        }
+        scope.launch {
             sources.extensions.ready.await()
             var previous = sources.extensions.state.value.associateBy { it.id }
             sources.extensions.state.collect { listings ->
@@ -1672,6 +1677,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             notice(if (removeEntry) "已移除这部番的本机记录。" else "已清除观看位置；追番状态与已看标记保留。")
         }
     }
+
+    fun retryAutomaticSources() = sourceOperation("automatic-sources") { sources.extensions.retryAutomaticSources() }
+    fun restoreAutomaticSource(id: String) = sourceOperation(id) { sources.extensions.restoreAutomaticSource(id) }
 
     fun installSource(id: String) = sourceOperation(id) { sources.extensions.install(id) }
     fun updateSource(id: String) = sourceOperation(id) { sources.extensions.update(id) }

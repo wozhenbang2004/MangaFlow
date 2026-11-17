@@ -25,6 +25,7 @@ import kotlinx.coroutines.IO
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -104,6 +105,32 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         }
     }
 
+    private val automatic = AutomaticAnimeSources(application, this, scope)
+    val preparation = automatic.state
+    suspend fun retryAutomaticSources() { ready.await(); automatic.start() }
+    suspend fun restoreAutomaticSource(id: String) = actionGate(id).withLock {
+        ready.await()
+        automatic.restore(id)
+    }
+
+    private val operationGuard = SynchronizedObject()
+    private val packageOperations = mutableMapOf<String, Mutex>()
+    private val sourceActions = mutableMapOf<String, Mutex>()
+    // User removal/restoration spans both the persistent preference and package mutation.
+    // Background install jobs never acquire this gate, so removal may cancel/join them safely.
+    private fun actionGate(id: String): Mutex = synchronized(operationGuard) {
+        sourceActions.getOrPut(id) { Mutex() }
+    }
+    private fun packageGate(id: String): Mutex = synchronized(operationGuard) {
+        packageOperations.getOrPut(id) { Mutex() }
+    }
+    init { scope.launch { ready.await(); automatic.start() } }
+
+    internal suspend fun installAutomatically(id: String) = packageGate(id).withLock {
+        require(id in AUTOMATIC_ANIME_SOURCE_IDS)
+        download(id, update = false, initialEnabled = id !in AUTOMATIC_ANIME_INACTIVE_IDS)
+    }
+
     suspend fun homeSections(id: String): List<LanercBrowseSection> = readHomeSections(id)
     suspend fun categories(id: String): List<LanercCategory> = readCategories(id)
     suspend fun searchFiltered(id: String, category: String, filtersJson: String = "{}", page: Int = 1): List<dev.mangaflow.anime.AnimeSourceTitle> =
@@ -116,15 +143,15 @@ class LanercSourceStore private constructor(context: PlatformContext) {
     }
 
     /**
-     * Optional extensions remain explicit. The repository registers its native adapters without
-     * downloads; opening anime must never turn a remote directory into executable bootstrap code.
+     * Native adapters need no downloads. The packaged automatic manifest is user-authorized;
+     * it never executes unverified directory bytes or silently updates an installed revision.
      * A known URL is not an integrity guarantee: pin downloaded bytes before validation executes JS.
      */
-    suspend fun install(id: String) {
+    suspend fun install(id: String) = packageGate(id).withLock {
         if (id in BUNDLED_HTML_ANIME_IDS) editBuiltIn(id, enabled = true, removed = false)
         else download(id, update = false)
     }
-    suspend fun update(id: String) {
+    suspend fun update(id: String) = packageGate(id).withLock {
         check(id !in BUNDLED_HTML_ANIME_IDS) { "此来源已内置，随应用版本更新，无需下载脚本。" }
         download(id, update = true)
     }
@@ -140,10 +167,11 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         return failures
     }
 
-    private suspend fun download(id: String, update: Boolean) {
+    private suspend fun download(id: String, update: Boolean, initialEnabled: Boolean = true) {
         ready.await()
         check(!loadFailure) { "来源存储未能读取，原文件仍保留；暂不能覆盖。" }
         val descriptor = descriptor(id)
+        require(id !in ANIME_PRIVATE_KEY_PACKAGES) { "此来源需要独立协议适配，未复制其中的第三方私钥。" }
         require(installable(descriptor)) { unsupported(descriptor) ?: "此类来源暂不支持。" }
         val expected = packages.value[id]
         if (!update && expected != null) return
@@ -158,7 +186,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             if (digest != descriptor.observedDigest) throw LanercPackageIntegrityException()
             val version = Regex("(?im)(?:version|版本)\\s*[:=]\\s*['\"]?([A-Za-z0-9._-]{1,48})")
                 .find(code)?.groupValues?.get(1) ?: digest.take(12)
-            val next = LanercInstalledPackage(id, code, digest, version, expected?.enabled ?: true,
+            val next = LanercInstalledPackage(id, code, digest, version, expected?.enabled ?: initialEnabled,
                 randomUuid(), expected?.optionsJson ?: "{}", expected?.code, expected?.digest, expected?.version,
                 optionsKey = expected?.optionsKey.orEmpty())
             stage = "准备组件"
@@ -189,6 +217,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
                 }
             }
             mutableState.value = mutableState.value.map { if (it.id == id) it.copy(error = message) else it }
+            if (failure is LanercCapabilityException) throw LanercCapabilityException(message)
             throw IllegalStateException(message)
         }
     }
@@ -229,19 +258,22 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             revision = randomUuid(), previousCode = installed.code, previousDigest = installed.digest,
             previousVersion = installed.version)
     }
-    suspend fun remove(id: String) {
-        if (id in BUNDLED_HTML_ANIME_IDS) {
-            // A durable tombstone prevents automatic registration from undoing the user's removal.
-            editBuiltIn(id, enabled = false, removed = true)
-            return
+    suspend fun remove(id: String): Unit = actionGate(id).withLock {
+        automatic.suppress(id)
+        packageGate(id).withLock removePackage@ {
+            if (id in BUNDLED_HTML_ANIME_IDS) {
+                // A durable tombstone prevents automatic registration from undoing the user's removal.
+                editBuiltIn(id, enabled = false, removed = true)
+                return@removePackage
+            }
+            ready.await()
+            withContext(Dispatchers.IO) { writer.withLock {
+                check(!loadFailure) { "来源存储未能读取，不能覆盖原文件。" }
+                val old = packages.value[id]
+                commit(packages.value - id)
+                if (old?.optionsKey?.isNotEmpty() == true) runCatching { deleteSecret(application, optionsSecret(id, old.optionsKey)) }
+            } }
         }
-        ready.await()
-        withContext(Dispatchers.IO) { writer.withLock {
-            check(!loadFailure) { "来源存储未能读取，不能覆盖原文件。" }
-            val old = packages.value[id]
-            commit(packages.value - id)
-            if (old?.optionsKey?.isNotEmpty() == true) runCatching { deleteSecret(application, optionsSecret(id, old.optionsKey)) }
-        } }
     }
 
     /** Private user backup of installed bytes; no Ext, cookies, credentials or session state. */
@@ -384,6 +416,17 @@ class LanercSourceStore private constructor(context: PlatformContext) {
                 installed != null, installed?.enabled == true, installed?.version.orEmpty(), installed?.digest.orEmpty(),
                 installed?.previousVersion, loadError ?: unsupported(item), item.aliases, item.functions,
                 "{}", installable(item), installed?.revision, installed?.optionsJson?.let { it != "{}" } == true)
+        }.map { listing ->
+            listing.copy(
+                automaticPreparation = listing.id in AUTOMATIC_ANIME_SOURCE_IDS,
+                bundledAlternativeId = ANIME_BUNDLED_ALTERNATIVES[listing.id],
+                installable = listing.installable && listing.id !in ANIME_PRIVATE_KEY_PACKAGES,
+                preparationUnavailableReason = when {
+                    listing.id in ANIME_PRIVATE_KEY_PACKAGES -> "当前协议需独立适配，未复制第三方私钥；请使用已内置来源。"
+                    listing.id in AUTOMATIC_ANIME_INACTIVE_IDS -> "来源可自动准备；当前网络协议尚未适配，默认未启用。"
+                    else -> null
+                },
+            )
         }
 
     private data class BuiltInChoice(val enabled: Boolean, val removed: Boolean, val revision: String)

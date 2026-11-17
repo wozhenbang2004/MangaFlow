@@ -3579,3 +3579,10 @@ The owner reports that the source-manager Browse category should include Bangumi
 - ANIME-BROWSE-03: Unsupported comic and unknown protocols show their real category/compatibility reason rather than implying the user must repair every entry. Keep exact errors for compatible install failures. Script aliases, digest, declared capabilities and URL belong in a local technical-information disclosure, not the default detail body. Do not claim unperformed automatic preparation or playable compatibility from a catalogue listing.
 
 Source/whitespace review only. No local build, automated tests or runtime UI acceptance was performed. Automatic package preparation is a separate source-owner implementation; these static catalogue and navigation changes do not certify installation or video availability.
+
+### ANIME-SOURCE-PREP-01 · 自动来源准备状态
+
+- 用户目标：支持的来源自动准备，不要求逐个安装；未适配来源不能冒充可用。
+- 来源管理直接使用 `sourcePreparation` 的等待、准备、重试、就绪、停用、失败状态；就绪仅代表安装并启用，不代表已完成播放实测。失败提供统一重试入口，自动项不再显示首次安装主按钮。用户主动停用或移除的状态保留，不因统一重试恢复；仅已移除的自动项提供次级“重新准备此来源”，显式恢复当前单源，不启用其他停用来源。
+- 原生重复实现标明无需重复安装；协议限制在详情单独说明。内置资料浏览入口及即播匹配交互保持不变。
+- 验证：源代码与状态契约静态核对；尚未完成设备运行、安装或网络播放验收。
