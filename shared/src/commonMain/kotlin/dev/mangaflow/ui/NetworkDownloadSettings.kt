@@ -138,14 +138,16 @@ private fun DownloadConnectionSettings(
     val relay = remember(context) { RelayLinkController.get(context) }
     val relayState by relay.state.collectAsStateWithLifecycle()
     val relayDirect = remember(relayState, settings.proxyProvider) {
-        settings.proxyProvider == DownloadProxyProvider.RELAY && currentRelayBinding(DownloadRouteMode.DIRECT) != null
+        settings.proxyProvider == DownloadProxyProvider.RELAY && runCatching { currentRelayBinding(DownloadRouteMode.DIRECT) != null }.getOrDefault(false)
     }
+
     val schedule by autoCheck.schedule.collectAsStateWithLifecycle()
     val colors = MaterialTheme.colorScheme
     var host by remember(settings.proxy) { mutableStateOf(settings.proxy?.host.orEmpty()) }
     var port by remember(settings.proxy) { mutableStateOf(settings.proxy?.port?.toString().orEmpty()) }
     var type by remember(settings.proxy) { mutableStateOf(settings.proxy?.type ?: DownloadProxyType.SOCKS) }
     var overviewNotice by remember { mutableStateOf<String?>(null) }
+    var expandedConnection by remember { mutableStateOf<String?>(null) }
     var editorNotice by remember { mutableStateOf<String?>(null) }
     var useAfterSave by remember { mutableStateOf(false) }
     val focus = LocalFocusManager.current
@@ -211,8 +213,7 @@ private fun DownloadConnectionSettings(
         stableSize = true) { editing ->
         val interactive = active && editing == proxyEditing
         if (!editing) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            connectionSummary()
-            Text("代理提供方", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+            Text("代理方式", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
             MotionTabs(if (settings.proxyProvider == DownloadProxyProvider.RELAY) 0 else 1,
                 listOf("Relay", "自定义地址"), onSelect = { index ->
                     if (interactive) try {
@@ -222,14 +223,28 @@ private fun DownloadConnectionSettings(
                 }, modifier = Modifier.fillMaxWidth(), role = Role.RadioButton,
                 treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 44.dp,
                 foreground = colors.primary, track = colors.onSurface.copy(alpha = .035f), indicator = colors.primary.copy(alpha = .10f),
-                itemContent = { index, selected, color ->
+                itemContent = { index, _, color ->
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        if (selected) Icon(Icons.Outlined.Check, null, Modifier.size(16.dp), tint = color)
                         Text(if (index == 0) "Relay" else "自定义地址", style = MaterialTheme.typography.labelLarge, color = color)
                     }
                 })
             if (settings.proxyProvider == DownloadProxyProvider.RELAY) relaySummary()
-            Text("默认线路 · 仅用于未单独设置的项目", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+            if (settings.proxyProvider == DownloadProxyProvider.CUSTOM) MotionTextButton(onClick = { startEditing(false) }, enabled = interactive,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+                Icon(Icons.Outlined.Edit, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("代理地址", style = MaterialTheme.typography.bodyMedium)
+                    Text(settings.proxy?.let(::proxyAddressLabel) ?: "点此设置",
+                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                Icon(Icons.Outlined.ChevronRight, "编辑代理地址", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+            }
+            SettingsDisclosure("未单独设置的项目", downloadRouteLabel(settings.defaultMode), Icons.Outlined.Language,
+                expanded = expandedConnection == "fallback", compact = true,
+                onToggle = { if (interactive) expandedConnection = if (expandedConnection == "fallback") null else "fallback" }) {
+            Text("仅供未单独设置线路的项目使用，不覆盖来源选择。", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             DownloadModeChoices(settings.defaultMode, enabled = interactive,
                 onSelect = { chosen ->
                     if (interactive) {
@@ -244,7 +259,9 @@ private fun DownloadConnectionSettings(
             if (settings.defaultMode == DownloadRouteMode.SYSTEM)
                 Text("沿用旧线路 · 点选后切换", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             if (settings.defaultMode == DownloadRouteMode.DIRECT && !relayDirect && environment?.defaultNetworkUsesVpn == true)
-                Text("VPN 仍可能接管直连", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                Text(if (settings.proxyProvider == DownloadProxyProvider.RELAY) "直连仍可能受系统 VPN 影响；联动未就绪会明确报错"
+                    else "直连仍可能受系统 VPN 影响", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             MotionTextButton(onClick = onStartCheck, enabled = interactive,
                 modifier = Modifier.weight(1f).heightIn(min = 44.dp)) {
@@ -253,41 +270,46 @@ private fun DownloadConnectionSettings(
                 Text(when {
                     checkState.restoring -> "读取检测记录"
                     checkState.running -> "检测在后台继续"
-                    else -> if (schedule.autoApply) "检测并优化" else "检测线路"
+                    else -> if (schedule.autoApply) "立即检测并优化" else "立即检测"
                 }, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                val checkTime = checkState.finishedAtMillis ?: checkState.startedAtMillis
-                val checkValue = if (checkState.running) "${checkState.completed}/${checkState.total}"
-                    else checkTime?.let { formatInstantMillis(it, "MM-dd HH:mm") }
-                checkValue?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                    maxLines = 1, softWrap = false); Spacer(Modifier.width(6.dp)) }
+                if (checkState.running) Text("${checkState.completed}/${checkState.total}",
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                 Icon(Icons.Outlined.ChevronRight, "开始网络检测", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
             }
-            if (checkState.rows.isNotEmpty() && !checkState.running) MotionIconButton(onClick = onCheckHistory,
-                enabled = interactive, modifier = Modifier.size(44.dp), tooltip = "查看上次检测") {
-                Icon(Icons.Outlined.History, "查看上次检测", Modifier.size(18.dp))
             }
-            }
-            if (settings.proxyProvider == DownloadProxyProvider.CUSTOM) MotionTextButton(onClick = { startEditing(false) }, enabled = interactive,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
-                Icon(Icons.Outlined.Edit, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+            if (checkState.rows.isNotEmpty() && !checkState.running) MotionTextButton(onClick = onCheckHistory,
+                enabled = interactive, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+                Icon(Icons.Outlined.History, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
                 Spacer(Modifier.width(8.dp))
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("代理地址", style = MaterialTheme.typography.bodyMedium)
-                    Text(settings.proxy?.let(::proxyAddressLabel) ?: "点此设置",
-                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text("上次结果", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                (checkState.finishedAtMillis ?: checkState.startedAtMillis)?.let {
+                    Text(formatInstantMillis(it, "MM-dd HH:mm"), style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant)
                 }
-                Icon(Icons.Outlined.ChevronRight, "编辑代理地址", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                Icon(Icons.Outlined.ChevronRight, "查看上次检测结果", Modifier.size(16.dp))
             }
-            SettingsToggle("定期检测", schedule.enabled, Icons.Outlined.Schedule) {
-                if (interactive && !autoCheck.updateSchedule(schedule.copy(enabled = it))) overviewNotice = "设置未保存，请重试"
+            SettingsDisclosure("自动检测", when {
+                schedule.enabled && schedule.autoApply -> "定期检测并优化"
+                schedule.enabled -> "定期检测 · 不改线路"
+                schedule.autoApply -> "手动检测后优化"
+                else -> "仅手动检测"
+            }, Icons.Outlined.AutoMode, expanded = expandedConnection == "automatic", compact = true,
+                onToggle = { if (interactive) expandedConnection = if (expandedConnection == "automatic") null else "automatic" }) {
+                SettingsToggle("定期检测", schedule.enabled, Icons.Outlined.Schedule) {
+                    if (interactive && !autoCheck.updateSchedule(schedule.copy(enabled = it))) overviewNotice = "设置未保存，请重试"
+                }
+                SettingsToggle("检测后自动优化", schedule.autoApply, Icons.Outlined.AutoMode) {
+                    if (interactive && !autoCheck.updateSchedule(schedule.copy(autoApply = it))) overviewNotice = "设置未保存，请重试"
+                }
+                Text("只调整已验证且未锁定的项目；在“使用范围”中按来源锁定。",
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             }
-            SettingsToggle("检测后自动优化", schedule.autoApply, Icons.Outlined.AutoMode) {
-                if (interactive && !autoCheck.updateSchedule(schedule.copy(autoApply = it))) overviewNotice = "设置未保存，请重试"
+            SettingsDisclosure("设备网络", "系统报告，不代表请求线路", Icons.Outlined.Info,
+                expanded = expandedConnection == "environment", compact = true,
+                onToggle = { if (interactive) expandedConnection = if (expandedConnection == "environment") null else "environment" }) {
+                connectionSummary()
             }
-            Text("只调整已验证且未锁定的项目。", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             overviewNotice?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.error) }
-            Text("切换影响后续请求；已在途不强切，旧任务可能需要重试。", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
         } else Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                 MotionIconButton(onClick = { resetDraft(); finishEditing() }, enabled = interactive,
@@ -366,8 +388,8 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
     val relay = remember(context) { RelayLinkController.get(context) }
     val relayState by relay.state.collectAsStateWithLifecycle()
     val relaySelected = settings.proxyProvider == DownloadProxyProvider.RELAY
-    val relayProxy = remember(relayState, relaySelected) { relaySelected && currentRelayBinding(DownloadRouteMode.PROXY) != null }
-    val relayDirect = remember(relayState, relaySelected) { relaySelected && currentRelayBinding(DownloadRouteMode.DIRECT) != null }
+    val relayProxy = remember(relayState, relaySelected) { relaySelected && runCatching { currentRelayBinding(DownloadRouteMode.PROXY) != null }.getOrDefault(false) }
+    val relayDirect = remember(relayState, relaySelected) { relaySelected && runCatching { currentRelayBinding(DownloadRouteMode.DIRECT) != null }.getOrDefault(false) }
     val saved = settings.sourceOverrides[sourceId]
     val colors = MaterialTheme.colorScheme
     var expanded by remember(sourceId) { mutableStateOf(false) }
@@ -486,8 +508,8 @@ internal fun DownloadRouteControl(
     val relay = remember(context) { RelayLinkController.get(context) }
     val relayState by relay.state.collectAsStateWithLifecycle()
     val relaySelected = settings.proxyProvider == DownloadProxyProvider.RELAY
-    val relayProxy = remember(relayState, relaySelected) { relaySelected && currentRelayBinding(DownloadRouteMode.PROXY) != null }
-    val relayDirect = remember(relayState, relaySelected) { relaySelected && currentRelayBinding(DownloadRouteMode.DIRECT) != null }
+    val relayProxy = remember(relayState, relaySelected) { relaySelected && runCatching { currentRelayBinding(DownloadRouteMode.PROXY) != null }.getOrDefault(false) }
+    val relayDirect = remember(relayState, relaySelected) { relaySelected && runCatching { currentRelayBinding(DownloadRouteMode.DIRECT) != null }.getOrDefault(false) }
     DownloadRouteSelector(
         category = category, selected = settings.categoryOverrides[category],
         inherited = settings.defaultMode, hasProxy = if (relaySelected) relayProxy else settings.proxy != null,
@@ -513,8 +535,8 @@ internal fun TaskDownloadRouteControl(
     val relay = remember(context) { RelayLinkController.get(context) }
     val relayState by relay.state.collectAsStateWithLifecycle()
     val relaySelected = settings.proxyProvider == DownloadProxyProvider.RELAY
-    val relayProxy = remember(relayState, relaySelected) { relaySelected && currentRelayBinding(DownloadRouteMode.PROXY) != null }
-    val relayDirect = remember(relayState, relaySelected) { relaySelected && currentRelayBinding(DownloadRouteMode.DIRECT) != null }
+    val relayProxy = remember(relayState, relaySelected) { relaySelected && runCatching { currentRelayBinding(DownloadRouteMode.PROXY) != null }.getOrDefault(false) }
+    val relayDirect = remember(relayState, relaySelected) { relaySelected && runCatching { currentRelayBinding(DownloadRouteMode.DIRECT) != null }.getOrDefault(false) }
     DownloadRouteSelector(
         category = category, selected = selected,
         inherited = settings.categoryOverrides[category] ?: settings.defaultMode,

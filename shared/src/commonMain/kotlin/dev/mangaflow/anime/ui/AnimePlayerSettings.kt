@@ -304,8 +304,8 @@ internal fun AnimePlayerSettings(
                                 item { AnimeTextField(maximumDraft, { maximumDraft = it; error = null }, "最大缓冲（秒）") }
                                 item { AnimeTextField(startDraft, { startDraft = it; error = null }, "起播缓冲（秒）") }
                                 item { AnimeTextField(rebufferDraft, { rebufferDraft = it; error = null }, "恢复缓冲（秒）") }
-                            } else item { AnimeQuietLabel("当前内核自行管理缓冲，可调整自动恢复次数。") }
-                            item { AnimeTextField(retryDraft, { retryDraft = it; error = null }, "自动恢复次数，0 为关闭") }
+                            } else item { AnimeQuietLabel("当前内核自行管理缓冲，可调整单线路重试次数。") }
+                            item { AnimeTextField(retryDraft, { retryDraft = it; error = null }, "单线路重试次数，0 关闭自动恢复") }
                             item { MotionButton(onClick = {
                                 val minimum = bufferMillis(minimumDraft); val maximum = bufferMillis(maximumDraft)
                                 val start = bufferMillis(startDraft); val rebuffer = bufferMillis(rebufferDraft)

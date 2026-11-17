@@ -344,7 +344,7 @@ private fun RelayLinkSummary(
             })
             Spacer(Modifier.width(8.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(relayPhaseLabel(state), style = MaterialTheme.typography.labelMedium,
+                Text("Relay · " + relayPhaseLabel(state), style = MaterialTheme.typography.labelMedium,
                     color = if (state.phase == RelayLinkPhase.ERROR || state.phase == RelayLinkPhase.CONFLICT)
                         colors.error else colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
@@ -354,9 +354,19 @@ private fun RelayLinkSummary(
             !state.supported -> MotionTextButton(onClick = controller::openProvider, enabled = enabled) {
                 Text("打开", style = MaterialTheme.typography.labelMedium)
             }
-            !state.authorized -> MotionTextButton(onClick = controller::requestAuthorization, enabled = enabled) {
-                Text("授权", style = MaterialTheme.typography.labelMedium)
+            state.phase == RelayLinkPhase.AUTHORIZATION_REQUIRED -> MotionTextButton(onClick = controller::requestAuthorization, enabled = enabled) {
+                Text("去授权", style = MaterialTheme.typography.labelMedium)
             }
+            state.phase == RelayLinkPhase.ERROR || state.phase == RelayLinkPhase.CONFLICT || !state.authorized ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    MotionTextButton(onClick = controller::refresh, enabled = enabled) {
+                        Text("重新核对", style = MaterialTheme.typography.labelMedium)
+                    }
+                    if (state.enabled) MotionIconButton(onClick = controller::disable, enabled = enabled,
+                        modifier = Modifier.size(44.dp), tooltip = "暂停 Relay 联动") {
+                        Icon(Icons.Outlined.Pause, "暂停 Relay 联动", Modifier.size(18.dp))
+                    }
+                }
             else -> MotionIconButton(onClick = { if (state.enabled) controller.disable() else controller.enable() },
                 enabled = enabled, modifier = Modifier.size(44.dp),
                 tooltip = if (state.enabled) "暂停 Relay 联动" else "启用 Relay 联动") {
@@ -403,7 +413,7 @@ private fun RelayLinkDetails(state: RelayLinkState, controller: RelayLinkControl
             MotionTextButton(onClick = controller::openProvider, enabled = enabled) {
                 Text(if (state.supported) "打开 Relay" else "更新 Relay", style = MaterialTheme.typography.labelMedium)
             }
-            if (state.supported && !state.authorized) MotionTextButton(onClick = controller::requestAuthorization, enabled = enabled) {
+            if (state.phase == RelayLinkPhase.AUTHORIZATION_REQUIRED) MotionTextButton(onClick = controller::requestAuthorization, enabled = enabled) {
                 Text("授权联动", style = MaterialTheme.typography.labelMedium)
             }
             if (state.authorized) MotionTextButton(onClick = controller::revoke, enabled = enabled) {
@@ -430,7 +440,7 @@ private fun RelayEvidenceRow(label: String, value: String, confirmed: Boolean) {
 private fun relayPhaseLabel(state: RelayLinkState): String = when (state.phase) {
     RelayLinkPhase.NOT_AVAILABLE, RelayLinkPhase.NOT_INSTALLED -> "未检测到"
     RelayLinkPhase.INCOMPATIBLE -> "需要更新 Relay"
-    RelayLinkPhase.AUTHORIZATION_REQUIRED -> "首次使用需要授权"
+    RelayLinkPhase.AUTHORIZATION_REQUIRED -> "需要授权"
     RelayLinkPhase.AUTHORIZING -> "等待授权"
     RelayLinkPhase.DISABLED -> "已暂停"
     RelayLinkPhase.CONNECTING -> "正在核对"
@@ -439,7 +449,7 @@ private fun relayPhaseLabel(state: RelayLinkState): String = when (state.phase) 
     RelayLinkPhase.SAVED -> "规则已保存 · 等待应用"
     RelayLinkPhase.APPLIED -> if (state.realRequestVerified) "请求已验证" else "规则已应用"
     RelayLinkPhase.CONFLICT -> "规则冲突"
-    RelayLinkPhase.ERROR -> "联动中断"
+    RelayLinkPhase.ERROR -> "联动异常 · 待核对"
 }
 
 private fun relayConflictLabel(conflict: String): String = when {
@@ -545,13 +555,13 @@ private fun NetworkConnectionHelp(relayInstalled: Boolean) {
         listOf(
             if (relayInstalled) "Relay 联动只管理 MangaFlow 自己的规则。首次需要授权；规则保存、核心应用和实际请求响应分别记录。"
                 else "识别系统公开的 VPN、代理地址和自动代理配置。检测到配置不代表请求一定使用它。",
-            if (relayInstalled) "联动启用后的直连与代理由 Relay 执行，无需填写端口；共享图片域名使用专用入口。绕过 VPN、强制出口或授权变化会明确提示。"
+            if (relayInstalled) "仅选择 Relay 且启用联动后，已绑定请求由 Relay 专用入口执行。绑定未就绪会明确失败；没有绑定的直连仍可能受系统 VPN 接管。选择自定义地址不使用 Relay 专用入口。"
                 else "直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。外部软件需提供相应的分流能力。",
-            "检测反映本次入口响应，不代表带宽或全部图片可用；可调整每项选择，确认后才修改配置。",
+            "立即检测会发起新检查；上次结果仅查看历史。开启自动优化后，只改已验证且未锁定的项目；使用范围可按来源锁定。检测不代表带宽或全部图片可用。",
             "Steam 等独立连接会单独标记覆盖范围，普通接口可用不代表其所有连接都可用。",
-            "每个漫画源可单独设置搜索、阅读、账号接口与新下载线路；网页认证仍遵循系统网络，进行中任务保留原线路。",
-            "点选直连或代理后才切换线路，未选择的旧设置继续使用原线路。下载来源尚未确定时，入口只显示“线路”。",
-            "新请求使用新设置。已有下载保留原线路，需明确选择“使用当前设置重试”才更换。手工代理地址目前不支持账号密码。",
+            "来源线路用于该来源的搜索、阅读、账号与新下载；网页认证遵循系统网络。系统报告了VPN或代理，不代表请求已经使用它。",
+            "手动选择用于后续请求；开启自动优化时，检测也可调整未锁定项目。下载来源尚未确定时，入口只显示“线路”。",
+            "切换用于后续请求；已在途不强切。旧下载的固定线路若与当前代理方式不兼容，会提示使用当前设置重试。手工代理地址目前不支持账号密码。",
         ).forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
     }
 }

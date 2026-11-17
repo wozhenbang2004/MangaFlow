@@ -75,8 +75,12 @@ internal fun AnimePlayerPane(
     val index = ordered.indexOfFirst { it.id == episode?.id }
     val previous = ordered.getOrNull(index - 1).takeIf { index > 0 }
     val next = ordered.getOrNull(index + 1).takeIf { index >= 0 }
-    val failure = resolutionError ?: playback.error ?: if (playback.phase == AnimePlayerPhase.ERROR)
+    val playerFailure = playback.error ?: if (playback.phase == AnimePlayerPhase.ERROR)
         "播放器未能准备视频，请重试或选择其他来源。" else null
+    val failure = resolutionError ?: playerFailure?.let { error ->
+        if (playback.phase == AnimePlayerPhase.ERROR) listOfNotNull(error, state.playbackRecoveryStopReason).joinToString("\n")
+        else error
+    }
     val focus = remember { FocusRequester() }
     var controlsVisible by remember { mutableStateOf(true) }
     var controlsHeld by remember { mutableStateOf(false) }

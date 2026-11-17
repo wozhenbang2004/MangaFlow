@@ -821,9 +821,12 @@ private fun playbackFailure(error: PlaybackException): Throwable = IOException(w
     }
     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "当前播放路由未能连接来源，请重试或检查该来源的网络设置"
-    PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
     PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
-    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED -> "当前设备无法解码这条线路，可选择其他格式或清晰度"
+    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED -> "这条线路返回的内容无法作为视频文件读取，请重试或换个来源"
+    PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
+    PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> "这条线路的播放清单无法读取，请重试或换个来源"
+    PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED -> "当前设备不支持这条线路的媒体格式，请换个来源"
+    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED -> "这条线路的解码器未能启动，请重试或换个来源"
     PlaybackException.ERROR_CODE_DRM_SCHEME_UNSUPPORTED -> "这条线路需要当前播放器不支持的受保护媒体授权"
     else -> readablePlayerError(error)
 }, error)

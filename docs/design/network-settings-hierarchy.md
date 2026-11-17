@@ -1,0 +1,9 @@
+# Network settings hierarchy · 2026-11-17
+
+The two supplied screenshots were actually inspected. The network screenshot shows the previous provider radio with a selection check beside a failed Relay state, a second direct/proxy choice, ambient VPN metadata, a new-check action carrying a historical timestamp, two equal-weight automation switches and long footnotes. The playback screenshot shows a separate decoder failure; it is not evidence that the displayed proxy setting caused that failure. Neither screenshot contains an application version. Their network layout is consistent with the b309ed8-or-later UI, not proof of a particular installed build.
+
+The connection page keeps Relay and custom address as one explicit provider selection. Selection styling is not a successful-connection receipt. The selected provider's authorization/status or saved address remains adjacent; failed or missing authorization stays visible. Existing Relay evidence details remain available. Default route is disclosed as the fallback for projects without their own choice, not another proxy provider or a reset-all action.
+
+Starting a check and viewing a previous result are separate actions. Only historical results carry their old timestamp. Automatic checking and automatic application retain independent saved settings inside one progressive-disclosure section with a truthful summary. Source/category grouping and exact-target locks remain on the usage page. Ambient system VPN/proxy observations are separately labelled device reports, never proof of the route used by an app request.
+
+No routing stores, automatic-check policy, credentials, source adapters or device-network settings change in this UI slice. Existing request/transport incompatibility and in-flight behavior remain authoritative. No local build, automated test or device-layout validation was performed.
