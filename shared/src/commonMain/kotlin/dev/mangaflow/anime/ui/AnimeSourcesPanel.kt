@@ -233,7 +233,13 @@ internal fun AnimeSourcesPanel(
                             val sourceGroups = catalog.episodes.map { it.group }.distinct()
                             val selectedGroup = state.sourceGroups[sourceId]
                             val matched = focusEpisode?.let { state.episodeOptions[it.id].orEmpty()
-                                .firstOrNull { option -> option.sourceId == sourceId && option.confirmed } }
+                                .firstOrNull { option -> option.sourceId == sourceId && option.catalog.id == catalog.title.id &&
+                                    option.catalog.url == catalog.title.url && option.confirmed } }
+                            val hasConfirmed = if (focusEpisode != null) matched != null else
+                                state.episodeOptions.values.any { options -> options.any { option ->
+                                    option.sourceId == sourceId && option.catalog.id == catalog.title.id &&
+                                        option.catalog.url == catalog.title.url && option.confirmed
+                                } }
                             Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -263,10 +269,11 @@ internal fun AnimeSourcesPanel(
                                         onClick = { mapping = null
                                             controller.selectSourceGroup(sourceId, group) })
                                 }
-                                if (sourceGroups.size > 1 && selectedGroup == null)
-                                    AnimeQuietLabel("请选择一条线路；不同线路可能包含不同季度或版本。")
-                                if (focusEpisode != null && selectedGroup != null) {
-                                    if (matched != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                if (sourceGroups.size > 1 && selectedGroup == null) {
+                                    AnimeQuietLabel(if (hasConfirmed) "已自动对应可靠线路；也可在此手动更换。"
+                                        else "请选择一条线路；不同线路可能包含不同季度或版本。")
+                                }
+                                if (focusEpisode != null && matched != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                             AnimeQuietLabel("本集已确认")
                                             Text(matched.episode.title, style = MaterialTheme.typography.bodyMedium)
@@ -278,6 +285,7 @@ internal fun AnimeSourcesPanel(
                                             Text("播放")
                                         }
                                     }
+                                if (focusEpisode != null && selectedGroup != null) {
                                     MotionTextButton(onClick = {
                                         expandedSource = if (expandedSource == sourceId) null else sourceId
                                         mapping = null; episodeQuery = ""

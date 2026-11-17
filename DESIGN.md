@@ -3601,3 +3601,9 @@ Source/whitespace review only. No local build, automated tests or runtime UI acc
 - 歧义结果不混入可靠线路，也不在普通剧集列表重复要求确认。后台聚合和媒体解析是否成功需各自验证，不以此界面改动代替网络/实机验收。
 
 - 聚合状态直接读取 Controller 的 sourceAggregationRunning/Completed/Total。详情仅运行时显示轻量进度，不挡选集；来源面板同时可查看本轮核对数量，完成数不解释为成功或可播放数。
+
+### ANIME-CONFIRMED-UI-01 · 自动线路不要求重复选择
+
+- 多线路且未手动锁定组，不等于未匹配。来源面板按当前来源、目录身份的 confirmed options 判断：聚焦集数时只看本集，无聚焦时看该来源任一已确认对应，不借用其他来源结果。
+- 已有自动对应显示中性说明与本集播放入口，不再要求重复选择组。手动点选组和仅已选组可编辑集数映射的限制保留，不放宽匹配。
+- 静态检查通过；未执行构建或实机播放验收。
