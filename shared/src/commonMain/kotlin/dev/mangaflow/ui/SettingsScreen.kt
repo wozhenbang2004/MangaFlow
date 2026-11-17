@@ -181,6 +181,7 @@ fun SettingsScreen(
     sourceRepository: dev.mangaflow.data.UnifiedMangaRepository? = null,
     onOpenDownloads: () -> Unit = {},
     animeController: AnimeController? = null,
+    onBrowseAnime: (dev.mangaflow.anime.AnimeDiscoveryProvider) -> Unit = {},
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -599,7 +600,8 @@ fun SettingsScreen(
     animeController?.let { controller ->
         val animeState by controller.state.collectAsStateWithLifecycle()
         AnimeSourceManager(showAnimeSources && screenActive, animeState, controller, storageBackdrop,
-            onDismiss = { showAnimeSources = false })
+            onDismiss = { showAnimeSources = false },
+            onBrowse = { provider -> if (screenActive) onBrowseAnime(provider) })
     }
 
     NetworkDownloadDialog(showNetworkDownloads, sourceBackdrop, onDismiss = { showNetworkDownloads = false },

@@ -389,6 +389,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     var desktopNavigationMode by rememberSaveable { mutableIntStateOf(0) }
     var desktopSearchRequest by remember { mutableIntStateOf(0) }
     var animeSearchRequest by remember { mutableIntStateOf(0) }
+    var animeBrowseRequest by remember { mutableIntStateOf(0) }
     var animeBackRequest by remember { mutableIntStateOf(0) }
     var animeImmersive by remember { mutableStateOf(false) }
     var tagSearchVisible by rememberSaveable { mutableStateOf(false) }
@@ -1296,6 +1297,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         backdrop = searchBackdrop, navigation = navigation, active = rootActive,
                                         navigationVisible = !desktopNavigationVisible,
                                         searchRequest = animeSearchRequest, backRequest = animeBackRequest,
+                                        browseRequest = animeBrowseRequest, onBrowseRequestConsumed = { animeBrowseRequest = 0 },
                                         onPlaybackVisibility = { animeImmersive = it },
                                     )
                                     Section.BOARDS -> {
@@ -1424,6 +1426,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         sourceBackdrop = searchBackdrop, sourceRegistry = model.bodySources,
                                         sourcePlugins = model.sourcePlugins, sourceRepository = model.repository,
                                         animeController = model.services.anime,
+                                        onBrowseAnime = { provider ->
+                                            model.services.anime.closePlayback()
+                                            model.services.anime.closeDetail()
+                                            model.services.anime.configureDiscovery(dev.mangaflow.anime.AnimeDiscoveryTab.RANKING,
+                                                dev.mangaflow.anime.AnimeDiscoveryQuery(provider = provider,
+                                                    order = dev.mangaflow.anime.AnimeDiscoveryOrder.RANK))
+                                            animeBrowseRequest++
+                                            changeSection(Section.ANIME)
+                                        },
                                         active = rootActive && !searchVisible,
                                         onOpenDownloads = { changeSection(Section.DOWNLOADS) })
                                 }

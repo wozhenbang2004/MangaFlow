@@ -1,5 +1,7 @@
 # MangaFlow
 
+- EXPERIENCE-DIRECT-01–05 in DESIGN supersedes the older draft/Apply contract for the experience settings dialog. One number per setting: explicit manual value or current automatic value. Slider steps save directly through the existing CAS/persistence owner; do not reintroduce target/current badges or Done→Apply. Keep exact manual authority, real pause/capacity diagnostics in details, stable slider geometry, error/reload paths and newest-edit preservation during saves. No local tests/builds/UI automation; root integrates with ordinary CI.
+
 - APK-INSTALL-01–04 in DESIGN owns the generic installation-failure report. Preserve verified APK/session identity, explicit system user confirmation and user data; persist real installer statuses and keep unknown distinct from failure or success. Official 306/315 static checks do not diagnose the user device. No local tests/builds/install attempts; root integrates reviewed latest-main changes and ordinary CI.
 
 - READCOUNT-01–05 in DESIGN owns the reported 16-page readiness count jumping to 1/2. Preserve manual counts, exact source/page/cache identity, current-window observations and explicit unknowns. Offset settling is not a reverse turn; admission pauses must not discard overlapping completed resources. Sampling freshness follows real cadence; layout-effect retirement is not cache deletion. No fake fixed readiness, tests/local builds/probes/UI automation; root integrates one reviewed latest-main batch.

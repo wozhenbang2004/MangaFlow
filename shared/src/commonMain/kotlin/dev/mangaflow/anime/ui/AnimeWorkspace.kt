@@ -53,6 +53,8 @@ internal fun AnimeWorkspace(
     active: Boolean = true,
     searchRequest: Int = 0,
     backRequest: Int = 0,
+    browseRequest: Int = 0,
+    onBrowseRequestConsumed: () -> Unit = {},
     onPlaybackVisibility: (Boolean) -> Unit = {},
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
@@ -113,6 +115,28 @@ internal fun AnimeWorkspace(
     }
     LaunchedEffect(controller) {
         controller.ensureDiscovery()
+    }
+    LaunchedEffect(browseRequest) {
+        if (browseRequest != 0) {
+            pendingManualPlaybackId = null
+            disclosedAutoSelectionGeneration = null
+            playerFullscreen = false
+            playbackIntent = null
+            playbackFailure = null
+            awaitingResolve = false
+            pendingAssociation = null
+            browseCandidate = null
+            browseCandidateVideo = false
+            tab = 0
+            searchExpanded = false
+            toolsVisible = false
+            pendingTool = null
+            sourcesVisible = false
+            downloadsVisible = false
+            trackingVisible = false
+            reviewsVisible = false
+            onBrowseRequestConsumed()
+        }
     }
     LaunchedEffect(state.discoveryTab) {
         if (state.discoveryTab == AnimeDiscoveryTab.SOURCES) controller.selectDiscoveryTab(AnimeDiscoveryTab.HOME)

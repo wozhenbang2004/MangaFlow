@@ -22,16 +22,24 @@ import dev.mangaflow.ui.motion.*
 /** Catalogue presence, successful install and successful playback remain separate facts. */
 @Composable
 internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, controller: AnimeController,
-    backdrop: HazeState, onDismiss: () -> Unit) {
+    backdrop: HazeState, onDismiss: () -> Unit,
+    onBrowse: (AnimeDiscoveryProvider) -> Unit) {
     var tab by remember { mutableIntStateOf(0) }
     var selectedId by remember { mutableStateOf<String?>(null) }
     var removeConfirm by remember { mutableStateOf(false) }
+    var pendingBrowse by remember { mutableStateOf<AnimeDiscoveryProvider?>(null) }
+    var technicalExpanded by remember(selectedId) { mutableStateOf(false) }
     val selected = state.sourceExtensions.firstOrNull { it.id == selectedId }
     val listings = state.sourceExtensions.filter { item ->
         when (tab) { 0 -> item.kind.name == "VIDEO"; 1 -> item.kind.name == "BROWSE"; else -> item.kind.name !in setOf("VIDEO", "BROWSE") }
     }
-    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 640.dp,
-        onClosed = { selectedId = null; removeConfirm = false }) {
+    MotionDialog(visible, onDismissRequest = { pendingBrowse = null; onDismiss() }, maximumWidth = 640.dp,
+        onClosed = {
+            selectedId = null; removeConfirm = false
+            val provider = pendingBrowse
+            pendingBrowse = null
+            if (provider != null) onBrowse(provider)
+        }) {
         LiquidGlassSurface(backdrop, role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
                 Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp),
@@ -42,7 +50,7 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                     }
                     Text(selected?.name ?: "来源管理", Modifier.weight(1f).padding(start = if (selected == null) 8.dp else 0.dp),
                         style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭来源管理") {
+                    MotionIconButton(onClick = { pendingBrowse = null; onDismiss() }, modifier = Modifier.size(44.dp), tooltip = "关闭来源管理") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
                 }
@@ -56,11 +64,26 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                             AnimeSectionTitle("内置来源", "TvTFun · AGE · GiriGiriLove · LMM")
                             AnimeQuietLabel("内建来源已随应用准备；扩展来源可在此管理。", Modifier.padding(bottom = 12.dp))
                         }
+                        if (tab == 1) {
+                            item(key = "builtin-browse-heading") { AnimeSectionTitle("内置资料") }
+                            items(AnimeDiscoveryProvider.entries, key = { "builtin-browse:" + it.name }) { provider ->
+                                AnimeSelection(animeDiscoveryProviderLabel(provider),
+                                    if (provider == AnimeDiscoveryProvider.BANGUMI) "已内置 · 评分、新番、番表"
+                                    else "已内置 · 评分、人气、趋势", selected = false,
+                                    onClick = { pendingBrowse = provider; onDismiss() })
+                            }
+                            if (listings.isNotEmpty()) item(key = "extension-browse-heading") { AnimeSectionTitle("扩展资料") }
+                        }
                         items(listings, key = { it.id }) { item ->
                             val busy = item.id in state.sourceOperationIds
                             AnimeSelection(item.name, when {
                                 busy -> "正在处理"
-                                item.error != null -> "需要处理 · 点按查看"
+                                !item.installable -> when (item.kind.name) {
+                                    "COMIC" -> "漫画协议 · 动漫模块不支持"
+                                    "UNKNOWN" -> "协议待适配 · 暂不可用"
+                                    else -> "暂不兼容 · 点按查看原因"
+                                }
+                                item.error != null -> "准备未完成 · 点按重试"
                                 item.installed -> (if (item.enabled) "已启用" else "已暂停") + " · " + item.version
                                 item.kind.name == "VIDEO" -> "可安装的视频来源"
                                 item.kind.name == "BROWSE" -> "浏览资料 · 可安装"
@@ -70,7 +93,7 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                                 selectedId = item.id; removeConfirm = false
                             })
                         }
-                        if (listings.isEmpty()) item { AnimeMessage("这一类暂无来源") }
+                        if (listings.isEmpty() && tab != 1) item { AnimeMessage("这一类暂无来源") }
                     }
                     if (tab == 0) MotionButton(onClick = controller::installVideoSources,
                         enabled = state.sourceOperationIds.isEmpty() && listings.any { it.installable && !it.installed },
@@ -83,12 +106,6 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                         verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         item {
                             AnimeQuietLabel(animeExtensionKind(selected.kind.name) + if (selected.installed) " · " + selected.version else "")
-                            if (selected.aliases.isNotEmpty()) AnimeQuietLabel(selected.aliases.joinToString(" · "))
-                            if (selected.installed && selected.digest.isNotBlank()) AnimeQuietLabel("脚本版本 " + selected.digest.take(12))
-                        }
-                        val declared = selected.capabilities.mapNotNull(::animeExtensionCapability).distinct()
-                        if (declared.isNotEmpty()) item {
-                            AnimeQuietLabel("脚本声明 · " + declared.joinToString(" · "))
                         }
                         val search = state.sourceResults.firstOrNull { it.providerId == selected.id }
                         val catalogueError = state.sourceCatalogErrors[selected.id]
@@ -101,7 +118,7 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                             })
                         }
                         if (selected.error != null) item {
-                            Text(selected.error.orEmpty(), color = MaterialTheme.colorScheme.error,
+                            Text(selected.error.orEmpty(), color = if (selected.installable) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                                 style = MaterialTheme.typography.bodySmall)
                         }
                         if (removeConfirm) item {
@@ -133,7 +150,20 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                             AnimeQuietLabel(selected.error ?: "这种来源目前不能安装。")
                         }
                         item {
-                            AnimeQuietLabel(selected.scriptUrl)
+                            MotionTextButton(onClick = { technicalExpanded = !technicalExpanded }) {
+                                Text(if (technicalExpanded) "收起技术信息" else "技术信息")
+                                Icon(if (technicalExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                                    null, Modifier.size(16.dp))
+                            }
+                        }
+                        if (technicalExpanded) item {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                if (selected.aliases.isNotEmpty()) AnimeQuietLabel(selected.aliases.joinToString(" · "))
+                                if (selected.installed && selected.digest.isNotBlank()) AnimeQuietLabel("脚本版本 " + selected.digest.take(12))
+                                val declared = selected.capabilities.mapNotNull(::animeExtensionCapability).distinct()
+                                if (declared.isNotEmpty()) AnimeQuietLabel("脚本声明 · " + declared.joinToString(" · "))
+                                AnimeQuietLabel(selected.scriptUrl)
+                            }
                         }
                     }
                 }

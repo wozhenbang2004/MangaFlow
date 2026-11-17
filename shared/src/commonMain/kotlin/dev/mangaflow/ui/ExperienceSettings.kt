@@ -54,19 +54,21 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionSlider
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
-import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.motionInputGate
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-/** One retained workspace owns its draft, numeric editor and exit-bound storage handoff. */
+/** One retained workspace saves each accepted edit, with a single serialized latest-value writer. */
 @Composable
 internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, onDismiss: () -> Unit,
     onOpenStorage: (() -> Unit)? = null, onOpenNetwork: (() -> Unit)? = null,
@@ -79,7 +81,10 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
     val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
     var applying by remember { mutableStateOf(false) }
     val applyScope = rememberCoroutineScope()
-    val active = visible && lifecycle.isAtLeast(Lifecycle.State.RESUMED) && !applying
+    val latestVisible by rememberUpdatedState(visible)
+    var hostAlive by remember { mutableStateOf(true) }
+    DisposableEffect(Unit) { onDispose { hostAlive = false } }
+    val active = visible && lifecycle.isAtLeast(Lifecycle.State.RESUMED)
     var baseline by remember(store) { mutableStateOf(store.overrides.value) }
     var baselineMode by remember(store) { mutableStateOf(store.state.value.mode) }
     var draft by remember(store) { mutableStateOf(store.overrides.value) }
@@ -92,7 +97,7 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
     var notice by remember { mutableStateOf<String?>(null) }
     val editor = remember { ExperienceEditor() }
     val dirty = draft != baseline || draftMode != baselineMode || editor.pending
-    val conflict = savedCustom != baseline || savedBudget.mode != baselineMode
+    val conflict = !applying && (store.overrides.value != baseline || store.state.value.mode != baselineMode)
     val preview = remember(draft, draftMode, savedBudget) { store.previewBudget(draft, draftMode) }
     val detailScroll = rememberScrollState()
     val navigationScroll = rememberScrollState()
@@ -123,10 +128,54 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
         focus.clearFocus(force = true)
         onDismiss()
     }
+    fun saveChanges() {
+        if (applying || (draft == baseline && draftMode == baselineMode)) return
+        if (store.overrides.value != baseline || store.state.value.mode != baselineMode) {
+            notice = "设置已在其他入口改变，请重新载入"
+            return
+        }
+        notice = null
+        applying = true
+        applyScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            // Accepted slider steps survive a host/navigation disposal while disk IO is in flight.
+            withContext(NonCancellable) {
+                try {
+                    // Dragging can produce newer values while persistence is suspended. Keep only
+                    // the newest complete configuration and never launch competing disk writes.
+                    while (draft != baseline || draftMode != baselineMode) {
+                        val candidate = draft
+                        val candidateMode = draftMode
+                        val saved = store.applyConfiguration(candidateMode, candidate,
+                            expectedMode = baselineMode, expectedOverrides = baseline)
+                        if (!saved) {
+                            notice = "设置已在其他入口改变，请重新载入"
+                            return@withContext
+                        }
+                        baseline = candidate
+                        baselineMode = candidateMode
+                    }
+                    if (hostAlive && latestVisible) pendingExit?.let(::finishExit)
+                } catch (cancel: CancellationException) { throw cancel }
+                catch (_: Exception) { notice = "设置未保存，请重试" }
+                finally { applying = false }
+            }
+        }
+    }
+    fun change(value: ExperienceOverrides) {
+        draft = value
+        saveChanges()
+    }
+    fun changeMode(value: ExperienceMode) {
+        draftMode = value
+        saveChanges()
+    }
     fun requestExit(destination: String = "close") {
         if (!active || !settleEditor()) return
         focus.clearFocus(force = true)
-        if (draft != baseline || draftMode != baselineMode) pendingExit = destination else finishExit(destination)
+        if (applying || draft != baseline || draftMode != baselineMode) {
+            pendingExit = destination
+            saveChanges()
+        } else finishExit(destination)
     }
     fun selectCategory(category: String, forecast: Boolean = false) {
         if (!active || pendingExit != null || !settleEditor()) return
@@ -134,48 +183,24 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
         if (forecast) deviceTab = "forecast"
         expanded = category
     }
-    fun apply() {
-        if (!active || !dirty || !settleEditor()) return
-        // Recheck the actual preference owner immediately before saving this draft.
-        if (store.overrides.value != baseline || store.state.value.mode != baselineMode) {
-            notice = "设置已在其他入口改变，请重新载入"
-            return
-        }
-        val candidateMode = draftMode
-        val candidate = draft
-        val expectedMode = baselineMode
-        val expected = baseline
-        notice = null
-        applying = true
-        applyScope.launch {
-            try {
-                val saved = store.applyConfiguration(candidateMode, candidate,
-                    expectedMode = expectedMode, expectedOverrides = expected)
-                if (!saved) { notice = "设置已在其他入口改变，请重新载入"; return@launch }
-                baseline = store.overrides.value
-                baselineMode = store.state.value.mode
-                draft = baseline
-                draftMode = baselineMode
-                notice = null
-                focus.clearFocus(force = true)
-                pendingExit?.let(::finishExit)
-            } catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { notice = "设置未保存，请重试" }
-            finally { applying = false }
-        }
-    }
     LaunchedEffect(visible) {
-        if (visible) { reload(); expanded = "reading"; showLegend = false; detailScroll.scrollTo(0) }
+        if (visible) {
+            // A host can hide/reopen this retained dialog without taking our close path.
+            // Do not replace newer accepted edits while their writer is still draining.
+            pendingExit = null
+            if (!applying && !dirty) reload()
+            expanded = "reading"
+            showLegend = false
+            detailScroll.scrollTo(0)
+        }
     }
     LaunchedEffect(savedCustom, savedBudget.mode) {
-        if (visible && !dirty) reload()
+        if (visible && !applying && !dirty && editor.field == null) reload()
     }
     LaunchedEffect(expanded) { detailScroll.scrollTo(0) }
     MotionDialog(visible, onDismissRequest = {
-        if (!applying) {
-            if (pendingExit != null) pendingExit = null
-            else requestExit()
-        }
+        if (pendingExit != null) pendingExit = null
+        else requestExit()
     }, properties = DialogProperties(usePlatformDefaultWidth = false),
         maximumWidth = 1040.dp * LocalMangaWindow.current.fontScale,
         onClosed = {
@@ -195,7 +220,6 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
             LaunchedEffect(wide) { focus.clearFocus(force = true) }
             val panelWidth = if (wide) maxWidth else minOf(maxWidth, 560.dp * window.fontScale)
             val maximumHeight = minOf(window.height * .9f, if (wide) 680.dp else 560.dp).coerceAtLeast(1.dp)
-            val pinnedImpact = !wide && maximumHeight >= 420.dp * window.fontScale
             val panel: @Composable () -> Unit = {
                 Column(Modifier.fillMaxWidth().height(maximumHeight)
                     .padding(horizontal = 16.dp, vertical = 8.dp)) {
@@ -222,16 +246,15 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                             .verticalScroll(navigationScroll)) {
                             ExperienceModeChoices(draftMode, active && pendingExit == null) { mode ->
                                 if (active && pendingExit == null && settleEditor()) {
-                                    draftMode = mode
-                                    notice = null
+                                    changeMode(mode)
                                     focus.clearFocus(force = true)
                                 }
                             }
-                            ExperienceResourceOverview(liveUsage, savedBudget, preview, dirty,
+                            ExperienceResourceOverview(liveUsage, savedBudget, savedBudget, false,
                                 active && pendingExit == null, editor.pending) { group ->
                                 selectCategory(group, forecast = group == "resources")
                             }
-                            if (preview.protections.isNotEmpty()) ExperienceProtectionSummary(preview.protections, dirty)
+                            if (savedBudget.protections.isNotEmpty()) ExperienceProtectionSummary(savedBudget.protections, false)
                             Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
                                 ExperienceCategoryNavigation(shownCategory, draft, active && pendingExit == null) { selectCategory(it) }
                             }
@@ -241,84 +264,48 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                             if (!wide) {
                                 ExperienceModeChoices(draftMode, active && pendingExit == null) { mode ->
                                     if (settleEditor()) {
-                                        draftMode = mode
-                                        notice = null
+                                        changeMode(mode)
                                         focus.clearFocus(force = true)
                                     }
                                 }
-                                ExperienceResourceOverview(liveUsage, savedBudget, preview, dirty,
-                                    active && pendingExit == null, editor.pending, showDraftImpact = !pinnedImpact) { group ->
+                                ExperienceResourceOverview(liveUsage, savedBudget, savedBudget, false,
+                                    active && pendingExit == null, editor.pending) { group ->
                                     selectCategory(group, forecast = group == "resources")
                                 }
-                                if (preview.protections.isNotEmpty()) ExperienceProtectionSummary(preview.protections, dirty)
+                                if (savedBudget.protections.isNotEmpty()) ExperienceProtectionSummary(savedBudget.protections, false)
                                 ExperienceCategoryNavigation(shownCategory, draft, active && pendingExit == null) { selectCategory(it) }
                                 ExperienceReveal(showLegend) { ExperienceNavigationLegend() }
                             }
                             ExperienceSettings(active && pendingExit == null, shownCategory,
-                                store, preview, savedBudget, editor, draft, { draft = it; notice = null },
+                                store, preview, savedBudget, editor, draft, ::change,
                                 currentDraft = { draft },
-                                mode = draftMode, draft = dirty,
+                                mode = draftMode, draft = false,
                                 deviceTab = deviceTab, onDeviceTabChange = { deviceTab = it },
                                 onOpenNetwork = onOpenNetwork?.let { { requestExit("network") } },
                                 onOpenSourceChecks = onOpenSourceChecks?.let { { requestExit("source-checks") } })
                         }
                     }
-                    if (dirty && pinnedImpact)
-                        ExperienceDraftImpact(liveUsage, savedBudget, preview, editor.pending)
                     if (notice != null || conflict) Text(notice ?: "设置已在其他入口改变，请重新载入",
                         Modifier.fillMaxWidth().padding(vertical = 4.dp), style = MaterialTheme.typography.labelSmall,
                         color = if (conflict) statusColors.waiting else statusColors.error)
-                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        val stateColor = when {
-                            applying -> statusColors.activity
-                            conflict -> statusColors.waiting
-                            notice != null -> statusColors.error
-                            pendingExit != null -> statusColors.waiting
-                            dirty -> colors.primary
-                            else -> statusColors.success
-                        }
-                        val stateLabel = when {
-                            applying -> "应用中"
-                            conflict -> "需要重新载入"
-                            notice != null -> "尚未保存"
-                            pendingExit != null -> "尚未应用"
-                            editor.pending -> "编辑中"
-                            dirty -> "草稿"
-                            else -> "当前配置已保存"
-                        }
-                        Box(Modifier.size(18.dp).semantics { contentDescription = stateLabel }, contentAlignment = Alignment.Center) {
-                            if (applying) MotionBusyIndicator(Modifier.size(18.dp), color = stateColor, strokeWidth = 1.5.dp)
-                            else Icon(when {
-                                conflict -> Icons.Outlined.SyncProblem
-                                notice != null -> Icons.Outlined.ErrorOutline
-                                pendingExit != null -> Icons.Outlined.PauseCircleOutline
-                                dirty -> Icons.Outlined.Edit
-                                else -> Icons.Outlined.CheckCircle
-                            }, null, Modifier.size(18.dp), tint = stateColor)
-                        }
-                        Text(if (applying || conflict || notice != null || pendingExit != null || dirty) stateLabel else "",
-                            Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
-                            color = stateColor,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (pendingExit != null) MotionIconButton(onClick = { pendingExit = null }, enabled = active,
-                            modifier = Modifier.size(44.dp), tooltip = "继续编辑") {
-                            Icon(Icons.Outlined.Edit, "继续编辑", Modifier.size(18.dp))
-                        }
-                        if (dirty || conflict) MotionIconButton(onClick = {
-                            val destination = pendingExit
-                            reload()
-                            if (destination != null) finishExit(destination)
-                        }, enabled = active, modifier = Modifier.size(44.dp),
-                            tooltip = if (pendingExit != null) "放弃草稿并继续" else if (conflict) "重新载入设置" else "撤销所有未应用修改") {
-                            Icon(if (conflict) Icons.Outlined.Refresh else Icons.Outlined.Undo,
-                                if (pendingExit != null) "放弃草稿并继续" else if (conflict) "重新载入设置" else "撤销草稿", Modifier.size(18.dp))
-                        }
-                        MotionButton(onClick = { apply() }, enabled = active && dirty && !conflict,
-                            modifier = Modifier.heightIn(min = 44.dp).semantics {
-                                contentDescription = if (pendingExit != null) "应用全部设置并继续" else "应用全部设置"
-                            }, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)) {
-                            Text("应用")
+                    // No second Apply step. Show save progress/failure only when it needs attention.
+                    // Keep this slot stable during save completion so dragging cannot shift the slider.
+                    Box(Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+                        if (applying || notice != null || conflict || pendingExit != null) Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (applying) MotionBusyIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
+                            Text(if (applying) "保存中" else "尚未保存", Modifier.weight(1f),
+                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                            if (!applying) {
+                                if (pendingExit != null) MotionTextButton(onClick = {
+                                    val destination = pendingExit
+                                    reload()
+                                    finishExit(destination)
+                                }) { Text("放弃未保存修改") }
+                                MotionTextButton(onClick = {
+                                    if (conflict) reload() else saveChanges()
+                                }) { Text(if (conflict) "重新载入" else "重试") }
+                            }
                         }
                     }
                 }
@@ -434,7 +421,7 @@ private fun ExperienceNavigationLegend() {
         ResourceValue(Icons.Outlined.Download, "后台", "下载与任务让行")
         ResourceValue(Icons.Outlined.Storage, "缓存", "容量、时效与清理")
         ResourceValue(Icons.Outlined.DeveloperBoard, "设备", "硬件、观测与保护")
-        ExperienceHint("绿点／勾表示对应状态已确认，蓝色表示处理或编辑，时钟／暂停的琥珀色表示等待或约束，红色表示失败，问号／— 表示未知。蓝点仍表示自定义，修改后点“应用”保存。")
+        ExperienceHint("绿点／勾表示对应状态已确认，蓝色表示处理或编辑，时钟／暂停的琥珀色表示等待或约束，红色表示失败，问号／— 表示未知。蓝点仍表示自定义；拖动立即保存，键盘输入点勾或回车保存。")
         ExperienceHint("实测是当前占用；≈ 是配置情景估算，不是硬上限或安全保证。点数值查看口径；缓存占满不等于故障。")
     }
 }
@@ -520,9 +507,9 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 if (finishEditor()) change(currentDraft().copy(prefetchMode = it))
             }
             ExperienceReveal(custom.prefetchMode == PrefetchMode.MANUAL) {
-                ExperienceNumber("待读窗口", custom.ahead, budget.goal.prefetchAhead, 0..40, "页",
+                ExperienceLiveNumber("待读窗口", custom.ahead, budget.goal.prefetchAhead, 0..40, "页",
                     editor, active && expanded == "reading" && custom.prefetchMode == PrefetchMode.MANUAL, effective = appliedBudget.prefetchAhead) { change(custom.copy(ahead = it)) }
-                ExperienceNumber("回看窗口", custom.behind, budget.goal.prefetchBehind, 0..8, "页",
+                ExperienceLiveNumber("回看窗口", custom.behind, budget.goal.prefetchBehind, 0..8, "页",
                     editor, active && expanded == "reading" && custom.prefetchMode == PrefetchMode.MANUAL, effective = appliedBudget.prefetchBehind) { change(custom.copy(behind = it)) }
             }
             ExperienceReveal(custom.prefetchMode != PrefetchMode.OFF) {
@@ -538,7 +525,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                         crossChapter = true, browseWarmup = true, decodedPrefetchPages = null, readerStatusPlacement = ReaderStatusPlacement.BOTTOM,
                         runtime = resetExperienceRuntime(custom.runtime, ExperienceRuntimeGroup.READING)))
                 }, extra = {
-                    ExperienceNumber("临近页预解码", custom.decodedPrefetchPages, budget.goal.decodedPrefetchPages, 0..8, "页",
+                    ExperienceLiveNumber("临近页预解码", custom.decodedPrefetchPages, budget.goal.decodedPrefetchPages, 0..8, "页",
                         editor, active && expanded == "reading" && detail == "reading-advanced", effective = appliedBudget.decodedPrefetchPages) {
                         change(custom.copy(decodedPrefetchPages = it))
                     }
@@ -550,25 +537,25 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 }) {
                 ExperienceBudgetRow("窗口目标", budget.goal.prefetchAhead.toString() + " 待读 · " + budget.goal.prefetchBehind + " 回看")
                 ExperienceHint("待读和回看跟随实际翻页方向，不固定为屏幕左右。窗口是候选页数，解析、传输、解码各有并发上限；原图存磁盘，临近预览进内存。")
-                ExperienceHint("环形箭头表示跟随目标，笔形表示手动值，直接输入不设业务上限；“当前”只在暂停等实际状态不同时显示。配置数量不等于正在执行的数量。")
+                ExperienceHint("环形箭头表示自动调节，笔形表示手动值。拖动直接保存，手动输入不设业务上限；配置数量不等于正在执行的数量。")
             }
         }
 
         if (expanded == "parallel") ExperienceCategorySection("并行", Icons.Outlined.AccountTree,
             modified = experienceParallelCustom(custom)) {
-            ExperienceNumber("当前页请求", custom.readerRequests, budget.goal.readerRequests, 1..4, "个",
+            ExperienceLiveNumber("当前页请求", custom.readerRequests, budget.goal.readerRequests, 1..4, "个",
                 editor, active && expanded == "parallel", effective = appliedBudget.readerRequests) { change(custom.copy(readerRequests = it)) }
-            ExperienceNumber("图址解析", custom.resolveRequests, budget.goal.resolveRequests, 1..8, "个",
+            ExperienceLiveNumber("图址解析", custom.resolveRequests, budget.goal.resolveRequests, 1..8, "个",
                 editor, active && expanded == "parallel", effective = appliedBudget.resolveRequests) { change(custom.copy(resolveRequests = it)) }
-            ExperienceNumber("原图预取", custom.prefetchRequests, budget.goal.prefetchRequests, 1..12, "个",
+            ExperienceLiveNumber("原图预取", custom.prefetchRequests, budget.goal.prefetchRequests, 1..12, "个",
                 editor, active && expanded == "parallel", effective = appliedBudget.prefetchRequests) { change(custom.copy(prefetchRequests = it)) }
-            ExperienceNumber("图片解码", custom.decodeRequests, budget.goal.decodeRequests, 1..4, "个",
+            ExperienceLiveNumber("图片解码", custom.decodeRequests, budget.goal.decodeRequests, 1..4, "个",
                 editor, active && expanded == "parallel", effective = appliedBudget.decodeRequests) { change(custom.copy(decodeRequests = it)) }
-            ExperienceNumber("下载页面", custom.downloadPages, budget.goal.backgroundPages, 1..maximumBackgroundPageParallelism, "个",
+            ExperienceLiveNumber("下载页面", custom.downloadPages, budget.goal.backgroundPages, 1..maximumBackgroundPageParallelism, "个",
                 editor, active && expanded == "parallel", effective = appliedBudget.backgroundPages) { change(custom.copy(downloadPages = it)) }
-            ExperienceNumber("每源请求", custom.sourcePages, budget.goal.sourceParallelism, 1..8, "个",
+            ExperienceLiveNumber("每源请求", custom.sourcePages, budget.goal.sourceParallelism, 1..8, "个",
                 editor, active && expanded == "parallel", effective = appliedBudget.sourceParallelism) { change(custom.copy(sourcePages = it)) }
-            ExperienceNumber("下载章节", custom.chapters, budget.goal.chapterParallelism, 1..4, "章",
+            ExperienceLiveNumber("下载章节", custom.chapters, budget.goal.chapterParallelism, 1..4, "章",
                 editor, active && expanded == "parallel", effective = appliedBudget.chapterParallelism) { change(custom.copy(chapters = it)) }
             ExperienceTools("parallel", "并行", active && expanded == "parallel", detail, ::toggleDetail,
                 experienceParallelCustom(custom), onRestore = {
@@ -598,14 +585,14 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
             if (custom.sourceRecovery == null) ExperienceBudgetRow("预览", sourceRecoveryLabel(budget.sourceRecovery))
             ExperienceBudgetRow("预热预算", budget.standbySources.toString() + " 源 · " + experienceCacheSize(budget.standbyPrefetchBytes))
             budget.standbyPauseReason?.let { ExperienceHint(it) }
-            ExperienceNumber("同时备用来源", custom.standbySources,
+            ExperienceLiveNumber("同时备用来源", custom.standbySources,
                 if (budget.sourceRecovery == SourceRecoveryMode.AGGRESSIVE) 2 else 1, 1..4, "源",
                 editor, active && expanded == "sources", effective = appliedBudget.standbySources, automaticLabel = "预热模式") {
                 change(custom.copy(standbySources = it))
             }
-            ExperienceNumber("每源附近预热", custom.standbyPages, 3, 1..12, "页",
+            ExperienceLiveNumber("每源附近预热", custom.standbyPages, 3, 1..12, "页",
                 editor, active && expanded == "sources", effective = appliedBudget.standbyPages) { change(custom.copy(standbyPages = it ?: 3)) }
-            ExperienceNumber("备用原图窗口", custom.standbyMiB,
+            ExperienceLiveNumber("备用原图窗口", custom.standbyMiB,
                 (budget.goal.prefetchBytes / 4L / EXPERIENCE_MIB).toInt(), 1..128, "MB",
                 editor, active && expanded == "sources", effective = (appliedBudget.standbyPrefetchBytes / EXPERIENCE_MIB).toInt()) {
                 change(custom.copy(standbyMiB = it))
@@ -724,21 +711,21 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                         color = if (cacheClearFailed) statusColors.error else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            ExperienceNumber("内存缓存上限", custom.memoryMiB, automaticMemoryBytes?.let { (it / EXPERIENCE_MIB).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() }, 1..512, "MB",
+            ExperienceLiveNumber("内存缓存上限", custom.memoryMiB, automaticMemoryBytes?.let { (it / EXPERIENCE_MIB).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() }, 1..512, "MB",
                 editor, active && expanded == "cache", effective = usage.memoryLimit?.let { (it / EXPERIENCE_MIB).toInt() }, automaticLabel = "模式预算") {
                 change(custom.copy(memoryMiB = it))
             }
-            ExperienceNumber("闲置回收", custom.contentCache.memoryIdleMinutes, ContentCachePreferences().memoryIdleMinutes, 0..120, "分钟",
+            ExperienceLiveNumber("闲置回收", custom.contentCache.memoryIdleMinutes, ContentCachePreferences().memoryIdleMinutes, 0..120, "分钟",
                 editor, active && expanded == "cache", effective = appliedCustom.contentCache.memoryIdleMinutes,
                 automaticLabel = "默认值") {
                 change(custom.copy(contentCache = custom.contentCache.copy(memoryIdleMinutes = it ?: ContentCachePreferences().memoryIdleMinutes)))
             }
             ExperienceBudgetRow("共享磁盘", cacheUsage(usage.diskBytes, usage.diskLimit))
-            ExperienceNumber("磁盘缓存预算", custom.diskMiB, (budget.goal.diskCacheBytes / EXPERIENCE_MIB).toInt(), 1..8192, "MB",
+            ExperienceLiveNumber("磁盘缓存预算", custom.diskMiB, (budget.goal.diskCacheBytes / EXPERIENCE_MIB).toInt(), 1..8192, "MB",
                 editor, active && expanded == "cache", effective = (appliedBudget.diskCacheBytes / EXPERIENCE_MIB).toInt()) {
                 change(custom.copy(diskMiB = it))
             }
-            ExperienceNumber("原图预取窗口", custom.prefetchMiB, (budget.goal.prefetchBytes / EXPERIENCE_MIB).toInt(), 1..512, "MB",
+            ExperienceLiveNumber("原图预取窗口", custom.prefetchMiB, (budget.goal.prefetchBytes / EXPERIENCE_MIB).toInt(), 1..512, "MB",
                 editor, active && expanded == "cache", effective = (appliedBudget.prefetchBytes / EXPERIENCE_MIB).toInt()) {
                 change(custom.copy(prefetchMiB = it))
             }
@@ -753,7 +740,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 statusIcon = Icons.Outlined.Schedule, statusColor = mangaStatusColors().waiting)
             usage.cacheError?.let { Text(it, Modifier.padding(vertical = 4.dp),
                 style = MaterialTheme.typography.labelSmall, color = mangaStatusColors().error) }
-            ExperienceNumber("磁盘图片保留", custom.contentCache.imageRetentionHours, 0, 0..720, "小时",
+            ExperienceLiveNumber("磁盘图片保留", custom.contentCache.imageRetentionHours, 0, 0..720, "小时",
                 editor, active && expanded == "cache", effective = appliedCustom.contentCache.imageRetentionHours,
                 automaticLabel = "默认值") { change(custom.copy(contentCache = custom.contentCache.copy(imageRetentionHours = it ?: 0))) }
             } else if (cacheTab == "areas") {
@@ -790,7 +777,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 }
                 val defaultMinutes = (ContentCachePreferences().freshMillis(cacheKind) / 60_000L).toInt()
                 val currentMinutes = (appliedCustom.contentCache.freshMillis(cacheKind) / 60_000L).toInt()
-                ExperienceNumber(when (cacheKind) {
+                ExperienceLiveNumber(when (cacheKind) {
                     ContentCacheKind.SEARCH -> "搜索间隔"; ContentCacheKind.DISCOVERY -> "发现间隔"
                     ContentCacheKind.RANKING -> "榜单间隔"; ContentCacheKind.DETAILS -> "目录间隔"
                     ContentCacheKind.PAGE_MANIFEST -> "图址间隔"; ContentCacheKind.METRICS -> "评分间隔"
@@ -811,19 +798,19 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 if (cacheKind == ContentCacheKind.POPULARITY) ExperienceHint("热度随列表与详情返回，此上限同时约束这些资料的复用时间；不为每张卡单独请求热度。")
                 else if (effectiveMinutes < minutes && cache.enabled && !cache.refreshOnOpen)
                     ExperienceHint("同时受热度资料时效上限约束。")
-                ExperienceNumber("失败结果重试间隔", cache.failureMinutes, 1, 0..60, "分钟", editor, active && expanded == "cache",
+                ExperienceLiveNumber("失败结果重试间隔", cache.failureMinutes, 1, 0..60, "分钟", editor, active && expanded == "cache",
                     effective = appliedCustom.contentCache.failureMinutes, automaticLabel = "默认值") {
                     change(custom.copy(contentCache = cache.copy(failureMinutes = it ?: 1)))
                 }
-                ExperienceNumber("快照最长保留", cache.retentionHours, 168, 1..720, "小时", editor, active && expanded == "cache",
+                ExperienceLiveNumber("快照最长保留", cache.retentionHours, 168, 1..720, "小时", editor, active && expanded == "cache",
                     effective = appliedCustom.contentCache.retentionHours, automaticLabel = "默认值") {
                     change(custom.copy(contentCache = cache.copy(retentionHours = it ?: 168)))
                 }
-                ExperienceNumber("列表快照上限", cache.snapshotMemoryEntries, 24, 1..64, "份", editor, active && expanded == "cache",
+                ExperienceLiveNumber("列表快照上限", cache.snapshotMemoryEntries, 24, 1..64, "份", editor, active && expanded == "cache",
                     effective = appliedCustom.contentCache.snapshotMemoryEntries, automaticLabel = "默认值") {
                     change(custom.copy(contentCache = cache.copy(snapshotMemoryEntries = it ?: 24)))
                 }
-                ExperienceNumber("列表磁盘上限", cache.snapshotDiskMiB, 8, 1..128, "MB", editor, active && expanded == "cache",
+                ExperienceLiveNumber("列表磁盘上限", cache.snapshotDiskMiB, 8, 1..128, "MB", editor, active && expanded == "cache",
                     effective = appliedCustom.contentCache.snapshotDiskMiB, automaticLabel = "默认值") {
                     change(custom.copy(contentCache = cache.copy(snapshotDiskMiB = it ?: 8)))
                 }
@@ -928,7 +915,7 @@ private fun ExperienceRuntimeSettings(group: ExperienceRuntimeGroup, custom: Exp
             val shortcut = field.semanticMaximum ?: when (field.unit) {
                 "px" -> 2048; "MiB" -> 1024; "Mpx" -> 64; "秒" -> 120; "页" -> 24; else -> 16
             }
-            ExperienceNumber(field.label, field.value(custom.runtime), default,
+            ExperienceLiveNumber(field.label, field.value(custom.runtime), default,
                 field.minimum..maxOf(field.minimum, shortcut), field.unit, editor, active && supported,
                 effective = field.effectiveValue(currentBudget, usage), automaticLabel = if (field.followsAutomatic) "自动预算" else "默认值",
                 semanticMaximum = field.semanticMaximum) { value ->
@@ -951,27 +938,27 @@ private fun ExperienceRecoverySettings(custom: ExperienceOverrides, currentBudge
     val p = custom.recovery
     val actual = currentBudget.recovery
     fun update(value: dev.mangaflow.reader.ReaderRecoveryPreferences) = onChange(custom.copy(recovery = value))
-    ExperienceNumber("连续失败", p.consecutiveFailures, 3, 1..12, "页", editor, active,
+    ExperienceLiveNumber("连续失败", p.consecutiveFailures, 3, 1..12, "页", editor, active,
         effective = actual.consecutiveFailures) { update(p.copy(consecutiveFailures = it ?: 3)) }
-    ExperienceNumber("失败观察窗口", p.failureWindow, 6, 1..24, "页", editor, active,
+    ExperienceLiveNumber("失败观察窗口", p.failureWindow, 6, 1..24, "页", editor, active,
         effective = actual.failureWindow) { update(p.copy(failureWindow = it ?: 6)) }
-    ExperienceNumber("窗口内失败", p.failuresInWindow, 3, 1..12, "页", editor, active,
+    ExperienceLiveNumber("窗口内失败", p.failuresInWindow, 3, 1..12, "页", editor, active,
         effective = actual.failuresInWindow) { update(p.copy(failuresInWindow = it ?: 3)) }
     if (p.failuresInWindow > p.failureWindow) ExperienceHint("窗口阈值大于窗口页数，此条件不会触发；连续失败条件仍独立生效。")
-    ExperienceNumber("切源冷却", p.switchCooldownSeconds, 60, 0..300, "秒", editor, active,
+    ExperienceLiveNumber("切源冷却", p.switchCooldownSeconds, 60, 0..300, "秒", editor, active,
         effective = actual.switchCooldownSeconds) { update(p.copy(switchCooldownSeconds = it ?: 60)) }
-    ExperienceNumber("备用重试", p.standbyRetryCount, 2, 0..8, "次", editor, active,
+    ExperienceLiveNumber("备用重试", p.standbyRetryCount, 2, 0..8, "次", editor, active,
         effective = actual.standbyRetryCount) { update(p.copy(standbyRetryCount = it ?: 2)) }
-    ExperienceNumber("备用重试间隔", p.standbyRetryDelaySeconds, 30, 0..120, "秒", editor, active,
+    ExperienceLiveNumber("备用重试间隔", p.standbyRetryDelaySeconds, 30, 0..120, "秒", editor, active,
         effective = actual.standbyRetryDelaySeconds) { update(p.copy(standbyRetryDelaySeconds = it ?: 30)) }
-    ExperienceNumber("备用目录等待", p.manifestTimeoutSeconds, 25, 1..120, "秒", editor, active,
+    ExperienceLiveNumber("备用目录等待", p.manifestTimeoutSeconds, 25, 1..120, "秒", editor, active,
         effective = actual.manifestTimeoutSeconds) { update(p.copy(manifestTimeoutSeconds = it ?: 25)) }
-    ExperienceNumber("图片无新字节等待", p.imageTimeoutSeconds, 45, 1..180, "秒", editor, active,
+    ExperienceLiveNumber("图片无新字节等待", p.imageTimeoutSeconds, 45, 1..180, "秒", editor, active,
         effective = (effectiveImageTransportTimeoutMillis(actual.imageTimeoutSeconds.toLong() * 1_000L) / 1_000L).toInt()) {
         update(p.copy(imageTimeoutSeconds = it ?: 45))
     }
     ExperienceTransportLimit(p.imageTimeoutSeconds.toLong() * 1_000L)
-    ExperienceNumber("慢加载提示", p.slowLoadSeconds, 8, 1..60, "秒", editor, active,
+    ExperienceLiveNumber("慢加载提示", p.slowLoadSeconds, 8, 1..60, "秒", editor, active,
         effective = actual.slowLoadSeconds) { update(p.copy(slowLoadSeconds = it ?: 8)) }
     ExperienceHint("自动补页使用已经确认的同页关系。排队、取消和资源暂停不计坏页；未对齐的版本先手动确认。整章自动切源还要求目标图可显示。")
 }
@@ -997,6 +984,7 @@ internal class ExperienceEditor {
     // One edit buffer survives changes between the narrow and wide workspace.
     val input = mutableStateOf("")
     val position = mutableFloatStateOf(0f)
+    var sliderMaximum by mutableIntStateOf(0)
     val invalidInput = mutableStateOf(false)
     fun clear() { field = null; pending = false; accept = null }
 }
@@ -1018,17 +1006,27 @@ internal fun ExperienceReveal(expanded: Boolean, content: @Composable ColumnScop
         verticalArrangement = Arrangement.spacedBy(4.dp), content = content)
 }
 
+/** The experience dialog saves immediately; other consumers retain explicit numeric acceptance. */
+@Composable
+private fun ExperienceLiveNumber(title: String, value: Int?, automatic: Int?, range: IntRange, unit: String,
+    editor: ExperienceEditor, active: Boolean, effective: Int? = null, automaticLabel: String = "模式目标",
+    semanticMaximum: Int? = null, onChange: (Int?) -> Unit) {
+    ExperienceNumber(title, value, automatic, range, unit, editor, active, effective, automaticLabel,
+        semanticMaximum, liveSlider = true, onChange = onChange)
+}
+
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
 internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range: IntRange, unit: String,
     editor: ExperienceEditor, active: Boolean, effective: Int? = null, automaticLabel: String = "模式目标",
-    semanticMaximum: Int? = null, onChange: (Int?) -> Unit) {
+    semanticMaximum: Int? = null, liveSlider: Boolean = false, onChange: (Int?) -> Unit) {
     val colors = MaterialTheme.colorScheme
-    val selected = value ?: automatic
+    val selected = value ?: effective ?: automatic
     val current = (selected ?: range.first).coerceAtLeast(range.first)
-    // The slider is a shortcut; the numeric editor accepts every representable value.
-    val sliderMaximum = maxOf(range.last, current)
     val editing = active && editor.field == title
+    // Freeze the shortcut scale for this edit: saving a step must not move the thumb's
+    // coordinate system, especially after a manually entered value exceeds the shortcut.
+    val sliderMaximum = if (editing) maxOf(range.last, editor.sliderMaximum) else maxOf(range.last, current)
     val focus = LocalFocusManager.current
     var draft by editor.input
     var sliding by editor.position
@@ -1037,6 +1035,11 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
     fun commit(): Boolean {
         if (!acceptsInput()) return false
         val parsed = draft.toIntOrNull()
+        if (!editor.pending && parsed == selected) {
+            editor.clear()
+            focus.clearFocus(force = true)
+            return true
+        }
         if (parsed == null || parsed < range.first || (semanticMaximum != null && parsed > semanticMaximum)) { invalid = true; return false }
         val accepted = parsed
         draft = accepted.toString()
@@ -1058,6 +1061,7 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                         if (editing) editor.clear() else {
                             draft = selected?.toString().orEmpty()
                             sliding = current.toFloat()
+                            editor.sliderMaximum = maxOf(range.last, current)
                             invalid = false
                             editor.clear()
                             editor.field = title
@@ -1067,8 +1071,7 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                     modifier = Modifier.widthIn(max = maxWidth).heightIn(min = 44.dp).semantics(mergeDescendants = true) {
                         contentDescription = title + "，" + (selected?.toString()?.plus(" " + unit) ?: "自动值尚未知") +
                             (if (value == null) "，跟随" + automaticLabel else "，手动值") +
-                            (effective?.let { "，当前有效值 " + it + " " + unit } ?: "") +
-                            (if (editing) "，点击取消未应用的编辑" else "，点击编辑")
+                            (if (editing) "，点击收起编辑" else "，点击编辑")
                     }) {
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -1078,8 +1081,6 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                             Icon(if (editing) Icons.Outlined.Close else if (value == null) Icons.Outlined.Sync else Icons.Outlined.Edit,
                                 null, Modifier.size(14.dp), tint = if (editing || value != null) colors.primary else colors.onSurfaceVariant)
                         }
-                        if (selected != null && effective != null && effective != selected)
-                            Text("当前 " + effective, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                     }
                 }
             }
@@ -1120,35 +1121,9 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                 MotionTextButton(onClick = { commit() }, enabled = editing,
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                     modifier = Modifier.heightIn(min = 44.dp).semantics {
-                        contentDescription = "完成" + title + "编辑，保留为草稿"
+                        contentDescription = "保存" + title + "数值"
                     }) {
-                    Text("完成")
-                }
-                MotionIconButton(onClick = {
-                    if (acceptsInput()) { editor.clear(); focus.clearFocus(force = true) }
-                }, enabled = editing, modifier = Modifier.size(44.dp), tooltip = "取消未应用的" + title + "编辑") {
-                    Icon(Icons.Outlined.Close, "取消编辑", Modifier.size(18.dp))
-                }
-            }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp),
-                            modifier = Modifier.semantics(mergeDescendants = true) {
-                                contentDescription = automaticLabel + " " + (automatic?.toString()?.plus(" " + unit) ?: "未知")
-                            }) {
-                            Icon(Icons.Outlined.Sync, null, Modifier.size(15.dp), tint = colors.primary)
-                            Text("目标 " + (automatic?.toString()?.plus(" " + unit) ?: "—"),
-                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                            Icon(Icons.Outlined.CheckCircle, null, Modifier.size(15.dp), tint = colors.onSurfaceVariant)
-                            Text("当前 " + (effective?.toString()?.plus(" " + unit) ?: "—"),
-                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                        }
-                    }
-                    if (semanticMaximum != null) Text(range.first.toString() + "–" + semanticMaximum + " " + unit,
-                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                    Icon(Icons.Outlined.Check, "保存数值", Modifier.size(18.dp))
                 }
                 MotionIconButton(onClick = {
                     if (acceptsInput()) {
@@ -1160,17 +1135,22 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                     Icon(Icons.Outlined.Sync, "恢复" + title + "跟随" + automaticLabel, Modifier.size(18.dp))
                 }
             }
+            if (semanticMaximum != null) Text(range.first.toString() + "–" + semanticMaximum + " " + unit,
+                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             if (invalid) Text(if (semanticMaximum != null) "请输入 " + range.first + "–" + semanticMaximum + " 的整数"
                 else "请输入不小于 " + range.first + " 的有效整数", style = MaterialTheme.typography.labelSmall, color = colors.error)
             MotionSlider(sliding, onValueChange = {
-                if (acceptsInput()) { sliding = it; draft = it.roundToInt().toString(); invalid = false; editor.pending = true }
-            }, valueRange = range.first.toFloat()..sliderMaximum.toFloat(), onValueChangeFinished = {
                 if (acceptsInput()) {
-                    val accepted = sliding.roundToInt().coerceAtLeast(range.first)
+                    val accepted = it.roundToInt().coerceAtLeast(range.first)
+                    sliding = accepted.toFloat()
                     draft = accepted.toString()
                     invalid = false
-                    editor.pending = draft != selected?.toString().orEmpty()
+                    editor.pending = !liveSlider && draft != selected?.toString().orEmpty()
+                    if (liveSlider) onChange(accepted)
                 }
+            }, valueRange = range.first.toFloat()..sliderMaximum.toFloat(), onValueChangeFinished = {
+                // Live experience steps are already saved. Other consumers retain their local
+                // numeric buffer until the check/IME Done action accepts it.
             }, formatValue = { it.roundToInt().toString() + " " + unit },
                 modifier = Modifier.fillMaxWidth().semantics { contentDescription = title + "滑块" })
         }
