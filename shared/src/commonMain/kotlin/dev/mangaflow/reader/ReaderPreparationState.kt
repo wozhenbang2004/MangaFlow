@@ -192,14 +192,15 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
         tickets.keys.removeAll { it.first == index }
     }
     /** Layout sizes changed, not original identity or the time of its last verification. */
-    fun invalidateLayoutPreviews(owner: Any, retiredChecks: Set<Long>, visible: Set<Int>) = synchronized(lock) {
+    fun invalidateLayoutPreviews(retiredChecks: Set<Long>) = synchronized(lock) {
         rows.toMap().forEach { (index, row) ->
             val key = index to PrefetchStage.CHECKING
             val ticket = tickets[key]
-            // The new visible attempt may already have completed from memory before
-            // this host observes the layout. Its ticket is not one of our retired checks.
-            val independent = ticket != null && ticket !in retiredChecks &&
-                (index in visible || ticket in activeTickets && ticketOwners[ticket] !== owner)
+            // CHECKING also describes source-native original materialization (for
+            // example JM descrambling), not just viewport-sized preview checks. Only
+            // retire the exact preview tickets cancelled by the layout host. Independent
+            // original/foreground work retains its real stage, even outside visibility.
+            val independent = ticket != null && ticket !in retiredChecks
             if (!independent) {
                 tickets.remove(key)?.let { activeTickets.remove(it); ticketOwners.remove(it) }
             }

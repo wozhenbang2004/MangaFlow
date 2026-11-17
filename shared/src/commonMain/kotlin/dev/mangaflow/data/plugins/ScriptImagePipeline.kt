@@ -296,19 +296,24 @@ internal suspend fun materializeScriptPage(
     val policy = ExperiencePolicyStore.get(context)
     val runtime = policy.state.value.runtime
     val maxImageBytes = runtime.maxImageBytes
+    val transport = currentCoroutineContext()[ChapterDownloadTransport]
+    // Foreground cache hits must not require an available network route. Optional
+    // current() checks and actual fetches evaluate this only inside the lease's finally.
+    val selectedRoute by lazy { route ?: transport?.route ?: DownloadRoutingStore.get(context).sourceSnapshot(ref.sourceId) }
     val releaseCache = dev.mangaflow.storage.StorageCacheStore.get(context).leaseFile(
         dev.mangaflow.storage.CacheBackend.SCRIPT, target, mangaId, chapterId, ref.sourceId, page.index, !prefetched)
     val stage = if (page.transform == "jm") "decode" else "image"
     fun current() = scriptSourceImageEpoch(context, ref.sourceId) == epoch &&
-        store.installed.value.any { it.sourceId == ref.sourceId && it.digest == bundle.digest }
+        store.installed.value.any { it.sourceId == ref.sourceId && it.digest == bundle.digest } &&
+        // A download owns its frozen transport. Optional reader preparation instead
+        // expires when its source route changes; changing layout is not a new owner.
+        (!prefetched || transport != null || DownloadRoutingStore.get(context).sourceSnapshot(ref.sourceId) == selectedRoute)
     // A key has one writer; unrelated originals no longer hold CPU slots while downloading.
     return try { decodeGates[(fingerprint.hashCode() and Int.MAX_VALUE) % decodeGates.size].withLock {
         withContext(Dispatchers.IO) {
             if (!current()) throw ScriptImageRefreshRequired("图片来源或账号已变化，请刷新本章。")
             if (!retry && target.isFile && target.length() in 128L..maxImageBytes && storageImageBounds(target) != null)
                 return@withContext page.copy(url = target.toURI(), headers = emptyMap(), transform = "", sourceSessionEpoch = epoch)
-            val transport = currentCoroutineContext()[ChapterDownloadTransport]
-            val selectedRoute = route ?: transport?.route ?: DownloadRoutingStore.get(context).sourceSnapshot(ref.sourceId)
             try {
                 val fetch: suspend () -> ByteArray = { withImageSession(context, ref.sourceId, epoch) {
                     val started = monotonicTimeMillis()
@@ -321,6 +326,7 @@ internal suspend fun materializeScriptPage(
                         fetchScriptImageBytes(context, page.url, actualHeaders, selectedRoute,
                             onBytes = { count ->
                                 if (count > 0L) {
+                                    if (!current()) throw ScriptImageRefreshRequired("图片来源、账号或预读路由已变化，请刷新本章。")
                                     received += count
                                     onBytes?.invoke(count)
                                     work?.onBytes(count)

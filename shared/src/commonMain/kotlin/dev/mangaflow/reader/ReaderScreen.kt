@@ -1757,10 +1757,9 @@ private fun ChapterPages(
     val atEndChanged by rememberUpdatedState(onAtEndChanged)
     val currentPages by rememberUpdatedState(pages)
     val layoutKey = remember(preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles) { Any() }
-    val retainHttpLayout = sourceId != "jmcomic" && !sourceId.startsWith("js_")
     val loadedPages = remember(pages, headers, sourceId, layoutKey) { mutableStateMapOf<Int, String>() }
     val composedPages = remember(pages, headers, sourceId, layoutKey) { mutableStateMapOf<Int, Boolean>() }
-    val prefetchRequests = remember(pages, headers, sourceId, if (retainHttpLayout) null else layoutKey) {
+    val prefetchRequests = remember(pages, headers, sourceId) {
         mutableStateMapOf<Int, ReaderPagePrefetch>()
     }
     val prefetchFailures = remember(pages, headers, sourceId) { mutableStateMapOf<Int, String>() }
@@ -2292,7 +2291,7 @@ private fun ChapterPages(
             position = viewport.position, groups = viewport.groups,
             scrollDirection = viewport.scrollDirection, directionAnchor = viewport.directionAnchor,
             directionBaseline = viewport.directionBaseline, layoutKey = layoutKey,
-            retainOriginalsAcrossLayouts = retainHttpLayout,
+            retainOriginalsAcrossLayouts = true,
             visibleRange = viewport.visibleRange)
     }
 }
@@ -2578,8 +2577,7 @@ internal fun AdjacentPagePrefetch(
                     allTickets.keys.filter { it.second == PrefetchStage.CHECKING }.toList().forEach { key ->
                         allTickets.remove(key)?.let { tracker?.finish(it) }
                     }
-                    tracker?.invalidateLayoutPreviews(owner, retiredCheckTickets,
-                        (window.first..window.last).filter { it in pages.indices }.toSet())
+                    tracker?.invalidateLayoutPreviews(retiredCheckTickets)
                     memoryKeys.clear(); inspected.clear(); previewChecks.clear(); deferredChecks.clear()
                     previousPosition = Float.NaN; speed = 0f
                 }
