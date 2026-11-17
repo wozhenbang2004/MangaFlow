@@ -211,6 +211,40 @@ jobs:
           xcodebuild -project iosApp/MangaFlow.xcodeproj -scheme MangaFlow -configuration Debug \
             -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$RUNNER_TEMP/MangaFlow-simulator" CODE_SIGNING_ALLOWED=NO MARKETING_VERSION="$MANGA_VERSION" CURRENT_PROJECT_VERSION="$MANGA_BUILD_NUMBER" build
+      - name: Preserve minimal JVM crash diagnostics
+        if: failure()
+        run: |
+          # hs_err contains environment variables and process memory later in the file.
+          # Keep only recognized fatal-error header fields, never the raw report.
+          python3 - <<'PYTHON'
+          import itertools
+          import re
+          from pathlib import Path
+
+          output = Path("dist/ios-crash-diagnostics")
+          output.mkdir(parents=True, exist_ok=True)
+          allowed = re.compile(
+              r"^# (?:A fatal error|There is insufficient memory|Native memory allocation|"
+              r"JRE version:|Java VM:|Problematic frame:|  SIG[A-Z]+|  EXCEPTION_[A-Z_]+|"
+              r"  Internal Error|[CVJjv]  )"
+          )
+          reports = sorted(Path.cwd().glob("hs_err_pid*.log"))
+          for report in reports:
+              with report.open(errors="replace") as source:
+                  lines = [line.rstrip() for line in itertools.islice(source, 80)
+                           if allowed.match(line)]
+              (output / report.name).write_text("\n".join(lines) + "\n")
+          if not reports:
+              (output / "status.txt").write_text("No workspace-root JVM crash report was found.\n")
+          PYTHON
+      - name: Upload minimal JVM crash diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mangaflow-ios-crash-${{ github.run_number }}-${{ github.run_attempt }}
+          path: dist/ios-crash-diagnostics/
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Package the unsigned iOS applications
         run: |
           set -euo pipefail

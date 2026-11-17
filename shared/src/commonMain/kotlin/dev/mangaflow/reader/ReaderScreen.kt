@@ -500,8 +500,9 @@ fun ReaderScreen(
         mutableStateOf(if (localImport) emptyMap() else
             repository.imageHeaders(chapterSourceMangaId(manga.id, chapter), chapterId).toMap())
     }
-    val preparationTracker = remember(sourceIdentity, pages, headers, preferences.mode, preferences.panelLayoutKey,
-        preferences.doublePage, preferences.coverAlone) { ReaderPreparationTracker(chapter.sourceId, pages.size) }
+    val isolatedPanelLayout = if (preferences.panelEngine == PanelEngine.OFF) null else
+        listOf(preferences.mode, preferences.panelLayoutKey, preferences.doublePage, preferences.coverAlone)
+    val preparationTracker = remember(sourceIdentity, pages, headers, isolatedPanelLayout) { ReaderPreparationTracker(chapter.sourceId, pages.size) }
     val preparation by preparationTracker.state.collectAsStateWithLifecycle()
     LaunchedEffect(sourceIdentity, chapter, pageIndex, pages, standbyActive, loading, error,
         sourcePickerBlocking, chapterChangeRequested, experienceBudget.standbySources, preparation.direction) {
@@ -1055,8 +1056,8 @@ fun ReaderScreen(
                         error = "已停止等待"; loading = false
                     },
                 )
-                pages.isNotEmpty() -> key(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles,
-                    preferences.panelLayoutKey) {
+                pages.isNotEmpty() -> key(chapterId, sourceIdentity, isolatedPanelLayout,
+                    manualSingles.takeIf { preferences.panelEngine != PanelEngine.OFF }) {
                     if (preferences.panelEngine != PanelEngine.OFF) GuidedPanelReader(
                         pages = pages, headers = headers, resolvePage = resolvePage, retryPage = retryPage,
                         observePageTransfer = observePageTransfer,
@@ -1755,17 +1756,23 @@ private fun ChapterPages(
     val nearEnd by rememberUpdatedState(onNearEnd)
     val atEndChanged by rememberUpdatedState(onAtEndChanged)
     val currentPages by rememberUpdatedState(pages)
-    val loadedPages = remember(pages, headers, sourceId) { mutableStateMapOf<Int, String>() }
-    val composedPages = remember(pages, headers, sourceId) { mutableStateMapOf<Int, Boolean>() }
-    val prefetchRequests = remember(pages, headers, sourceId) { mutableStateMapOf<Int, ReaderPagePrefetch>() }
+    val layoutKey = remember(preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles) { Any() }
+    val retainHttpLayout = sourceId != "jmcomic" && !sourceId.startsWith("js_")
+    val loadedPages = remember(pages, headers, sourceId, layoutKey) { mutableStateMapOf<Int, String>() }
+    val composedPages = remember(pages, headers, sourceId, layoutKey) { mutableStateMapOf<Int, Boolean>() }
+    val prefetchRequests = remember(pages, headers, sourceId, if (retainHttpLayout) null else layoutKey) {
+        mutableStateMapOf<Int, ReaderPagePrefetch>()
+    }
     val prefetchFailures = remember(pages, headers, sourceId) { mutableStateMapOf<Int, String>() }
     val pageDimensions = remember(pages, headers, sourceId) { mutableStateMapOf<String, IntSize>() }
-    val startPage = remember { initialPage.coerceIn(0, pages.lastIndex) }
-    val startOffset = remember { initialOffset.coerceAtLeast(0) }
+    val startPage = remember(layoutKey) { initialPage.coerceIn(0, pages.lastIndex) }
+    val startOffset = remember(layoutKey) { initialOffset.coerceAtLeast(0) }
     val endRevealPx = with(LocalDensity.current) { 24.dp.roundToPx() }
     val previewHeightPx = with(LocalDensity.current) { LocalMangaWindow.current.height.roundToPx() }
     var contentWidthPx by remember { mutableIntStateOf(0) }
     val keyboardMotion = LocalMotionEnabled.current
+    var prefetchViewport: ReaderPrefetchViewport? = null
+    key(layoutKey) {
     if (preferences.mode == ReadingMode.VERTICAL) {
         val list = rememberLazyListState(initialFirstVisibleItemIndex = startPage)
         val pageLayoutReady = remember { mutableStateMapOf<Int, Boolean>() }
@@ -1978,26 +1985,18 @@ private fun ChapterPages(
                     if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0)
             }
         }
-        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, loadedPages, prefetchRequests, prefetchPage,
-            scriptPrefetch = scriptPrefetch,
-            enabled = active, sourceId = sourceId,
-            viewportWidth = { contentWidthPx }, viewportHeight = previewHeightPx,
-            onPageFailure = { index, failure -> prefetchFailures[index] = failure
-                onPrefetchFailure(pages[index]) },
-            onPageRecovered = { index -> prefetchFailures.remove(index) },
-            onPageDimensions = { index, size -> pageDimensions[pages[index].url] = size },
-            // Actual scrolling and explicit navigation own direction, never layout remeasurement.
+        prefetchViewport = ReaderPrefetchViewport(
             scrollDirection = { verticalDirection },
             directionAnchor = { verticalIntentAnchor.toLong() - verticalLayoutShift },
             directionBaseline = { directionBaseline },
             position = {
                 val item = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == list.firstVisibleItemIndex }
                 list.firstVisibleItemIndex + list.firstVisibleItemScrollOffset.toFloat() / (item?.size ?: 1).coerceAtLeast(1)
-            }) {
-            val visible = list.layoutInfo.visibleItemsInfo.filter { it.index in pages.indices }
-            val anchor = list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex)
-            (visible.firstOrNull()?.index ?: anchor) to (visible.lastOrNull()?.index ?: anchor)
-        }
+            }, visibleRange = {
+                val visible = list.layoutInfo.visibleItemsInfo.filter { it.index in pages.indices }
+                val anchor = list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex)
+                (visible.firstOrNull()?.index ?: anchor) to (visible.lastOrNull()?.index ?: anchor)
+            })
         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
             .bottomPullLoad(pull).bottomPullLoad(previousPull)) {
             LazyColumn(state = list, modifier = Modifier.widthIn(max = MangaLayout.ReaderPageWidth)
@@ -2153,17 +2152,11 @@ private fun ChapterPages(
                 save(groups.getOrNull(pager.settledPage)?.first ?: pages.lastIndex, 0)
             }
         }
-        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, loadedPages, prefetchRequests, prefetchPage,
-            scriptPrefetch = scriptPrefetch,
-            enabled = active, sourceId = sourceId, groups = groups,
-            viewportWidth = { contentWidthPx }, viewportHeight = previewHeightPx,
-            onPageFailure = { index, failure -> prefetchFailures[index] = failure
-                onPrefetchFailure(pages[index]) },
-            onPageRecovered = { index -> prefetchFailures.remove(index) },
-            position = { pager.currentPage + pager.currentPageOffsetFraction }) {
-            val shown = groups.getOrNull(pager.currentPage)
-            (shown?.first ?: pages.lastIndex) to (shown?.last ?: pages.lastIndex)
-        }
+        prefetchViewport = ReaderPrefetchViewport(groups = groups,
+            position = { pager.currentPage + pager.currentPageOffsetFraction }, visibleRange = {
+                val shown = groups.getOrNull(pager.currentPage)
+                (shown?.first ?: pages.lastIndex) to (shown?.last ?: pages.lastIndex)
+            })
         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
             .bottomPullLoad(pull)) {
             // Physical swipe direction is a user preference, not the OS layout direction.
@@ -2286,7 +2279,29 @@ private fun ChapterPages(
                 .padding(start = 72.dp, end = 16.dp, bottom = 12.dp)) { endContent(pull) }
         }
     }
+    }
+    // Both visual branches publish their viewport in this composition, before this
+    // one chapter-owned host. No asynchronous unregister/register handoff gap.
+    prefetchViewport?.let { viewport ->
+        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, loadedPages, prefetchRequests, prefetchPage,
+            scriptPrefetch = scriptPrefetch, enabled = active, sourceId = sourceId,
+            viewportWidth = { contentWidthPx }, viewportHeight = previewHeightPx,
+            onPageFailure = { index, failure -> prefetchFailures[index] = failure; onPrefetchFailure(pages[index]) },
+            onPageRecovered = { index -> prefetchFailures.remove(index) },
+            onPageDimensions = { index, size -> pageDimensions[pages[index].url] = size },
+            position = viewport.position, groups = viewport.groups,
+            scrollDirection = viewport.scrollDirection, directionAnchor = viewport.directionAnchor,
+            directionBaseline = viewport.directionBaseline, layoutKey = layoutKey,
+            retainOriginalsAcrossLayouts = retainHttpLayout,
+            visibleRange = viewport.visibleRange)
+    }
 }
+
+private data class ReaderPrefetchViewport(
+    val visibleRange: () -> Pair<Int, Int>, val position: () -> Float,
+    val groups: List<PageSpread>? = null, val scrollDirection: (() -> Int)? = null,
+    val directionAnchor: (() -> Long)? = null, val directionBaseline: (() -> Pair<Long, Long>)? = null,
+)
 
 private data class ReaderSourceIdentity(val logicalId: String, val chapterId: String,
     val sourceId: String, val sourceMangaId: String)
@@ -2301,6 +2316,7 @@ private data class PrefetchWindow(
     val resolveParallel: Int, val decodeParallel: Int, val decodeEnabled: Boolean, val foregroundActive: Boolean,
     val runtime: ExperienceRuntimePreferences,
     val scrollDirection: Int?, val directionAnchor: Long?, val directionBaseline: Pair<Long, Long>?,
+    val groups: List<PageSpread>?, val layoutKey: Any?,
 )
 
 private data class PrefetchedReaderPage(val page: Page, val diskCacheKey: String?)
@@ -2338,6 +2354,7 @@ internal fun AdjacentPagePrefetch(
     scrollDirection: (() -> Int)? = null,
     directionAnchor: (() -> Long)? = null,
     directionBaseline: (() -> Pair<Long, Long>)? = null,
+    layoutKey: Any? = null, retainOriginalsAcrossLayouts: Boolean = false,
     visibleRange: () -> Pair<Int, Int>,
 ) {
     val context = LocalContext.current
@@ -2363,7 +2380,13 @@ internal fun AdjacentPagePrefetch(
     val currentLoaded by rememberUpdatedState(loadedPages)
     val prefetchEnabled by rememberUpdatedState(enabled)
     val readerActive by rememberUpdatedState(foregroundActive)
-    LaunchedEffect(pages, headers, mode, imageLoader, resolvePage, scriptPrefetch, sourceId, groups, viewportHeight, tracker, cacheRangeOwner, rangeStore) {
+    val currentGroups by rememberUpdatedState(groups)
+    val currentHeight by rememberUpdatedState(viewportHeight)
+    val currentLayout by rememberUpdatedState(layoutKey)
+    LaunchedEffect(pages, headers, if (retainOriginalsAcrossLayouts) null else mode, imageLoader,
+        resolvePage, scriptPrefetch, sourceId, if (retainOriginalsAcrossLayouts) null else groups,
+        if (retainOriginalsAcrossLayouts) null else viewportHeight,
+        if (retainOriginalsAcrossLayouts) null else layoutKey, tracker, cacheRangeOwner, rangeStore) {
         val owner = Any()
         val requestScope = this
         val resolvedAttempts = mutableSetOf<Int>()
@@ -2445,8 +2468,6 @@ internal fun AdjacentPagePrefetch(
         // An attempted cache-only check is not a claim that a preview remains resident.
         val previewChecks = mutableMapOf<Int, Pair<IntSize, Int>>()
         val deferredChecks = mutableMapOf<Int, Long>()
-        val pairedPages = groups.orEmpty().filter { it.second != null }
-            .flatMap { listOfNotNull(it.first, it.second) }.toSet()
         fun transfers(): Set<Int> = (requests.keys + scriptRequests.keys).toSet()
         fun pending(): Set<Int> = transfers() + resolutionJobs.keys
         fun originalReady(index: Int, page: Page, diskKey: String?) {
@@ -2467,6 +2488,10 @@ internal fun AdjacentPagePrefetch(
             checks[index]?.cancel()
         }
         val readingIntent = ReaderPrefetchDirection()
+        var previousLayout: Any? = currentLayout
+        var previousPreviewViewport: IntSize? = null
+        var observedBaseline: Pair<Any?, Long>? = null
+        var intentEpoch = 0L
         var previousPosition = Float.NaN
         var previousTime = monotonicTimeMillis()
         var lastMove = previousTime
@@ -2493,6 +2518,8 @@ internal fun AdjacentPagePrefetch(
                     cacheAt = now
                     val freshnessMillis = currentBudget.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 2_000L +
                         previousScanMillis * 2L
+                    val scanLayout = currentLayout
+                    val scanViewport = IntSize(currentViewportWidth(), currentHeight)
                     val scanTargets = inspectTargets - inspectVisible
                     val scan = tracker?.beginObservationScan(owner, scanTargets.size)
                     var scanCompleted = false
@@ -2504,7 +2531,9 @@ internal fun AdjacentPagePrefetch(
                                 retained?.diskCacheKey, memoryKeys[index])
                             tracker?.inspectedObservation(owner, scan)
                             if (index in inspectTargets && index !in inspectVisible)
-                                tracker?.artifact(index, artifact.originalPresent, artifact.originalBytes, artifact.previewResident,
+                                tracker?.artifact(index, artifact.originalPresent, artifact.originalBytes,
+                                    artifact.previewResident.takeIf { scanLayout === currentLayout &&
+                                        scanViewport == IntSize(currentViewportWidth(), currentHeight) },
                                     freshnessMillis = freshnessMillis, owner = owner)
                         }
                         scanCompleted = true
@@ -2523,11 +2552,11 @@ internal fun AdjacentPagePrefetch(
                     currentBudget.prefetchAhead, currentBudget.prefetchBehind,
                     ((currentPosition?.invoke() ?: first.toFloat()) * 10f).roundToInt() / 10f,
                     currentBudget.adjacentPrefetchBytes, currentBudget.prefetchRequests,
-                    currentBudget.decodedPrefetchPages, IntSize(currentViewportWidth(), viewportHeight),
+                    currentBudget.decodedPrefetchPages, IntSize(currentViewportWidth(), currentHeight),
                     checks.keys.toSet(), resolutionJobs.keys.toSet(), resolvedPages.keys.toSet(),
                     currentBudget.resolveRequests, currentBudget.decodeRequests, experience.canDecodePrefetch(), readerActive,
                     currentBudget.runtime, currentScrollDirection?.invoke(), currentDirectionAnchor?.invoke(),
-                    currentDirectionBaseline?.invoke())
+                    currentDirectionBaseline?.invoke(), currentGroups, currentLayout)
             }.distinctUntilChanged().combine(snapshotFlow {
                 prefetchEnabled && (currentBudget.prefetchBytes > 0L ||
                     currentBudget.decodedPrefetchPages > 0 && experience.canDecodePrefetch())
@@ -2539,6 +2568,24 @@ internal fun AdjacentPagePrefetch(
                 }
             } }) { window, _ -> window }.collectLatest { window ->
                 val now = monotonicTimeMillis()
+                if (previousLayout !== window.layoutKey || previousPreviewViewport != window.viewport) {
+                    previousLayout = window.layoutKey
+                    previousPreviewViewport = window.viewport
+                    val retiredChecks = checks.values.toList()
+                    checks.clear(); checkTokens.clear()
+                    retiredChecks.forEach { it.cancel() }
+                    val retiredCheckTickets = allTickets.filterKeys { it.second == PrefetchStage.CHECKING }.values.toSet()
+                    allTickets.keys.filter { it.second == PrefetchStage.CHECKING }.toList().forEach { key ->
+                        allTickets.remove(key)?.let { tracker?.finish(it) }
+                    }
+                    tracker?.invalidateLayoutPreviews(owner, retiredCheckTickets,
+                        (window.first..window.last).filter { it in pages.indices }.toSet())
+                    memoryKeys.clear(); inspected.clear(); previewChecks.clear(); deferredChecks.clear()
+                    previousPosition = Float.NaN; speed = 0f
+                }
+                val groups = window.groups
+                val pairedPages = groups.orEmpty().filter { it.second != null }
+                    .flatMap { listOfNotNull(it.first, it.second) }.toSet()
                 val visiblePages = (window.first..window.last).filter { it in pages.indices }.toSet()
                 // Composition may include many future pages. Only actual visibility promotes work.
                 val foreground = if (window.foregroundActive) visiblePages else emptySet()
@@ -2555,7 +2602,9 @@ internal fun AdjacentPagePrefetch(
                 // inside the same image never count as additional reversed pages.
                 val logicalPage = window.directionAnchor ?: (groups?.indexOfFirst { it.contains(window.first) }
                     ?.takeIf { it >= 0 } ?: window.first).toLong()
-                val nextDirection = readingIntent.update(logicalPage, window.scrollDirection, window.directionBaseline?.first ?: 0L,
+                val baseline = window.layoutKey to (window.directionBaseline?.first ?: 0L)
+                if (observedBaseline != baseline) { observedBaseline = baseline; intentEpoch++ }
+                val nextDirection = readingIntent.update(logicalPage, window.scrollDirection, intentEpoch,
                     window.directionBaseline?.second ?: logicalPage)
                 if (nextDirection != direction) speed = 0f
                 direction = nextDirection
@@ -2626,7 +2675,12 @@ internal fun AdjacentPagePrefetch(
                     when { !window.enabled -> "阅读暂缓"; !window.visibleReady -> "当前页优先"
                         window.bytes <= 0L -> currentBudget.reason
                         !writable -> "等待可回收空间；当前阅读和下载受保护"; else -> null })
-                val running = desired + foreground + promoted
+                // A remounted current image can temporarily be unready. Keep only already
+                // running originals within the same observation window; never start new
+                // optional requests until visibleReady. Disabled/zero-budget still cancels.
+                val retainedOriginals = if (retainOriginalsAcrossLayouts && window.enabled &&
+                    window.foregroundActive && window.bytes > 0L) transfers().intersect(observationWindow) else emptySet()
+                val running = desired + foreground + promoted + retainedOriginals
                 (pending() + checks.keys).filter { it !in running }.forEach(::stop)
                 // Preview preparation can extend beyond the original-image window when
                 // its independent decoded-page setting is larger. Keep that admitted work's

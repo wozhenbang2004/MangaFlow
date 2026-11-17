@@ -191,6 +191,23 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
         tickets.filterKeys { it.first == index }.values.forEach { activeTickets.remove(it); ticketOwners.remove(it) }
         tickets.keys.removeAll { it.first == index }
     }
+    /** Layout sizes changed, not original identity or the time of its last verification. */
+    fun invalidateLayoutPreviews(owner: Any, retiredChecks: Set<Long>, visible: Set<Int>) = synchronized(lock) {
+        rows.toMap().forEach { (index, row) ->
+            val key = index to PrefetchStage.CHECKING
+            val ticket = tickets[key]
+            // The new visible attempt may already have completed from memory before
+            // this host observes the layout. Its ticket is not one of our retired checks.
+            val independent = ticket != null && ticket !in retiredChecks &&
+                (index in visible || ticket in activeTickets && ticketOwners[ticket] !== owner)
+            if (!independent) {
+                tickets.remove(key)?.let { activeTickets.remove(it); ticketOwners.remove(it) }
+            }
+            rows[index] = row.copy(previewResident = null,
+                decode = if (independent) row.decode else ReaderPreparationStep())
+        }
+        publishLocked()
+    }
     fun transfer(index: Int, ticket: Long, value: PrefetchWorkSnapshot) = synchronized(lock) {
         if (value.stage != PrefetchStage.DOWNLOADING || ticket !in activeTickets ||
             tickets[index to PrefetchStage.DOWNLOADING] != ticket) return@synchronized
