@@ -25,6 +25,7 @@ import dev.mangaflow.data.plugins.prefetchScriptPage
 import dev.mangaflow.data.sources.prefetchJmPage
 import dev.mangaflow.data.sources.JmImageRefreshRequired
 import dev.mangaflow.data.plugins.ScriptImageRefreshRequired
+import dev.mangaflow.data.plugins.sourceImageRevisions
 import dev.mangaflow.data.plugins.scriptSourceImageEpoch
 import dev.mangaflow.experience.PrefetchWork
 import dev.mangaflow.experience.withPrefetchImageInactivity
@@ -377,6 +378,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private data class NextChapterIntent(val epoch: Long, val workId: String, val currentId: String,
         val currentOwner: String, val targetId: String, val targetOwner: String)
     private var chapterPrefetchIntent: NextChapterIntent? = null
+    private var chapterPrefetchImageRevision = 0L
+    private var chapterPrefetchImageRestarts = 0
     // A cancelled replacement may itself still be waiting for an older native task.
     // Keep every retiring generation until its real cleanup has completed.
     private val retiringChapterPrefetches = mutableSetOf<Job>()
@@ -412,26 +415,25 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 cancelReaderSourceStandbys()
                 val intent = chapterPrefetchIntent
                 cancelNextChapterPrefetch(clearIntent = false)
-                if (intent != null && intent.epoch == readingRequestId &&
-                    services.sourceConfiguration.value == scope && repository.sourceConfigurationKey() == scope &&
-                    visibleReading?.first?.id == intent.workId && visibleReading?.second?.id == intent.currentId) {
-                    val reading = _reading.value?.takeIf { it.manga.id == intent.workId }
-                    if (reading != null && reading.chapters.any { it.id == intent.currentId &&
-                            chapterSourceMangaId(reading.manga.id, it) == intent.currentOwner }) {
-                        reading.chapters.firstOrNull { it.id == intent.targetId &&
-                            chapterSourceMangaId(intent.workId, it) == intent.targetOwner }?.let {
-                            // Revalidate the immediate successor and wait for every retiring
-                            // generation before acquiring a new byte window.
-                            prefetchNextChapter(reading.manga, it)
-                        }
-                    }
-                }
+                if (services.sourceConfiguration.value == scope && repository.sourceConfigurationKey() == scope)
+                    resumeNextChapterIntent(intent)
                 if (current.isFederatedSearch && current.sourceScope != scope) showBrowse(current.copy(
                     items = emptyList(), sourceMatches = emptyMap(), sourceChoiceIds = emptySet(),
                     searchSources = emptyMap(), sourceNextPages = emptyMap(), hasMore = false,
                     loading = true, loadingMore = false, refreshing = false, error = null,
                     failedPage = null, page = 0, updatedAt = 0,
                 ))
+            }
+        }
+        viewModelScope.launch {
+            sourceImageRevisions.collect { revisions ->
+                val intent = chapterPrefetchIntent ?: return@collect
+                val source = SourceKeys.decodeChapter(intent.targetOwner, intent.targetId).sourceId
+                if (!source.startsWith("js_") && source != "jmcomic") return@collect
+                val revision = revisions[source] ?: 0L
+                if (revision != (sourceImageRevisions.value[source] ?: 0L) ||
+                    revision == chapterPrefetchImageRevision) return@collect
+                resumeNextChapterIntent(intent)
             }
         }
         viewModelScope.launch {
@@ -2754,6 +2756,21 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private data class NextChapterLimits(val allowed: Boolean, val ahead: Int, val bytes: Long,
         val foreground: Boolean, val pages: Int, val manifestSeconds: Int, val imageSeconds: Int, val cacheSeconds: Int)
 
+    private fun resumeNextChapterIntent(intent: NextChapterIntent?) {
+        if (intent == null || intent.epoch != readingRequestId ||
+            services.sourceConfiguration.value != repository.sourceConfigurationKey() ||
+            visibleReading?.first?.id != intent.workId || visibleReading?.second?.id != intent.currentId) return
+        val reading = _reading.value?.takeIf { it.manga.id == intent.workId } ?: return
+        if (reading.chapters.none { it.id == intent.currentId &&
+                chapterSourceMangaId(reading.manga.id, it) == intent.currentOwner }) return
+        reading.chapters.firstOrNull { it.id == intent.targetId &&
+            chapterSourceMangaId(intent.workId, it) == intent.targetOwner }?.let {
+            // Entry revalidates immediate same-group successor, installed source and owner;
+            // replacement work joins all retiring generations before acquiring its budget.
+            prefetchNextChapter(reading.manga, it)
+        }
+    }
+
     private fun retireNextChapterJob() {
         retiringChapterPrefetches.removeAll { it.isCompleted }
         chapterPrefetchJob?.let { retiringChapterPrefetches += it; it.cancel() }
@@ -2763,7 +2780,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private fun cancelNextChapterPrefetch(clearIntent: Boolean = true) {
         chapterPrefetchRequest++
         retireNextChapterJob()
-        if (clearIntent) chapterPrefetchIntent = null
+        if (clearIntent) {
+            chapterPrefetchIntent = null
+            chapterPrefetchImageRestarts = 0
+        }
         chapterPrefetchKey = null
         _nextChapterPreparation.value = null
     }
@@ -2783,23 +2803,53 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val owner = chapterSourceMangaId(manga.id, chapter)
         val source = SourceKeys.decodeChapter(owner, chapter.id).sourceId
         if (repository.sources.none { it.id == source }) return
+        val epoch = readingRequestId
+        val currentChapter = current.id
+        val currentOwner = chapterSourceMangaId(manga.id, current)
+        val accepted = NextChapterIntent(epoch, manga.id, currentChapter, currentOwner, chapter.id, owner)
+        val imageRevision = sourceImageRevisions.value[source] ?: 0L
+        val sameIntent = chapterPrefetchIntent == accepted
+        fun showSessionSuspended() {
+            _nextChapterPreparation.value = ReaderNextChapterPreparation(epoch, manga.id,
+                currentChapter, chapter.id, chapter.title, source, owner,
+                ReaderNextChapterPreparationPhase.DEFERRED,
+                reason = "来源图片会话连续变化，下一话准备已暂缓；请重新打开本章。")
+        }
+        if (!sameIntent) chapterPrefetchImageRestarts = 0
+        else if ((source.startsWith("js_") || source == "jmcomic") && imageRevision != chapterPrefetchImageRevision) {
+            // All re-entry paths, including configuration events arriving first, spend
+            // the same intent budget. A script preference write cannot reset it.
+            cancelNextChapterPrefetch(clearIntent = false)
+            chapterPrefetchImageRevision = imageRevision
+            if (chapterPrefetchImageRestarts >= 2) {
+                chapterPrefetchImageRestarts = 3
+                showSessionSuspended()
+                return
+            }
+            chapterPrefetchImageRestarts++
+        }
+        if (sameIntent && chapterPrefetchImageRestarts > 2) {
+            // Configuration cancellation clears the previous status, not the exhausted
+            // intent. Rebuild its explanation only after the owner checks above pass.
+            showSessionSuspended()
+            return
+        }
+        chapterPrefetchIntent = accepted
+        chapterPrefetchImageRevision = imageRevision
         val key = "${manga.id}/${chapter.id}"
         if (chapterPrefetchKey == key && chapterPrefetchJob?.isActive == true) return
         retireNextChapterJob()
         val retiring = retiringChapterPrefetches.toList()
         chapterPrefetchKey = key
         val request = ++chapterPrefetchRequest
-        val epoch = readingRequestId
-        val currentChapter = current.id
-        val currentOwner = chapterSourceMangaId(manga.id, current)
-        chapterPrefetchIntent = NextChapterIntent(epoch, manga.id, currentChapter, currentOwner, chapter.id, owner)
         val configuration = repository.sourceConfigurationKey()
         val sourceEpoch = scriptSourceImageEpoch(application, source)
         fun currentSession(): Boolean {
             if (request != chapterPrefetchRequest || epoch != readingRequestId || chapterPrefetchKey != key ||
                 visibleReading?.first?.id != manga.id || visibleReading?.second?.id != currentChapter ||
                 repository.sourceConfigurationKey() != configuration ||
-                scriptSourceImageEpoch(application, source) != sourceEpoch) return false
+                scriptSourceImageEpoch(application, source) != sourceEpoch ||
+                (sourceImageRevisions.value[source] ?: 0L) != imageRevision) return false
             val reading = _reading.value?.takeIf { it.manga.id == manga.id } ?: return false
             val origin = reading.chapters.firstOrNull { it.id == currentChapter } ?: return false
             if (chapterSourceMangaId(manga.id, origin) != currentOwner || repository.sources.none { it.id == source }) return false

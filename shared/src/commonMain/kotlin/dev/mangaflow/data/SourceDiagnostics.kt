@@ -1,5 +1,6 @@
 package dev.mangaflow.data
 
+import dev.mangaflow.data.sources.SourceAccountCleanupException
 import dev.mangaflow.platform.wallTimeMillis
 import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CancellationException
@@ -9,7 +10,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
 enum class SourceStage(val label: String) { CATALOGUE("目录"), SEARCH("搜索"), DETAIL("详情"), PAGES("图片清单"), IMAGE_RESOLVE("图片地址"), IMAGE_READ("图片读取"), IMAGE_DECODE("图片解码"), ACCOUNT("账号"), FAVORITES("站点收藏"), COMMENTS("评论") }
-enum class SourceFailureKind(val label: String) { LOGIN("需要登录"), NETWORK("连接失败"), RESPONSE("站点响应"), PARSING("解析失败"), UNSUPPORTED("能力不兼容"), UNKNOWN("读取失败") }
+enum class SourceFailureKind(val label: String) { LOGIN("需要登录"), NETWORK("连接失败"), RESPONSE("站点响应"), PARSING("解析失败"), UNSUPPORTED("能力不兼容"), UNKNOWN("读取失败"), CLEANUP("收尾异常") }
 data class SourceHealth(val sourceId: String, val stage: SourceStage, val lastAttemptAt: Long = 0,
     val lastSuccessAt: Long = 0, val checking: Boolean = false, val failure: SourceFailureKind? = null,
     val message: String = "", val operationId: Long = 0)
@@ -18,6 +19,8 @@ internal data class SourceFailureSummary(val kind: SourceFailureKind, val messag
 
 /** Classify this operation only; never expose arbitrary exception text, URLs or credentials. */
 internal fun sourceFailureSummary(stage: SourceStage, failure: Exception): SourceFailureSummary {
+    if (stage == SourceStage.ACCOUNT && failure is SourceAccountCleanupException)
+        return SourceFailureSummary(SourceFailureKind.CLEANUP, requireNotNull(failure.message))
     val type = when {
         (failure as? SourceException)?.httpStatus == 401 || failure.message.orEmpty().contains("登录") -> SourceFailureKind.LOGIN
         failure is TimeoutCancellationException || Regex("(?i)timeout|connect|dns|network|超时|连接|网络").containsMatchIn(failure.message.orEmpty()) -> SourceFailureKind.NETWORK

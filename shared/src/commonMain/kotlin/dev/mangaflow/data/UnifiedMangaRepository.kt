@@ -18,6 +18,7 @@ import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.net.checked
+import dev.mangaflow.data.plugins.sourceImageRevisions
 import dev.mangaflow.data.plugins.ScriptBodySource
 import dev.mangaflow.storage.UnifiedChapterStore
 import dev.mangaflow.storage.UnifiedWorkSettings
@@ -275,13 +276,26 @@ class UnifiedMangaRepository(
     suspend fun saveSourceSetting(id: String, key: String, value: String) { adapter(id).saveSetting(key, value); invalidatePageCache(id) }
     suspend fun sourceAccountState(id: String): SourceAccountState = adapter(id).accountState()
     suspend fun sourceLogin(id: String, user: String, password: String) = diagnostics.track(id, SourceStage.ACCOUNT) {
-        adapter(id).login(user, password); invalidatePageCache(id)
+        commitSourceAccountChange(id) { adapter(id).login(user, password) }
     }
     suspend fun sourceLoginCookies(id: String, values: List<String>) = diagnostics.track(id, SourceStage.ACCOUNT) {
-        adapter(id).loginWithCookies(values); invalidatePageCache(id)
+        commitSourceAccountChange(id) { adapter(id).loginWithCookies(values) }
     }
     suspend fun sourceLogout(id: String) = diagnostics.track(id, SourceStage.ACCOUNT) {
-        adapter(id).logout(); invalidatePageCache(id)
+        commitSourceAccountChange(id) { adapter(id).logout() }
+    }
+    private suspend fun commitSourceAccountChange(id: String, action: suspend () -> Unit) {
+        try { action() }
+        catch (committed: SourceAccountCleanupException) {
+            try { invalidatePageCache(id) }
+            catch (cancel: CancellationException) {
+                cancel.addSuppressed(committed)
+                throw cancel
+            }
+            catch (cleanup: Exception) { if (cleanup !== committed) committed.addSuppressed(cleanup) }
+            throw committed
+        }
+        invalidatePageCache(id)
     }
     suspend fun sourceFavoriteFolders(id: String): List<SourceFavoriteFolder> = diagnostics.track(id, SourceStage.FAVORITES) {
         adapter(id).favoriteFolders()
@@ -1074,10 +1088,11 @@ class UnifiedMangaRepository(
     override fun cachedPages(mangaId: String, chapterId: String): List<Page>? {
         val ref = runCatching { SourceKeys.decodeChapter(mangaId, chapterId) }.getOrNull() ?: return null
         if (ref.sourceId == "copy") return copy.cachedPages(ref.mangaId, ref.chapterId)
-        val key = SourceKeys.chapter(ref.sourceId, ref.mangaId, ref.chapterId) + "@network/" + DownloadRoutingStore.sourceRevision(ref.sourceId)
+        val imageRevision = sourceImageRevisions.value[ref.sourceId] ?: 0L
+        val key = SourceKeys.chapter(ref.sourceId, ref.mangaId, ref.chapterId) + "@network/" + DownloadRoutingStore.sourceRevision(ref.sourceId) + "@image/" + imageRevision
         return synchronized(unifiedMangaRepositoryStateLock) {
             val now = repositoryNanoTime()
-            pageCache[key]?.takeIf { now - it.storedAtNanos in 0L until freshNanos(ContentCacheKind.PAGE_MANIFEST) }?.pages
+            pageCache[key]?.takeIf { (sourceImageRevisions.value[ref.sourceId] ?: 0L) == imageRevision && now - it.storedAtNanos in 0L until freshNanos(ContentCacheKind.PAGE_MANIFEST) }?.pages
         }
     }
 
@@ -1092,8 +1107,11 @@ class UnifiedMangaRepository(
         currentCoroutineContext().ensureActive()
         val ref = SourceKeys.decodeChapter(mangaId, chapterId)
         if (ref.sourceId == "copy") return copy.pages(ref.mangaId, ref.chapterId, forceRefresh)
-        val key = SourceKeys.chapter(ref.sourceId, ref.mangaId, ref.chapterId) + "@network/" + DownloadRoutingStore.sourceRevision(ref.sourceId)
+        val imageRevision = sourceImageRevisions.value[ref.sourceId] ?: 0L
+        val key = SourceKeys.chapter(ref.sourceId, ref.mangaId, ref.chapterId) + "@network/" + DownloadRoutingStore.sourceRevision(ref.sourceId) + "@image/" + imageRevision
         val request = synchronized(unifiedMangaRepositoryStateLock) {
+            if ((sourceImageRevisions.value[ref.sourceId] ?: 0L) != imageRevision)
+                throw CancellationException("来源图片会话已变化，请刷新本章。")
             val generation = pageCacheGenerations[ref.sourceId] ?: 0L
             val now = repositoryNanoTime()
             val ttl = freshNanos(ContentCacheKind.PAGE_MANIFEST)
@@ -1101,6 +1119,8 @@ class UnifiedMangaRepository(
             if (forceRefresh) pageCache.remove(key)
             else pageCache.remove(key)?.let { cached ->
                 pageCache[key] = cached
+                if ((sourceImageRevisions.value[ref.sourceId] ?: 0L) != imageRevision)
+                    throw CancellationException("来源图片会话已变化，请刷新本章。")
                 return cached.pages
             }
             // Match Copy's reader/download handoff: refresh may join a live fetch, never a completed one.
@@ -1114,7 +1134,8 @@ class UnifiedMangaRepository(
                     requestContext.ensureActive()
                     synchronized(unifiedMangaRepositoryStateLock) {
                         requestContext.ensureActive()
-                        if ((pageCacheGenerations[ref.sourceId] ?: 0L) != generation)
+                        if ((pageCacheGenerations[ref.sourceId] ?: 0L) != generation ||
+                            (sourceImageRevisions.value[ref.sourceId] ?: 0L) != imageRevision)
                             throw CancellationException("来源已更新或移除，请重新打开章节。")
                         if (pageRequests[key]?.result === requestContext[Job]) {
                             pageCache.remove(key)
@@ -1129,7 +1150,10 @@ class UnifiedMangaRepository(
         }
         try {
             request.result.start()
-            return request.result.await()
+            val loaded = request.result.await()
+            if ((sourceImageRevisions.value[ref.sourceId] ?: 0L) != imageRevision)
+                throw CancellationException("来源图片会话已变化，请刷新本章。")
+            return loaded
         } finally {
             synchronized(unifiedMangaRepositoryStateLock) {
                 request.readers--

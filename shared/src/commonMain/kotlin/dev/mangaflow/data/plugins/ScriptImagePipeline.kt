@@ -44,6 +44,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
@@ -67,6 +70,13 @@ private val decodeGates = Array(64) { Mutex() }
 private val savedHeaderRefs = linkedSetOf<String>()
 private val headerSecrets = linkedMapOf<String, String>()
 private val sourceEpochOverrides = mutableMapOf<String, String>()
+// Process-local, non-secret cache/session fence. Readers need no imageStateLock.
+private val mutableSourceImageRevisions = MutableStateFlow<Map<String, Long>>(emptyMap())
+val sourceImageRevisions = mutableSourceImageRevisions.asStateFlow()
+internal fun notifySourceImageSessionChanged(sourceId: String) {
+    mutableSourceImageRevisions.update { it + (sourceId to ((it[sourceId] ?: 0L) + 1L)) }
+}
+
 private val imageSessionJobs = mutableMapOf<String, MutableSet<Job>>()
 
 fun scriptSourceImageEpoch(context: PlatformContext, sourceId: String): String {
@@ -79,35 +89,42 @@ fun scriptSourceImageEpoch(context: PlatformContext, sourceId: String): String {
 /** A late script callback must not restore cookies or settings after its session was replaced. */
 internal fun <T> withScriptSourceImageEpoch(context: PlatformContext, sourceId: String,
     expected: String, replaceAfter: Boolean = false, operation: () -> T): T {
-    var interrupted: List<Job> = emptyList()
-    val result = synchronized(imageStateLock) {
-        val current = sourceEpochOverrides[sourceId]
-            ?: context.getSharedPreferences("mangaflow_script_image_sessions")
-                .getString("epoch_$sourceId", "initial").orEmpty()
-        if (current != expected) throw CancellationException("来源、账号或设置已变化。")
-        operation().also { if (replaceAfter) interrupted = replaceScriptImageSessionLocked(context, sourceId) }
-    }
-    interrupted.forEach { it.cancel(CancellationException("来源图片会话已变化。")) }
-    return result
+    val interrupted = mutableListOf<Job>()
+    return try {
+        synchronized(imageStateLock) {
+            val current = sourceEpochOverrides[sourceId]
+                ?: context.getSharedPreferences("mangaflow_script_image_sessions")
+                    .getString("epoch_$sourceId", "initial").orEmpty()
+            if (current != expected) throw CancellationException("来源、账号或设置已变化。")
+            operation().also { if (replaceAfter) replaceScriptImageSessionLocked(context, sourceId, interrupted) }
+        }
+    } finally { interrupted.forEach { it.cancel(CancellationException("来源图片会话已变化。")) } }
 }
 
 /** Caller owns imageStateLock: committing credentials and advancing their fence are indivisible. */
-private fun replaceScriptImageSessionLocked(context: PlatformContext, sourceId: String): List<Job> {
+private fun replaceScriptImageSessionLocked(context: PlatformContext, sourceId: String, interrupted: MutableList<Job>) {
     val epoch = randomUuid()
     sourceEpochOverrides[sourceId] = epoch
-    resolvedImages.entries.removeAll { it.key.sourceId == sourceId }
-    failedImageRetries.removeAll { it.sourceId == sourceId }
-    headerSecrets.entries.removeAll { JSONObject(it.value).optString("sourceId") == sourceId }
-    check(context.getSharedPreferences("mangaflow_script_image_sessions").edit()
-        .putString("epoch_$sourceId", epoch).commit()) { "来源图片会话状态未能保存，请检查存储空间。" }
-    return imageSessionJobs.remove(sourceId).orEmpty().toList()
+    try {
+        resolvedImages.entries.removeAll { it.key.sourceId == sourceId }
+        failedImageRetries.removeAll { it.sourceId == sourceId }
+        headerSecrets.entries.removeAll { JSONObject(it.value).optString("sourceId") == sourceId }
+        check(context.getSharedPreferences("mangaflow_script_image_sessions").edit()
+            .putString("epoch_$sourceId", epoch).commit()) { "来源图片会话状态未能保存，请检查存储空间。" }
+    } finally {
+        // The in-memory fence changed even if persistence fails. Never leave manifests
+        // under the former revision reusable; the original storage error still propagates.
+        interrupted += imageSessionJobs.remove(sourceId).orEmpty()
+        notifySourceImageSessionChanged(sourceId)
+    }
 }
 
 /** Account/settings changes invalidate late image resolutions and protected headers across restarts. */
 fun invalidateScriptSourceImages(context: PlatformContext, sourceId: String) {
     if (!sourceId.startsWith("js_")) return
-    val interrupted = synchronized(imageStateLock) { replaceScriptImageSessionLocked(context, sourceId) }
-    interrupted.forEach { it.cancel(CancellationException("来源图片会话已变化。")) }
+    val interrupted = mutableListOf<Job>()
+    try { synchronized(imageStateLock) { replaceScriptImageSessionLocked(context, sourceId, interrupted) } }
+    finally { interrupted.forEach { it.cancel(CancellationException("来源图片会话已变化。")) } }
 }
 
 /** Package publication and its session fence must be observed as one source change. */
@@ -116,7 +133,7 @@ internal fun <T> withScriptSourcePackageChanges(context: PlatformContext, source
     val interrupted = mutableListOf<Job>()
     return try {
         synchronized(imageStateLock) {
-            operation().also { sourceIds.forEach { interrupted += replaceScriptImageSessionLocked(context, it) } }
+            operation().also { sourceIds.forEach { replaceScriptImageSessionLocked(context, it, interrupted) } }
         }
     } finally { interrupted.forEach { it.cancel(CancellationException("来源脚本已变化。")) } }
 }

@@ -91,8 +91,8 @@ internal fun ContentProfileAccountScreen(
         operation = scope.launch {
             try { block() }
             catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) {
-                val failedMessage = repository.sourceHealth.value[owner]?.message?.takeIf { it.isNotBlank() }
+            catch (failure: Exception) {
+                val failedMessage = (failure as? SourceAccountCleanupException)?.message ?: repository.sourceHealth.value[owner]?.message?.takeIf { it.isNotBlank() }
                     ?: "来源操作未完成，请重试。"
                 try {
                     val latest = repository.sourceAccountState(owner)

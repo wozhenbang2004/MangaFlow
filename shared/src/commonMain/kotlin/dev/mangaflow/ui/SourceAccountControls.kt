@@ -23,6 +23,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.sources.BodySourceInfo
+import dev.mangaflow.data.sources.SourceAccountCleanupException
 import dev.mangaflow.data.sources.SourceAccountState
 import dev.mangaflow.data.sources.SourceCapabilities
 import dev.mangaflow.ui.motion.MotionButton
@@ -103,8 +104,8 @@ internal fun SourceAccountControls(
                 val refreshed = repository.sourceAccountState(source.id)
                 if (present && generation == expected) { currentAccountChanged(refreshed); expanded = false }
             } catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) {
-                val failureMessage = repository.sourceHealth.value[source.id]?.message ?: "验证未完成，请稍后重试。"
+            catch (failure: Exception) {
+                val failureMessage = (failure as? SourceAccountCleanupException)?.message ?: repository.sourceHealth.value[source.id]?.message ?: "验证未完成，请稍后重试。"
                 // An unsuccessful logout may still have cleared its local credential in finally.
                 try {
                     val refreshed = repository.sourceAccountState(source.id)

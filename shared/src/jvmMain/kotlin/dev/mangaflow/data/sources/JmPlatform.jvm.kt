@@ -1,5 +1,7 @@
 package dev.mangaflow.data.sources
 
+import dev.mangaflow.data.plugins.notifySourceImageSessionChanged
+
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.ChapterDownloadTransport
 import dev.mangaflow.data.ConnectionProbeBudget
@@ -365,6 +367,8 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
             val timeouts = dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.imageTimeouts()
             runInterruptible {
                 val (loginClient, _) = createClient(pinDomain = true, route = route, timeouts = timeouts)
+                var committed = false
+                var failure: Exception? = null
                 try {
                     val user = loginClient.login(username.trim(), password)
                     val owner = user.username()?.takeIf { it.isNotBlank() }
@@ -386,13 +390,28 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                         client = replacement; clientConfig = config; clientImageHttp = imageHttp; clientRoute = route
                         clientTimeouts = timeouts; clientObservesRelayTraffic = true
                         savedSession = secret; imageEpoch = jmDigest(secret.toString()); accountName = owner; probeSession++
-                        previous?.close()
-                    } catch (failure: Exception) { replacement.close(); throw failure }
-                } finally {
-                    // The upstream login client holds an encrypted in-memory password. Do not reuse it.
-                    loginClient.cookies = emptyList()
-                    loginClient.close()
+                        photoImages.clear()
+                        notifySourceImageSessionChanged(info.id)
+                        committed = true
+                        previous?.let { closeAccountClient(it)?.let { problem -> throw problem } }
+                    } catch (problem: Exception) {
+                        // A committed replacement is the live account owner, not a failed temporary client.
+                        val cleanup = if (!committed) closeAccountClient(replacement) else null
+                        throw mergeAccountFailure(problem, cleanup)!!
+                    }
+                } catch (problem: Exception) { failure = problem }
+                finally {
+                    // Always attempt both credential clearing and close, even if one fails.
+                    closeAccountClient(loginClient)?.let { cleanup ->
+                        failure = mergeAccountFailure(failure, cleanup)
+                    }
                 }
+                failure?.let { problem ->
+                    if (committed && problem !is CancellationException)
+                        throw SourceAccountCleanupException(signedIn = true, cause = problem)
+                    throw problem
+                }
+                Unit
             }
         }
     }
@@ -401,10 +420,39 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
         mutex.withLock {
             deleteSecret(context, SECRET_KEY)
             savedSession = null; imageEpoch = jmDigest("native-jm-anonymous"); accountName = ""; probeSession++
+            photoImages.clear()
+            notifySourceImageSessionChanged(info.id)
             val previous = client
             client = null; clientConfig = null; clientImageHttp = null; clientRoute = null; clientTimeouts = null
-            previous?.let { active -> runInterruptible { active.cookies = emptyList(); active.close() } }
+            previous?.let { active ->
+                val cleanup = runInterruptible { closeAccountClient(active) }
+                if (cleanup is CancellationException) throw cleanup
+                if (cleanup != null) throw SourceAccountCleanupException(signedIn = false, cause = cleanup)
+            }
         }
+    }
+
+    /** Cancellation always remains the primary outcome, even after an earlier cleanup error. */
+    private fun mergeAccountFailure(first: Exception?, next: Exception?): Exception? {
+        if (first == null) return next
+        if (next == null || first === next) return first
+        return if (next is CancellationException && first !is CancellationException) {
+            next.addSuppressed(first)
+            next
+        } else {
+            first.addSuppressed(next)
+            first
+        }
+    }
+
+    /** Retiring clients only. Preserve every cleanup failure without touching the active owner. */
+    private fun closeAccountClient(retired: JmApiClient): Exception? {
+        var failure: Exception? = null
+        try { retired.cookies = emptyList() } catch (problem: Exception) { failure = problem }
+        try { retired.close() } catch (problem: Exception) {
+            failure = mergeAccountFailure(failure, problem)
+        }
+        return failure
     }
 
     override suspend fun favoriteFolders(): List<SourceFavoriteFolder> = clientCall { active ->
