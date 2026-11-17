@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.*
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -532,7 +533,7 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
     StatusExplanation("底栏仅显示已备页数、执行数与可用源数；99+ 只缩写显示，不限制配置。? 表示尚有未核实项。")
     when (section) {
         ReaderStatusSection.PREPARATION -> {
-            StatusExplanation("已备 / 目标。绿点表示原图备齐；? 待核实。页码下方依次是阶段与当前原图。")
+            StatusExplanation("已备 / 目标。绿点表示原图备齐；? 待核实。页码下方是准备阶段；完成不代表缓存仍然存在。")
             FlowRow(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 StatusToken(Icons.Outlined.KeyboardDoubleArrowRight, "前读配置", "${budget.prefetchAhead} 页")
@@ -542,7 +543,7 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
             StatusExplanation(budget.reason)
         }
         ReaderStatusSection.WORK -> {
-            StatusExplanation("并发只计已获名额的任务；阶段完成不等于小图仍驻留。底栏三格依次表示解析、原图、解码状态，不是百分比。")
+            StatusExplanation("进行中只计已获名额的任务，不是线程数；完成按页计，不代表预览仍在内存。底栏三格依次表示解析、原图、解码状态，不是百分比。")
             FlowRow(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 StatusToken(Icons.Outlined.Link, "解析并发配置", "解析 ${budget.resolveRequests}")
@@ -668,7 +669,6 @@ private fun WorkDisclosure(icon: ImageVector, title: String, active: Long, maxim
     phaseDeferred: Boolean = false, onToggle: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val status = mangaStatusColors()
-    val reserve = "8".repeat(maxOf(active, maximum, 1L).toString().length)
     MotionTextButton(onClick = onToggle, enabled = enabled,
         modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
             .background(if (expanded) colors.primary.copy(alpha = .065f) else Color.Transparent, RoundedCornerShape(12.dp))
@@ -684,25 +684,23 @@ private fun WorkDisclosure(icon: ImageVector, title: String, active: Long, maxim
                     StatusToken(Icons.Outlined.Pause, "准备阶段", "暂缓", status.waiting)
                     Spacer(Modifier.width(8.dp))
                 }
-                StatusCounter(Icons.Outlined.PlayArrow, active.takeIf { known }, "实际并发",
-                    color = if (known && active > 0L) status.activity else status.neutral, reserve = reserve)
+                StatusToken(Icons.Outlined.PlayArrow, "当前进行中的任务，不是线程数",
+                    if (known) "进行中 $active 项" else "进行中 —",
+                    if (known && active > 0L) status.activity else status.neutral)
                 Box(Modifier.width(19.dp), contentAlignment = Alignment.CenterEnd) {
                     if (hasFailure && failed == 0L) Icon(Icons.Outlined.ErrorOutline, "准备失败", Modifier.size(13.dp), tint = colors.error)
                 }
                 Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
                     Modifier.padding(start = 6.dp).size(16.dp), tint = colors.onSurfaceVariant)
             }
-            StatusMetricSlots(reserve, Modifier.padding(start = 25.dp)) { index ->
-                when (index) {
-                    0 -> StatusCounter(Icons.Outlined.Schedule, queued.takeIf { known }, "排队", reserve = reserve,
-                        iconColor = if (known && queued > 0L) status.waiting else status.neutral)
-                    1 -> StatusCounter(Icons.Outlined.Check, completed?.takeIf { known }, completedLabel, reserve = reserve,
-                        iconColor = if (known && (completed ?: 0L) > 0L) status.success else status.neutral)
-                    2 -> StatusCounter(Icons.Outlined.Pause, deferred.takeIf { known }, "暂缓", reserve = reserve,
-                        iconColor = if (known && deferred > 0L) status.waiting else status.neutral)
-                    else -> StatusCounter(Icons.Outlined.ErrorOutline, failed.takeIf { known }, "失败",
-                        color = if (known && failed > 0L) status.error else status.neutral, reserve = reserve)
-                }
+            FlowRow(Modifier.padding(start = 25.dp), horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(if (known) "排队 $queued 项" else "排队 —", style = MaterialTheme.typography.labelSmall,
+                    color = if (known && queued > 0L) status.waiting else status.neutral)
+                Text("$completedLabel ${completed?.takeIf { known }?.let { "$it 页" } ?: "—"}",
+                    style = MaterialTheme.typography.labelSmall, color = status.neutral)
+                if (known && deferred > 0L) Text("暂缓 $deferred 页", style = MaterialTheme.typography.labelSmall, color = status.waiting)
+                if (known && failed > 0L) Text("失败 $failed 页", style = MaterialTheme.typography.labelSmall, color = status.error)
             }
         }
     }
@@ -856,7 +854,11 @@ private val ReaderStatusMark.description get() = when (this) {
 private fun StatusMark(mark: ReaderStatusMark, modifier: Modifier = Modifier) {
     val status = mangaStatusColors()
     when (mark) {
-        ReaderStatusMark.ACTIVE -> MotionBusyIndicator(modifier, color = status.activity, strokeWidth = 1.dp)
+        ReaderStatusMark.ACTIVE -> Box(modifier, contentAlignment = Alignment.Center) {
+            if (LocalMotionEnabled.current) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp),
+                color = status.activity, trackColor = status.activity.copy(alpha = .15f))
+            else Box(Modifier.fillMaxWidth().height(2.dp).background(status.activity, CircleShape))
+        }
         ReaderStatusMark.READY -> Box(modifier.padding(1.5.dp).background(status.success, CircleShape))
         ReaderStatusMark.QUEUED -> Icon(Icons.Outlined.Schedule, null, modifier, tint = status.waiting)
         ReaderStatusMark.PAUSED -> Icon(Icons.Outlined.Pause, null, modifier, tint = status.waiting)
@@ -915,11 +917,14 @@ private fun PreparationDetails(state: ReaderPreparationState, work: ReaderWork) 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PreparationPages(pages: List<ReaderPreparationPage>, work: ReaderWork) {
+    var showAll by remember(work, pages.map { it.pageIndex }) { mutableStateOf(false) }
+    val sortedPages = pages.sortedBy { it.pageIndex }
+    val visiblePages = if (showAll) sortedPages else sortedPages.take(12)
     val pageReserve = "8".repeat((pages.maxOfOrNull { it.pageIndex.toLong() + 1L } ?: 1L).toString().length)
     val pageWidth = statusNumberWidth(pageReserve, 10.dp).coerceAtLeast(32.dp)
     FlowRow(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(7.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        pages.sortedBy { it.pageIndex }.forEach { page ->
+        visiblePages.forEach { page ->
             Column(Modifier.width(pageWidth).semantics(mergeDescendants = true) {
                 contentDescription = "第 ${page.pageIndex + 1} 页，${roleLabel(page.role)}，${work.title}${phaseLabel(work.step(page).phase)}，原图${presenceLabel(page.originalPresent)}，小图${previewPresenceLabel(page.previewResident)}"
             }, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -927,11 +932,20 @@ private fun PreparationPages(pages: List<ReaderPreparationPage>, work: ReaderWor
                     .background(MaterialTheme.colorScheme.onSurface.copy(alpha =
                         if (page.role == ReaderPreparationRole.VISIBLE) .09f else 0f), CircleShape)
                     .padding(horizontal = 4.dp, vertical = 2.dp))
-                StepMark(work.step(page).phase)
-                if (work == ReaderWork.ORIGINAL) PresenceMark(Icons.Outlined.Download, page.originalPresent)
-                if (work == ReaderWork.PREVIEW) PresenceMark(Icons.Outlined.PhotoSizeSelectLarge, page.previewResident)
+                val presence = when (work) {
+                    ReaderWork.ORIGINAL -> page.originalPresent
+                    ReaderWork.PREVIEW -> page.previewResident
+                    else -> true
+                }
+                if (work.step(page).phase == ReaderPreparationPhase.COMPLETE && presence != true)
+                    PresenceMark(Icons.Outlined.Check, presence)
+                else StepMark(work.step(page).phase)
             }
         }
+    }
+    if (pages.size > 12) MotionTextButton(onClick = { showAll = !showAll }, modifier = Modifier.heightIn(min = 44.dp)) {
+        Text(if (showAll) "收起页码" else "其余 ${pages.size - 12} 页", style = MaterialTheme.typography.labelSmall)
+        Icon(if (showAll) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
     }
 }
 
@@ -1181,11 +1195,7 @@ private fun CacheOverview(store: ExperiencePolicyStore, expanded: ReaderWork?, e
             }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.weight(1f)) {
-                StatusToken(Icons.Outlined.History, "最近一次缓存回收，与阅读历史无关", memory?.let { sample -> sample.lastReclaimedAtMillis?.let {
-                    "回收于" + cacheElapsedLabel((sample.sampledAtMillis - it).coerceAtLeast(0L)) + "前"
-                } ?: "尚无回收" } ?: "—")
-            }
+            Spacer(Modifier.weight(1f))
             clearResult?.let { result ->
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
                     modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = "清理完成，已移出可复用解码缓存 $result" }) {
@@ -1438,7 +1448,7 @@ private fun phaseLabel(phase: ReaderPreparationPhase) = when (phase) {
     ReaderPreparationPhase.FAILED -> "失败"; ReaderPreparationPhase.SKIPPED -> "未安排"
 }
 private fun presenceLabel(present: Boolean?) = when (present) { true -> "已备"; false -> "未备"; null -> "待核实" }
-private fun previewPresenceLabel(present: Boolean?) = when (present) { true -> "驻留"; false -> "未驻留"; null -> "待核实" }
+private fun previewPresenceLabel(present: Boolean?) = when (present) { true -> "预览已缓存"; false -> "预览未缓存"; null -> "待核实" }
 private data class PreparationIssue(val index: Int, val stage: String, val phase: ReaderPreparationPhase, val reason: String)
 private fun pageRanges(indices: List<Int>): String {
     val pages = indices.distinct().sorted()

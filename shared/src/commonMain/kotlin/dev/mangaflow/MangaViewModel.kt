@@ -2647,7 +2647,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     fun cancelReaderSourceStandbys() = readerStandbys.clear()
 
     /** Prepare confirmed alternatives without selecting one or manufacturing page equivalence. */
-    fun warmReaderSourceStandbys(manga: Manga, chapter: Chapter, pageIndex: Int, pageCount: Int) {
+    fun warmReaderSourceStandbys(manga: Manga, chapter: Chapter, pageIndex: Int, pageCount: Int, direction: Int) {
         if (manga.sourceUrl == LOCAL_SOURCE_URL) return
         val session = _reading.value?.takeIf { it.manga.id == manga.id && it.collection == null } ?: return
         val current = session.chapters.firstOrNull { it.id == chapter.id } ?: return
@@ -2686,7 +2686,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val epochs = candidates.associate { it.sourceId to scriptSourceImageEpoch(application, it.sourceId) }
         val key = "$epoch\u0000${manga.id}\u0000${current.id}\u0000$logical\u0000$configuration\u0000" +
             candidates.joinToString("|") { "${it.storageId}:${epochs[it.sourceId]}" }
-        readerStandbys.warm(key, manga.id, current, candidates, pageIndex, pageCount, availability) { variant ->
+        readerStandbys.warm(key, manga.id, current, candidates, pageIndex, pageCount, direction, availability) { variant ->
             val active = _reading.value
             epoch == readingRequestId && active != null && active.manga.id == manga.id &&
                 repository.sourceConfigurationKey() == configuration &&

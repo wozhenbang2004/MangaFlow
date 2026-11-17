@@ -1002,9 +1002,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             if (model.reading.value === current.session)
                                 model.retryReaderSourceStandby(current.session.manga, chapter, variantId)
                         },
-                        onWarmSourceStandbys = { chapter, index, count ->
+                        onWarmSourceStandbys = { chapter, index, count, direction ->
                             if (model.reading.value === current.session)
-                                model.warmReaderSourceStandbys(current.session.manga, chapter, index, count)
+                                model.warmReaderSourceStandbys(current.session.manga, chapter, index, count, direction)
                         },
                         onPrefetchPageFailed = { chapter, page ->
                             if (model.reading.value === current.session)

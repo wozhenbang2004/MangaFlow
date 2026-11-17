@@ -75,7 +75,7 @@ private fun ResourceMetricRow(icon: ImageVector, title: String, value: String, t
 }
 
 @Composable
-private fun ResourceAllocation(icon: ImageVector, title: String, used: Long?, budget: Long?,
+internal fun ResourceAllocation(icon: ImageVector, title: String, used: Long?, budget: Long?,
     modifier: Modifier, enabled: Boolean, draft: Boolean, resizePending: Boolean = false, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val statusColors = mangaStatusColors()
@@ -92,7 +92,7 @@ private fun ResourceAllocation(icon: ImageVector, title: String, used: Long?, bu
         modifier = modifier.heightIn(min = 52.dp).semantics(mergeDescendants = true) {
             contentDescription = "$title，当前 ${resourceBytes(used)}，" + (if (draft) "草稿预算 " else "现用预算 ") + resourceBytes(budget) +
                 if (overBudget) {
-                    if (draft) "，低于当前占用，应用后按缓存规则回收" else "，当前高于预算，在用内容释放后回收"
+                    if (draft) "，低于当前占用，应用后按缓存规则回收" else "，当前高于预算，仍受缓存保护规则约束"
                 } else if (resizePending) "，现用磁盘容量仍在等待调整" else if (!known) "，尚无完整采样"
                 else if (budget == 0L) { if (draft) "，草稿将关闭此项缓存预算" else "，此项缓存预算已关闭" } else ""
         }) {
@@ -131,34 +131,16 @@ internal fun ExperienceMemoryCacheSummary(usage: ExperienceUsage, requestedIdleM
     val statusColors = mangaStatusColors()
     val memory = usage.memoryCache
     var details by remember { mutableStateOf(false) }
-    val expiry = memory?.idleMinutes?.let { if (it == 0) "∞" else "$it min" } ?: "—"
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Icon(Icons.Outlined.Image, "解码内存", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(resourceBytes(memory?.bytes) + " / " + resourceBytes(memory?.limit),
-                    style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text(memory?.entries?.let { "$it 项" } ?: "—", style = MaterialTheme.typography.labelSmall,
-                        color = colors.onSurfaceVariant)
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Icon(Icons.Outlined.Schedule, null, Modifier.size(15.dp),
-                            tint = colors.onSurfaceVariant)
-                        Text(expiry, style = MaterialTheme.typography.labelSmall,
-                            color = colors.onSurfaceVariant,
-                            modifier = Modifier.semantics {
-                                contentDescription = memory?.idleMinutes?.let {
-                                    if (it == 0) "时间过期关闭，仅按容量淘汰" else "闲置 $it 分钟到期回收"
-                                } ?: "内存缓存尚未采样"
-                            })
-                    }
-                    if (memory != null && requestedIdleMinutes != memory.idleMinutes) Row(verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Icon(Icons.Outlined.Sync, "闲置回收设置等待缓存采样确认", Modifier.size(14.dp),
-                            tint = statusColors.waiting)
-                    }
-                }
+                ResourceAllocation(Icons.Outlined.Memory, "解码内存", memory?.bytes, memory?.limit,
+                    Modifier.fillMaxWidth(), enabled, draft = false) { details = !details }
+                Text(memory?.entries?.let { "$it 项" } ?: "—", style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant)
+                if (memory != null && requestedIdleMinutes != memory.idleMinutes)
+                    Icon(Icons.Outlined.HourglassEmpty, "闲置清理设置等待采样确认", Modifier.size(14.dp), tint = statusColors.waiting)
             }
             MotionIconButton(onClick = { details = !details }, enabled = enabled,
                 modifier = Modifier.size(44.dp), tooltip = "实际过期、淘汰与清空") {
@@ -166,10 +148,10 @@ internal fun ExperienceMemoryCacheSummary(usage: ExperienceUsage, requestedIdleM
                     tint = if (details) colors.primary else colors.onSurfaceVariant)
             }
             MotionIconButton(onClick = onClear, enabled = enabled && !clearing,
-                modifier = Modifier.size(44.dp), tooltip = "释放可复用的解码图片内存") {
+                modifier = Modifier.size(44.dp), tooltip = "立即清理解码缓存") {
                 if (clearing) MotionBusyIndicator(Modifier.size(20.dp).semantics { contentDescription = "正在清理解码缓存" },
                     color = statusColors.activity, strokeWidth = 1.5.dp)
-                else Icon(Icons.Outlined.CleaningServices, "释放解码缓存", Modifier.size(20.dp), tint = colors.primary)
+                else Icon(Icons.Outlined.CleaningServices, "立即清理解码缓存", Modifier.size(20.dp), tint = colors.primary)
             }
         }
         ExperienceReveal(details) {

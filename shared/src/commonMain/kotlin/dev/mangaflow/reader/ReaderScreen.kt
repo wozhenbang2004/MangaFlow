@@ -295,7 +295,7 @@ fun ReaderScreen(
     sourceStandbys: List<ReaderSourceStandby> = emptyList(),
     standbyAvailability: dev.mangaflow.data.ReaderSourceStandbyAvailability = dev.mangaflow.data.ReaderSourceStandbyAvailability(),
     nextChapterPreparation: dev.mangaflow.data.ReaderNextChapterPreparation? = null,
-    onWarmSourceStandbys: (Chapter, Int, Int) -> Unit = { _, _, _ -> },
+    onWarmSourceStandbys: (Chapter, Int, Int, Int) -> Unit = { _, _, _, _ -> },
     onRetryStandby: (Chapter, String) -> Unit = { _, _ -> },
     onRescueSourceStandbys: (Chapter, Boolean) -> Unit = { _, _ -> },
     onVerifiedSourceSwitch: (Chapter, ChapterVariant, Int, String) -> Unit = { _, _, _, _ -> },
@@ -479,16 +479,6 @@ fun ReaderScreen(
         if (!standbyActive) cancelSourceStandbys()
         onDispose { cancelSourceStandbys() }
     }
-    LaunchedEffect(sourceIdentity, chapter, pageIndex, pages, standbyActive, loading, error,
-        sourcePickerBlocking, chapterChangeRequested, experienceBudget.standbySources) {
-        // A stalled or failed visible image is exactly when spare sources matter. Do not
-        // gate standby preparation on the visible image reaching READY.
-        if (!standbyActive || pages.isEmpty() ||
-            sourcePickerBlocking || chapterChangeRequested) return@LaunchedEffect
-        // A finite intent delay follows the actual cursor; rapid paging replaces stale work.
-        delay(350)
-        warmSourceStandbys(chapter, pageIndex.coerceIn(pages.indices), pages.size)
-    }
     val latestReadingIdentity by rememberUpdatedState(manga.id to sourceIdentity)
     var headers by remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId, repository, localImport) {
         mutableStateOf(if (localImport) emptyMap() else
@@ -497,6 +487,16 @@ fun ReaderScreen(
     val preparationTracker = remember(sourceIdentity, pages, headers, preferences.mode, preferences.panelLayoutKey,
         preferences.doublePage, preferences.coverAlone) { ReaderPreparationTracker(chapter.sourceId, pages.size) }
     val preparation by preparationTracker.state.collectAsStateWithLifecycle()
+    LaunchedEffect(sourceIdentity, chapter, pageIndex, pages, standbyActive, loading, error,
+        sourcePickerBlocking, chapterChangeRequested, experienceBudget.standbySources, preparation.direction) {
+        // A stalled or failed visible image is exactly when spare sources matter. Do not
+        // gate standby preparation on the visible image reaching READY.
+        if (!standbyActive || pages.isEmpty() ||
+            sourcePickerBlocking || chapterChangeRequested) return@LaunchedEffect
+        // A finite intent delay follows the actual cursor; rapid paging replaces stale work.
+        delay(350)
+        warmSourceStandbys(chapter, pageIndex.coerceIn(pages.indices), pages.size, preparation.direction)
+    }
     val chapterDownload = remember(downloadStore, manga.id, chapterId) { downloadStore.observeChapter(manga.id, chapterId) }
     val initialDownload = remember(downloadStore, manga.id, chapterId) {
         downloadStore.entries.value.firstOrNull { it.manga.id == manga.id && it.chapter.id == chapterId }
@@ -1742,6 +1742,26 @@ private fun ChapterPages(
         val legacyLongPosition = remember { longImagePosition(startPage)?.takeIf { it > 0f } }
         var restoring by remember { mutableStateOf(startOffset > 0 || legacyLongPosition != null) }
         var targetHeight by remember { mutableIntStateOf(0) }
+        var verticalDirection by remember { mutableIntStateOf(1) }
+        var directionSuppression by remember { mutableIntStateOf(0) }
+        suspend fun withoutScrollDirection(block: suspend () -> Unit) {
+            directionSuppression++
+            try { block() } finally { directionSuppression-- }
+        }
+        fun recordNavigation(index: Int, offset: Int = 0) {
+            val current = list.firstVisibleItemIndex
+            verticalDirection = when {
+                index > current || index == current && offset > list.firstVisibleItemScrollOffset -> 1
+                index < current || index == current && offset < list.firstVisibleItemScrollOffset -> -1
+                else -> verticalDirection
+            }
+        }
+        LaunchedEffect(list) {
+            snapshotFlow {
+                if (restoring || directionSuppression > 0 || !list.isScrollInProgress) 0
+                else if (list.lastScrolledForward) 1 else if (list.lastScrolledBackward) -1 else 0
+            }.distinctUntilChanged().collect { if (it != 0) verticalDirection = it }
+        }
         val pull = rememberBottomPullLoadState(
             key = list,
             enabled = active && !restoring && onNext != null,
@@ -1776,7 +1796,7 @@ private fun ChapterPages(
                 withFrameNanos { }
                 // Old vertical reading kept long-image pan separately from the list offset.
                 val offset = (startOffset + (legacyLongPosition ?: 0f) * targetHeight).roundToInt()
-                list.scrollToItem(startPage, offset.coerceIn(0, targetHeight - 1))
+                withoutScrollDirection { list.scrollToItem(startPage, offset.coerceIn(0, targetHeight - 1)) }
                 restoring = false
             }
         }
@@ -1808,8 +1828,10 @@ private fun ChapterPages(
                     // A vertical page's height scales with its viewport width. Keep the same
                     // place in the original image while rotating/resizing, without a new history format.
                     val offset = (old.third.toDouble() * current.first / old.first).roundToInt().coerceAtLeast(0)
-                    list.stopScroll()
-                    list.scrollToItem(old.second, offset)
+                    withoutScrollDirection {
+                        list.stopScroll()
+                        list.scrollToItem(old.second, offset)
+                    }
                     previous = Triple(current.first, old.second, offset)
                 }
             }
@@ -1828,7 +1850,10 @@ private fun ChapterPages(
             targetPage?.let {
                 readingNavigation()
                 restoring = false
-                list.scrollToItem(it.coerceIn(0, pages.lastIndex), targetOffset.coerceAtLeast(0))
+                val index = it.coerceIn(0, pages.lastIndex)
+                val offset = targetOffset.coerceAtLeast(0)
+                recordNavigation(index, offset)
+                withoutScrollDirection { list.scrollToItem(index, offset) }
                 onTargetConsumed()
             }
         }
@@ -1838,8 +1863,12 @@ private fun ChapterPages(
             try {
                 readingNavigation()
                 suspend fun moveTo(index: Int) {
-                    if (keyboardMotion) list.animateScrollToItem(index.coerceIn(0, pages.lastIndex))
-                    else list.scrollToItem(index.coerceIn(0, pages.lastIndex))
+                    val target = index.coerceIn(0, pages.lastIndex)
+                    recordNavigation(target)
+                    withoutScrollDirection {
+                        if (keyboardMotion) list.animateScrollToItem(target)
+                        else list.scrollToItem(target)
+                    }
                 }
                 when (request.action) {
                     ReaderKeyboardAction.FIRST_PAGE -> moveTo(0)
@@ -1883,6 +1912,8 @@ private fun ChapterPages(
                 onPrefetchFailure(pages[index]) },
             onPageRecovered = { index -> prefetchFailures.remove(index) },
             onPageDimensions = { index, size -> pageDimensions[pages[index].url] = size },
+            // Actual scrolling and explicit navigation own direction, never layout remeasurement.
+            scrollDirection = { verticalDirection },
             position = {
                 val item = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == list.firstVisibleItemIndex }
                 list.firstVisibleItemIndex + list.firstVisibleItemScrollOffset.toFloat() / (item?.size ?: 1).coerceAtLeast(1)
@@ -2132,6 +2163,7 @@ private data class PrefetchWindow(
     val viewport: IntSize, val checking: Set<Int>, val resolving: Set<Int>, val resolved: Set<Int>,
     val resolveParallel: Int, val decodeParallel: Int, val decodeEnabled: Boolean, val foregroundActive: Boolean,
     val runtime: ExperienceRuntimePreferences,
+    val scrollDirection: Int?,
 )
 
 private data class PrefetchedReaderPage(val page: Page, val diskCacheKey: String?)
@@ -2166,6 +2198,7 @@ internal fun AdjacentPagePrefetch(
     onPageFailure: (Int, String) -> Unit = { _, _ -> },
     onPageRecovered: (Int) -> Unit = {},
     position: (() -> Float)? = null, groups: List<PageSpread>? = null,
+    scrollDirection: (() -> Int)? = null,
     visibleRange: () -> Pair<Int, Int>,
 ) {
     val context = LocalContext.current
@@ -2178,6 +2211,7 @@ internal fun AdjacentPagePrefetch(
     val currentOverrides by rememberUpdatedState(overrides)
     val visible by rememberUpdatedState(visibleRange)
     val currentPosition by rememberUpdatedState(position)
+    val currentScrollDirection by rememberUpdatedState(scrollDirection)
     val dimensionsKnown by rememberUpdatedState(onPageDimensions)
     val pageFailed by rememberUpdatedState(onPageFailure)
     val pageRecovered by rememberUpdatedState(onPageRecovered)
@@ -2341,7 +2375,7 @@ internal fun AdjacentPagePrefetch(
                     currentBudget.decodedPrefetchPages, IntSize(currentViewportWidth(), viewportHeight),
                     checks.keys.toSet(), resolutionJobs.keys.toSet(), resolvedPages.keys.toSet(),
                     currentBudget.resolveRequests, currentBudget.decodeRequests, experience.canDecodePrefetch(), readerActive,
-                    currentBudget.runtime)
+                    currentBudget.runtime, currentScrollDirection?.invoke())
             }.distinctUntilChanged().combine(snapshotFlow {
                 prefetchEnabled && (currentBudget.prefetchBytes > 0L ||
                     currentBudget.decodedPrefetchPages > 0 && experience.canDecodePrefetch())
@@ -2364,11 +2398,11 @@ internal fun AdjacentPagePrefetch(
                 val promoted = if (window.foregroundActive) (workTokens.filterValues { it.isForeground }.keys +
                     resolutionTokens.filterValues { it.isForeground }.keys +
                     checkTokens.filterValues { it.isForeground }.keys).toSet() else emptySet()
-                // Offset settling/bounce is not a turn in the opposite reading direction.
-                // Use the leading page anchor, not the trailing visible edge: decoding
-                // a tall image can reduce the visible range without any backward turn.
+                // Vertical layouts supply actual scroll direction: even their leading item
+                // can move during remeasurement/restoration. Paged readers retain anchor turns.
                 val oldFirst = previousFirst
                 val nextDirection = when {
+                    window.scrollDirection != null -> window.scrollDirection.takeIf { it != 0 } ?: direction
                     oldFirst == null -> direction
                     window.first > oldFirst -> 1
                     window.first < oldFirst -> -1

@@ -242,7 +242,7 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                 Column(Modifier.fillMaxWidth().height(maximumHeight)
                     .padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("体验与资源", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
+                        Text("体验策略", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         // A stable header slot replaces the permanently empty bottom action row.
                         Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
@@ -266,7 +266,7 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                     }
                     ExperienceIconChoices(listOf(
                         Triple(ExperienceWorkspace.OVERVIEW, "概览", Icons.Outlined.Dashboard),
-                        Triple(ExperienceWorkspace.TUNING, "调优", Icons.Outlined.Tune),
+                        Triple(ExperienceWorkspace.TUNING, "配置", Icons.Outlined.Tune),
                         Triple(ExperienceWorkspace.DIAGNOSTICS, "诊断", Icons.Outlined.Analytics)),
                         workspace, enabled = interactive, selectedLabel = true, navigation = true, onSelected = ::selectWorkspace)
                     Spacer(Modifier.height(8.dp))
@@ -339,30 +339,27 @@ private fun ExperienceOverview(usage: ExperienceUsage, budget: ExperienceBudget,
         Text("体验策略", Modifier.padding(top = 4.dp), style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         ExperienceModeChoices(mode, enabled, onMode)
+        ExperienceHint("全局配置；本章准备进度在阅读栏查看。")
         Spacer(Modifier.height(4.dp))
-        Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .025f), tonalElevation = 0.dp) {
-            Column(Modifier.padding(horizontal = 10.dp, vertical = 4.dp)) {
-                ExperienceOverviewLink(Icons.Outlined.Memory, "解码缓存 · 已用 / 容量",
-                    cacheUsage(usage.memoryBytes, usage.memoryLimit), enabled) { onCategory("cache") }
-                ExperienceOverviewLink(Icons.Outlined.Storage, "共享磁盘 · 已用 / 预算",
-                    cacheUsage(usage.diskBytes, usage.diskLimit), enabled) { onCategory("cache") }
-                if (usage.diskResizePending) ExperienceHint("磁盘容量调整中，在用内容保留")
-                usage.cacheError?.let { Text(it, Modifier.padding(vertical = 4.dp),
-                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
-            }
+        Text("应用缓存", style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            ResourceAllocation(Icons.Outlined.Memory, "内存缓存", usage.memoryBytes, usage.memoryLimit,
+                Modifier.weight(1f), enabled, draft = false) { onCategory("cache") }
+            ResourceAllocation(Icons.Outlined.Storage, "磁盘缓存", usage.diskBytes, usage.diskLimit,
+                Modifier.weight(1f), enabled, draft = false, resizePending = usage.diskResizePending) { onCategory("cache") }
         }
+        usage.cacheError?.let { Text(it, style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.error) }
         if (budget.protections.isNotEmpty()) ExperienceProtectionSummary(budget.protections, false)
         ExperienceOverviewLink(Icons.Outlined.AutoStories, "阅读与预读",
             "待读 ${budget.prefetchAhead} 页 · 回看 ${budget.prefetchBehind} 页", enabled) { onCategory("reading") }
         ExperienceOverviewLink(Icons.Outlined.AccountTree, "并行调度",
-            "上限 · 预取 ${custom.prefetchRequests ?: budget.prefetchRequests} · 解码 ${custom.decodeRequests ?: budget.decodeRequests}" +
-                if (usage.activePrefetch == 0 && usage.activeDecodes == 0) "\n预取 / 解码空闲"
-                else "\n进行中 · 预取 ${usage.activePrefetch} · 解码 ${usage.activeDecodes}", enabled) { onCategory("parallel") }
+            "同时预取 ${custom.prefetchRequests ?: budget.prefetchRequests} 个 · 解码 ${custom.decodeRequests ?: budget.decodeRequests} 个", enabled) { onCategory("parallel") }
         ExperienceOverviewLink(Icons.Outlined.Layers, "多源补页",
             "备用预算 ${budget.standbySources} 源", enabled) { onCategory("sources") }
         ExperienceOverviewLink(Icons.Outlined.Download, "后台任务",
-            "下载 ${usage.activeBackgroundPages} 页执行", enabled) { onCategory("downloads") }
+            if (custom.allowBackgroundDownloads) (if (custom.yieldToReading) "退到后台继续下载 · 阅读优先" else "退到后台继续下载") else "退到后台暂停下载", enabled) { onCategory("downloads") }
         ExperienceOverviewLink(Icons.Outlined.Analytics, "诊断与保护",
             "观测 · 硬件 · 情景", enabled) { onCategory("resources") }
     }
@@ -511,7 +508,7 @@ private fun ExperienceNavigationLegend() {
         ResourceValue(Icons.Outlined.Download, "后台", "下载与任务让行")
         ResourceValue(Icons.Outlined.Storage, "缓存", "容量、时效与清理")
         ResourceValue(Icons.Outlined.Analytics, "诊断", "硬件、观测与保护")
-        ExperienceHint("绿点／勾表示对应状态已确认，蓝色表示处理或编辑，时钟／暂停的琥珀色表示等待或约束，红色表示失败，问号／— 表示未知。蓝点仍表示自定义；拖动立即保存，键盘输入点勾或回车保存。")
+        ExperienceHint("绿点／勾表示对应状态已确认，蓝色表示处理或编辑，时钟／暂停的琥珀色表示等待或约束，红色表示失败，问号／— 表示未知。蓝点表示自定义，自动图标表示跟随策略；拖动立即保存，键盘输入点勾或回车保存。")
         ExperienceHint("实测是当前占用；≈ 是配置情景估算，不是硬上限或安全保证。缓存占满不等于故障；详细估算放在诊断的情景页。")
     }
 }
@@ -605,10 +602,20 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                     editor, active && expanded == "reading" && custom.prefetchMode == PrefetchMode.MANUAL, effective = appliedBudget.prefetchBehind) { change(custom.copy(behind = it)) }
             }
             ExperienceReveal(custom.prefetchMode != PrefetchMode.OFF) {
+                ExperienceLiveNumber("临近页预解码", custom.decodedPrefetchPages, budget.goal.decodedPrefetchPages, 0..8, "页",
+                    editor, active && expanded == "reading" && custom.prefetchMode != PrefetchMode.OFF,
+                    effective = appliedBudget.decodedPrefetchPages) { change(custom.copy(decodedPrefetchPages = it)) }
                 SettingsToggle("提前准备下一章", custom.crossChapter, Icons.Outlined.SkipNext) { change(custom.copy(crossChapter = it)) }
+                ExperienceReveal(custom.crossChapter) {
+                    ExperienceLiveNumber("下一章准备", custom.runtime.nextChapterPages, 3, 0..24, "页",
+                        editor, active && expanded == "reading" && custom.crossChapter && custom.prefetchMode != PrefetchMode.OFF,
+                        effective = appliedBudget.runtime.nextChapterPages, automaticLabel = "默认值") {
+                        change(custom.copy(runtime = custom.runtime.copy(nextChapterPages = it ?: 3)))
+                    }
+                }
                 ExperienceHint(when {
                     !custom.crossChapter -> "翻到下一章时再加载。"
-                    !budget.crossChapter -> "跨章预读当前已暂停。"
+                    !budget.crossChapter || minOf(budget.prefetchAhead, budget.runtime.nextChapterPages) == 0 -> "跨章预读当前已暂停。"
                     else -> "临近章末时，准备下一章前 ${minOf(budget.prefetchAhead, budget.runtime.nextChapterPages)} 页原图。"
                 })
             }
@@ -629,33 +636,30 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                         crossChapter = true, browseWarmup = true, decodedPrefetchPages = null, readerStatusPlacement = ReaderStatusPlacement.BOTTOM,
                         runtime = resetExperienceRuntime(custom.runtime, ExperienceRuntimeGroup.READING)))
                 }, extra = {
-                    ExperienceLiveNumber("临近页预解码", custom.decodedPrefetchPages, budget.goal.decodedPrefetchPages, 0..8, "页",
-                        editor, active && expanded == "reading" && detail == "reading-advanced", effective = appliedBudget.decodedPrefetchPages) {
-                        change(custom.copy(decodedPrefetchPages = it))
-                    }
                     ExperienceRuntimeSettings(ExperienceRuntimeGroup.READING, custom, budget, appliedBudget, usage, store,
                         editor, active && expanded == "reading" && detail == "reading-advanced", ::change)
                 }) {
                 ExperienceBudgetRow("窗口目标", budget.goal.prefetchAhead.toString() + " 待读 · " + budget.goal.prefetchBehind + " 回看")
                 ExperienceHint("待读和回看跟随实际翻页方向，不固定为屏幕左右。窗口是候选页数，解析、传输、解码各有并发上限；原图存磁盘，临近预览进内存。")
-                ExperienceHint("环形箭头表示自动调节，强调色表示手动值。拖动直接保存，手动输入不设业务上限；配置数量不等于正在执行的数量。")
+                ExperienceHint("自动图标表示跟随策略，强调色表示手动值。拖动直接保存，手动输入不设业务上限；配置数量不等于正在执行的数量。")
                 ExperienceHint("阅读底栏贴近安全区，四个固定槽位只展示状态。点击槽位查看数量、原因和操作，不自动展开遮挡画面。")
             }
         }
 
         if (expanded == "parallel") ExperienceCategorySection("并行", Icons.Outlined.AccountTree,
             modified = experienceParallelCustom(custom)) {
-            ExperienceLiveNumber("当前页请求", custom.readerRequests, budget.goal.readerRequests, 1..4, "个",
+            ExperienceHint("同时处理的任务上限，不是提前准备的页数。")
+            ExperienceLiveNumber("当前页请求", custom.readerRequests, budget.goal.readerRequests, 1..4, "任务",
                 editor, active && expanded == "parallel", effective = appliedBudget.readerRequests) { change(custom.copy(readerRequests = it)) }
-            ExperienceLiveNumber("图址解析", custom.resolveRequests, budget.goal.resolveRequests, 1..8, "个",
+            ExperienceLiveNumber("图址解析", custom.resolveRequests, budget.goal.resolveRequests, 1..8, "任务",
                 editor, active && expanded == "parallel", effective = appliedBudget.resolveRequests) { change(custom.copy(resolveRequests = it)) }
-            ExperienceLiveNumber("原图预取", custom.prefetchRequests, budget.goal.prefetchRequests, 1..12, "个",
+            ExperienceLiveNumber("原图预取", custom.prefetchRequests, budget.goal.prefetchRequests, 1..12, "任务",
                 editor, active && expanded == "parallel", effective = appliedBudget.prefetchRequests) { change(custom.copy(prefetchRequests = it)) }
-            ExperienceLiveNumber("图片解码", custom.decodeRequests, budget.goal.decodeRequests, 1..4, "个",
+            ExperienceLiveNumber("图片解码", custom.decodeRequests, budget.goal.decodeRequests, 1..4, "任务",
                 editor, active && expanded == "parallel", effective = appliedBudget.decodeRequests) { change(custom.copy(decodeRequests = it)) }
-            ExperienceLiveNumber("下载页面", custom.downloadPages, budget.goal.backgroundPages, 1..maximumBackgroundPageParallelism, "个",
+            ExperienceLiveNumber("下载页面", custom.downloadPages, budget.goal.backgroundPages, 1..maximumBackgroundPageParallelism, "任务",
                 editor, active && expanded == "parallel", effective = appliedBudget.backgroundPages) { change(custom.copy(downloadPages = it)) }
-            ExperienceLiveNumber("每源请求", custom.sourcePages, budget.goal.sourceParallelism, 1..8, "个",
+            ExperienceLiveNumber("每源请求", custom.sourcePages, budget.goal.sourceParallelism, 1..8, "任务",
                 editor, active && expanded == "parallel", effective = appliedBudget.sourceParallelism) { change(custom.copy(sourcePages = it)) }
             ExperienceLiveNumber("下载章节", custom.chapters, budget.goal.chapterParallelism, 1..4, "章",
                 editor, active && expanded == "parallel", effective = appliedBudget.chapterParallelism) { change(custom.copy(chapters = it)) }
@@ -669,9 +673,6 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                         editor, active && expanded == "parallel" && detail == "parallel-advanced", ::change)
                 }) {
                 ExperienceHint("数字是各阶段允许同时执行的任务数。一个请求不等于一条系统线程，也不保证占满一个CPU核心。")
-                ExperienceBudgetRow("当前 · 请求 / 排队", usage.activeReaderImages.toString() + " / " + usage.queuedTasks)
-                ExperienceBudgetRow("当前 · 解析 / 解码", usage.activeResolves.toString() + " / " + usage.activeDecodes)
-                ExperienceBudgetRow("当前 · 预取 / 下载", usage.activePrefetch.toString() + " / " + usage.activeBackgroundPages)
                 ExperienceHint("自动项按设备与来源反馈调整；手动值保留。限流、系统暂停和存储故障会显示真实等待原因。")
             }
         }
@@ -813,21 +814,24 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 automaticDisplay = usage.memoryLimit?.let { ((it.toDouble() / EXPERIENCE_MIB * 10).roundToInt() / 10.0).toString() }) {
                 change(custom.copy(memoryMiB = it))
             }
-            ExperienceLiveNumber("闲置回收", custom.contentCache.memoryIdleMinutes, ContentCachePreferences().memoryIdleMinutes, 0..120, "分钟",
+            ExperienceLiveNumber("未用多久清理", custom.contentCache.memoryIdleMinutes, ContentCachePreferences().memoryIdleMinutes, 0..120, "分钟",
                 editor, active && expanded == "cache", effective = appliedCustom.contentCache.memoryIdleMinutes,
                 automaticLabel = "默认值") {
                 change(custom.copy(contentCache = custom.contentCache.copy(memoryIdleMinutes = it ?: ContentCachePreferences().memoryIdleMinutes)))
             }
+            ExperienceHint("满额时先淘汰最久未用；0 分钟仅关闭闲置过期。")
             Text("磁盘缓存", Modifier.padding(top = 12.dp), style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-            SettingsToggle("自动回收", custom.runtime.automaticCleanup, Icons.Outlined.CleaningServices) {
+            SettingsToggle("自动清理磁盘", custom.runtime.automaticCleanup, Icons.Outlined.CleaningServices) {
                 change(custom.copy(runtime = custom.runtime.copy(automaticCleanup = it)))
             }
+            ExperienceHint(if (custom.runtime.automaticCleanup) "到期或满额时清理；正在使用和离线内容保留。"
+                else "自动清理已关闭，保留设置供重新开启。")
             val evictionChoices = listOf(
                 Triple(CacheEvictionOrder.UNUSED_FIRST, "未使用", Icons.Outlined.VisibilityOff),
                 Triple(CacheEvictionOrder.LEAST_RECENT, "最久未用", Icons.Outlined.History),
                 Triple(CacheEvictionOrder.LARGEST_FIRST, "较大优先", Icons.Outlined.PhotoSizeSelectLarge))
-            SettingsDisclosure("回收顺序", evictionChoices.first { it.first == custom.runtime.evictionOrder }.second,
+            SettingsDisclosure("满额先清哪些", evictionChoices.first { it.first == custom.runtime.evictionOrder }.second,
                 Icons.Outlined.Sort, expanded = detail == "cache-eviction", compact = true,
                 onToggle = { toggleDetail("cache-eviction") }) {
                 ExperienceIconChoices(evictionChoices, custom.runtime.evictionOrder,
@@ -840,7 +844,10 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 }
                 ExperienceHint("容量不足时优先回收；正在使用和离线保存的内容保留。")
             }
-            ExperienceBudgetRow("共享磁盘", cacheUsage(usage.diskBytes, usage.diskLimit))
+            ResourceAllocation(Icons.Outlined.Storage, "应用磁盘缓存", usage.diskBytes, usage.diskLimit,
+                Modifier.fillMaxWidth(), active, draft = false, resizePending = usage.diskResizePending) {
+                toggleDetail("cache-help")
+            }
             ExperienceLiveNumber("磁盘缓存预算", custom.diskMiB, (budget.goal.diskCacheBytes / EXPERIENCE_MIB).toInt(), 1..8192, "MB",
                 editor, active && expanded == "cache", effective = (appliedBudget.diskCacheBytes / EXPERIENCE_MIB).toInt()) {
                 change(custom.copy(diskMiB = it))
@@ -860,9 +867,10 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 statusIcon = Icons.Outlined.Schedule, statusColor = mangaStatusColors().waiting)
             usage.cacheError?.let { Text(it, Modifier.padding(vertical = 4.dp),
                 style = MaterialTheme.typography.labelSmall, color = mangaStatusColors().error) }
-            ExperienceLiveNumber("磁盘图片保留", custom.contentCache.imageRetentionHours, 0, 0..720, "小时",
+            ExperienceLiveNumber("图片未用多久清理", custom.contentCache.imageRetentionHours, 0, 0..720, "小时",
                 editor, active && expanded == "cache", effective = appliedCustom.contentCache.imageRetentionHours,
                 automaticLabel = "默认值") { change(custom.copy(contentCache = custom.contentCache.copy(imageRetentionHours = it ?: 0))) }
+            if (custom.contentCache.imageRetentionHours == 0) ExperienceHint(if (custom.runtime.automaticCleanup) "0 小时：不过期，满额时仍按所选顺序淘汰。" else "0 小时：不过期；自动清理也已关闭。")
             } else if (cacheTab == "areas") {
                 ExperienceCacheBreakdown(usage)
             } else {
@@ -1027,8 +1035,16 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
 private fun ExperienceRuntimeSettings(group: ExperienceRuntimeGroup, custom: ExperienceOverrides,
     budget: ExperienceBudget, currentBudget: ExperienceBudget, usage: ExperienceUsage, store: ExperiencePolicyStore,
     editor: ExperienceEditor, active: Boolean, onChange: (ExperienceOverrides) -> Unit) {
-    ExperienceRuntimeField.entries.filter { it.group == group }.forEach { field ->
+    ExperienceRuntimeField.entries.filter { it.group == group && it != ExperienceRuntimeField.NEXT_CHAPTER }.forEach { field ->
         key(field) {
+            val section = when (field) {
+                ExperienceRuntimeField.PREDICTION -> "自动窗口"
+                ExperienceRuntimeField.PREFETCH_RETRIES -> "失败后重试"
+                ExperienceRuntimeField.PREVIEW_WIDTH -> "预览尺寸"
+                else -> null
+            }
+            if (section != null) Text(section, Modifier.padding(top = 12.dp, bottom = 2.dp),
+                style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             val supported = platformKind != PlatformKind.ANDROID ||
                 field != ExperienceRuntimeField.TILE_DECODES && field != ExperienceRuntimeField.FALLBACK_PIXELS
             val automaticBudget = remember(custom, budget, field) {
@@ -1204,7 +1220,7 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                             Text((displayed ?: "—") + " " + unit, Modifier.weight(1f, fill = false),
                                 style = MaterialTheme.typography.bodyMedium, color = if (editing || value != null) colors.primary else colors.onSurface)
-                            Icon(if (editing) Icons.Outlined.Close else if (value == null) Icons.Outlined.Sync else Icons.Outlined.ChevronRight,
+                            Icon(if (editing) Icons.Outlined.Close else if (value == null) (if (liveSlider) Icons.Outlined.AutoMode else Icons.Outlined.Sync) else Icons.Outlined.ChevronRight,
                                 null, Modifier.size(14.dp), tint = if (editing || value != null) colors.primary else colors.onSurfaceVariant)
                         }
                     }
@@ -1279,6 +1295,11 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                 // numeric buffer until the check/IME Done action accepts it.
             }, formatValue = { it.roundToInt().toString() + " " + unit },
                 modifier = Modifier.fillMaxWidth().semantics { contentDescription = title + "滑块" })
+            if (liveSlider) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(range.first.toString() + " " + unit, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                Text(sliderMaximum.toString() + " " + unit, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            }
+            if (liveSlider) ExperienceHint(if (semanticMaximum == null) "拖动即保存；更大数值可直接输入。" else "拖动即保存。")
         }
     }
 }
@@ -1286,7 +1307,7 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
 /** Existing icon presses and retained disclosure share one local, fixed-height tool row. */
 @Composable
 private fun ExperienceTools(key: String, title: String, active: Boolean, detail: String?, onDetail: (String) -> Unit,
-    modified: Boolean, onRestore: () -> Unit, extraLabel: String = "更多参数",
+    modified: Boolean, onRestore: () -> Unit, extraLabel: String = "高级参数",
     extraIcon: ImageVector = Icons.Outlined.Tune, extra: (@Composable ColumnScope.() -> Unit)? = null,
     help: @Composable ColumnScope.() -> Unit) {
     val colors = MaterialTheme.colorScheme
@@ -1294,24 +1315,24 @@ private fun ExperienceTools(key: String, title: String, active: Boolean, detail:
     val extraOpen = detail == key + "-advanced"
     Column(Modifier.fillMaxWidth().motionInputGate(active)) {
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-            MotionIconButton(onClick = { onDetail(key + "-help") }, enabled = active,
-                modifier = Modifier.size(44.dp).semantics { stateDescription = if (helpOpen) "已展开" else "已收起" },
-                tooltip = title + "说明") {
-                Icon(Icons.Outlined.Info, title + "说明", Modifier.size(18.dp),
-                    tint = if (helpOpen) colors.primary else colors.onSurfaceVariant)
+            MotionTextButton(onClick = { onDetail(key + "-help") }, enabled = active,
+                modifier = Modifier.heightIn(min = 44.dp).semantics { stateDescription = if (helpOpen) "已展开" else "已收起" },
+                contentPadding = PaddingValues(horizontal = 6.dp)) {
+                Icon(Icons.Outlined.Info, null, Modifier.size(16.dp))
+                Text("说明", Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelSmall)
             }
-            if (extra != null) MotionIconButton(onClick = { onDetail(key + "-advanced") }, enabled = active,
-                modifier = Modifier.size(44.dp).semantics { stateDescription = if (extraOpen) "已展开" else "已收起" },
-                tooltip = title + "：" + extraLabel) {
-                Icon(extraIcon, title + "：" + extraLabel, Modifier.size(18.dp),
-                    tint = if (extraOpen) colors.primary else colors.onSurfaceVariant)
+            if (extra != null) MotionTextButton(onClick = { onDetail(key + "-advanced") }, enabled = active,
+                modifier = Modifier.heightIn(min = 44.dp).semantics { stateDescription = if (extraOpen) "已展开" else "已收起" },
+                contentPadding = PaddingValues(horizontal = 6.dp)) {
+                Icon(extraIcon, null, Modifier.size(16.dp))
+                Text(extraLabel, Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelSmall)
+                Icon(if (extraOpen) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, Modifier.size(14.dp))
             }
             Spacer(Modifier.weight(1f))
             MotionSwap(modified, Modifier.size(44.dp)) { shown ->
                 if (shown) MotionIconButton(onClick = onRestore, enabled = active && modified,
                     modifier = Modifier.size(44.dp), tooltip = "恢复" + title + "默认设置") {
-                    Icon(Icons.Outlined.RestartAlt, "恢复" + title + "默认设置", Modifier.size(18.dp),
-                        tint = colors.onSurfaceVariant)
+                    Icon(Icons.Outlined.RestartAlt, "恢复" + title + "默认设置", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
                 }
             }
         }

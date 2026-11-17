@@ -130,17 +130,12 @@ internal class ReaderSourceStandbyController(
 
     fun warm(
         sessionKey: String, workId: String, chapter: Chapter, candidates: List<ChapterVariant>,
-        pageIndex: Int, pageCount: Int, availability: ReaderSourceStandbyAvailability,
+        pageIndex: Int, pageCount: Int, direction: Int, availability: ReaderSourceStandbyAvailability,
         current: (ChapterVariant) -> Boolean,
     ) {
         val index = pageIndex.coerceAtLeast(0)
-        val previous = position.value
-        position.value = Position(index, pageCount.coerceAtLeast(0), when {
-            key != sessionKey -> 1
-            index < previous.index -> -1
-            index > previous.index -> 1
-            else -> previous.direction
-        })
+        // Share the primary reader's turn intent. A remeasured cursor is not a reverse turn.
+        position.value = Position(index, pageCount.coerceAtLeast(0), if (direction < 0) -1 else 1)
         if (key == sessionKey && job?.isActive == true) {
             mutableAvailability.value = availability
             return
