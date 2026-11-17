@@ -1752,12 +1752,27 @@ private fun ChapterPages(
         var restoring by remember { mutableStateOf(startOffset > 0 || legacyLongPosition != null) }
         var targetHeight by remember { mutableIntStateOf(0) }
         var verticalDirection by remember { mutableIntStateOf(1) }
+        var verticalIntentAnchor by remember { mutableIntStateOf(startPage) }
+        var verticalLayoutShift by remember { mutableStateOf(0L) }
+        var directionBaseline by remember { mutableStateOf(0L to startPage.toLong()) }
+        var navigationGeneration by remember { mutableStateOf(0L) }
         var directionSuppression by remember { mutableIntStateOf(0) }
-        suspend fun withoutScrollDirection(block: suspend () -> Unit) {
+        fun rebaseDirection() {
+            verticalIntentAnchor = list.firstVisibleItemIndex.coerceIn(pages.indices)
+            directionBaseline = (directionBaseline.first + 1L) to (verticalIntentAnchor.toLong() - verticalLayoutShift)
+        }
+        suspend fun withoutScrollDirection(rebase: Boolean = true, block: suspend () -> Unit) {
+            val generation = navigationGeneration
             directionSuppression++
-            try { block() } finally { directionSuppression-- }
+            var completed = false
+            try { block(); completed = true } finally {
+                if ((rebase || !completed) && generation == navigationGeneration) rebaseDirection()
+                directionSuppression--
+            }
         }
         fun recordNavigation(index: Int, offset: Int = 0) {
+            navigationGeneration++
+            verticalIntentAnchor = index
             val current = list.firstVisibleItemIndex
             verticalDirection = when {
                 index > current || index == current && offset > list.firstVisibleItemScrollOffset -> 1
@@ -1766,10 +1781,30 @@ private fun ChapterPages(
             }
         }
         LaunchedEffect(list) {
+            var wasScrolling = false
             snapshotFlow {
-                if (restoring || directionSuppression > 0 || !list.isScrollInProgress) 0
-                else if (list.lastScrolledForward) 1 else if (list.lastScrolledBackward) -1 else 0
-            }.distinctUntilChanged().collect { if (it != 0) verticalDirection = it }
+                val direction = if (restoring || directionSuppression > 0 || !list.isScrollInProgress) 0
+                    else if (list.lastScrolledForward) 1 else if (list.lastScrolledBackward) -1 else 0
+                Triple(direction, list.firstVisibleItemIndex.coerceIn(pages.indices),
+                    !restoring && directionSuppression == 0 && !list.isScrollInProgress)
+            }.distinctUntilChanged().collect { (direction, anchor, idle) ->
+                if (direction != 0) {
+                    verticalDirection = direction
+                    verticalIntentAnchor = anchor
+                } else if (idle && wasScrolling) {
+                    // Preserve the last real scroll sample if its final anchor and the
+                    // transition to idle arrive together in one Compose snapshot.
+                    val finalDirection = anchor.compareTo(verticalIntentAnchor)
+                    if (finalDirection != 0) verticalDirection = finalDirection
+                    verticalIntentAnchor = anchor
+                } else if (idle && anchor != verticalIntentAnchor) {
+                    // A layout correction translates coordinates; it is neither another
+                    // reversed page nor a reason to forget a genuine one-page glance.
+                    verticalLayoutShift += anchor.toLong() - verticalIntentAnchor
+                    verticalIntentAnchor = anchor
+                }
+                wasScrolling = direction != 0
+            }
         }
         val pull = rememberBottomPullLoadState(
             key = list,
@@ -1809,7 +1844,11 @@ private fun ChapterPages(
                 restoring = false
             }
         }
-        LaunchedEffect(dragging) { if (dragging) { restoring = false; readingNavigation() } }
+        LaunchedEffect(dragging) { if (dragging) {
+            navigationGeneration++
+            if (restoring || directionSuppression > 0) rebaseDirection()
+            restoring = false; readingNavigation()
+        } }
         LaunchedEffect(list, active, nextChapterPages) {
             snapshotFlow {
                 val layout = list.layoutInfo
@@ -1862,7 +1901,7 @@ private fun ChapterPages(
                 val index = it.coerceIn(0, pages.lastIndex)
                 val offset = targetOffset.coerceAtLeast(0)
                 recordNavigation(index, offset)
-                withoutScrollDirection { list.scrollToItem(index, offset) }
+                withoutScrollDirection(rebase = false) { list.scrollToItem(index, offset) }
                 onTargetConsumed()
             }
         }
@@ -1874,7 +1913,7 @@ private fun ChapterPages(
                 suspend fun moveTo(index: Int) {
                     val target = index.coerceIn(0, pages.lastIndex)
                     recordNavigation(target)
-                    withoutScrollDirection {
+                    withoutScrollDirection(rebase = false) {
                         if (keyboardMotion) list.animateScrollToItem(target)
                         else list.scrollToItem(target)
                     }
@@ -1923,6 +1962,8 @@ private fun ChapterPages(
             onPageDimensions = { index, size -> pageDimensions[pages[index].url] = size },
             // Actual scrolling and explicit navigation own direction, never layout remeasurement.
             scrollDirection = { verticalDirection },
+            directionAnchor = { verticalIntentAnchor.toLong() - verticalLayoutShift },
+            directionBaseline = { directionBaseline },
             position = {
                 val item = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == list.firstVisibleItemIndex }
                 list.firstVisibleItemIndex + list.firstVisibleItemScrollOffset.toFloat() / (item?.size ?: 1).coerceAtLeast(1)
@@ -2172,7 +2213,7 @@ private data class PrefetchWindow(
     val viewport: IntSize, val checking: Set<Int>, val resolving: Set<Int>, val resolved: Set<Int>,
     val resolveParallel: Int, val decodeParallel: Int, val decodeEnabled: Boolean, val foregroundActive: Boolean,
     val runtime: ExperienceRuntimePreferences,
-    val scrollDirection: Int?,
+    val scrollDirection: Int?, val directionAnchor: Long?, val directionBaseline: Pair<Long, Long>?,
 )
 
 private data class PrefetchedReaderPage(val page: Page, val diskCacheKey: String?)
@@ -2208,6 +2249,8 @@ internal fun AdjacentPagePrefetch(
     onPageRecovered: (Int) -> Unit = {},
     position: (() -> Float)? = null, groups: List<PageSpread>? = null,
     scrollDirection: (() -> Int)? = null,
+    directionAnchor: (() -> Long)? = null,
+    directionBaseline: (() -> Pair<Long, Long>)? = null,
     visibleRange: () -> Pair<Int, Int>,
 ) {
     val context = LocalContext.current
@@ -2221,6 +2264,8 @@ internal fun AdjacentPagePrefetch(
     val visible by rememberUpdatedState(visibleRange)
     val currentPosition by rememberUpdatedState(position)
     val currentScrollDirection by rememberUpdatedState(scrollDirection)
+    val currentDirectionAnchor by rememberUpdatedState(directionAnchor)
+    val currentDirectionBaseline by rememberUpdatedState(directionBaseline)
     val dimensionsKnown by rememberUpdatedState(onPageDimensions)
     val pageFailed by rememberUpdatedState(onPageFailure)
     val pageRecovered by rememberUpdatedState(onPageRecovered)
@@ -2331,7 +2376,7 @@ internal fun AdjacentPagePrefetch(
             scriptRequests[index]?.cancel()
             checks[index]?.cancel()
         }
-        var previousFirst: Int? = null
+        val readingIntent = ReaderPrefetchDirection()
         var previousPosition = Float.NaN
         var previousTime = monotonicTimeMillis()
         var lastMove = previousTime
@@ -2391,7 +2436,8 @@ internal fun AdjacentPagePrefetch(
                     currentBudget.decodedPrefetchPages, IntSize(currentViewportWidth(), viewportHeight),
                     checks.keys.toSet(), resolutionJobs.keys.toSet(), resolvedPages.keys.toSet(),
                     currentBudget.resolveRequests, currentBudget.decodeRequests, experience.canDecodePrefetch(), readerActive,
-                    currentBudget.runtime, currentScrollDirection?.invoke())
+                    currentBudget.runtime, currentScrollDirection?.invoke(), currentDirectionAnchor?.invoke(),
+                    currentDirectionBaseline?.invoke())
             }.distinctUntilChanged().combine(snapshotFlow {
                 prefetchEnabled && (currentBudget.prefetchBytes > 0L ||
                     currentBudget.decodedPrefetchPages > 0 && experience.canDecodePrefetch())
@@ -2414,21 +2460,18 @@ internal fun AdjacentPagePrefetch(
                 val promoted = if (window.foregroundActive) (workTokens.filterValues { it.isForeground }.keys +
                     resolutionTokens.filterValues { it.isForeground }.keys +
                     checkTokens.filterValues { it.isForeground }.keys).toSet() else emptySet()
-                // Vertical layouts supply actual scroll direction: even their leading item
-                // can move during remeasurement/restoration. Paged readers retain anchor turns.
-                val oldFirst = previousFirst
-                val nextDirection = when {
-                    window.scrollDirection != null -> window.scrollDirection.takeIf { it != 0 } ?: direction
-                    oldFirst == null -> direction
-                    window.first > oldFirst -> 1
-                    window.first < oldFirst -> -1
-                    else -> direction
-                }
-                if (nextDirection != direction) {
-                    (pending() + checks.keys).filter { it !in foreground && it !in promoted }.forEach(::stop)
-                    speed = 0f
-                }
+                // The long preparation window follows sustained reading intent, not a
+                // one-page glance backwards. A spread is one navigation unit; panels
+                // inside the same image never count as additional reversed pages.
+                val logicalPage = window.directionAnchor ?: (groups?.indexOfFirst { it.contains(window.first) }
+                    ?.takeIf { it >= 0 } ?: window.first).toLong()
+                val nextDirection = readingIntent.update(logicalPage, window.scrollDirection, window.directionBaseline?.first ?: 0L,
+                    window.directionBaseline?.second ?: logicalPage)
+                if (nextDirection != direction) speed = 0f
                 direction = nextDirection
+                // Do not cancel overlapping work merely for a direction change. The
+                // desired-window filter below still cancels all genuinely departed work,
+                // and budget shrink retains its independent cancellation/admission gate.
                 if (previousPosition.isFinite() && window.position != previousPosition) {
                     val delta = window.position - previousPosition
                     val sample = kotlin.math.abs(delta) * 1000f / (now - previousTime).coerceAtLeast(100L)
@@ -2437,7 +2480,6 @@ internal fun AdjacentPagePrefetch(
                 }
                 if (window.position != previousPosition) previousTime = now
                 previousPosition = window.position
-                previousFirst = window.first
                 val seconds = window.runtime.predictionSeconds ?: when (currentBudget.mode) {
                     ExperienceMode.ECO -> 2; ExperienceMode.AUTO -> 5; ExperienceMode.PERFORMANCE -> 8 }
                 val readyLead = maxOf(1, window.decoded, window.parallel)
