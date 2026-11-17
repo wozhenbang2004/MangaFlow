@@ -5,7 +5,7 @@ import java.net.Proxy
 
 /** A task-local proxy. SYSTEM deliberately leaves the platform's selector untouched. */
 internal fun DownloadRouteSnapshot?.javaProxy(): Proxy? {
-    val route = this?.checked() ?: return null
+    val route = this?.checkedActive() ?: return null
     if (route.relayBinding != null) throw DownloadRouteException("此下载入口需要 Relay 精确传输，无法退回系统网络。")
     return when (route.mode) {
         DownloadRouteMode.SYSTEM -> null

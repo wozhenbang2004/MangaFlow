@@ -18,6 +18,7 @@ enum class DownloadCategory {
 
 /** DIRECT uses an authorized Relay exit when bound; otherwise it only disables app proxies. */
 enum class DownloadRouteMode { SYSTEM, DIRECT, PROXY }
+enum class DownloadProxyProvider { RELAY, CUSTOM }
 enum class DownloadProxyType { HTTP, SOCKS }
 
 data class DownloadProxyEndpoint(val host: String, val port: Int, val type: DownloadProxyType)
@@ -38,6 +39,7 @@ data class DownloadRoutingSettings(
     val categoryOverrides: Map<DownloadCategory, DownloadRouteMode> = emptyMap(),
     val proxy: DownloadProxyEndpoint? = null,
     val sourceOverrides: Map<String, SourceNetworkSettings> = emptyMap(),
+    val proxyProvider: DownloadProxyProvider = if (proxy != null || sourceOverrides.values.any { it.proxy != null }) DownloadProxyProvider.CUSTOM else DownloadProxyProvider.RELAY,
 )
 
 /** Invalid or unsupported routes must fail before a request, without falling back to direct. */
@@ -60,10 +62,21 @@ internal fun DownloadRouteSnapshot.checked(): DownloadRouteSnapshot {
     }
 }
 
-private fun configuredRoute(mode: DownloadRouteMode, proxy: DownloadProxyEndpoint?): DownloadRouteSnapshot {
-    val endpoint = proxy.takeIf { mode == DownloadRouteMode.PROXY }
-    val binding = if (endpoint == null && mode != DownloadRouteMode.SYSTEM) currentRelayBinding(mode) else null
+internal fun configuredRoute(mode: DownloadRouteMode, proxy: DownloadProxyEndpoint?,
+    provider: DownloadProxyProvider): DownloadRouteSnapshot {
+    val endpoint = proxy.takeIf { mode == DownloadRouteMode.PROXY && provider == DownloadProxyProvider.CUSTOM }
+    val binding = if (provider == DownloadProxyProvider.RELAY && mode != DownloadRouteMode.SYSTEM) currentRelayBinding(mode) else null
     return DownloadRouteSnapshot(mode, endpoint, binding).checked()
+}
+
+/** Frozen work never silently changes provider after a user switches the application setting. */
+internal fun DownloadRouteSnapshot.checkedActive(): DownloadRouteSnapshot {
+    val provider = DownloadRoutingStore.activeProxyProvider()
+    if (relayBinding != null && provider == DownloadProxyProvider.CUSTOM ||
+        proxy != null && provider == DownloadProxyProvider.RELAY) {
+        throw DownloadRouteException("代理提供方已切换，原任务线路已停用；请按当前设置重新开始。")
+    }
+    return checked()
 }
 
 /** Stable route identity includes the grant, never an ephemeral port or secret. */
@@ -138,13 +151,13 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
     val state: StateFlow<DownloadRoutingSettings> = mutableState.asStateFlow()
 
     fun setDefault(mode: DownloadRouteMode) = synchronized(lock) {
-        if (mode == DownloadRouteMode.PROXY) configuredRoute(mode, mutableState.value.proxy)
+        if (mode == DownloadRouteMode.PROXY) configuredRoute(mode, mutableState.value.proxy, mutableState.value.proxyProvider)
         disk.edit().putString("default", mode.name).apply()
         mutableState.value = readSettings()
     }
 
     fun setCategory(category: DownloadCategory, mode: DownloadRouteMode?) = synchronized(lock) {
-        if (mode == DownloadRouteMode.PROXY) configuredRoute(mode, mutableState.value.proxy)
+        if (mode == DownloadRouteMode.PROXY) configuredRoute(mode, mutableState.value.proxy, mutableState.value.proxyProvider)
         val editor = disk.edit()
         if (mode == null) editor.remove(categoryKey(category)) else editor.putString(categoryKey(category), mode.name)
         editor.apply()
@@ -159,15 +172,30 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
         else editor.putString("proxy_host", checked.host).putInt("proxy_port", checked.port)
             .putString("proxy_type", checked.type.name)
         if (useAsDefault) editor.putString("default", DownloadRouteMode.PROXY.name)
+            .putString("proxy_provider", DownloadProxyProvider.CUSTOM.name)
         editor.apply()
+        mutableState.value = readSettings()
+    }
+
+    fun setProxyProvider(provider: DownloadProxyProvider) = synchronized(lock) {
+        val previous = disk.getString("proxy_provider")
+        val saved = runCatching { disk.edit().putString("proxy_provider", provider.name).commit() }.getOrDefault(false)
+        if (!saved) {
+            // Preference backends may change their in-memory map before returning failure.
+            val rollback = disk.edit()
+            if (previous == null) rollback.remove("proxy_provider") else rollback.putString("proxy_provider", previous)
+            rollback.apply()
+            throw DownloadRouteException("代理提供方未能保存，请重试。")
+        }
         mutableState.value = readSettings()
     }
 
     fun setSource(sourceId: String, settings: SourceNetworkSettings?) = synchronized(lock) {
         require(sourceId.matches(Regex("[A-Za-z0-9_.-]{1,96}"))) { "漫画源标识无效。" }
         val checked = settings?.let {
-            val route = configuredRoute(it.mode, it.proxy)
-            SourceNetworkSettings(route.mode, route.proxy)
+            configuredRoute(it.mode, it.proxy ?: mutableState.value.proxy, mutableState.value.proxyProvider)
+            SourceNetworkSettings(it.mode, if (it.mode == DownloadRouteMode.PROXY &&
+                mutableState.value.proxyProvider == DownloadProxyProvider.CUSTOM) it.proxy?.let(::checkedProxy) else it.proxy)
         }
         val next = mutableState.value.sourceOverrides.toMutableMap()
         if (checked == null) next.remove(sourceId) else next[sourceId] = checked
@@ -191,15 +219,15 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
         val current = mutableState.value
         if (current !== expected) return@synchronized false
 
-        // Validate the entire selected batch before creating an editor. Source proxy addresses
-        // are explicit probe results: null means Relay, never an implicit borrow from global.
-        defaultMode?.let { configuredRoute(it, current.proxy) }
+        // Validate the entire selected batch before creating an editor. The selected provider
+        // owns transport; dormant per-source endpoints survive changes to route modes.
+        defaultMode?.let { configuredRoute(it, current.proxy, current.proxyProvider) }
         val categories = categoryModes.toMap()
-        categories.values.forEach { configuredRoute(it, current.proxy) }
+        categories.values.forEach { configuredRoute(it, current.proxy, current.proxyProvider) }
         val sources = sourceSettings.toMap().mapValues { (id, settings) ->
             if (!id.matches(Regex("[A-Za-z0-9_.-]{1,96}"))) throw DownloadRouteException("漫画源标识无效。")
-            val route = configuredRoute(settings.mode, settings.proxy)
-            SourceNetworkSettings(route.mode, route.proxy)
+            val route = configuredRoute(settings.mode, settings.proxy ?: current.proxy, current.proxyProvider)
+            SourceNetworkSettings(route.mode, settings.proxy ?: current.sourceOverrides[id]?.proxy)
         }
         val changes = linkedMapOf<String, String>()
         defaultMode?.let { changes["default"] = it.name }
@@ -239,16 +267,16 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
     fun sourceSnapshot(sourceId: String, category: DownloadCategory? = null,
         overrideMode: DownloadRouteMode? = null): DownloadRouteSnapshot {
         val current = mutableState.value
-        if (overrideMode != null) return configuredRoute(overrideMode, current.proxy)
-        current.sourceOverrides[sourceId]?.let { return configuredRoute(it.mode, it.proxy) }
+        if (overrideMode != null) return configuredRoute(overrideMode, current.proxy, current.proxyProvider)
+        current.sourceOverrides[sourceId]?.let { return configuredRoute(it.mode, it.proxy ?: current.proxy, current.proxyProvider) }
         val mode = category?.let { current.categoryOverrides[it] } ?: current.defaultMode
-        return configuredRoute(mode, current.proxy)
+        return configuredRoute(mode, current.proxy, current.proxyProvider)
     }
 
     fun snapshot(category: DownloadCategory, overrideMode: DownloadRouteMode? = null): DownloadRouteSnapshot {
         val current = mutableState.value
         val mode = overrideMode ?: current.categoryOverrides[category] ?: current.defaultMode
-        return configuredRoute(mode, current.proxy)
+        return configuredRoute(mode, current.proxy, current.proxyProvider)
     }
 
     private fun readSettings(): DownloadRoutingSettings {
@@ -256,13 +284,16 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
         val host = disk.getString("proxy_host")
         val proxy = if (host != null && proxyType != null)
             DownloadProxyEndpoint(host, disk.getInt("proxy_port"), proxyType) else null
+        val sources = readSources()
         return DownloadRoutingSettings(
             defaultMode = readMode("default") ?: DownloadRouteMode.SYSTEM,
             categoryOverrides = DownloadCategory.entries.mapNotNull { category ->
                 readMode(categoryKey(category))?.let { category to it }
             }.toMap(),
             proxy = proxy,
-            sourceOverrides = readSources(),
+            sourceOverrides = sources,
+            proxyProvider = disk.getString("proxy_provider")?.let { saved -> DownloadProxyProvider.entries.firstOrNull { it.name == saved } }
+                ?: if (proxy != null || sources.values.any { it.proxy != null }) DownloadProxyProvider.CUSTOM else DownloadProxyProvider.RELAY,
         )
     }
 
@@ -297,18 +328,20 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
         internal fun activeDefaultSnapshot(): DownloadRouteSnapshot {
             val current = synchronized(lock) { instance }?.state?.value
                 ?: return DownloadRouteSnapshot(DownloadRouteMode.SYSTEM)
-            return configuredRoute(current.defaultMode, current.proxy)
+            return configuredRoute(current.defaultMode, current.proxy, current.proxyProvider)
         }
 
         internal fun sourceRevision(sourceId: String): String {
             val current = synchronized(lock) { instance }?.state?.value ?: DownloadRoutingSettings()
             val source = current.sourceOverrides[sourceId]
             val mode = source?.mode ?: current.defaultMode
-            val endpoint = if (mode == DownloadRouteMode.PROXY) (if (source != null) source.proxy else current.proxy) else null
-            val binding = if (mode != DownloadRouteMode.SYSTEM && endpoint == null) currentRelayBinding(mode) else null
-            val text = DownloadRouteSnapshot(mode, endpoint, binding).identity()
+            val endpoint = source?.proxy ?: current.proxy
+            val text = current.proxyProvider.name + "|" + runCatching {
+                configuredRoute(mode, endpoint, current.proxyProvider).identity()
+            }.getOrElse { mode.name + "|unavailable" }
             return sha256(text.encodeToByteArray()).joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
         }
+        internal fun activeProxyProvider(): DownloadProxyProvider? = synchronized(lock) { instance }?.state?.value?.proxyProvider
         fun get(context: PlatformContext): DownloadRoutingStore = synchronized(lock) {
             instance ?: DownloadRoutingStore(context).also { instance = it }
         }

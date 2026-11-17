@@ -64,19 +64,15 @@ internal fun autoCurrentRoute(settings: DownloadRoutingSettings, target: AutoTar
     val source = target.ownerId?.let { settings.sourceOverrides[it] }
     val mode = source?.mode ?: target.category?.let { settings.categoryOverrides[it] } ?: settings.defaultMode
     val endpoint = if (source != null) source.proxy else settings.proxy
-    val binding = if (mode != DownloadRouteMode.SYSTEM && (mode != DownloadRouteMode.PROXY || endpoint == null)) currentRelayBinding(mode) else null
-    DownloadRouteSnapshot(mode, endpoint.takeIf { mode == DownloadRouteMode.PROXY }, binding).checked()
+    configuredRoute(mode, endpoint ?: settings.proxy, settings.proxyProvider)
 }.getOrNull()
 
 internal fun autoCandidate(settings: DownloadRoutingSettings, target: AutoTarget, mode: DownloadRouteMode): AutoCandidate = try {
     val source = target.ownerId?.let { settings.sourceOverrides[it] }
     val endpoint = if (mode == DownloadRouteMode.PROXY) {
-        if (source?.mode == DownloadRouteMode.PROXY) source.proxy else settings.proxy
+        source?.proxy ?: settings.proxy
     } else null
-    val binding = if (endpoint == null) currentRelayBinding(mode) else null
-    if (mode == DownloadRouteMode.PROXY && endpoint == null && binding == null) AutoCandidate(null,
-        NetworkAutoRouteResult(NetworkAutoRouteStatus.NOT_CONFIGURED, message = "未配置可用代理或 Relay 联动"))
-    else AutoCandidate(DownloadRouteSnapshot(mode, endpoint, binding).checked())
+    AutoCandidate(configuredRoute(mode, endpoint ?: settings.proxy, settings.proxyProvider))
 } catch (_: Exception) {
     AutoCandidate(null, NetworkAutoRouteResult(NetworkAutoRouteStatus.NOT_CONFIGURED, message = "此线路配置尚不可用"))
 }
@@ -242,8 +238,9 @@ internal suspend fun autoTargets(context: PlatformContext, repository: UnifiedMa
 
     // The anime category is inherited by both source discovery and frozen playback/download
     // assets. Only real JSON API schema evidence can trigger an automatic source-route change.
-    val animeProviders = AnimeSourceRepository(context).providers
-        .distinctBy { it.id }
+    val animeRepository = AnimeSourceRepository(context)
+    animeRepository.extensions.ready.await()
+    val animeProviders = animeRepository.providers.distinctBy { it.id }
     animeProviders.forEach { provider ->
         targets += AutoTarget(id = "anime." + provider.id, label = provider.name,
             category = DownloadCategory.ANIME, sourceId = provider.id,
@@ -255,7 +252,8 @@ internal suspend fun autoTargets(context: PlatformContext, repository: UnifiedMa
             probeAnimeSource(provider.id, provider.homeUrl, route)
         }
     }
-    val animeOwnerIds = animeProviders.map { it.id }.toSet() + setOf(
+    val animeOwnerIds = animeProviders.map { it.id }.toSet() +
+        animeRepository.extensions.state.value.filter { it.installed }.map { it.id } + setOf(
         "anime-bangumi", "anime-anilist", "anime-danmaku-dandanplay")
     for ((id, label) in listOf(
         "anime-bangumi" to "Bangumi 番剧资料",
@@ -278,6 +276,17 @@ internal suspend fun autoTargets(context: PlatformContext, repository: UnifiedMa
             } finally { http.close() }
         }
     }
+    // Installed but disabled/non-video entries remain visible without enabling them or
+    // mistaking a homepage response for a verified playback-provider API.
+    val checkedAnimeIds = targets.mapNotNull { it.sourceId }.toSet()
+    animeRepository.extensions.state.value.filter { it.installed && it.id !in checkedAnimeIds }.forEach { listing ->
+        targets += AutoTarget("anime." + listing.id, listing.name, category = DownloadCategory.ANIME,
+            sourceId = listing.id, groupOverride = NetworkAutoGroup.ANIME_SOURCES,
+            coverage = "已安装来源；保留当前开关与线路", unsupported = NetworkAutoRouteResult(
+                NetworkAutoRouteStatus.UNSUPPORTED,
+                message = if (!listing.enabled) "来源已关闭，本次不启用或修改线路" else "此来源尚无独立服务验证，线路保持不变"))
+    }
+
     ReviewProviders.all.forEach { provider ->
         targets += AutoTarget(ReviewProviders.routingId(provider.id), provider.name, ratingId = provider.id,
             coverage = "实际评分／映射服务的匿名榜单或漫画搜索及结构校验；不写评分缓存或关联", timeoutMillis = 35_000) { route ->

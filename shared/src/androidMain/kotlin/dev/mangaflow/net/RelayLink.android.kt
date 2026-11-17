@@ -48,10 +48,12 @@ internal actual fun platformRelayLinkController(context: PlatformContext): Relay
     }
 
 actual fun currentRelayBinding(mode: DownloadRouteMode): RelayRouteBinding? =
-    if (mode == DownloadRouteMode.SYSTEM) null else activeRelayLink?.binding()
+    if (mode == DownloadRouteMode.SYSTEM || DownloadRoutingStore.activeProxyProvider() == DownloadProxyProvider.CUSTOM) null else activeRelayLink?.binding()
 
 actual fun resolveRelayEndpoint(binding: RelayRouteBinding, mode: DownloadRouteMode): RelayManagedEndpoint =
-    activeRelayLink?.endpoint(binding, mode)
+    if (DownloadRoutingStore.activeProxyProvider() == DownloadProxyProvider.CUSTOM)
+        throw DownloadRouteException("已切换到自定义代理，原 Relay 任务需按当前设置重新开始。")
+    else activeRelayLink?.endpoint(binding, mode)
         ?: throw DownloadRouteException("Relay 联动尚未恢复，原任务暂不能继续。")
 
 actual fun recordRelayRequest(binding: RelayRouteBinding, mode: DownloadRouteMode, observationEpoch: String) {
@@ -405,15 +407,16 @@ private class AndroidRelayLink(private val app: Context) : RelayPlatformLink {
 
     private fun rules(): JSONArray {
         val settings = DownloadRoutingStore.get(app).state.value
+        if (settings.proxyProvider != DownloadProxyProvider.RELAY) return JSONArray()
         val rules = sortedMapOf<String, DownloadRouteMode>()
-        fun add(id: String, mode: DownloadRouteMode, endpoint: DownloadProxyEndpoint?) {
-            if (mode != DownloadRouteMode.SYSTEM && (mode != DownloadRouteMode.PROXY || endpoint == null)) rules[id] = mode
+        fun add(id: String, mode: DownloadRouteMode) {
+            if (mode != DownloadRouteMode.SYSTEM) rules[id] = mode
         }
-        add("default", settings.defaultMode, settings.proxy)
-        settings.categoryOverrides.forEach { (category, mode) -> add("category." + category.name, mode, settings.proxy) }
+        add("default", settings.defaultMode)
+        settings.categoryOverrides.forEach { (category, mode) -> add("category." + category.name, mode) }
         val reviewOwners = dev.mangaflow.data.ReviewProviders.ids.map(dev.mangaflow.data.ReviewProviders::routingId).toSet()
         settings.sourceOverrides.forEach { (id, source) ->
-            if (!sourcesKnown || id in sourceUrls || id in reviewOwners) add("source." + digest(id.toByteArray()).take(40), source.mode, source.proxy)
+            if (!sourcesKnown || id in sourceUrls || id in reviewOwners) add("source." + digest(id.toByteArray()).take(40), source.mode)
         }
         check(rules.size <= 256) { "Relay link rule limit" }
         return JSONArray().apply {

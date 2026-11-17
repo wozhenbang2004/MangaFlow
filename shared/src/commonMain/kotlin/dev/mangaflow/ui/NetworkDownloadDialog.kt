@@ -17,6 +17,8 @@ import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -56,7 +58,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 internal enum class NetworkDownloadScene(val label: String) {
-    CONNECTION("连接"), CATEGORIES("按类型"), CHECK("检查"),
+    CONNECTION("连接"), CATEGORIES("使用范围"), CHECK("检查"),
 }
 
 /** Retained scenes share one content-size owner inside the bounded scrolling viewport. */
@@ -99,7 +101,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
         if (visible && resolvingOpen && !autoState.restoring) {
             if (!proxyEditing && !showInfo) scene = when {
                 initialScene == NetworkDownloadScene.CATEGORIES -> initialScene
-                autoState.running || autoState.rows.isNotEmpty() -> NetworkDownloadScene.CHECK
+                autoState.running -> NetworkDownloadScene.CHECK
                 else -> initialScene
             }
             resolvingOpen = false
@@ -115,7 +117,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
         scene = NetworkDownloadScene.CHECK
         autoInfoRow = null
         val current = autoCheck.state.value
-        if (!current.restoring && !current.running && !current.applying && current.rows.isEmpty()) {
+        if (!current.restoring && !current.running && !current.applying) {
             autoReceipt = null
             autoCheck.start()
         }
@@ -190,7 +192,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                         }
                         val title = if (scene == NetworkDownloadScene.CHECK)
                             if (autoState.historyOnly) "上次检测" else if (autoState.complete || autoState.applied) "检测结果"
-                            else "网络检测" else "网络与下载"
+                            else "网络检测" else "网络与代理"
                         MotionSwap(title, Modifier.weight(1f)) { heading ->
                             Text(heading, style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -199,16 +201,16 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                             modifier = Modifier.size(44.dp), tooltip = "连接与识别说明") {
                             Icon(Icons.Outlined.Info, "连接与识别说明", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
                         }
-                        MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭网络与下载") {
-                            Icon(Icons.Outlined.Close, "关闭网络与下载", Modifier.size(20.dp))
+                        MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭网络与代理") {
+                            Icon(Icons.Outlined.Close, "关闭网络与代理", Modifier.size(20.dp))
                         }
                     }
                     if (scene != NetworkDownloadScene.CHECK) {
                         val settingsScenes = listOf(NetworkDownloadScene.CONNECTION, NetworkDownloadScene.CATEGORIES)
                         MotionTabs(settingsScenes.indexOf(scene), settingsScenes.map { it.label },
                             onSelect = { resolvingOpen = false; scene = settingsScenes[it] }, modifier = Modifier.fillMaxWidth(),
-                            treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 40.dp,
-                            track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
+                            treatment = MotionTabTreatment.Underline, controlHeight = 44.dp,
+                            foreground = colors.primary, indicator = colors.primary)
                     }
                     NetworkSceneContent(scene, NetworkDownloadScene.entries,
                         Modifier.weight(1f, fill = false).fillMaxWidth()) { shown ->
@@ -220,16 +222,18 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                                 suggestionRevision = suggestionRevision,
                                 onSuggestionConsumed = { suggestedProxy = null },
                                 autoCheck = autoCheck, onStartCheck = ::startCheck,
+                                onCheckHistory = { resolvingOpen = false; proxyEditing = false; scene = NetworkDownloadScene.CHECK },
                                 onCheckEvidence = { autoInfoRow = it; showInfo = true },
                                 onCheckSettings = { resolvingOpen = false; scene = NetworkDownloadScene.CONNECTION },
                                 onCheckReceipt = { autoReceipt = it.takeIf(String::isNotBlank) },
                                 proxyEditing = proxyEditing, onProxyEditing = { if (it) resolvingOpen = false; proxyEditing = it },
                                 connectionSummary = {
-                                    RelayLinkSummary(relayState, relay, enabled = active && shown == scene,
-                                        onDetails = { showInfo = true })
                                     NetworkEnvironmentSummary(environment, environmentLoading, environmentError,
                                         enabled = active && shown == scene, compact = true,
                                         onRefresh = { environmentRevision++ }, onUse = ::useReportedProxy)
+                                }, repository = repository, registry = registry, relaySummary = {
+                                    RelayLinkSummary(relayState, relay, enabled = active && shown == scene,
+                                        onDetails = { showInfo = true })
                                 })
                         }
                     }
@@ -321,17 +325,26 @@ internal fun <T : Any> NetworkSceneContent(
 private fun RelayLinkSummary(
     state: RelayLinkState, controller: RelayLinkController, enabled: Boolean, onDetails: () -> Unit,
 ) {
-    if (!state.installed) return
     val colors = MaterialTheme.colorScheme
     val busy = state.phase == RelayLinkPhase.AUTHORIZING || state.phase == RelayLinkPhase.CONNECTING ||
         state.phase == RelayLinkPhase.SYNCING
     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
         MotionTextButton(onClick = onDetails, enabled = enabled, modifier = Modifier.weight(1f)) {
-            Icon(Icons.Outlined.Link, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+            val status = mangaStatusColors()
+            val failed = state.phase == RelayLinkPhase.ERROR || state.phase == RelayLinkPhase.CONFLICT
+            val verified = state.phase == RelayLinkPhase.APPLIED && state.vpnConnected && state.realRequestVerified
+            Icon(when {
+                failed -> Icons.Outlined.ErrorOutline
+                verified -> Icons.Outlined.CheckCircle
+                else -> Icons.Outlined.Link
+            }, null, Modifier.size(17.dp), tint = when {
+                failed -> status.error
+                verified -> status.success
+                else -> colors.onSurfaceVariant
+            })
             Spacer(Modifier.width(8.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("Relay 联动", style = MaterialTheme.typography.bodyMedium)
-                Text(relayPhaseLabel(state), style = MaterialTheme.typography.labelSmall,
+                Text(relayPhaseLabel(state), style = MaterialTheme.typography.labelMedium,
                     color = if (state.phase == RelayLinkPhase.ERROR || state.phase == RelayLinkPhase.CONFLICT)
                         colors.error else colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
@@ -356,7 +369,6 @@ private fun RelayLinkSummary(
 
 @Composable
 private fun RelayLinkDetails(state: RelayLinkState, controller: RelayLinkController, enabled: Boolean) {
-    if (!state.installed) return
     val colors = MaterialTheme.colorScheme
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -425,9 +437,9 @@ private fun relayPhaseLabel(state: RelayLinkState): String = when (state.phase) 
     RelayLinkPhase.WAITING_FOR_VPN -> "等待 VPN 连接"
     RelayLinkPhase.SYNCING -> "正在同步规则"
     RelayLinkPhase.SAVED -> "规则已保存 · 等待应用"
-    RelayLinkPhase.APPLIED -> "已应用 · ${state.ruleCount} 项规则"
-    RelayLinkPhase.CONFLICT -> "规则冲突 · 查看详情"
-    RelayLinkPhase.ERROR -> "联动中断 · 查看详情"
+    RelayLinkPhase.APPLIED -> if (state.realRequestVerified) "请求已验证" else "规则已应用"
+    RelayLinkPhase.CONFLICT -> "规则冲突"
+    RelayLinkPhase.ERROR -> "联动中断"
 }
 
 private fun relayConflictLabel(conflict: String): String = when {

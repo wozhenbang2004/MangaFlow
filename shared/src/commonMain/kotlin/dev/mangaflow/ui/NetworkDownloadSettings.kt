@@ -31,6 +31,9 @@ import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.SwapVert
+import androidx.compose.material.icons.outlined.AutoMode
+import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -61,6 +64,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadNetworkEnvironment
 import dev.mangaflow.net.DownloadProxyEndpoint
+import dev.mangaflow.net.DownloadProxyProvider
 import dev.mangaflow.net.DownloadProxyType
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteMode
@@ -97,12 +101,16 @@ internal fun NetworkDownloadSettings(
     onSuggestionConsumed: () -> Unit = {},
     autoCheck: NetworkAutoCheckController,
     onStartCheck: () -> Unit,
+    onCheckHistory: () -> Unit,
     onCheckEvidence: (String?) -> Unit,
     onCheckSettings: () -> Unit,
     onCheckReceipt: (String) -> Unit,
     proxyEditing: Boolean = false,
     onProxyEditing: (Boolean) -> Unit = {},
     connectionSummary: @Composable () -> Unit = {},
+    relaySummary: @Composable () -> Unit = {},
+    repository: dev.mangaflow.data.UnifiedMangaRepository? = null,
+    registry: dev.mangaflow.storage.BodySourceRegistry? = null,
 ) {
     val context = LocalMangaContext.current
     val store = remember(context) { DownloadRoutingStore.get(context) }
@@ -110,25 +118,8 @@ internal fun NetworkDownloadSettings(
     when (scene) {
         NetworkDownloadScene.CONNECTION -> DownloadConnectionSettings(
             store, active, environment, suggestedProxy, suggestionRevision, onSuggestionConsumed,
-            proxyEditing, onProxyEditing, connectionSummary, onStartCheck, checkState)
-        NetworkDownloadScene.CATEGORIES -> BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val stacked = maxWidth < 300.dp * LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                DownloadCategory.entries.forEach { category ->
-                    if (stacked) Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                        Text(downloadCategoryLabel(category), style = MaterialTheme.typography.bodyMedium)
-                        DownloadRouteControl(category, backdrop = backdrop, enabled = active, compact = true,
-                            modifier = Modifier.align(Alignment.End))
-                    } else Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(downloadCategoryLabel(category), Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        DownloadRouteControl(category, backdrop = backdrop, enabled = active, compact = true)
-                    }
-                }
-                Text("来源专用线路优先；动漫目录、视频播放和离线下载继承动漫策略。", style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
+            proxyEditing, onProxyEditing, connectionSummary, relaySummary, onStartCheck, onCheckHistory, checkState, autoCheck)
+        NetworkDownloadScene.CATEGORIES -> NetworkRouteDirectory(repository, registry, autoCheck, active, backdrop)
         NetworkDownloadScene.CHECK -> NetworkAutoCheckWorkspace(autoCheck, active,
             onCheckEvidence, onCheckSettings, onCheckReceipt)
     }
@@ -139,14 +130,17 @@ private fun DownloadConnectionSettings(
     store: DownloadRoutingStore, active: Boolean, environment: DownloadNetworkEnvironment?,
     suggestedProxy: DownloadProxyEndpoint?, suggestionRevision: Int, onSuggestionConsumed: () -> Unit,
     proxyEditing: Boolean, onProxyEditing: (Boolean) -> Unit, connectionSummary: @Composable () -> Unit,
-    onStartCheck: () -> Unit, checkState: NetworkAutoCheckState,
+    relaySummary: @Composable () -> Unit,
+    onStartCheck: () -> Unit, onCheckHistory: () -> Unit, checkState: NetworkAutoCheckState, autoCheck: NetworkAutoCheckController,
 ) {
     val settings by store.state.collectAsStateWithLifecycle()
     val context = LocalMangaContext.current
     val relay = remember(context) { RelayLinkController.get(context) }
     val relayState by relay.state.collectAsStateWithLifecycle()
-    val relayDirect = remember(relayState) { currentRelayBinding(DownloadRouteMode.DIRECT) != null }
-    val relayProxy = remember(relayState) { currentRelayBinding(DownloadRouteMode.PROXY) != null }
+    val relayDirect = remember(relayState, settings.proxyProvider) {
+        settings.proxyProvider == DownloadProxyProvider.RELAY && currentRelayBinding(DownloadRouteMode.DIRECT) != null
+    }
+    val schedule by autoCheck.schedule.collectAsStateWithLifecycle()
     val colors = MaterialTheme.colorScheme
     var host by remember(settings.proxy) { mutableStateOf(settings.proxy?.host.orEmpty()) }
     var port by remember(settings.proxy) { mutableStateOf(settings.proxy?.port?.toString().orEmpty()) }
@@ -218,6 +212,23 @@ private fun DownloadConnectionSettings(
         val interactive = active && editing == proxyEditing
         if (!editing) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             connectionSummary()
+            Text("代理提供方", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+            MotionTabs(if (settings.proxyProvider == DownloadProxyProvider.RELAY) 0 else 1,
+                listOf("Relay", "自定义地址"), onSelect = { index ->
+                    if (interactive) try {
+                        store.setProxyProvider(if (index == 0) DownloadProxyProvider.RELAY else DownloadProxyProvider.CUSTOM)
+                        overviewNotice = null
+                    } catch (_: Exception) { overviewNotice = "切换未保存，请重试" }
+                }, modifier = Modifier.fillMaxWidth(), role = Role.RadioButton,
+                treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 44.dp,
+                foreground = colors.primary, track = colors.onSurface.copy(alpha = .035f), indicator = colors.primary.copy(alpha = .10f),
+                itemContent = { index, selected, color ->
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        if (selected) Icon(Icons.Outlined.Check, null, Modifier.size(16.dp), tint = color)
+                        Text(if (index == 0) "Relay" else "自定义地址", style = MaterialTheme.typography.labelLarge, color = color)
+                    }
+                })
+            if (settings.proxyProvider == DownloadProxyProvider.RELAY) relaySummary()
             Text("默认线路 · 仅用于未单独设置的项目", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
             DownloadModeChoices(settings.defaultMode, enabled = interactive,
                 onSelect = { chosen ->
@@ -225,7 +236,8 @@ private fun DownloadConnectionSettings(
                         overviewNotice = null
                         try { store.setDefault(chosen) }
                         catch (_: DownloadRouteException) {
-                            startEditing(chosen == DownloadRouteMode.PROXY)
+                            if (settings.proxyProvider == DownloadProxyProvider.CUSTOM) startEditing(chosen == DownloadRouteMode.PROXY)
+                            else overviewNotice = "请先授权并连接 Relay，再选择代理"
                         } catch (_: Exception) { overviewNotice = "线路未能保存，请重试" }
                     }
                 })
@@ -233,37 +245,49 @@ private fun DownloadConnectionSettings(
                 Text("沿用旧线路 · 点选后切换", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             if (settings.defaultMode == DownloadRouteMode.DIRECT && !relayDirect && environment?.defaultNetworkUsesVpn == true)
                 Text("VPN 仍可能接管直连", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             MotionTextButton(onClick = onStartCheck, enabled = interactive,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+                modifier = Modifier.weight(1f).heightIn(min = 44.dp)) {
                 Icon(Icons.Outlined.SwapVert, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
                 Spacer(Modifier.width(8.dp))
                 Text(when {
                     checkState.restoring -> "读取检测记录"
                     checkState.running -> "检测在后台继续"
-                    checkState.historyOnly -> "上次检测结果"
-                    checkState.rows.isNotEmpty() -> "最近检测结果"
-                    else -> "一键检测"
+                    else -> if (schedule.autoApply) "检测并优化" else "检测线路"
                 }, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                 val checkTime = checkState.finishedAtMillis ?: checkState.startedAtMillis
                 val checkValue = if (checkState.running) "${checkState.completed}/${checkState.total}"
                     else checkTime?.let { formatInstantMillis(it, "MM-dd HH:mm") }
                 checkValue?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
                     maxLines = 1, softWrap = false); Spacer(Modifier.width(6.dp)) }
-                Icon(Icons.Outlined.ChevronRight, "查看网络检测", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                Icon(Icons.Outlined.ChevronRight, "开始网络检测", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
             }
-            MotionTextButton(onClick = { startEditing(false) }, enabled = interactive,
+            if (checkState.rows.isNotEmpty() && !checkState.running) MotionIconButton(onClick = onCheckHistory,
+                enabled = interactive, modifier = Modifier.size(44.dp), tooltip = "查看上次检测") {
+                Icon(Icons.Outlined.History, "查看上次检测", Modifier.size(18.dp))
+            }
+            }
+            if (settings.proxyProvider == DownloadProxyProvider.CUSTOM) MotionTextButton(onClick = { startEditing(false) }, enabled = interactive,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
                 Icon(Icons.Outlined.Edit, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(if (relayProxy) "指定代理" else "代理地址", style = MaterialTheme.typography.bodyMedium)
-                    Text(overviewNotice ?: settings.proxy?.let(::proxyAddressLabel) ?:
-                        if (relayProxy) "可选 · 当前由 Relay 自动管理" else "未设置",
+                    Text("代理地址", style = MaterialTheme.typography.bodyMedium)
+                    Text(settings.proxy?.let(::proxyAddressLabel) ?: "点此设置",
                         style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
                 Icon(Icons.Outlined.ChevronRight, "编辑代理地址", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
             }
+            SettingsToggle("定期检测", schedule.enabled, Icons.Outlined.Schedule) {
+                if (interactive && !autoCheck.updateSchedule(schedule.copy(enabled = it))) overviewNotice = "设置未保存，请重试"
+            }
+            SettingsToggle("检测后自动优化", schedule.autoApply, Icons.Outlined.AutoMode) {
+                if (interactive && !autoCheck.updateSchedule(schedule.copy(autoApply = it))) overviewNotice = "设置未保存，请重试"
+            }
+            Text("只调整已验证且未锁定的项目。", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            overviewNotice?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.error) }
+            Text("切换影响后续请求；已在途不强切，旧任务可能需要重试。", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
         } else Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                 MotionIconButton(onClick = { resetDraft(); finishEditing() }, enabled = interactive,
@@ -334,24 +358,26 @@ private fun DownloadConnectionSettings(
 
 /** Per-source drafts stay private until an explicit save; running tasks retain their route snapshot. */
 @Composable
-internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = true) {
+internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = true,
+    category: DownloadCategory? = null, title: String = "连接线路") {
     val context = LocalMangaContext.current
     val store = remember(context) { DownloadRoutingStore.get(context) }
     val settings by store.state.collectAsStateWithLifecycle()
     val relay = remember(context) { RelayLinkController.get(context) }
     val relayState by relay.state.collectAsStateWithLifecycle()
-    val relayProxy = remember(relayState) { currentRelayBinding(DownloadRouteMode.PROXY) != null }
-    val relayDirect = remember(relayState) { currentRelayBinding(DownloadRouteMode.DIRECT) != null }
+    val relaySelected = settings.proxyProvider == DownloadProxyProvider.RELAY
+    val relayProxy = remember(relayState, relaySelected) { relaySelected && currentRelayBinding(DownloadRouteMode.PROXY) != null }
+    val relayDirect = remember(relayState, relaySelected) { relaySelected && currentRelayBinding(DownloadRouteMode.DIRECT) != null }
     val saved = settings.sourceOverrides[sourceId]
     val colors = MaterialTheme.colorScheme
     var expanded by remember(sourceId) { mutableStateOf(false) }
-    fun initialMode() = (saved?.mode ?: settings.defaultMode).takeIf { it in selectableDownloadRoutes }
+    fun initialMode() = (saved?.mode ?: category?.let { settings.categoryOverrides[it] } ?: settings.defaultMode).takeIf { it in selectableDownloadRoutes }
     fun initialProxy() = if (saved == null) settings.proxy else saved.proxy
     var mode by remember(sourceId, saved) { mutableStateOf(initialMode()) }
     var host by remember(sourceId, saved) { mutableStateOf(initialProxy()?.host.orEmpty()) }
     var port by remember(sourceId, saved) { mutableStateOf(initialProxy()?.port?.toString().orEmpty()) }
     var type by remember(sourceId, saved) { mutableStateOf(initialProxy()?.type ?: DownloadProxyType.SOCKS) }
-    var useManualProxy by remember(sourceId, saved) { mutableStateOf(initialProxy() != null) }
+    var useManualProxy by remember(sourceId, saved) { mutableStateOf(saved?.proxy != null) }
     var notice by remember(sourceId) { mutableStateOf<String?>(null) }
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -360,15 +386,15 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
         host = initialProxy()?.host.orEmpty()
         port = initialProxy()?.port?.toString().orEmpty()
         type = initialProxy()?.type ?: DownloadProxyType.SOCKS
-        useManualProxy = initialProxy() != null
+        useManualProxy = saved?.proxy != null
         notice = null
     }
     fun close() { expanded = false; focus.clearFocus(force = true); keyboard?.hide() }
-    val routeLabel = runCatching { store.sourceSnapshot(sourceId) }.fold(
+    val routeLabel = runCatching { store.sourceSnapshot(sourceId, category) }.fold(
         onSuccess = { downloadRouteSummary(it.mode) },
         onFailure = { "待配置" })
     Column(Modifier.fillMaxWidth().motionInputGate(enabled), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        RouteDisclosure("连接线路", routeLabel, expanded) {
+        RouteDisclosure(title, (if (saved == null) "跟随 · " else "") + routeLabel, expanded) {
             if (expanded) { resetDraft(); close() } else { resetDraft(); expanded = true }
         }
         // This lazy source-details row owns its single retained editor expansion.
@@ -377,13 +403,13 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
                 DownloadModeChoices(mode, enabled = enabled, onSelect = { mode = it; notice = null })
                 if (mode == null) Text("选择直连或代理后保存", style = MaterialTheme.typography.labelSmall,
                     color = colors.onSurfaceVariant)
-                if (mode == DownloadRouteMode.PROXY && relayProxy) {
-                    MotionTabs(if (useManualProxy) 1 else 0, listOf("Relay", "指定代理"),
+                if (mode == DownloadRouteMode.PROXY && !relaySelected) {
+                    MotionTabs(if (useManualProxy) 1 else 0, listOf("全局地址", "此源地址"),
                         onSelect = { useManualProxy = it == 1; notice = null }, modifier = Modifier.fillMaxWidth(),
                         treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 36.dp,
                         fontSize = 12.sp, track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
                 }
-                if (mode == DownloadRouteMode.PROXY && (!relayProxy || useManualProxy)) {
+                if (mode == DownloadRouteMode.PROXY && !relaySelected && useManualProxy) {
                     MotionTabs(if (type == DownloadProxyType.SOCKS) 0 else 1, listOf("SOCKS5", "HTTP"),
                         onSelect = { type = if (it == 0) DownloadProxyType.SOCKS else DownloadProxyType.HTTP; notice = null },
                         modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Soft,
@@ -408,26 +434,31 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
                 if (mode == DownloadRouteMode.DIRECT && !relayDirect) Text("直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                 if ((mode == DownloadRouteMode.DIRECT && relayDirect) ||
-                    (mode == DownloadRouteMode.PROXY && relayProxy && !useManualProxy))
-                    Text("使用 Relay 联动 · 无需填写端口", style = MaterialTheme.typography.labelSmall,
+                    (mode == DownloadRouteMode.PROXY && relaySelected))
+                    Text(if (relayProxy || mode == DownloadRouteMode.DIRECT) "使用全局 Relay · 无需端口" else "全局 Relay 尚未就绪", style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant)
                 Text("用于该源后续请求与新下载；本次下载显式线路优先。网页认证仍遵循系统网络。",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                saved?.proxy?.let { Text("已保存 · " + proxyAddressLabel(it), style = MaterialTheme.typography.labelSmall,
+                if (!relaySelected) saved?.proxy?.let { Text("已保存 · " + proxyAddressLabel(it), style = MaterialTheme.typography.labelSmall,
                     color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis) }
                 notice?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.error) }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    if (saved != null) MotionTextButton(onClick = {
+                        try { store.setSource(sourceId, null); close() }
+                        catch (_: Exception) { notice = "设置未保存，请重试" }
+                    }, enabled = enabled) { Text("清除此源设置") }
                     MotionTextButton(onClick = { resetDraft(); close() }, enabled = enabled) { Text("取消") }
                     MotionTextButton(onClick = {
                         try {
                             val selectedMode = mode?.takeIf { it in selectableDownloadRoutes }
                                 ?: throw DownloadRouteException("请选择直连或代理。")
-                            val manualProxy = !relayProxy || useManualProxy
+                            val manualProxy = !relaySelected && useManualProxy
                             if (selectedMode == DownloadRouteMode.PROXY && manualProxy && type == DownloadProxyType.HTTP &&
                                 (sourceId.startsWith("js_") || platformKind == PlatformKind.IOS))
                                 throw DownloadRouteException("此来源暂不支持 HTTP 代理，请选择 SOCKS5。")
                             val endpoint = if (selectedMode == DownloadRouteMode.PROXY && manualProxy)
-                                DownloadProxyEndpoint(host.trim(), port.toIntOrNull() ?: 0, type) else null
+                                DownloadProxyEndpoint(host.trim(), port.toIntOrNull() ?: 0, type)
+                                else if (relaySelected || selectedMode == DownloadRouteMode.DIRECT) saved?.proxy else null
                             store.setSource(sourceId, SourceNetworkSettings(selectedMode, endpoint))
                             notice = null
                             close()
@@ -454,11 +485,12 @@ internal fun DownloadRouteControl(
     val settings by store.state.collectAsStateWithLifecycle()
     val relay = remember(context) { RelayLinkController.get(context) }
     val relayState by relay.state.collectAsStateWithLifecycle()
-    val relayProxy = remember(relayState) { currentRelayBinding(DownloadRouteMode.PROXY) != null }
-    val relayDirect = remember(relayState) { currentRelayBinding(DownloadRouteMode.DIRECT) != null }
+    val relaySelected = settings.proxyProvider == DownloadProxyProvider.RELAY
+    val relayProxy = remember(relayState, relaySelected) { relaySelected && currentRelayBinding(DownloadRouteMode.PROXY) != null }
+    val relayDirect = remember(relayState, relaySelected) { relaySelected && currentRelayBinding(DownloadRouteMode.DIRECT) != null }
     DownloadRouteSelector(
         category = category, selected = settings.categoryOverrides[category],
-        inherited = settings.defaultMode, hasProxy = settings.proxy != null || relayProxy,
+        inherited = settings.defaultMode, hasProxy = if (relaySelected) relayProxy else settings.proxy != null,
         relayManaged = relayDirect || relayProxy,
         taskOnly = false, onSelect = { store.setCategory(category, it) }, compact = compact,
         modifier = modifier, enabled = enabled, backdrop = backdrop,
@@ -480,12 +512,13 @@ internal fun TaskDownloadRouteControl(
     val settings by store.state.collectAsStateWithLifecycle()
     val relay = remember(context) { RelayLinkController.get(context) }
     val relayState by relay.state.collectAsStateWithLifecycle()
-    val relayProxy = remember(relayState) { currentRelayBinding(DownloadRouteMode.PROXY) != null }
-    val relayDirect = remember(relayState) { currentRelayBinding(DownloadRouteMode.DIRECT) != null }
+    val relaySelected = settings.proxyProvider == DownloadProxyProvider.RELAY
+    val relayProxy = remember(relayState, relaySelected) { relaySelected && currentRelayBinding(DownloadRouteMode.PROXY) != null }
+    val relayDirect = remember(relayState, relaySelected) { relaySelected && currentRelayBinding(DownloadRouteMode.DIRECT) != null }
     DownloadRouteSelector(
         category = category, selected = selected,
         inherited = settings.categoryOverrides[category] ?: settings.defaultMode,
-        hasProxy = settings.proxy != null || relayProxy, relayManaged = relayDirect || relayProxy, taskOnly = true, onSelect = onSelect,
+        hasProxy = if (relaySelected) relayProxy else settings.proxy != null, relayManaged = relayDirect || relayProxy, taskOnly = true, onSelect = onSelect,
         modifier = modifier, enabled = enabled, backdrop = backdrop,
     )
 }
@@ -686,8 +719,9 @@ private fun RouteChoiceRow(
 internal fun RouteDisclosure(label: String, detail: String, expanded: Boolean, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     MotionTextButton(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
-        Spacer(Modifier.weight(1f))
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.width(6.dp))
         Text(detail, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
         Spacer(Modifier.width(6.dp))

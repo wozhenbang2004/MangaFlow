@@ -123,6 +123,8 @@ data class NetworkAutoScheduleState(
     }
 }
 
+private val networkSelectionLock = StorageLock()
+
 private class NetworkAutoScheduleStore(context: PlatformContext) {
     private val prefs = preferences(applicationContext(context), "mangaflow_network_auto")
     private val mutable = MutableStateFlow(NetworkAutoScheduleState(
@@ -137,7 +139,7 @@ private class NetworkAutoScheduleStore(context: PlatformContext) {
         lastApplied = prefs.getInt("lastApplied", 0),
     ))
     val state: StateFlow<NetworkAutoScheduleState> = mutable.asStateFlow()
-    fun update(next: NetworkAutoScheduleState): Boolean {
+    fun update(next: NetworkAutoScheduleState): Boolean = synchronized(networkSelectionLock) {
         next.checked()
         if (!prefs.edit().putBoolean("enabled", next.enabled)
                 .putInt("intervalMinutes", next.intervalMinutes)
@@ -150,7 +152,7 @@ private class NetworkAutoScheduleStore(context: PlatformContext) {
             lastApplied = previous.lastApplied, message = previous.message) }
         return true
     }
-    fun lockTarget(id: String, locked: Boolean): Boolean {
+    fun lockTarget(id: String, locked: Boolean): Boolean = synchronized(networkSelectionLock) {
         if (!id.matches(Regex("[A-Za-z0-9_.-]{1,160}"))) return false
         val current = mutable.value
         return update(current.copy(lockedTargetIds =
@@ -224,7 +226,7 @@ private class NetworkAutoScheduler(
         }
         if (finished?.complete == true && schedule.state.value.enabled && schedule.state.value.autoApply &&
             eligible.isNotEmpty()) {
-            val result = engine.apply(eligible)
+            val result = engine.apply(eligible, automatic = true)
             if (result.success) {
                 applied = result.applied
                 message = if (applied > 0) "已自动调整 $applied 项线路" else "线路无需调整"
@@ -244,6 +246,7 @@ class NetworkAutoCheckController internal constructor(
     operations: ApplicationOperations = ApplicationOperations.get(context),
     prepareSources: suspend () -> Unit = {},
 ) {
+    private val operationScope = operations.scope
     private val settings = NetworkAutoScheduleStore(context)
     private val engine = NetworkAutoCheckEngine(context, repository, registry, operations, prepareSources, settings.state)
     private val scheduler = NetworkAutoScheduler(context, operations, engine, settings)
@@ -254,7 +257,17 @@ class NetworkAutoCheckController internal constructor(
     fun lockTarget(id: String, locked: Boolean): Boolean = settings.lockTarget(id, locked)
     suspend fun checkDue() = scheduler.checkDue()
     fun resume() = scheduler.resume()
-    fun start(): Boolean = engine.start()
+    fun start(): Boolean {
+        if (!engine.start()) return false
+        val runId = engine.state.value.runId
+        operationScope.launch {
+            val completed = engine.state.first { it.runId != runId || !it.running && !it.restoring }
+            if (completed.runId != runId || !completed.complete || !settings.state.value.autoApply) return@launch
+            val eligible = completed.selection.filterKeys { it !in settings.state.value.lockedTargetIds }
+            if (eligible.isNotEmpty()) engine.apply(eligible, automatic = true)
+        }
+        return true
+    }
     suspend fun run() { start() }
     fun cancel() = engine.cancel()
     fun invalidate(reason: String) = engine.invalidate(reason)
@@ -286,6 +299,7 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
     private val store = DownloadRoutingStore.get(app)
     private val relay = RelayLinkController.get(app)
     private val plugins = SourcePluginStore.get(app)
+    private val animeSources = dev.mangaflow.anime.sources.AnimeSourceRepository(app)
     private val webdav = WebDavBackupStore(app)
     private val lock = StorageLock()
     private val mutableState = MutableStateFlow(NetworkAutoCheckState())
@@ -367,6 +381,7 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
                 val frozen = withTimeout(20_000L) {
                     prepareSources()
                     plugins.ready.await()
+                    animeSources.extensions.ready.await()
                     val captured = store.state.value
                     val fence = captureFence(captured)
                     val targets = autoTargets(app, repository, registry, captured, webdav)
@@ -492,7 +507,7 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
         }
     }
 
-    suspend fun apply(selected: Map<String, DownloadRouteMode>): NetworkAutoApplyResult = withContext(Dispatchers.IO) {
+    suspend fun apply(selected: Map<String, DownloadRouteMode>, automatic: Boolean = false): NetworkAutoApplyResult = withContext(Dispatchers.IO) {
         val frozen = synchronized(lock) {
             if (closed || !state.value.complete || state.value.historyOnly || state.value.stale || state.value.running || state.value.applying || state.value.applied) null
             else plan?.also { mutableState.update { it.copy(applying = true) } }
@@ -537,7 +552,12 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
             if (selected.keys.any { it in schedule.value.lockedTargetIds }) {
                 return@withContext NetworkAutoApplyResult(0, "保存前有来源被锁定，未修改线路", false)
             }
-            if (!store.applyBatch(frozen.fence.settings, default, categories, sources)) {
+            val committed = synchronized(networkSelectionLock) {
+                (!automatic || schedule.value.autoApply) &&
+                    selected.keys.none { it in schedule.value.lockedTargetIds } &&
+                    store.applyBatch(frozen.fence.settings, default, categories, sources)
+            }
+            if (!committed) {
                 markApplyStale("网络配置已被其他操作修改，请重新检测")
                 return@withContext NetworkAutoApplyResult(0, "网络配置已变化，未修改配置", false, true)
             }
@@ -660,6 +680,9 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
         val sources = entries?.filter { it.isInstalled }?.map { it.source } ?: repository?.sources.orEmpty()
         return hash(buildString {
             append(repository?.sourceConfigurationKey())
+            append(animeSources.extensions.state.value.sortedBy { it.id }.map {
+                listOf(it.id, it.installed, it.enabled, it.kind, it.revision, it.scriptUrl)
+            })
             sources.sortedBy { it.id }.forEach { source ->
                 append('|').append(source.id).append(':').append(source.revision).append(':').append(source.homeUrl)
                 append(':').append(scriptSourceImageEpoch(app, source.id))

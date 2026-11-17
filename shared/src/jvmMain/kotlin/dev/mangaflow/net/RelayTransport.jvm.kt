@@ -111,7 +111,12 @@ internal fun OkHttpClient.Builder.observeRelayRoute(route: DownloadRouteSnapshot
 }
 
 internal fun OkHttpClient.Builder.applyDownloadRoute(route: DownloadRouteSnapshot?, observeTraffic: Boolean = true): OkHttpClient.Builder = apply {
-    val selected = route?.checked()
+    val selected = route?.checkedActive()
+    addInterceptor { chain ->
+        try { selected?.checkedActive() }
+        catch (failure: DownloadRouteException) { throw IOException(failure.message, failure) }
+        chain.proceed(chain.request())
+    }
     if (selected?.relayBinding != null) {
         dns(relayDeferredDns)
         socketFactory(RelayTunnelSocketFactory(selected.relayBinding, selected.mode))
@@ -121,6 +126,7 @@ internal fun OkHttpClient.Builder.applyDownloadRoute(route: DownloadRouteSnapsho
 
 /** The update downloader keeps its existing streaming/redirect/Range contract. */
 internal fun DownloadRouteSnapshot.openDownloadConnection(url: URL): HttpURLConnection {
+    checkedActive()
     if (relayBinding == null) return (javaProxy()?.let { url.openConnection(it) } ?: url.openConnection()) as HttpURLConnection
     return RelayDownloadConnection(url, this)
 }

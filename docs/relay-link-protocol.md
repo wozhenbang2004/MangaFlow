@@ -31,3 +31,21 @@ Two authenticated local entries implement the already resolved direct/proxy requ
 Initial MangaFlow baseline: `c8f3016552e723981a51e018107883510eef14f6`. Available Relay baseline: recovered public-ready 0.3.1/versionCode25, not a claimed GitHub main. Fixed core: `1.14.4-relay-fallback.4`, AAR SHA-256 `a30d78defda5baabce1acbb9554000779e4fbcba5481454ef8754329008e5417`.
 
 Build, authorization, active reload, restart/revocation, shared-CDN routing, global/app-policy conflicts and actual device behavior require separate evidence. No test suite or synthetic probe is added. Existing MangaFlow CI owns its packages; Relay builds retain the original network-edition signer and private configuration stays out of source/APKs.
+
+## One active application proxy provider · 2026-11-17
+
+Relay and custom proxy are mutually exclusive application selections. The routing store preserves default/category/source mode choices and all saved endpoint addresses when switching provider. Relay selection ignores dormant custom endpoints. Custom selection uses the source's saved endpoint when present, otherwise the global custom endpoint; missing proxy configuration fails explicitly. Custom DIRECT uses the ordinary direct app transport, not Relay, without changing the device VPN or system network settings.
+
+Existing installations with any saved custom endpoint initially select custom; otherwise they select Relay. This deliberately resolves the former mixed behaviour (custom PROXY plus Relay DIRECT) rather than claiming unchanged transport. Source/category overrides and automatic-check locks are not deleted. Relay's app-specific inventory is cleared while custom is active; user-wide VPN state is untouched.
+
+A frozen task is never rewritten to another provider. Shared HTTP request entry, JVM OkHttp request entry/URL transport and Relay endpoint resolution reject a frozen route incompatible with the active provider, asking for an explicit restart under current settings. Already in-flight responses may finish; this is not an instant system-wide network cutover. Manual network checks now apply verified recommendations when autoApply is enabled, just like scheduled checks. Source locks are serialized with final batch publication; configuration/source/network/Relay freshness fences and two real successful samples remain required. Unsupported/partial targets stay visible and cannot fabricate an automatic recommendation.
+
+Source review only; no local builds, automated tests, simulated network requests or observed device cutover claims.
+
+### Network configuration surface
+
+The connection page presents one Relay/custom-address radio selection, with provider-specific controls below it. Saved inactive addresses remain stored. Default routing and source overrides are separate from provider selection. Relay's compact success mark requires applied state, connected VPN and an actual observed response; details retain the distinction between applied rules and verified traffic.
+
+The usage page progressively discloses manga, anime, ratings/metadata/danmaku, download/sync categories and other saved sources. Listing a source never probes or enables it. Locks use the exact automatic-check target IDs; category defaults without aggregate probes have no misleading lock. Source DIRECT saves preserve dormant addresses; the explicit clear-source-settings action removes that source override. Opening the dialog does not jump to historical checks; running a new check and viewing history are separate actions.
+
+UI review used the two supplied screenshots and existing Motion/Material controls. Narrow-screen and enlarged-font rendering remains unverified; no local build or automated tests were run.
