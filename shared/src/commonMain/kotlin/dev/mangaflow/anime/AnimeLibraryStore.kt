@@ -299,11 +299,16 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         val bindings = objects(json.getJSONArray("bindings")).map(::decodeBinding)
         require(bindings.all { it.subjectId in entries && it.catalog.sourceId.isNotBlank() && it.catalog.id.isNotBlank() })
         require(bindings.map { it.subjectId to it.catalog.sourceId }.distinct().size == bindings.size)
-        require(bindings.all { binding ->
-            val subject = entries.getValue(binding.subjectId).subject
+        require(bindings.groupBy { it.subjectId }.all { (subjectId, subjectBindings) ->
+            val subject = entries.getValue(subjectId).subject
             val source = subject.externalIds["native-source"]
-            source == null || (binding.catalog.sourceId == source && subject.id ==
-                "native:$source:${dev.mangaflow.anime.sources.animeHash(binding.catalog.id + "\n" + binding.catalog.url)}")
+            if (source == null) true else {
+                // Other sources are associations, not intrinsic owners. Keep the exact native
+                // anchor while accepting the cross-source bindings our aggregator persists.
+                val owner = subjectBindings.singleOrNull { it.catalog.sourceId == source }
+                owner != null && subject.id ==
+                    "native:$source:${dev.mangaflow.anime.sources.animeHash(owner.catalog.id + "\n" + owner.catalog.url)}"
+            }
         }) { "原始来源绑定与条目身份不一致。" }
 
         val progressRows = objects(json.getJSONArray("progress")).map(::decodeProgress)

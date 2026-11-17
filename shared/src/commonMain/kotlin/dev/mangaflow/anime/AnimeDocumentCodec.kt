@@ -17,9 +17,10 @@ internal object AnimeDocumentCodec {
         val nativeId = id.removePrefix("bangumi:")
         if (id.startsWith("native:")) {
             val source = ids.optString("native-source")
+            // Native detail writers retain provider metadata IDs (for example AGE/girigiri).
+            // These do not change the native namespace or establish a canonical association.
             require(Regex("anime-[a-z0-9-]+").matches(source) &&
-                Regex("native:${Regex.escape(source)}:[a-f0-9]{64}").matches(id) &&
-                ids.keys().asSequence().toSet() == setOf("native-source")) {
+                Regex("native:${Regex.escape(source)}:[a-f0-9]{64}").matches(id)) {
                 "原始来源条目身份无效，不能作为标准番剧恢复。"
             }
         } else {
