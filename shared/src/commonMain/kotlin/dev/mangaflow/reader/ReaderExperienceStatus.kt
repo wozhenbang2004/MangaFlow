@@ -1114,18 +1114,18 @@ private fun CacheOverview(store: ExperiencePolicyStore, expanded: ReaderWork?, e
             verticalArrangement = Arrangement.spacedBy(6.dp)) {
             StatusToken(Icons.Outlined.GridView, "当前解码条目", memory?.entries?.let { "$it 项" } ?: "—")
             StatusToken(Icons.Outlined.Tune, "用户内存上限配置", memoryMiB?.let { "$it MB" } ?: "自动")
-            StatusToken(if (idle == 0) Icons.Outlined.TimerOff else Icons.Outlined.Schedule, "下次闲置到期",
+            StatusToken(if (idle == 0) Icons.Outlined.TimerOff else Icons.Outlined.Timer, "最近采样时最早的闲置到期时间",
                 when {
                     idle == 0 -> "∞"
                     memory == null -> "—"
-                    else -> memory.nextExpiryAtMillis?.let { cacheElapsedLabel((it - memory.sampledAtMillis).coerceAtLeast(0L)) }
+                    else -> memory.nextExpiryAtMillis?.let { "约" + cacheElapsedLabel((it - memory.sampledAtMillis).coerceAtLeast(0L)) + "后到期" }
                         ?: "无待清"
                 })
         }
         StatusExplanation(when (idle) {
             null -> "离窗不即删 · 等待缓存采样"
             0 -> "离窗不即删 · 按容量淘汰"
-            else -> "离窗不即删 · 闲置到期或容量不足时回收"
+            else -> "到期时间按最近采样估算；再次使用会延后，不是整批清空。"
         })
         val reclaimReserve = listOf(memory?.evictedBytes, memory?.expiredBytes, memory?.clearedBytes)
             .map { it?.let(::experienceCacheSize) ?: "—" }
@@ -1140,9 +1140,9 @@ private fun CacheOverview(store: ExperiencePolicyStore, expanded: ReaderWork?, e
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f)) {
-                StatusToken(Icons.Outlined.History, "最近回收", memory?.let { sample -> sample.lastReclaimedAtMillis?.let {
-                    cacheElapsedLabel((sample.sampledAtMillis - it).coerceAtLeast(0L)) + "前"
-                } ?: "尚无" } ?: "—")
+                StatusToken(Icons.Outlined.History, "最近一次缓存回收，与阅读历史无关", memory?.let { sample -> sample.lastReclaimedAtMillis?.let {
+                    "回收于" + cacheElapsedLabel((sample.sampledAtMillis - it).coerceAtLeast(0L)) + "前"
+                } ?: "尚无回收" } ?: "—")
             }
             clearResult?.let { result ->
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -1170,15 +1170,15 @@ private fun CacheOverview(store: ExperiencePolicyStore, expanded: ReaderWork?, e
         }
         clearError?.let { StatusExplanation(it, error = true) }
     }
-    CacheWorkRow(Icons.Outlined.Storage, "图片磁盘", cache.diskBytes, cache.diskLimit,
-        cache.pending, expanded == ReaderWork.DISK, enabled) { onToggle(ReaderWork.DISK) }
+    CacheWorkRow(Icons.Outlined.Storage, "共享磁盘缓存", cache.diskBytes, cache.diskLimit,
+        cache.pending, expanded == ReaderWork.DISK, enabled, limitLabel = "预算") { onToggle(ReaderWork.DISK) }
     StatusReveal(expanded == ReaderWork.DISK) {
         FlowRow(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)) {
             StatusToken(Icons.Outlined.Tune, "用户磁盘上限配置", diskMiB?.let { "$it MB" } ?: "自动")
             StatusToken(Icons.Outlined.Timer, "原图保留", if (imageRetentionHours == 0) "按空间回收" else "$imageRetentionHours h")
         }
-        if (cache.pending) StatusExplanation("容量待调整；上方仍是当前实际容量，在用图片释放后再应用。")
+        if (cache.pending) StatusExplanation("等待缓存核实、调整或回收；上方是策略预算，不是底层已应用容量。在用内容会保留。")
     }
     cache.error?.let { StatusExplanation(it, error = true) }
 }
@@ -1273,7 +1273,7 @@ private fun cacheState(used: Long?, limit: Long?, pending: Boolean = false): Cac
     val occupancy = if (used != null && used >= 0L && limit != null && limit > 0L)
         (used.toDouble() / limit).coerceIn(0.0, 1.0).toFloat() else null
     return when {
-        pending -> CacheState("待调整", ReaderStatusMark.QUEUED, occupancy)
+        pending -> CacheState("待处理", ReaderStatusMark.QUEUED, occupancy)
         limit == 0L -> CacheState("已停用", ReaderStatusMark.DISABLED, null)
         used == null || limit == null || used < 0L || limit < 0L -> CacheState("用量未知", ReaderStatusMark.UNKNOWN, null)
         used >= limit -> CacheState("已达容量", ReaderStatusMark.IDLE, occupancy)
@@ -1293,7 +1293,7 @@ private fun ReaderCacheEntry(store: ExperiencePolicyStore, selected: Boolean) {
         contentDescription = "共享图片缓存"
         stateDescription = "解码内存${statusCacheUsage(cache.memoryBytes, cache.memoryLimit)}，${memory.label}；" +
             (if (cache.recentMemoryRelease) "近期有解码缓存回收；" else "") +
-            "图片磁盘${statusCacheUsage(cache.diskBytes, cache.diskLimit)}，${disk.label}；${cache.error ?: "点击查看"}"
+            "共享磁盘已用 / 策略预算${statusCacheUsage(cache.diskBytes, cache.diskLimit)}，${disk.label}；${cache.error ?: "点击查看"}"
     }, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             listOf(Icons.Outlined.Memory to memory, Icons.Outlined.Storage to disk).forEachIndexed { index, (icon, state) ->
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -1317,14 +1317,14 @@ private fun ReaderCacheEntry(store: ExperiencePolicyStore, selected: Boolean) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CacheWorkRow(icon: ImageVector, title: String, used: Long?, limit: Long?, pending: Boolean,
-    expanded: Boolean, enabled: Boolean, onToggle: () -> Unit) {
+    expanded: Boolean, enabled: Boolean, limitLabel: String = "容量", onToggle: () -> Unit) {
     val state = cacheState(used, limit, pending)
     val colors = MaterialTheme.colorScheme
     val accent = if (expanded) colors.primary else colors.onSurfaceVariant
     MotionTextButton(onClick = onToggle, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
         .background(if (expanded) colors.primary.copy(alpha = .065f) else Color.Transparent, RoundedCornerShape(12.dp))
         .semantics(mergeDescendants = true) {
-            contentDescription = "$title，应用共享，已用与当前容量${statusCacheUsage(used, limit)}，${state.label}"
+            contentDescription = "$title，应用共享，已用 / $limitLabel${statusCacheUsage(used, limit)}，${state.label}"
             stateDescription = if (expanded) "已展开" else "已收起"
         }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1333,9 +1333,11 @@ private fun CacheWorkRow(icon: ImageVector, title: String, used: Long?, limit: L
                 FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     StatusNumber(used?.let(::experienceCacheSize) ?: "—")
-                    Text("/ " + (limit?.let(::experienceCacheSize) ?: "—"),
+                    Text((if (limitLabel == "预算") "/ 预算 " else "/ ") + (limit?.let(::experienceCacheSize) ?: "—"),
                         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                if (pending) Text("待处理", style = MaterialTheme.typography.labelSmall,
+                    color = mangaStatusColors().waiting)
                 Box(Modifier.size(12.dp)) {
                     if (state.mark == ReaderStatusMark.UNKNOWN || state.mark == ReaderStatusMark.QUEUED || state.mark == ReaderStatusMark.DISABLED)
                         StatusMark(state.mark, Modifier.size(12.dp))

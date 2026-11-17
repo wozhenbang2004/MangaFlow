@@ -712,7 +712,8 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 }
             }
             ExperienceLiveNumber("内存缓存上限", custom.memoryMiB, automaticMemoryBytes?.let { (it / EXPERIENCE_MIB).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() }, 1..512, "MB",
-                editor, active && expanded == "cache", effective = usage.memoryLimit?.let { (it / EXPERIENCE_MIB).toInt() }, automaticLabel = "模式预算") {
+                editor, active && expanded == "cache", effective = usage.memoryLimit?.let { (it / EXPERIENCE_MIB).toInt() }, automaticLabel = "模式预算",
+                automaticDisplay = usage.memoryLimit?.let { ((it.toDouble() / EXPERIENCE_MIB * 10).roundToInt() / 10.0).toString() }) {
                 change(custom.copy(memoryMiB = it))
             }
             ExperienceLiveNumber("闲置回收", custom.contentCache.memoryIdleMinutes, ContentCachePreferences().memoryIdleMinutes, 0..120, "分钟",
@@ -794,7 +795,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                     }))
                 }
                 val effectiveMinutes = cache.freshMillis(cacheKind) / 60_000L
-                ExperienceBudgetRow("预览更新规则", if (effectiveMinutes == 0L) "每次请求更新" else "访问时超过 $effectiveMinutes 分钟再更新")
+                ExperienceBudgetRow("更新规则", if (effectiveMinutes == 0L) "每次请求更新" else "访问时超过 $effectiveMinutes 分钟再更新")
                 if (cacheKind == ContentCacheKind.POPULARITY) ExperienceHint("热度随列表与详情返回，此上限同时约束这些资料的复用时间；不为每张卡单独请求热度。")
                 else if (effectiveMinutes < minutes && cache.enabled && !cache.refreshOnOpen)
                     ExperienceHint("同时受热度资料时效上限约束。")
@@ -826,6 +827,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 }) {
                 ExperienceHint("用量 / 上限；— 表示尚未取得。内存缓存只包含可复用的解码图像，手动容量按输入保存。磁盘缓存可自动回收，离线章节独立保存；可回收内容在缓存管理中清理。")
                 ExperienceHint("闲置回收 0＝只按容量淘汰；时钟旁的 ∞ 表示时间过期已关闭。到期只移除可复用缓存引用，不强行释放仍在显示的图片。")
+                ExperienceHint("自动磁盘预算会为设备预留空闲空间；手动值按输入保留。共享磁盘包含图片、目录、列表和番剧缓冲，不含离线章节。")
                 ExperienceHint("磁盘保留从最近访问起算，始终保护正在阅读、传输和离线文件。关闭磁盘自动回收后保留至手动清理，内存策略独立生效。")
                 ExperienceHint("页面资料间隔 0＝不复用已完成结果，进行中的请求仍合并。允许先显示旧快照再更新；更新失败保留旧内容。关闭资料缓存不会删除历史、收藏和离线章节。")
                 ExperienceHint("预读离开窗口会取消未完成任务，完成的图片按内存闲置、磁盘保留与总空间规则回收。列表快照按设置的份数与磁盘容量淘汰；阅读记录、收藏和离线章节独立保存。")
@@ -1010,18 +1012,21 @@ internal fun ExperienceReveal(expanded: Boolean, content: @Composable ColumnScop
 @Composable
 private fun ExperienceLiveNumber(title: String, value: Int?, automatic: Int?, range: IntRange, unit: String,
     editor: ExperienceEditor, active: Boolean, effective: Int? = null, automaticLabel: String = "模式目标",
-    semanticMaximum: Int? = null, onChange: (Int?) -> Unit) {
+    semanticMaximum: Int? = null, automaticDisplay: String? = null, onChange: (Int?) -> Unit) {
     ExperienceNumber(title, value, automatic, range, unit, editor, active, effective, automaticLabel,
-        semanticMaximum, liveSlider = true, onChange = onChange)
+        semanticMaximum, liveSlider = true, automaticDisplay = automaticDisplay, onChange = onChange)
 }
 
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
 internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range: IntRange, unit: String,
     editor: ExperienceEditor, active: Boolean, effective: Int? = null, automaticLabel: String = "模式目标",
-    semanticMaximum: Int? = null, liveSlider: Boolean = false, onChange: (Int?) -> Unit) {
+    semanticMaximum: Int? = null, liveSlider: Boolean = false, automaticDisplay: String? = null,
+    onChange: (Int?) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val selected = value ?: effective ?: automatic
+    // An automatic byte budget can be fractional; do not truncate 30.7 MB into a competing 30 MB label.
+    val displayed = if (value == null) automaticDisplay ?: selected?.toString() else value.toString()
     val current = (selected ?: range.first).coerceAtLeast(range.first)
     val editing = active && editor.field == title
     // Freeze the shortcut scale for this edit: saving a step must not move the thumb's
@@ -1069,14 +1074,14 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                     }
                 }, enabled = active, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
                     modifier = Modifier.widthIn(max = maxWidth).heightIn(min = 44.dp).semantics(mergeDescendants = true) {
-                        contentDescription = title + "，" + (selected?.toString()?.plus(" " + unit) ?: "自动值尚未知") +
+                        contentDescription = title + "，" + (displayed?.plus(" " + unit) ?: "自动值尚未知") +
                             (if (value == null) "，跟随" + automaticLabel else "，手动值") +
                             (if (editing) "，点击收起编辑" else "，点击编辑")
                     }) {
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                            Text((selected?.toString() ?: "—") + " " + unit, Modifier.weight(1f, fill = false),
+                            Text((displayed ?: "—") + " " + unit, Modifier.weight(1f, fill = false),
                                 style = MaterialTheme.typography.bodyMedium, color = if (editing || value != null) colors.primary else colors.onSurface)
                             Icon(if (editing) Icons.Outlined.Close else if (value == null) Icons.Outlined.Sync else Icons.Outlined.Edit,
                                 null, Modifier.size(14.dp), tint = if (editing || value != null) colors.primary else colors.onSurfaceVariant)

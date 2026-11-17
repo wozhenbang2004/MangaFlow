@@ -125,7 +125,7 @@ private fun ResourceAllocation(icon: ImageVector, title: String, used: Long?, bu
 /** Values are one cache-owner snapshot; inspecting them never renews an image's idle age. */
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
-internal fun ExperienceMemoryCacheSummary(usage: ExperienceUsage, draftIdleMinutes: Int,
+internal fun ExperienceMemoryCacheSummary(usage: ExperienceUsage, requestedIdleMinutes: Int,
     enabled: Boolean, clearing: Boolean, onClear: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val statusColors = mangaStatusColors()
@@ -153,11 +153,10 @@ internal fun ExperienceMemoryCacheSummary(usage: ExperienceUsage, draftIdleMinut
                                 } ?: "内存缓存尚未采样"
                             })
                     }
-                    if (memory != null && draftIdleMinutes != memory.idleMinutes) Row(verticalAlignment = Alignment.CenterVertically,
+                    if (memory != null && requestedIdleMinutes != memory.idleMinutes) Row(verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Icon(Icons.Outlined.Edit, "草稿闲置回收时间", Modifier.size(14.dp), tint = colors.primary)
-                        Text(if (draftIdleMinutes == 0) "∞" else "$draftIdleMinutes min",
-                            style = MaterialTheme.typography.labelSmall, color = colors.primary)
+                        Icon(Icons.Outlined.Sync, "闲置回收设置等待缓存采样确认", Modifier.size(14.dp),
+                            tint = statusColors.waiting)
                     }
                 }
             }
@@ -182,6 +181,9 @@ internal fun ExperienceMemoryCacheSummary(usage: ExperienceUsage, draftIdleMinut
                 else -> Icons.Outlined.Remove
             }
             fun removalColor(entries: Long?) = if (entries != null && entries > 0L) statusColors.success else statusColors.neutral
+            if (memory != null && requestedIdleMinutes != memory.idleMinutes)
+                ResourceValue(Icons.Outlined.Sync, "回收设置待确认", if (requestedIdleMinutes == 0) "关闭时间过期" else "$requestedIdleMinutes min",
+                    statusIcon = Icons.Outlined.Schedule, statusColor = statusColors.waiting)
             ResourceValue(Icons.Outlined.Schedule, "到期回收", released(memory?.expiredEntries, memory?.expiredBytes),
                 removalMark(memory?.expiredEntries), removalColor(memory?.expiredEntries))
             ResourceValue(Icons.Outlined.SwapHoriz, "容量淘汰", released(memory?.evictedEntries, memory?.evictedBytes),
