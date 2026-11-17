@@ -69,6 +69,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                 val route = DownloadRoutingStore.get(context).sourceSnapshot(bundle.id, DownloadCategory.ANIME)
                 val js = QuickJs.create(Dispatchers.Default)
                 val network = JavascriptHttpSession(networkAllowed, route, 8 * 1024 * 1024)
+                val sdEvidence = SdSearchResponseEvidence.forCall(bundle.id, bundle.digest, method, args.optString(0))
                 var hostFailure: Exception? = null
                 var responseStatus: Int? = null
                 var changed = false
@@ -97,8 +98,10 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                         try {
                             checkCurrent()
                             check(networkAllowed) { "来源验证不能访问网络。" }
+                            val request = argument(values)
+                            sdEvidence?.beforeRequest(request)
                             lanercBlocking(operationContext) {
-                                http(argument(values), network, preferences, ::checkCurrent).also {
+                                http(request, network, preferences, ::checkCurrent, sdEvidence).also {
                                     responseStatus = JSONObject(it).optInt("statusCode").takeIf { code -> code in 400..599 }
                                 }
                             }
@@ -112,7 +115,11 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                         catch (failure: Exception) { hostFailure = failure; throw IllegalStateException("来源会话操作未完成。") }
                     })
                     js.defineBinding("__mlCodec", FunctionBinding<String> { values ->
-                        try { checkCurrent(); lanercCodec(argument(values)) }
+                        try {
+                            checkCurrent()
+                            val request = argument(values)
+                            lanercCodec(request).also { sdEvidence?.afterCodec(request, it) }
+                        }
                         catch (failure: Exception) { hostFailure = failure; throw IllegalStateException("来源编解码未完成。") }
                     })
                     js.defineBinding("__mlUnsupported", FunctionBinding<String> { _ ->
@@ -156,6 +163,8 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                         if (responseStatus in setOf(401, 403)) throw LanercCapabilityException("此来源需要验证或拒绝了访问，请检查来源账号与设置。")
                         throw IllegalStateException("来源请求或解析未完成，请检查网络路由与来源版本。")
                     }
+                    if (result is JSONArray && result.length() == 0 && sdEvidence?.twoUnresolvedMainAttempts() == true)
+                        throw LanercCapabilityException("闪电主搜索响应解析未完成，未将其当作没有匹配作品。")
                     checkCurrent()
                     LanercInvocation(result, route, bundle.revision, bundle.digest)
                 } catch (cancelled: CancellationException) { throw cancelled }
@@ -183,7 +192,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
     }
 
     private suspend fun http(raw: String, network: JavascriptHttpSession, preferences: LanercPreferences,
-        checkCurrent: () -> Unit): String {
+        checkCurrent: () -> Unit, sdEvidence: SdSearchResponseEvidence? = null): String {
         val input = JSONObject(raw)
         var url = animePublicUrl(input.getString("url"))
         var headers = input.optJSONObject("headers") ?: JSONObject()
@@ -206,6 +215,9 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
             responseHeaders.keys().asSequence().firstOrNull { it.equals("Set-Cookie", true) }
                 ?.let { preferences.receive(url, responseHeaders.optString(it)) }
             val status = response.optInt("statusCode")
+            // Only the first actual hop is eligible: redirects can change POST into GET.
+            if (redirect == 0 && method == "POST" && status == 200)
+                sdEvidence?.afterResponse(hop.toString(), response.toString())
             if (!follow || status !in setOf(301, 302, 303, 307, 308)) return response.toString()
             require(redirect < 3) { "来源重定向次数过多。" }
             val location = responseHeaders.keys().asSequence().firstOrNull { it.equals("Location", true) }
