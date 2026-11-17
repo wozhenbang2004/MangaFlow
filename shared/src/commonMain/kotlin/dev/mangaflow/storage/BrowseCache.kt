@@ -56,14 +56,14 @@ class BrowseCache(context: Context) {
                 ownedFiles.snapshot { versions[it] ?: 0L }
             }
         }
-        override suspend fun remove(expected: AuxiliaryCacheEntry): Long? = withContext(Dispatchers.IO) {
+        override suspend fun remove(expected: AuxiliaryCacheEntry, canRemove: () -> Boolean): Long? = withContext(Dispatchers.IO) {
             var changed = false
             try {
                 diskLock.withLock {
                     val version = synchronized(memoryLock) { memoryRevisionForFile(expected.key) }
                     if (ownedFiles.entry(expected.key, version, verifyBytes = true) != expected) return@withLock null
                     val accepted = synchronized(memoryLock) {
-                        if (memoryRevisionForFile(expected.key) != version) false else {
+                        if (memoryRevisionForFile(expected.key) != version || !canRemove()) false else {
                             // Do not cancel unrelated visible lists: generation also guards their UI.
                             // A queued writer must still own this exact memory snapshot below.
                             memory.keys.firstOrNull { fileFor(it).name == expected.key }?.let { key ->

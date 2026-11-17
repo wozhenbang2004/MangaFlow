@@ -44,10 +44,11 @@ internal class AnimeMetadataCache private constructor(private val context: Platf
             override suspend fun snapshot(): List<AuxiliaryCacheEntry> = withContext(Dispatchers.IO) {
                 lock.withLock { files.snapshot { versions[it] ?: 0L } }
             }
-            override suspend fun remove(expected: AuxiliaryCacheEntry): Long? = withContext(Dispatchers.IO) {
+            override suspend fun remove(expected: AuxiliaryCacheEntry, canRemove: () -> Boolean): Long? = withContext(Dispatchers.IO) {
                 lock.withLock {
                     if (files.entry(expected.key, versions[expected.key] ?: 0L, verifyBytes = true) != expected)
                         return@withLock null
+                    if (!canRemove()) return@withLock null
                     epoch.incrementAndGet()
                     memory.remove(expected.key)
                     versions.remove(expected.key)

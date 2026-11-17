@@ -67,14 +67,16 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
         )
     }
 
-    override fun resize(bytes: Long) {
-        synchronized(cache) { evictor.resize(cache, bytes.coerceAtLeast(0L)) }
+    override fun resize(bytes: Long, canResize: () -> Boolean, commitResize: (() -> Unit) -> Boolean) {
+        synchronized(cache) {
+            if (!evictor.resize(cache, bytes.coerceAtLeast(0L), canResize, commitResize)) store.cacheWorkFinished()
+        }
     }
 
-    override fun clear(expectedRevision: Long): Long? = synchronized(cache) {
-        if (sessions.get() > 0 || revision.get() != expectedRevision) return@synchronized null
+    override fun clear(expectedRevision: Long, canClear: () -> Boolean): Long? = synchronized(cache) {
+        if (sessions.get() > 0 || revision.get() != expectedRevision || !canClear()) return@synchronized null
         val before = cache.cacheSpace
-        cache.keys.toList().forEach(cache::removeResource)
+        cache.keys.toList().forEach { key -> if (canClear()) cache.removeResource(key) }
         val freed = (before - cache.cacheSpace).coerceAtLeast(0L)
         revision.incrementAndGet()
         store.cacheWorkFinished()
@@ -119,14 +121,19 @@ private class AdjustableAnimeEvictor(private val changed: () -> Unit) : CacheEvi
         spans.add(newSpan)
         changed()
     }
-    fun resize(cache: Cache, requested: Long) {
-        targetBytes = requested
-        evict(cache, 0L)
+    fun resize(cache: Cache, requested: Long, canResize: () -> Boolean, commitResize: (() -> Unit) -> Boolean): Boolean {
+        // Do not publish a provisional quota: a stale sweep must not leave its old
+        // limit installed for subsequent native writes after its eviction was stopped.
+        if (!evict(cache, 0L, requested, canResize) || !canResize()) return false
+        return commitResize { targetBytes = requested }
     }
-    private fun evict(cache: Cache, incoming: Long) {
-        val available = (targetBytes - incoming).coerceAtLeast(0L)
+    private fun evict(cache: Cache, incoming: Long, limit: Long = targetBytes,
+        canEvict: () -> Boolean = { true }): Boolean {
+        val available = (limit - incoming).coerceAtLeast(0L)
         while (bytes > available && spans.isNotEmpty()) {
+            if (!canEvict()) return false
             cache.removeSpan(spans.first())
         }
+        return canEvict()
     }
 }

@@ -18,7 +18,7 @@ interface AuxiliaryDiskCacheOwner {
     val ownerId: String
     suspend fun snapshot(): List<AuxiliaryCacheEntry>
     /** Null means the reviewed data changed or disappeared. The return value is actual removed bytes. */
-    suspend fun remove(expected: AuxiliaryCacheEntry): Long?
+    suspend fun remove(expected: AuxiliaryCacheEntry, canRemove: () -> Boolean = { true }): Long?
 }
 
 /** A failed family removal may still have released some files; the coordinator can report both. */

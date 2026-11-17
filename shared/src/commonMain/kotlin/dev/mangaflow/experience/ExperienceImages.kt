@@ -295,6 +295,7 @@ internal data class OriginalPagePrefetchResult(
     val diskCacheKey: String? = null,
     val deferred: Boolean = false,
     val failure: Throwable? = null,
+    val admissionDeferredStage: PrefetchStage? = null,
 )
 
 /** Original bytes only; a successful receipt is not an image validation result. */
@@ -311,7 +312,8 @@ internal suspend fun prefetchOriginalPageResult(
     val result = try { SingletonImageLoader.get(imageContext).execute(request) }
     catch (cancelled: CancellationException) { throw cancelled }
     catch (_: PrefetchBudgetExceeded) { return OriginalPagePrefetchResult(false, deferred = true) }
-    catch (_: ExperienceAdmissionDeferred) { return OriginalPagePrefetchResult(false, deferred = true) }
+    catch (_: ExperienceAdmissionDeferred) { return OriginalPagePrefetchResult(false, deferred = true,
+        admissionDeferredStage = work.snapshot().stage) }
     catch (_: OutOfMemoryError) { return OriginalPagePrefetchResult(false, deferred = true) }
     currentCoroutineContext().ensureActive()
     return when (result) {
@@ -329,7 +331,8 @@ internal suspend fun prefetchOriginalPageResult(
             if (failure is CancellationException) throw failure
             if (failure is PrefetchBudgetExceeded || failure is ExperienceAdmissionDeferred ||
                 failure is PrefetchPromoted || failure is OutOfMemoryError)
-                OriginalPagePrefetchResult(false, deferred = true)
+                OriginalPagePrefetchResult(false, deferred = true,
+                    admissionDeferredStage = work.snapshot().stage.takeIf { failure is ExperienceAdmissionDeferred })
             else OriginalPagePrefetchResult(false, failure = failure)
         }
     }

@@ -87,6 +87,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private val sources = mutableMapOf<String, SourceObservation>()
     private val measurements = ExperienceMeasurements()
     private val revision = MutableStateFlow(0L)
+    internal val admissionChanges: StateFlow<Long> = revision.asStateFlow()
     private val mutableState = MutableStateFlow(budget())
     val state: StateFlow<ExperienceBudget> = mutableState.asStateFlow()
     private val mutableUsage = MutableStateFlow(ExperienceUsage())
@@ -667,6 +668,26 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             onWaiting = onWaiting, block = block,
         )
     }
+    /** Read-only recovery hint; actual work must still acquire the normal admission. */
+    internal fun canRecoverPrefetchAdmission(stage: PrefetchStage, source: String, estimate: Long): Boolean = synchronized(lock) {
+        val b = mutableState.value
+        if (!b.foreground || readerWaiting) return@synchronized false
+        when (stage) {
+            PrefetchStage.RESOLVING -> {
+                val cap = b.resolveRequests
+                val optionalCap = if (readerUsers > 0 && cap > 1 && mutableOverrides.value.resolveRequests == null) cap - 1 else cap
+                activeResolves < cap && foregroundResolveWaiters == 0 && activeOptionalResolves < optionalCap && canResolveOptional()
+            }
+            PrefetchStage.CHECKING -> {
+                val cap = b.decodeRequests
+                val optionalCap = if (readerUsers > 0 && cap > 1 && mutableOverrides.value.decodeRequests == null) cap - 1 else cap
+                activeDecodes < cap && foregroundDecodeWaiters == 0 && activeOptionalDecodes < optionalCap && canDecodeOptional()
+            }
+            else -> activePrefetch < b.prefetchRequests && estimate.coerceAtLeast(EXPERIENCE_MIB) <=
+                b.prefetchBytes - prefetchReserved && sourceAvailable(source)
+        }
+    }
+
     internal fun wakeAdmissions(): Unit = synchronized(lock) { revision.value++; Unit }
 
     internal val tileDecodeParallelism: Int get() = state.value.runtime.tileDecodeRequests

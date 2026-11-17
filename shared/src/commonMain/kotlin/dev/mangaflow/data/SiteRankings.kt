@@ -142,11 +142,12 @@ class SiteRankingsRepository(context: PlatformContext) {
         override suspend fun snapshot(): List<AuxiliaryCacheEntry> = withContext(Dispatchers.IO) {
             diskLock.withLock { ownedFiles.snapshot() }
         }
-        override suspend fun remove(expected: AuxiliaryCacheEntry): Long? = withContext(Dispatchers.IO) {
+        override suspend fun remove(expected: AuxiliaryCacheEntry, canRemove: () -> Boolean): Long? = withContext(Dispatchers.IO) {
             var changed = false
             try {
                 diskLock.withLock {
                     if (ownedFiles.entry(expected.key, 0L, verifyBytes = true) != expected) return@withLock null
+                    if (!canRemove()) return@withLock null
                     cacheEpoch++
                     changed = true
                     // User-selected source associations and view-state preferences are not cache files.

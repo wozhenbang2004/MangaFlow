@@ -125,7 +125,7 @@ class ReaderCatalogStore(private val context: Context) {
                 }.mapNotNull { entry -> catalogOwner(File(root, entry.key))?.let { entry.copy(key = it) } }
             }
         }
-        override suspend fun remove(expected: AuxiliaryCacheEntry): Long? = withContext(Dispatchers.IO) {
+        override suspend fun remove(expected: AuxiliaryCacheEntry, canRemove: () -> Boolean): Long? = withContext(Dispatchers.IO) {
             state.files.withLock {
                 val owner = expected.key
                 if (StorageCacheStore.get(context).protectedCatalog(owner) || isWriting(owner)) return@withLock null
@@ -135,7 +135,7 @@ class ReaderCatalogStore(private val context: Context) {
                 if (state.cacheFiles.entry(file.name, memoryRevision, verifyBytes = true) != reviewed) return@withLock null
                 synchronized(state.memoryLock) {
                     // Hashing yields to queued/new save intents. Recheck their exact identity at deletion.
-                    if (owner in state.writes || (state.memoryRevisions[owner] ?: 0L) != memoryRevision ||
+                    if (!canRemove() || owner in state.writes || (state.memoryRevisions[owner] ?: 0L) != memoryRevision ||
                         StorageCacheStore.get(context).protectedCatalog(owner)) return@synchronized null
                     var freed = 0L
                     try {

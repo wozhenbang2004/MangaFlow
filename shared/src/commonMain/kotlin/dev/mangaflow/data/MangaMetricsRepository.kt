@@ -56,14 +56,14 @@ class MangaMetricsRepository(
                 ownedFiles.snapshot { revision }
             }
         }
-        override suspend fun remove(expected: AuxiliaryCacheEntry): Long? = withContext(Dispatchers.IO) {
+        override suspend fun remove(expected: AuxiliaryCacheEntry, canRemove: () -> Boolean): Long? = withContext(Dispatchers.IO) {
             var changed = false
             try {
                 disk.withLock {
                     val revision = synchronized(lock) { memoryRevision }
                     if (ownedFiles.entry(expected.key, revision, verifyBytes = true) != expected) return@withLock null
                     val accepted = synchronized(lock) {
-                        if (memoryRevision != revision) false else {
+                        if (memoryRevision != revision || !canRemove()) false else {
                             generation++
                             memoryRevision++
                             entries.clear()
