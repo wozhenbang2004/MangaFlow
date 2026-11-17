@@ -3,6 +3,15 @@ package dev.mangaflow.anime
 /** Cosmetic title normalization only: season, part, punctuation and edition suffixes survive. */
 private fun autoTitleKey(value: String) = value.trim().lowercase().filterNot { it.isWhitespace() }
 
+/** AGE uses both 第02集 and 第2集 for the same regular episode across routes.
+ * Only that complete numeric label is normalized; season/special/edition text survives. */
+private fun ageEpisodeLabelKey(value: String): String {
+    val literal = autoTitleKey(value)
+    if (literal.isBlank()) return ""
+    val number = Regex("第([0-9]+)集").matchEntire(literal)?.groupValues?.get(1)?.toLongOrNull()
+    return if (number != null) "regular-number:$number" else "literal:$literal"
+}
+
 internal fun autoPlaySubjectMatches(subject: AnimeSubject, title: AnimeSourceTitle): Boolean =
     autoPlaySubjectEvidence(subject, title, requireEvidence = true)
 
@@ -70,7 +79,7 @@ internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalo
         fun route(group: String) = group.substringAfterLast(" [", "").removeSuffix("]")
         val routes = eligible.keys.map(::route)
         val labels = eligible.values.map { rows -> rows.associate {
-            (it.kind to requireNotNull(it.number)) to autoTitleKey(it.title)
+            (it.kind to requireNotNull(it.number)) to ageEpisodeLabelKey(it.title)
         } }
         if (routes.all { it in knownRoutes } && routes.distinct().size == routes.size &&
             labels.distinct().size == 1 && labels.first().values.all { it.isNotBlank() }) {

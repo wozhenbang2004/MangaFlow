@@ -66,3 +66,14 @@ fall through to ffm3u8 for the proven same episode, while preserving user mappin
 
 Source integration is statically reviewed; no local build or runtime playback test
 was performed. The public page observation above is not a player first-frame result.
+
+## Observed zero-padding variation
+
+The same captured work response lists xigua, ffm3u8, wjm3u8 and lzm3u8 labels as
+`第01集` through `第07集`, while bfzym3u8 uses `第1集` through `第7集`.
+Literal label equality therefore rejected the entire otherwise equivalent route set.
+AGE-only label comparison now normalizes leading zeros solely for a complete
+`第[ASCII digits]集` label. It does not strip seasons, special-episode text,
+subtitles, edition markers or arbitrary suffixes. Kind/number identity, uniqueness,
+complete coverage, known-route whitelist and positive work ID remain prerequisites.
+This closes the observed formatting mismatch without using array position as identity.
