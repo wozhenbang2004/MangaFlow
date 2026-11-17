@@ -313,6 +313,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("followed", entry.followed).put("completed", JSONArray(entry.completedEpisodeIds.toList()))
         .put("resume", entry.resume?.let(::encodeProgress)).put("updated", entry.updatedAt)
         .put("revision", entry.revision).put("folder", entry.folder).put("pinned", entry.pinned)
+        .put("excludedSourceIds", JSONArray(entry.excludedSourceIds.sorted()))
 
     private fun decodeEntry(json: JSONObject) = AnimeLibraryEntry(
         subject = decodeSubject(json.getJSONObject("subject")),
@@ -322,6 +323,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         resume = json.optJSONObject("resume")?.let(::decodeProgress),
         updatedAt = json.getLong("updated"), revision = json.getLong("revision"),
         folder = json.optString("folder"), pinned = json.optBoolean("pinned"),
+        excludedSourceIds = json.optJSONArray("excludedSourceIds")?.let { strings(it).toSet() } ?: emptySet(),
     )
 
     private fun encodeSubject(subject: AnimeSubject) = AnimeDocumentCodec.subject(subject)
@@ -334,7 +336,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("count", binding.catalog.episodeCount).put("externalIds", JSONObject(binding.catalog.externalIds))
         .put("updateText", binding.catalog.updateText).put("ratingText", binding.catalog.ratingText)
         .put("episodes", JSONObject(binding.episodeMappings)).put("preferred", binding.preferred)
-        .put("group", binding.selectedGroup)
+        .put("group", binding.selectedGroup).put("automatic", binding.automatic)
 
     private fun decodeBinding(json: JSONObject): AnimeSourceBinding {
         val ids = json.optJSONObject("externalIds") ?: JSONObject()
@@ -346,7 +348,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             ids.keys().asSequence().associateWith { ids.getString(it) },
             updateText = json.optString("updateText"), ratingText = json.optString("ratingText")),
             mappings.keys().asSequence().associateWith { mappings.getString(it) },
-            json.optBoolean("preferred"), json.optString("group", null))
+            json.optBoolean("preferred"), json.optString("group", null), automatic = json.optBoolean("automatic", false))
     }
 
     private fun encodeProgress(progress: AnimeWatchProgress) = JSONObject().put("episode", progress.episodeId)

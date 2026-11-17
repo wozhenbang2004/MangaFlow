@@ -3,7 +3,14 @@ package dev.mangaflow.anime
 /** Cosmetic title normalization only: season, part, punctuation and edition suffixes survive. */
 private fun autoTitleKey(value: String) = value.trim().lowercase().filterNot { it.isWhitespace() }
 
-internal fun autoPlaySubjectMatches(subject: AnimeSubject, title: AnimeSourceTitle): Boolean {
+internal fun autoPlaySubjectMatches(subject: AnimeSubject, title: AnimeSourceTitle): Boolean =
+    autoPlaySubjectEvidence(subject, title, requireEvidence = true)
+
+/** Candidate recall may lack a year; only detailed evidence can promote it into a binding. */
+internal fun autoPlaySubjectCandidate(subject: AnimeSubject, title: AnimeSourceTitle): Boolean =
+    autoPlaySubjectEvidence(subject, title, requireEvidence = false)
+
+private fun autoPlaySubjectEvidence(subject: AnimeSubject, title: AnimeSourceTitle, requireEvidence: Boolean): Boolean {
     val subjectIds = subject.externalIds + if (subject.id.startsWith("bangumi:"))
         mapOf("bangumi" to subject.id.removePrefix("bangumi:")) else emptyMap()
     val sharedKeys = subjectIds.keys.intersect(title.externalIds.keys)
@@ -13,34 +20,69 @@ internal fun autoPlaySubjectMatches(subject: AnimeSubject, title: AnimeSourceTit
     val exactName = listOf(subject.title, subject.originalTitle).any {
         it.isNotBlank() && autoTitleKey(it) == autoTitleKey(title.title)
     }
-    if (!exactName) return false
     val sharedId = sharedKeys.any { key -> key in setOf("bangumi", "anilist", "mal", "douban") &&
         subjectIds[key]?.isNotBlank() == true && subjectIds[key] == title.externalIds[key] }
-    return sharedId || (subject.year != null && title.year == subject.year)
+    // A matching authoritative ID permits aliases, while conflicting IDs/years above still veto.
+    return sharedId || (exactName && (!requireEvidence || (subject.year != null && title.year == subject.year)))
 }
 
 /** Do not select between seasons/editions, or infer episode identity from list position. */
-internal fun autoPlayGroup(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog): String? {
-    if (catalog.notice != null || catalog.episodes.isEmpty()) return null
+internal fun autoPlayGroup(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog): String? =
+    autoPlayGroups(detail, requested, catalog).firstOrNull()
+
+internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog): List<String> {
+    if (catalog.notice != null || catalog.episodes.isEmpty()) return emptyList()
     val groups = catalog.episodes.groupBy { it.group }
+    if (groups.size == 1) {
+        val (name, rows) = groups.entries.single()
+        if (rows.count { it.number == requested.number && it.kind == requested.kind } == 1 &&
+            requested.number.isFinite()) return listOf(name)
+        return emptyList()
+    }
     val eligible = groups.filterValues { rows ->
         rows.count { it.number == requested.number && it.kind == requested.kind } == 1 &&
             rows.all { it.number != null && it.number.isFinite() } &&
             rows.map { it.kind to it.number }.distinct().size == rows.size
     }
-    if (eligible.isEmpty()) return null
+    if (eligible.isEmpty()) return emptyList()
     // More than one edition may mean multiple seasons all restarting at episode one.
-    if (catalog.episodes.map { it.edition }.distinct().size != 1) return null
+    if (catalog.episodes.map { it.edition }.distinct().size != 1) return emptyList()
     val coverage = eligible.values.map { rows -> rows.map { it.kind to requireNotNull(it.number) }.toSet() }
-    if (coverage.distinct().size != 1 || eligible.size != groups.size) return null
-    val canonicalKeys = detail.episodes.map { it.kind to it.number }.toSet()
-    if (!coverage.first().all { it in canonicalKeys }) return null
-    if (eligible.size == 1) return eligible.keys.single()
+    if (coverage.distinct().size != 1 || eligible.size != groups.size) return emptyList()
+    if (eligible.size == 1) return listOf(eligible.keys.single())
+    // Giri's exact chs/cht keys are subtitle tracks inside the same native get_detail record.
+    // Require complete matching episode labels as well as number/kind; never generalize this
+    // contract to arbitrary line names or other providers.
+    if (catalog.title.sourceId == "anime-girigiri" &&
+        catalog.title.externalIds["girigiri"] == catalog.title.id && eligible.size == 2 &&
+        eligible.keys.map { it.substringBefore(" [") }.toSet() == setOf("chs", "cht") &&
+        eligible.keys.all { Regex("""^(chs|cht) \[\d+\]$""").matches(it) }) {
+        val labels = eligible.values.map { rows -> rows.associate {
+            (it.kind to requireNotNull(it.number)) to autoTitleKey(it.title)
+        } }
+        if (labels.distinct().size == 1 && labels.first().values.all { it.isNotBlank() })
+            return eligible.keys.sortedBy { if (it.startsWith("chs [")) 0 else 1 }
+    }
+    // AGE's adapter constructs these routes exclusively from one requested work's
+    // video.playlists response. Unknown routes or unequal episode labels stay manual.
+    if (catalog.title.sourceId == "anime-age") {
+        val knownRoutes = setOf("xigua", "ffm3u8", "bfzym3u8", "wjm3u8", "lzm3u8")
+        fun route(group: String) = group.substringAfterLast(" [", "").removeSuffix("]")
+        val routes = eligible.keys.map(::route)
+        val labels = eligible.values.map { rows -> rows.associate {
+            (it.kind to requireNotNull(it.number)) to autoTitleKey(it.title)
+        } }
+        if (routes.all { it in knownRoutes } && routes.distinct().size == routes.size &&
+            labels.distinct().size == 1 && labels.first().values.all { it.isNotBlank() }) {
+            // Parsing order only, not measured speed or a promise of playable streams.
+            return eligible.keys.sortedBy { if (route(it) == "xigua") 1 else 0 }
+        }
+    }
     // Only adapters with a typed, audited automatic-line contract can select among groups.
     // Equal numbering with an empty edition is not proof that arbitrary groups are the same season.
-    return eligible.entries.filter { (_, rows) -> when (catalog.title.sourceId) {
+    return listOfNotNull(eligible.entries.filter { (_, rows) -> when (catalog.title.sourceId) {
         "anime-tvtfun" -> rows.all { it.playbackData == "automatic" } && rows.first().edition.isNotBlank()
         "anime-native-ani" -> rows.all { it.group == "自动线路" }
         else -> false
-    } }.singleOrNull()?.key
+    } }.singleOrNull()?.key)
 }

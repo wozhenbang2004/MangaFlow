@@ -201,6 +201,8 @@ internal fun AnimeSelection(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    titleMaxLines: Int = 2,
+    detailMaxLines: Int = 3,
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
@@ -215,9 +217,9 @@ internal fun AnimeSelection(
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(title, style = MaterialTheme.typography.bodyMedium,
                 color = colors.onSurface.copy(alpha = if (enabled) 1f else .45f),
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                maxLines = titleMaxLines, overflow = TextOverflow.Ellipsis)
             if (!detail.isNullOrBlank()) Text(detail, style = MaterialTheme.typography.labelSmall,
-                color = colors.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                color = colors.onSurfaceVariant, maxLines = detailMaxLines, overflow = TextOverflow.Ellipsis)
         }
         if (selected) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp), tint = colors.onSurface)
         else Spacer(Modifier.size(18.dp))

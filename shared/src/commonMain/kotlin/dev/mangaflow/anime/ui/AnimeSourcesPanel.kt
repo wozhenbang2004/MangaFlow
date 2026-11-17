@@ -33,6 +33,7 @@ internal fun AnimeSourcesPanel(
     focusEpisode: AnimeEpisode?,
     onDismiss: () -> Unit,
     onPlay: (String, AnimeEpisodeOption) -> Unit,
+    onAutomaticPlay: (AnimeEpisode) -> Unit,
 ) {
     val subject = state.detail?.subject
     val uriHandler = LocalUriHandler.current
@@ -44,11 +45,10 @@ internal fun AnimeSourcesPanel(
         }
     }
     var query by remember(subject?.id) { mutableStateOf(subject?.title.orEmpty()) }
-    var groups by remember(subject?.id) { mutableStateOf<Map<String, String>>(emptyMap()) }
     var mapping by remember(subject?.id, focusEpisode?.id) { mutableStateOf<EpisodeMappingDraft?>(null) }
     var expandedSource by remember(subject?.id, focusEpisode?.id) { mutableStateOf<String?>(null) }
     var manageExpanded by remember(subject?.id, focusEpisode?.id) {
-        mutableStateOf(focusEpisode == null || state.episodeOptions[focusEpisode.id].orEmpty().none { it.confirmed })
+        mutableStateOf(false)
     }
     var episodeQuery by remember(focusEpisode?.id) { mutableStateOf("") }
     var mappingLimit by remember(expandedSource, episodeQuery) { mutableIntStateOf(40) }
@@ -61,11 +61,8 @@ internal fun AnimeSourcesPanel(
     } }
     val previewing = preview != null || state.previewLoading
     val subjectId = subject?.id
-    LaunchedEffect(visible, subjectId) {
-        if (visible && subjectId != null && state.sourceResults.isEmpty()) controller.searchSources()
-    }
-    LaunchedEffect(state.sourceGroups) {
-        groups = groups.filter { (id, group) -> state.sourceGroups[id] != group }
+    LaunchedEffect(visible, subjectId, manageExpanded) {
+        if (visible && manageExpanded && subjectId != null && state.sourceResults.isEmpty()) controller.searchSources()
     }
     LaunchedEffect(state.episodeOptions, focusEpisode?.id) {
         val draft = mapping ?: return@LaunchedEffect
@@ -75,7 +72,7 @@ internal fun AnimeSourcesPanel(
     }
     MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 720.dp,
         onClosed = {
-            groups = emptyMap(); mapping = null; expandedSource = null
+            mapping = null; expandedSource = null
             controller.dismissSourcePreview()
         }) {
         LiquidGlassSurface(backdrop, role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp) {
@@ -165,25 +162,48 @@ internal fun AnimeSourcesPanel(
                         verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         if (focusEpisode != null) {
                             val choices = state.episodeOptions[focusEpisode.id].orEmpty().filter { it.confirmed }
-                            item(key = "episode-sources") { AnimeSectionTitle("本集来源", focusEpisode.title) }
+                            item(key = "episode-sources") { AnimeSectionTitle("本集线路", focusEpisode.title) }
+                            item(key = "automatic-play") {
+                                MotionButton(onClick = { onAutomaticPlay(focusEpisode) },
+                                    enabled = !state.autoMatching, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+                                    Text(if (state.autoMatching) "正在自动匹配" else "自动选择线路并播放")
+                                }
+                            }
                             items(choices, key = { "choice:" + it.sourceId + ":" + it.episode.id }) { option ->
                                 AnimeSelection(option.sourceName,
                                     listOf(option.episode.group, option.episode.edition).filter { it.isNotBlank() }.distinct().joinToString(" · "),
                                     selected = option.sourceId == state.preferredSourceId,
                                     onClick = { onPlay(focusEpisode.id, option) })
                             }
-                            if (choices.isEmpty()) item { AnimeQuietLabel("本集还没有确认的片源，请在下方选择作品与线路。") }
-                            item {
+                            if (choices.isEmpty()) item { AnimeQuietLabel(if (state.autoMatching)
+                                "正在自动核对本集线路，已匹配的结果会在这里出现。"
+                                else "本集暂未匹配到可靠线路，可重试自动匹配；手动调整在下方。") }
+                        } else item(key = "source-overview") {
+                            val matchedSources = state.episodeOptions.values.flatten().filter { it.confirmed }
+                                .map { it.sourceId }.distinct().size
+                            val matchedEpisodes = state.episodeOptions.values.count { options -> options.any { it.confirmed } }
+                            AnimeSectionTitle("自动汇总", "已匹配 $matchedSources 个来源 · $matchedEpisodes 集有对应线路")
+                            AnimeQuietLabel("剧集统一显示，点击剧集自动选择线路；不确定的结果不会混入。")
+                        }
+                        if (state.sourceAggregationTotal > 0) item(key = "aggregation-progress") {
+                            AnimeQuietLabel(if (state.sourceAggregationRunning)
+                                "后台核对来源 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal} · 无需等待全部完成"
+                                else "本轮已核对 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal} 个来源；未确认结果不混入线路。")
+                        }
+                        item(key = "retry-source-aggregation") {
+                            MotionTextButton(onClick = controller::retrySourceAggregation,
+                                enabled = !state.sourceAggregationRunning) { Text("重新核对来源") }
+                        }
+                        item {
                                 MotionTextButton(onClick = { manageExpanded = !manageExpanded },
                                     modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
                                     Icon(if (manageExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.Tune,
                                         null, Modifier.size(18.dp))
                                     Spacer(Modifier.width(8.dp))
-                                    Text(if (manageExpanded) "收起关联与搜索" else "关联其他来源 / 调整本集映射")
+                                    Text(if (manageExpanded) "收起手动调整" else "手动调整来源与集数")
                                 }
-                            }
                         }
-                        if (manageExpanded || focusEpisode == null) {
+                        if (manageExpanded) {
                         if (state.sourceBindings.isNotEmpty()) item { AnimeSectionTitle("已关联") }
                         val waitingBindings = state.sourceBindings.filter { binding -> state.sourceCatalogs.none {
                             it.title.sourceId == binding.catalog.sourceId && it.title.id == binding.catalog.id
@@ -212,7 +232,6 @@ internal fun AnimeSourcesPanel(
                             val name = state.sourceResults.firstOrNull { it.providerId == sourceId }?.name ?: animeSourceName(sourceId, state)
                             val sourceGroups = catalog.episodes.map { it.group }.distinct()
                             val selectedGroup = state.sourceGroups[sourceId]
-                            val stagedGroup = groups[sourceId] ?: selectedGroup
                             val matched = focusEpisode?.let { state.episodeOptions[it.id].orEmpty()
                                 .firstOrNull { option -> option.sourceId == sourceId && option.confirmed } }
                             Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -238,14 +257,11 @@ internal fun AnimeSourcesPanel(
                                 }
                                 sourceGroups.forEach { group ->
                                     val count = catalog.episodes.count { it.group == group }
-                                    AnimeSelection(group.ifBlank { "默认线路" },
+                                    AnimeSelection(animeSourceGroupLabel(group),
                                         count.toString() + " 条记录" + if (selectedGroup == group) " · 当前线路" else "",
-                                        selected = stagedGroup == group,
-                                        onClick = { groups = groups + (sourceId to group); mapping = null })
-                                }
-                                if (stagedGroup != null && stagedGroup != selectedGroup) {
-                                    MotionButton(onClick = { controller.selectSourceGroup(sourceId, stagedGroup) },
-                                        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) { Text("应用线路") }
+                                        selected = selectedGroup == group,
+                                        onClick = { mapping = null
+                                            controller.selectSourceGroup(sourceId, group) })
                                 }
                                 if (sourceGroups.size > 1 && selectedGroup == null)
                                     AnimeQuietLabel("请选择一条线路；不同线路可能包含不同季度或版本。")
@@ -301,7 +317,8 @@ internal fun AnimeSourcesPanel(
                             }
                         } }
                         if (state.sourceError != null) item {
-                            AnimeMessage("来源操作未完成", state.sourceError, icon = Icons.Outlined.ErrorOutline)
+                            Text(state.sourceError.orEmpty(), style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         item {
                             AnimeSectionTitle("查找其他来源")
@@ -423,4 +440,10 @@ internal fun AnimeCatalogNotice(catalog: AnimeSourceCatalog, retryEnabled: Boole
             Icon(Icons.Outlined.Refresh, "重试未完整加载的目录", Modifier.size(18.dp))
         }
     }
+}
+
+private fun animeSourceGroupLabel(group: String): String = when {
+    group.startsWith("cht [") -> "繁体线路 · " + group
+    group.startsWith("chs [") -> "简体线路 · " + group
+    else -> group.ifBlank { "默认线路" }
 }

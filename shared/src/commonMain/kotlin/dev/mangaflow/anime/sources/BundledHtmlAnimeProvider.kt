@@ -72,10 +72,10 @@ internal class BundledHtmlAnimeProvider(
         val http = AnimeHttp(id)
         return try {
             val response = http.request(url, AnimeSourceStage.CATALOG, referer = homeUrl)
-            val episodes = withContext(Dispatchers.Default) {
+            val (identity, episodes) = withContext(Dispatchers.Default) {
                 val document = Ksoup.parse(response.text, response.url.toString())
                 val pathPattern = Regex("^" + Regex.escape(playPrefix + title.id) + "-(\\d+)-(\\d+)\\.html$")
-                document.select("a[href*=$playPrefix]").mapNotNull { anchor ->
+                val episodes = document.select("a[href*=$playPrefix]").mapNotNull { anchor ->
                     val target = runCatching { animePublicUrl(animeAbsolute(homeUrl, anchor.attr("href"))) }.getOrNull()
                         ?: return@mapNotNull null
                     if (target.host != url.host) return@mapNotNull null
@@ -86,10 +86,27 @@ internal class BundledHtmlAnimeProvider(
                     AnimeSourceEpisode("${title.id}:${parts[1]}:${parts[2]}", label, target.toString(),
                         sourceEpisodeNumber(label), sourceEpisodeKind(label), "线路 ${parts[1]}")
                 }.distinctBy { it.id }
+                // Read only work-local metadata, not recommendation cards or global year filters.
+                val info = document.selectFirst(".detail-info")
+                val detailName = if (aki) info?.selectFirst("h3")?.text().orEmpty()
+                    else document.selectFirst("h1.v_title a")?.text().orEmpty()
+                val years = if (aki) info?.select("a[href]").orEmpty().mapNotNull { anchor ->
+                    val target = runCatching { animePublicUrl(animeAbsolute(homeUrl, anchor.attr("href"))) }.getOrNull()
+                    if (target == null || target.host != url.host) null else Regex("""^/bgmsearch/-+(\d{4})\.html$""")
+                        .matchEntire(target.encodedPath)?.groupValues?.get(1)?.toIntOrNull()
+                }.distinct() else document.select("meta[property=og:video:release_date]").mapNotNull { meta ->
+                    Regex("""^(\d{4})(?:-\d{2}-\d{2}(?:[T ].*)?)?$""").matchEntire(meta.attr("content").trim())
+                        ?.groupValues?.get(1)?.toIntOrNull()
+                }.distinct()
+                val year = years.singleOrNull()?.takeIf { it in 1900..2100 }
+                val identity = if (response.url.host == url.host && response.url.encodedPath == url.encodedPath &&
+                    detailName.trim() == title.title.trim() && year != null && (title.year == null || title.year == year))
+                    title.copy(year = year) else title
+                identity to episodes
             }
             if (episodes.isEmpty()) throw AnimeSourceException(id, AnimeSourceStage.CATALOG,
                 "来源未返回可识别的剧集，可能需要原站验证或页面规则已变化。")
-            AnimeSourceCatalog(title, episodes)
+            AnimeSourceCatalog(identity, episodes)
         } finally { http.close() }
     }
 

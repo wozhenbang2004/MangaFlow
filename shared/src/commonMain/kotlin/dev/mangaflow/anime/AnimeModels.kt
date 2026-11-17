@@ -130,6 +130,8 @@ data class AnimeLibraryEntry(
     val revision: Long = 0L,
     val folder: String = "",
     val pinned: Boolean = false,
+    /** Explicit per-work exclusions survive background association and process restarts. */
+    val excludedSourceIds: Set<String> = emptySet(),
 )
 
 data class AnimeSourceBinding(
@@ -138,6 +140,8 @@ data class AnimeSourceBinding(
     val episodeMappings: Map<String, String> = emptyMap(),
     val preferred: Boolean = false,
     val selectedGroup: String? = null,
+    /** Legacy bindings remain user-confirmed unless explicitly marked automatic. */
+    val automatic: Boolean = false,
 )
 
 data class AnimeSourceResult(
@@ -203,7 +207,7 @@ data class AnimePlaybackSettings(
     val skipEndingSeconds: Int = 0,
     val longPressSpeed: Float = 2f,
     val backgroundAudio: Boolean = false,
-    val automaticSourceRecovery: Boolean = false,
+    val automaticSourceRecovery: Boolean = true,
     val bufferMinMs: Int = 50_000,
     val bufferMaxMs: Int = 120_000,
     val bufferStartMs: Int = 1_500,
@@ -241,6 +245,10 @@ data class AnimeScreenState(
     val sourceResults: List<AnimeSourceResult> = emptyList(),
     val sourceCatalogs: List<AnimeSourceCatalog> = emptyList(),
     val sourceBindings: List<AnimeSourceBinding> = emptyList(),
+    val sourceAggregation: Map<String, AnimeAssociationProgress> = emptyMap(),
+    val sourceAggregationRunning: Boolean = false,
+    val sourceAggregationCompleted: Int = 0,
+    val sourceAggregationTotal: Int = 0,
     val sourceCatalogErrors: Map<String, String> = emptyMap(),
     val previewCatalog: AnimeSourceCatalog? = null,
     val previewLoading: Boolean = false,

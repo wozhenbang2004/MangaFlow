@@ -202,3 +202,38 @@ Six retained script references embed third-party private keys (Guazi, Shixiong, 
 Read-only retrieval of the two URLs visible in the owner's screenshots returned HTTP 200 with 31,884 bytes for guazi.js and 47,064 for lanerc.js; both hashes exactly matched the packaged pins and retained source snapshots. This rules out observed cloud-side file replacement/downloading failure at that moment, not the user's phone route or storage. The first-use missing-QuickJS path remains an independently established code defect addressed by the prior slice. Package requests retain SOURCE_PACKAGES routing, the native component retains COMPONENTS routing, and playback retains its exact anime source route; none is silently changed.
 
 Validation remains source review/diff checks only. Automatic first-use, cancellation, process restoration, upstream source reachability and playback require real product acceptance; no local tests/builds or synthesized execution were run.
+
+### Native detail identity enrichment (2026-11-17)
+
+Search cards from AniCh/AkiAnime/DMBus omit release years, so exact-name recall alone
+cannot confirm a season. Catalogs now preserve the exact native work ID/URL and can
+supplement release year from that same work's detail response: AniCh structured
+`airdate` (retained reference `ani.js:detail`), DMBus
+`og:video:release_date`, and AkiAnime's year-filter link strictly inside its
+`.detail-info` block. Detail title must equal the search title, years must be
+unambiguous and must not conflict with an existing year. Missing/ambiguous evidence
+stays missing, never copied from the requested Bangumi subject. AniCh metadata is
+optional and bounded to two seconds; failure does not discard actual episodes.
+LMM22 has not inherited the different LMM85 site's metadata contract.
+
+This is source review, not live playback, mainland-network or device acceptance.
+Dynamic WebView sniffing remains unsupported: interception alone does not guarantee
+per-source routing, while AndroidX ProxyController changes every WebView in the
+process. No global proxy, borrowed browser session, TLS bypass, external secret or
+unrestricted remote-JavaScript bridge was added.
+
+### Progressive all-source association and playback recovery · 2026-11-17
+
+The owner clarified that anime must follow manga's automatic all-source association behavior, not stop at the first successful playback source. The existing manga implementation was read: `UnifiedMangaRepository.startDiscovery` owns independent per-work source tasks; each reliable result attaches progressively and the view model reprojects the catalogue without changing the reader cursor. Anime now follows that ownership pattern, not manga's chapter-number identity rules (different anime seasons commonly restart at episode one).
+
+Opening a detail starts independent discovery for every currently eligible installed source, with four concurrent slots and per-source deadlines. Each verified work identity is linked and its observed episodes are projected immediately; other sources keep running when playback starts or its foreground preparation is cancelled. Later installed/re-enabled sources are picked up separately. New identity metadata reconsiders retained candidates instead of blindly rerunning every search. Search failure/timeout stays unavailable, distinct from a successfully empty result. Explicit unlink is a durable per-work exclusion; normal retry never overrides it, manual re-association clears only that exclusion, and existing manual bindings/groups remain authoritative.
+
+Association records structural identity only, not playback health. Default play consumes all uniquely verified same-episode options with bounded per-option resolution and a foreground deadline; later-arriving options can join recovery without restarting discovery. A failed existing option therefore no longer traps all subsequent default plays on the same source. Explicitly selected options remain locked. Actual player errors use the existing platform recovery-allowed guard and bounded recovery count, but now retain automatic-versus-explicit play intent; automatic retry is not hardwired to the failed source. New/missing settings default to recovery enabled; saved false values are preserved. Renderer/protected-media failures and nonzero cross-asset resume confirmation retain their existing safeguards.
+
+Recall and confirmation remain separate: full title/original-title recall may lack year, but only trusted detail year or a nonconflicting shared authoritative metadata ID confirms association. Strong shared IDs permit aliases. Detail reads are limited to plausible records, not all search results; unreadable rivals are unknown rather than negative evidence and equally proven versions require selection. Native-owned works retain their IDs and only exact known kind/number can map to another source, never list position. Unknown or conflicting seasons/editions are not forced into playable cells.
+
+For GiriGiriLove, only exact `chs`/`cht` groups from a positively identified native `vod_id` record may act as equivalent subtitle tracks. Complete kind/number/normalized labels must agree. Simplified subtitles are the initial preference, not a speed/health claim. Unknown groups, title mismatch and missing identity remain conservative; an explicit group is not rewritten.
+
+AGE group equivalence is limited to the known xigua/ffm3u8/bfzym3u8/wjm3u8/lzm3u8 routes emitted from one requested detail response, with identical complete episode keys and labels. Unknown/partial groups stay manual. M3U8-named routes precede xigua only as a parsing order, never a measured health claim. New native default groups are marked automatic so equivalent tracks can expand them; legacy saved groups remain explicit because their original user intent cannot be reconstructed. Background association can invalidate a prior whole-entry undo receipt; stale undo remains refused rather than overwriting newer bindings.
+
+Validation: independent static review completed; whitespace checked. No local build/tests, live-source requests or device execution was performed for this change. Structural association, successful address resolution and actual first-frame playback remain separate results.

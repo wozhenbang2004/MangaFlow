@@ -71,7 +71,26 @@ internal class AniChAnimeProvider(override val revision: String) : AnimeProvider
             if (episodes.isEmpty()) throw AnimeSourceException(id, AnimeSourceStage.CATALOG,
                 "AniCh 未返回实际可选剧集，未按总集数补造。")
             checkRoute(http, AnimeSourceStage.CATALOG)
-            AnimeSourceCatalog(title, episodes)
+            // Identity evidence belongs to this exact work, never to the requested subject.
+            // Search protobuf cards omit airdate; use the structured detail contract only.
+            val identity = try {
+                val detail = withTimeoutOrNull(2_000L) {
+                    val expected = animePublicUrl(detailUrl(title.id))
+                    val response = http.request(expected, AnimeSourceStage.CATALOG,
+                        referer = homeUrl, sameOriginRedirects = true)
+                    if (response.url.encodedPath != expected.encodedPath) JSONObject()
+                    else withContext(Dispatchers.Default) { JSONObject(response.text) }
+                } ?: JSONObject()
+                val detailName = detail.optString("title", "").trim()
+                val date = detail.optString("airdate", "").trim()
+                val year = Regex("""^(\d{4})-\d{2}-\d{2}(?:[T ].*)?$""")
+                    .matchEntire(date)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it in 1900..2100 }
+                if (detailName == title.title.trim() && year != null && (title.year == null || title.year == year))
+                    title.copy(year = year) else title
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { title } // Missing metadata must not hide the actual episode feed.
+            checkRoute(http, AnimeSourceStage.CATALOG)
+            AnimeSourceCatalog(identity, episodes)
         } finally { http.close() }
     }
 

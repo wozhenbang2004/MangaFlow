@@ -166,6 +166,9 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
                     }
                 }
             }
+            if (state.sourceAggregationRunning) item(key = "source-aggregation-progress") {
+                AnimeQuietLabel("后台补全来源 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal} · 可先选集播放")
+            }
             item(key = "episodes-heading") {
                 AnimeSectionTitle("选集 · ${episodes.size}", action = {
                     Row(verticalAlignment = Alignment.CenterVertically) {

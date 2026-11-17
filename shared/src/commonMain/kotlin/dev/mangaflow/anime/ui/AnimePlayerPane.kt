@@ -264,7 +264,7 @@ internal fun AnimePlayerPane(
                         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(detail?.subject?.title ?: "番剧", style = MaterialTheme.typography.titleSmall,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (episode != null) AnimeQuietLabel(animeEpisodeLabel(episode) + " · " + episode.title)
+                            if (episode != null) AnimeQuietLabel(animeEpisodeLabel(episode))
                         }
                     },
                     actions = {
@@ -386,6 +386,17 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState, bl
     var scrub by remember(state.sessionGeneration) { mutableStateOf<Long?>(null) }
     val duration = state.durationMs
     val ready = !blocked && state.phase in listOf(AnimePlayerPhase.OPENING, AnimePlayerPhase.READY, AnimePlayerPhase.ENDED)
+    val canSeek = ready && duration > 0L
+    val releaseControls by rememberUpdatedState(onHoldControls)
+    DisposableEffect(canSeek, state.sessionGeneration) {
+        // Slider removal/session replacement may skip onValueChangeFinished mid-drag.
+        scrub = null
+        releaseControls(false)
+        onDispose {
+            scrub = null
+            releaseControls(false)
+        }
+    }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(0.dp)) {
         if (workspaceNotice != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(workspaceNotice, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
@@ -396,6 +407,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState, bl
         if (state.notice != null) Text(state.notice, Modifier.fillMaxWidth().padding(top = 6.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 3, overflow = TextOverflow.Ellipsis)
+        if (canSeek) {
         MotionSlider(value = (scrub ?: state.positionMs).toFloat(), onValueChange = { onHoldControls(true); scrub = it.toLong() },
             enabled = ready && duration > 0L, valueRange = 0f..duration.coerceAtLeast(1L).toFloat(),
             onValueChangeFinished = { scrub?.let(player::seekTo); scrub = null; onHoldControls(false); onInteraction() },
@@ -407,7 +419,8 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState, bl
             Spacer(Modifier.weight(1f))
             if (state.bufferedAheadMs >= 0L && ready) AnimeQuietLabel("前方缓冲 " + animeTime(state.bufferedAheadMs))
         }
-        Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically,
+        }
+        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(2.dp)) {
             MotionIconButton(onClick = { onInteraction(); previous?.let(onEpisode) }, enabled = previous != null,
                 modifier = Modifier.size(44.dp), tooltip = "上一集") {
@@ -489,8 +502,8 @@ private fun AnimePlayerEpisodes(episodes: List<AnimeEpisode>, currentId: String?
             if (shown.isEmpty()) item { AnimeMessage("没有匹配的集数",
                 action = if (query.isNotBlank()) "清除查找" else null, onAction = { query = "" }) }
             items(shown, key = { it.id }) { episode ->
-                AnimeSelection(animeEpisodeLabel(episode) + " · " + episode.title,
-                    if (state.episodeOptions[episode.id].orEmpty().any { it.confirmed }) null else "需要确认来源",
+                AnimeSelection(animeEpisodeLabel(episode), episode.title,
+                    titleMaxLines = 1, detailMaxLines = 1,
                     selected = episode.id == currentId, onClick = { onEpisode(episode) })
             }
         }

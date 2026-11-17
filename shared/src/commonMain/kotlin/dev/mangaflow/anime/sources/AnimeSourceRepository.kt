@@ -399,6 +399,8 @@ private class GiriGiriProvider : RoutedAnimeProvider() {
         return try {
             val row = http.json(api.newBuilder().addPathSegment("get_detail").addQueryParameter("vod_id", key).build(),
                 AnimeSourceStage.CATALOG, referer = homeUrl).requiredObject("info", id, AnimeSourceStage.CATALOG)
+            val returnedId = row.text("vod_id")
+            check(returnedId.isBlank() || returnedId == key) { "GiriGiriLove 返回的作品身份不一致。" }
             val roads = row.text("vod_play_from").split("$$$")
             val groups = row.text("vod_play_url").split("$$$")
             if (roads.size != groups.size) throw AnimeSourceException(id, AnimeSourceStage.CATALOG, "GiriGiriLove 线路数据不完整，请刷新后重试。")
@@ -418,7 +420,9 @@ private class GiriGiriProvider : RoutedAnimeProvider() {
             }
             requireEpisodes(title.copy(title = row.text("vod_name").ifBlank { title.title },
                 coverUrl = sourceCover(homeUrl, row.text("vod_pic")).ifBlank { title.coverUrl },
-                year = row.positiveInt("vod_year") ?: title.year), episodes)
+                year = row.positiveInt("vod_year") ?: title.year,
+                externalIds = (title.externalIds - "girigiri") + if (returnedId == key)
+                    mapOf("girigiri" to key) else emptyMap()), episodes)
         } finally { http.close() }
     }
 }
