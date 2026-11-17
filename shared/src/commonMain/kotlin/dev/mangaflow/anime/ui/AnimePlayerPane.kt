@@ -357,7 +357,10 @@ private fun AnimeVideoStatus(resolving: Boolean, autoMatching: Boolean, failure:
         }
         playback.phase == AnimePlayerPhase.IDLE -> PlayerStageMessage("正在准备播放", null)
         playback.phase == AnimePlayerPhase.OPENING -> PlayerStageMessage("正在打开视频", "等待播放器准备")
-        playback.phase == AnimePlayerPhase.READY && playback.firstFrameRendered == false -> PlayerStageMessage("等待视频画面", null)
+        playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && playback.hasVideoTracks == false ->
+            PlayerStageMessage("当前仅识别到音轨", "未发现视频轨道")
+        playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && playback.firstFrameRendered == false ->
+            PlayerStageMessage("等待视频画面", if (playback.playWhenReady) "尚未收到首帧" else "播放已暂停")
         playback.isBuffering -> PlayerStageMessage("正在缓冲", if (playback.bufferedAheadMs >= 0L)
             "前方缓冲 " + animeTime(playback.bufferedAheadMs) else "等待视频数据")
         playback.ended -> Column(horizontalAlignment = Alignment.CenterHorizontally,

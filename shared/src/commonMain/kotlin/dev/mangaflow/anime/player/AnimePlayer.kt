@@ -93,6 +93,10 @@ data class AnimePlayerState(
     val videoEnhancement: AnimeVideoEnhancementState = AnimeVideoEnhancementState(),
     /** A local renderer failure is not evidence that another provider should be selected. */
     val sourceRecoveryAllowed: Boolean = true,
+    /** null until track discovery; false requires observed audio tracks and no video group. */
+    val hasVideoTracks: Boolean? = null,
+    /** Native playback is temporarily suppressed, for example by audio focus loss. */
+    val playbackSuppressed: Boolean = false,
 ) {
     val ended: Boolean get() = phase == AnimePlayerPhase.ENDED
     val isPlaying: Boolean get() = phase == AnimePlayerPhase.READY && playWhenReady && !isBuffering

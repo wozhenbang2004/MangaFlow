@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.AudioAttributes
@@ -127,6 +128,8 @@ internal class AndroidAnimePlayer(
     private var bufferingPosition = 0L
     private var bufferingEnd = 0L
     private var bufferingTimedOut = false
+    private var nativeFrameWaitSince: Long? = null
+    private val videoHosts = mutableSetOf<Any>()
     private val trackBindings = mutableMapOf<String, Pair<TrackGroup, Int>>()
     private var trackGroups = emptyList<TrackGroup>()
     private var trackRevision = 0L
@@ -403,6 +406,7 @@ internal class AndroidAnimePlayer(
             while (isActive && isCurrent(generation)) {
                 synchronize(generation, exo)
                 checkBufferingProgress(generation, exo)
+                checkNativeFrameRecovery(generation, exo)
                 delay(250L)
             }
         }
@@ -520,6 +524,41 @@ internal class AndroidAnimePlayer(
         fail(generation, IOException("原生画面未能恢复，请重试当前媒体", failure), sourceRecoveryAllowed = false)
     }
 
+    internal fun updateVideoHost(token: Any, hasSize: Boolean) {
+        if (hasSize) videoHosts.add(token) else videoHosts.remove(token)
+        if (videoHosts.isEmpty()) nativeFrameWaitSince = null
+    }
+
+    /** Only the already-started local graphics fallback is bounded here, never source health. */
+    private fun checkNativeFrameRecovery(generation: Long, exo: ExoPlayer) {
+        if (!isCurrent(generation) || engine.value !== exo) return
+        val audioOnly = state.value.hasVideoTracks == false && exo.currentTracks.groups.any { group ->
+            group.type == C.TRACK_TYPE_AUDIO && (0 until group.length).any(group::isTrackSelected)
+        }
+        if (nativeVideoOnly && !nativeVideoRestored && !nativeVideoRecoveryFailed &&
+            exo.playbackState == Player.STATE_READY && exo.isPlaying && audioOnly) {
+            // Audio-only media cannot produce a video first frame. Do not synthesize one.
+            nativeVideoRestored = true
+            nativeFrameWaitSince = null
+            return
+        }
+        val selectedVideo = exo.currentTracks.groups.any { group ->
+            group.type == C.TRACK_TYPE_VIDEO && (0 until group.length).any(group::isTrackSelected)
+        }
+        if (!nativeVideoOnly || nativeVideoRestored || nativeVideoRecoveryPending || nativeVideoRecoveryFailed ||
+            bufferingTimedOut || recovery?.isActive == true || videoHosts.isEmpty() || !selectedVideo ||
+            !(foreground || state.value.inPictureInPicture) || !exo.playWhenReady ||
+            exo.playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE ||
+            exo.playbackState != Player.STATE_READY || exo.playerError != null) {
+            nativeFrameWaitSince = null
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        val since = nativeFrameWaitSince ?: now.also { nativeFrameWaitSince = it }
+        if (now - since >= 30_000L)
+            failNativeVideoRecovery(generation, IOException("原生画面恢复未收到首帧"))
+    }
+
     private fun resetBufferingObservation() {
         bufferingSince = null
         bufferingProgressAt = 0L
@@ -529,7 +568,7 @@ internal class AndroidAnimePlayer(
     private fun checkBufferingProgress(generation: Long, exo: ExoPlayer) {
         if (!isCurrent(generation) || engine.value !== exo || bufferingTimedOut) return
         if (localLease != null || nativeVideoRecoveryPending || nativeVideoRecoveryFailed ||
-            (nativeVideoOnly && !nativeVideoRestored) || recovery?.isActive == true ||
+            recovery?.isActive == true ||
             !(foreground || state.value.inPictureInPicture) || !exo.playWhenReady ||
             exo.playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE ||
             exo.playerError != null || exo.playbackState != Player.STATE_BUFFERING) {
@@ -558,9 +597,11 @@ internal class AndroidAnimePlayer(
         catch (_: Exception) { /* A native stop failure must not hide the observed timeout. */ }
         finally {
             if (!cancelled && isCurrent(generation) && engine.value === exo) {
-                fail(generation, IOException(if (now - bufferingProgressAt >= 30_000L)
+                val timeout = IOException(if (now - bufferingProgressAt >= 30_000L)
                     "这条线路缓冲已持续 30 秒没有数据或播放进展，请重试或换个来源"
-                    else "这条线路持续缓冲超过 2 分钟，暂未达到起播条件，请重试或换个来源"))
+                    else "这条线路持续缓冲超过 2 分钟，暂未达到起播条件，请重试或换个来源")
+                if (nativeVideoOnly && !nativeVideoRestored) failNativeVideoRecovery(generation, timeout)
+                else fail(generation, timeout)
             }
         }
     }
@@ -595,6 +636,7 @@ internal class AndroidAnimePlayer(
                 bufferedMs = exo.bufferedPosition.takeIf { it != C.TIME_UNSET && it >= 0 } ?: -1L,
                 speed = exo.playbackParameters.speed,
                 isBuffering = exo.playbackState == Player.STATE_BUFFERING,
+                playbackSuppressed = exo.playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE,
                 error = null,
                 notice = if (phase == AnimePlayerPhase.READY && exo.playbackState != Player.STATE_BUFFERING &&
                     previous.notice == recoveryNotice) null else previous.notice,
@@ -708,7 +750,12 @@ internal class AndroidAnimePlayer(
                 } }, format.language, group.isTrackSelected(index))
             }
         }
-        publish(generation) { it.copy(tracks = choices) }
+        val hasVideo = when {
+            tracks.groups.any { it.type == C.TRACK_TYPE_VIDEO } -> true
+            tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO } -> false
+            else -> null
+        }
+        publish(generation) { it.copy(tracks = choices, hasVideoTracks = hasVideo) }
     }
 
     override fun selectTrackNative(kind: AnimeTrackKind, id: String?) {
@@ -748,6 +795,7 @@ internal class AndroidAnimePlayer(
 
     override fun setForegroundNative(foreground: Boolean, backgroundAudio: Boolean) {
         resetBufferingObservation()
+        nativeFrameWaitSince = null
         val exo = engine.value ?: return
         val videoDisabled = !foreground && backgroundAudio
         if ((C.TRACK_TYPE_VIDEO in exo.trackSelectionParameters.disabledTrackTypes) != videoDisabled) {
@@ -793,7 +841,10 @@ internal class AndroidAnimePlayer(
     override fun setPlayingNative(playing: Boolean) {
         engine.value?.playWhenReady = playing
     }
-    override fun seekNative(positionMs: Long) { resetBufferingObservation(); engine.value?.seekTo(positionMs) }
+    override fun seekNative(positionMs: Long) {
+        resetBufferingObservation(); nativeFrameWaitSince = null
+        engine.value?.seekTo(positionMs)
+    }
     override fun setSpeedNative(speed: Float): Float {
         val exo = engine.value ?: return speed
         exo.setPlaybackSpeed(speed)
@@ -802,6 +853,7 @@ internal class AndroidAnimePlayer(
     override fun releaseNative() {
         resetBufferingObservation()
         bufferingTimedOut = false
+        nativeFrameWaitSince = null
         recovery?.cancel()
         recovery = null
         recoveryNotice = null
@@ -914,6 +966,12 @@ actual fun AnimePlayerSurface(player: AnimePlayer, modifier: Modifier) {
             if (activity != null) android.detachActivity(activity)
         }
     }
+    val hostToken = remember(android) { Any() }
+    var hostHasSize by remember(android) { mutableStateOf(false) }
+    DisposableEffect(android, hostToken, hostHasSize) {
+        android.updateVideoHost(hostToken, hostHasSize)
+        onDispose { android.updateVideoHost(hostToken, false) }
+    }
     var cues by remember(exo) { mutableStateOf(exo?.currentCues ?: CueGroup.EMPTY_TIME_ZERO) }
     DisposableEffect(exo) {
         val observer = object : Player.Listener {
@@ -922,7 +980,9 @@ actual fun AnimePlayerSurface(player: AnimePlayer, modifier: Modifier) {
         exo?.addListener(observer)
         onDispose { exo?.removeListener(observer) }
     }
-    Box(modifier.background(Color.Black).clipToBounds()) {
+    Box(modifier.background(Color.Black).clipToBounds().onSizeChanged {
+        hostHasSize = it.width > 0 && it.height > 0
+    }) {
         ContentFrame(player = exo, modifier = Modifier.fillMaxSize(), contentScale = when (state.videoScale) {
             AnimeVideoScale.FIT -> ContentScale.Fit
             AnimeVideoScale.FILL -> ContentScale.FillBounds

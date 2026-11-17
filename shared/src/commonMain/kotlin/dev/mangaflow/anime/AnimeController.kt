@@ -1706,7 +1706,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 checkpoint(owner, snapshot, force = snapshot.phase != lastSavedPhase || snapshot.ended || !snapshot.playWhenReady)
                 if (snapshot.phase == AnimePlayerPhase.ERROR) {
                     val historyKey = playbackHistoryKey(owner.detail.subject.id, owner.episode.id, owner.option)
-                    if (historyKey != null && owner.asset.route == historyKey.route &&
+                    if (snapshot.sourceRecoveryAllowed && historyKey != null && owner.asset.route == historyKey.route &&
                         owner.sourceRevision == sourceRevision(owner.option.sourceId) &&
                         playbackOptions(owner.episode.id, automatic = owner.automaticIntent).any { it == owner.option && it.confirmed })
                         rememberPlaybackFailure(historyKey)
@@ -1714,8 +1714,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     if (!owner.recoveryHandled) { owner.recoveryHandled = true; recoverPlayback(owner) }
                 }
                 if (!owner.stableRecoveryReset) {
-                    if (snapshot.isPlaying && !snapshot.isBuffering && snapshot.phase == AnimePlayerPhase.READY &&
-                        snapshot.firstFrameRendered != false) {
+                    if (snapshot.isPlaying && !snapshot.playbackSuppressed && !snapshot.isBuffering && snapshot.phase == AnimePlayerPhase.READY &&
+                        (snapshot.firstFrameRendered != false || snapshot.hasVideoTracks == false)) {
                         val since = owner.stablePlaybackSince ?: monotonicTimeMillis().also { owner.stablePlaybackSince = it }
                         if (monotonicTimeMillis() - since >= 30_000L) {
                             owner.stableRecoveryReset = true
