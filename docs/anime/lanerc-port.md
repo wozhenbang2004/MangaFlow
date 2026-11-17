@@ -257,3 +257,11 @@ source-revision, cancellation and delayed-start checks remain in force. Historie
 are in-memory only and bounded to 256 entries per map; no health/speed claims,
 persistent blacklist or background media requests were introduced. Admission captures the exact candidate, source revisions and route; configuration changes and stale identities never add a failure penalty to the new route. Invalid route settings have no sortable history key and fail only that candidate inside resolution, without aborting healthy sources or substituting a direct/system route. Static review
 is required; no local builds or automated tests are run for this slice.
+
+### Unreadable local library must not block online details · 2026-11-17
+
+Observed user image `1000121989.jpg` shows the Bangumi work《你好 我是受心上人所托来做恋爱药的魔女》with zero episodes, disabled playback and the local-library read-failure message. Source tracing confirms `awaitReady()` rejected before the metadata request, and also gated native catalogues, source aggregation and playback resolution. The screenshot does not establish disk exhaustion or the underlying JSON/I/O failure.
+
+Loading completion is now separate from writable readiness. On failed reads, the original document stays untouched and the store exposes an explicit read-unavailable session. Only native/automatic playback associations can populate that session in memory; old favourites, progress, exclusions and manual bindings remain unknown, not recovered or deleted. Metadata, catalogue and playback resolution can proceed. Progress checkpoints are explicitly unsaved, including the outgoing-playback checkpoint, so the damaged library cannot block starting or changing episodes. Persistent edits, export and tracking remain write-gated. Existing explicit validated backup restore replaces the session and increments restore authority, cancelling old playback and requiring the detail to reopen. No automatic restore, reset or overwrite was added.
+
+Detail and library views retain an explicit local-data warning; unread records are not presented as an empty collection or a known unfollowed status. No local builds, tests, probes or playback verification were run. Source review and ordinary CI remain distinct from installed acceptance; diagnosing the original read failure remains open without device evidence.

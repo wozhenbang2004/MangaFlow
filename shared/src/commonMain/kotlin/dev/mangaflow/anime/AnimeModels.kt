@@ -228,6 +228,7 @@ data class AnimePlaybackSettings(
 }
 
 data class AnimeScreenState(
+    val libraryReadUnavailable: Boolean = false,
     val discoveryTab: AnimeDiscoveryTab = AnimeDiscoveryTab.HOME,
     val discoverySections: List<AnimeDiscoverySection> = emptyList(),
     val discoveryFeeds: Map<String, AnimeDiscoveryFeed> = emptyMap(),

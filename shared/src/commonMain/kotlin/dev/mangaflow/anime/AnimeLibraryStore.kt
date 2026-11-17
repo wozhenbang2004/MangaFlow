@@ -43,6 +43,8 @@ internal data class AnimeLibraryState(
     val discoveryColumns: Int? = null,
     /** Process-local authority. Old playback cannot write through a backup replacement. */
     val restoreEpoch: Long = 0L,
+    /** No persisted records are known; entries/bindings are session-only playback associations. */
+    val readUnavailable: Boolean = false,
 )
 
 /** One atomic document owns watch state and reviewed associations, including their undo receipt. */
@@ -65,13 +67,16 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             } catch (failure: Exception) {
                 // A damaged file is retained. No mutation may overwrite it with an empty library.
                 readFailure = failure
+                mutableState.value = AnimeLibraryState(readUnavailable = true)
             } finally { ready.complete(Unit) }
         }
     }
 
+    suspend fun awaitLoaded() { ready.await() }
+
     suspend fun awaitReady() {
         ready.await()
-        check(readFailure == null) { "追番记录未能读取，原文件已保留；请检查存储空间后重启。" }
+        check(readFailure == null) { "本地追番记录读取失败，原文件已保留；当前不能保存修改。请检查存储空间或通过备份恢复。" }
     }
 
     suspend fun edit(
@@ -81,7 +86,21 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         editBindings: (List<AnimeSourceBinding>) -> List<AnimeSourceBinding> = { it },
         transform: (AnimeLibraryEntry) -> AnimeLibraryEntry = { it },
     ): AnimeLibraryEntry {
-        awaitReady()
+        return editInternal(subject, expectedRevision, rememberUndo, editBindings, transform, sessionAllowed = false)
+    }
+
+    /** Online identity discovery may continue without claiming to recover any old user choices. */
+    suspend fun editPlaybackAssociation(
+        subject: AnimeSubject,
+        editBindings: (List<AnimeSourceBinding>) -> List<AnimeSourceBinding>,
+    ): AnimeLibraryEntry = editInternal(subject, null, false, editBindings, { it }, sessionAllowed = true)
+
+    private suspend fun editInternal(
+        subject: AnimeSubject, expectedRevision: Long?, rememberUndo: Boolean,
+        editBindings: (List<AnimeSourceBinding>) -> List<AnimeSourceBinding>,
+        transform: (AnimeLibraryEntry) -> AnimeLibraryEntry, sessionAllowed: Boolean,
+    ): AnimeLibraryEntry {
+        if (sessionAllowed) awaitLoaded() else awaitReady()
         return writer.withLock {
             val before = mutableState.value
             val previous = before.entries[subject.id]
@@ -101,7 +120,10 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
                 undo = if (rememberUndo) AnimeUndo(subject.id, previous,
                     before.bindings.filter { it.subjectId == subject.id }, changed.revision) else before.undo,
             )
-            persist(next)
+            if (readFailure != null) {
+                check(sessionAllowed)
+                mutableState.value = next
+            } else persist(next)
             changed
         }
     }
@@ -110,15 +132,16 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         subject: AnimeSubject,
         progress: AnimeWatchProgress,
         isCurrent: () -> Boolean,
-    ) {
-        awaitReady()
-        writer.withLock {
-            if (!isCurrent()) return@withLock
+    ): Boolean {
+        awaitLoaded()
+        if (state.value.readUnavailable) return false
+        return writer.withLock {
+            if (!isCurrent()) return@withLock false
             val before = mutableState.value
-            if (progress.updatedAt <= (before.clearedHistoryAt[subject.id] ?: -1L)) return@withLock
+            if (progress.updatedAt <= (before.clearedHistoryAt[subject.id] ?: -1L)) return@withLock false
             val entry = before.entries[subject.id] ?: AnimeLibraryEntry(subject)
             val previous = before.progress[progress.episodeId]
-            if (previous != null && previous.updatedAt > progress.updatedAt) return@withLock
+            if (previous != null && previous.updatedAt > progress.updatedAt) return@withLock false
             val completed = entry.completedEpisodeIds + if (progress.completed) setOf(progress.episodeId) else emptySet()
             val changed = entry.copy(
                 subject = subject, resume = progress, completedEpisodeIds = completed,
@@ -127,6 +150,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             )
             persist(before.copy(entries = before.entries + (subject.id to changed),
                 progress = before.progress + (progress.episodeId to progress)))
+            true
         }
     }
 
@@ -194,8 +218,11 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         val validated = decode(document.toString())
         ready.await()
         writer.withLock {
-            persist(validated.copy(undo = null, restoreEpoch = mutableState.value.restoreEpoch + 1))
-            readFailure = null
+            // Publication and clearing the read fault are one commit even if the caller leaves.
+            withContext(NonCancellable) {
+                persist(validated.copy(undo = null, restoreEpoch = mutableState.value.restoreEpoch + 1))
+                readFailure = null
+            }
         }
     }
 

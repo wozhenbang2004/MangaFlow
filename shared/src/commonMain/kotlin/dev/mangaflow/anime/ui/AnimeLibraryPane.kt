@@ -148,7 +148,12 @@ internal fun AnimeLibrary(
             if (state.reviews.isNotEmpty()) item(key = "reviews") {
                 AnimeSelection("待核对 " + state.reviews.size + " 项", "状态与已看集数逐项选择", false, onReview)
             }
-            if (entries.isEmpty()) item(key = "empty-library") {
+            if (state.libraryReadUnavailable) item(key = "library-unavailable") {
+                AnimeMessage("本地追番记录暂不可用",
+                    "原文件已保留，这不代表收藏或历史为空。可以继续浏览和播放，但本次进度不会保存。请检查存储空间或通过备份恢复。",
+                    action = "去发现", onAction = onDiscover)
+            }
+            if (entries.isEmpty() && !state.libraryReadUnavailable) item(key = "empty-library") {
                 val filtered = filter != 0 || folder != null
                 AnimeMessage(if (state.library.isEmpty()) "你的追番从这里开始"
                     else if (filtered) "当前筛选下没有番剧" else "这里还没有番剧",

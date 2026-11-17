@@ -95,7 +95,7 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
                         if (state.detailFromCache) AnimeQuietLabel(if (state.detailLoading) "已保存的资料 · 正在更新" else "已保存的资料")
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             MotionTextButton(onClick = { controller.setFollowed(subject, entry?.followed != true) },
-                                modifier = Modifier.heightIn(min = 44.dp)) {
+                                modifier = Modifier.heightIn(min = 44.dp), enabled = !state.libraryReadUnavailable) {
                                 Icon(if (entry?.followed == true) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder,
                                     null, Modifier.size(17.dp))
                                 Spacer(Modifier.width(6.dp))
@@ -122,8 +122,9 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
                             maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                     Box {
-                        MotionTextButton(onClick = { statusOpen = true }, modifier = Modifier.heightIn(min = 44.dp)) {
-                            Text(animeStatusLabel(entry?.status))
+                        MotionTextButton(onClick = { statusOpen = true }, modifier = Modifier.heightIn(min = 44.dp),
+                            enabled = !state.libraryReadUnavailable) {
+                            Text(if (state.libraryReadUnavailable) "记录未读取" else animeStatusLabel(entry?.status))
                             Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
                         }
                         CompactGlassPopover(statusOpen, backdrop = backdrop,
@@ -144,6 +145,10 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
                         }
                     }
                 }
+            }
+            if (state.libraryReadUnavailable) item(key = "library-read-warning") {
+                AnimeMessage("临时浏览 · 不保存进度",
+                    "本地追番记录未能读取，原文件已保留。旧收藏、续看和来源选择暂不可用；本次自动匹配仅在当前会话生效，不覆盖旧记录。可继续浏览和播放；请检查存储空间或通过备份恢复。")
             }
             if (state.detailLoading) item(key = "episode-loading") {
                 AnimeMessage("正在载入集数", "已保存的作品与续看记录会保留。")

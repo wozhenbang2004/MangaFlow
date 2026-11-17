@@ -185,6 +185,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             detailError = if (it.detail != null) "本机记录已恢复，请重新打开番剧以读取恢复后的关联。" else null) }
                     }
                     mutableState.update { it.copy(
+                        libraryReadUnavailable = stored.readUnavailable,
                         library = stored.entries.values.sortedWith(compareByDescending<AnimeLibraryEntry> { entry -> entry.pinned }
                             .thenByDescending { entry -> entry.updatedAt }),
                         settings = stored.settings,
@@ -618,7 +619,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (subject.externalIds["native-source"] != null) {
             detailJob = scope.launch {
                 try {
-                    library.awaitReady()
+                    library.awaitLoaded()
                     sources.extensions.ready.await()
                     val sourceId = subject.externalIds.getValue("native-source")
                     val saved = library.state.value.bindings.firstOrNull { it.subjectId == subject.id && it.catalog.sourceId == sourceId }
@@ -652,7 +653,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             ?: AnimeSourceBinding(subject.id, reference.copy(sourceRevision = revision), preferred = true, selectedGroup = group, automatic = true)
                     if (!preserveSaved) {
                         // Intrinsic native ownership only, never a guessed Bangumi/cross-source association.
-                        library.edit(subject, rememberUndo = false, editBindings = {
+                        library.editPlaybackAssociation(subject, editBindings = {
                             check(currentDetail(generation, subject.id) && library.state.value.restoreEpoch == openingRestoreEpoch &&
                                 discoverySourceRevision(sourceId) == revision && sources.provider(sourceId) != null) {
                                 "来源或页面已经变化，请重新打开。"
@@ -686,7 +687,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         // Source catalogues have independent ownership and do not wait for the metadata service.
         boundCatalogJob = scope.launch {
-            try { library.awaitReady(); sources.extensions.ready.await()
+            try { library.awaitLoaded(); sources.extensions.ready.await()
                 if (currentDetail(generation, subject.id)) startSourceAggregation(AnimeDetail(subject, emptyList()))
             }
             catch (cancel: CancellationException) { throw cancel }
@@ -701,7 +702,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         detailJob = scope.launch {
             try {
-                library.awaitReady()
+                library.awaitLoaded()
                 metadata.cachedDetail(subject)?.let { cached ->
                     if (!currentDetail(generation, subject.id)) return@launch
                     mutableState.update { it.copy(detail = cached, detailFromCache = true) }
@@ -1144,7 +1145,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             report(AnimeAssociationPhase.QUEUED)
             associationJobs[sourceId] = scope.launch {
                 try {
-                    library.awaitReady()
+                    library.awaitLoaded()
                     if (!current()) return@launch
                     if (sourceId in library.state.value.entries[detail.subject.id]?.excludedSourceIds.orEmpty()) {
                         report(AnimeAssociationPhase.EXCLUDED, "已按你的选择解除，不会自动重新关联。")
@@ -1217,7 +1218,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 return@aggregation true
                             }
                             if (!current()) return@aggregation false
-                            library.edit(detail.subject, rememberUndo = false, editBindings = { bindings ->
+                            library.editPlaybackAssociation(detail.subject, editBindings = { bindings ->
                                 check(current() && sourceId !in library.state.value.entries[detail.subject.id]?.excludedSourceIds.orEmpty()) {
                                     "来源选择已变化，自动关联已停止。"
                                 }
@@ -1333,7 +1334,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             pendingPlayback = null, autoPlaySelectionEpisodeId = null) }
         autoPlayJob = scope.launch {
             try {
-                library.awaitReady(); sources.extensions.ready.await()
+                library.awaitLoaded(); sources.extensions.ready.await()
                 if (generation != autoPlayGeneration || !currentDetail(owner, detail.subject.id)) return@launch
                 startSourceAggregation(detail)
                 val remaining = autoPlaybackDeadline - wallTimeMillis()
@@ -1391,7 +1392,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             var admissionKey: PlaybackHistoryKey? = null
             var admissionStillCurrent: (() -> Boolean)? = null
             try {
-                library.awaitReady()
+                library.awaitLoaded()
                 suspend fun resolveOption(candidate: AnimeEpisodeOption): Triple<AnimeEpisodeOption, AnimePlaybackAsset, String?> {
                     check(playbackOptions(episodeId, automatic = option == null).any { it == candidate && it.confirmed }) {
                         "本集来源关联已变化。"
@@ -1670,6 +1671,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     private suspend fun saveCurrentPlayback() {
         val owner = active ?: return
+        if (library.state.value.readUnavailable) return
         val snapshot = playerInstance?.state?.value ?: return
         if (!belongsTo(owner, snapshot) || snapshot.phase !in setOf(AnimePlayerPhase.READY, AnimePlayerPhase.ENDED)) return
         library.checkpoint(owner.detail.subject, progress(owner, snapshot)) {
@@ -1731,6 +1733,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     private fun checkpoint(owner: ActivePlayback, snapshot: AnimePlayerState, force: Boolean) {
+        if (library.state.value.readUnavailable) return
         if (!belongsTo(owner, snapshot) || snapshot.phase != AnimePlayerPhase.READY && snapshot.phase != AnimePlayerPhase.ENDED) return
         val now = wallTimeMillis()
         if (!force && now - lastCheckpointAt < 5_000L) return
@@ -1742,10 +1745,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val progress = progress(owner, snapshot)
         scope.launch {
             try {
-                library.checkpoint(owner.detail.subject, progress) {
+                val saved = library.checkpoint(owner.detail.subject, progress) {
                     playbackEpochs[owner.detail.subject.id] == owner.epoch && library.state.value.restoreEpoch == owner.libraryEpoch
                 }
-                if (ended) owner.endedSaved = true
+                if (ended && saved) owner.endedSaved = true
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 if (active === owner) { lastCheckpointAt = 0L; lastSavedPosition = -1L; lastSavedPhase = null }
@@ -1869,7 +1872,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         mutableState.update { it.copy(resolving = true, sourceError = null) }
         resolveJob = scope.launch {
             try {
-                library.awaitReady()
+                library.awaitLoaded()
                 val offline = downloads.playback(id)
                 check(fallback == null || offline.subject.id == fallback.subject.id &&
                     offline.episode.id == fallback.resume?.episodeId && offline.asset.id == fallback.resume?.assetId) {

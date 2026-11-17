@@ -621,7 +621,8 @@ private fun NextWorkRow(next: ReaderNextChapterPreparation, maximum: Long, expan
         next.failedPages > 0 || next.phase == ReaderNextChapterPreparationPhase.FAILED,
         next.queuedPages.toLong() + if (next.manifestQueued) 1L else 0L,
         next.originalReadyPages.toLong().takeIf { next.requestedPages > 0 }, next.deferredPages.toLong(), next.failedPages.toLong(),
-        completedLabel = "原图已备", onToggle = onToggle)
+        completedLabel = "原图已备", phaseDeferred = next.phase == ReaderNextChapterPreparationPhase.DEFERRED,
+        onToggle = onToggle)
 }
 
 @Composable
@@ -663,7 +664,8 @@ private fun StatusMetricSlots(reserve: String, modifier: Modifier = Modifier, co
 @Composable
 private fun WorkDisclosure(icon: ImageVector, title: String, active: Long, maximum: Long, summary: String,
     expanded: Boolean, enabled: Boolean, hasFailure: Boolean, queued: Long, completed: Long?, deferred: Long,
-    failed: Long, known: Boolean = true, completedLabel: String = "阶段完成", onToggle: () -> Unit) {
+    failed: Long, known: Boolean = true, completedLabel: String = "阶段完成",
+    phaseDeferred: Boolean = false, onToggle: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val status = mangaStatusColors()
     val reserve = "8".repeat(maxOf(active, maximum, 1L).toString().length)
@@ -678,6 +680,10 @@ private fun WorkDisclosure(icon: ImageVector, title: String, active: Long, maxim
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Icon(icon, null, Modifier.size(18.dp), tint = if (expanded) colors.primary else colors.onSurfaceVariant)
                 Text(title, Modifier.weight(1f).padding(horizontal = 7.dp), style = MaterialTheme.typography.labelLarge)
+                if (known && phaseDeferred) {
+                    StatusToken(Icons.Outlined.Pause, "准备阶段", "暂缓", status.waiting)
+                    Spacer(Modifier.width(8.dp))
+                }
                 StatusCounter(Icons.Outlined.PlayArrow, active.takeIf { known }, "实际并发",
                     color = if (known && active > 0L) status.activity else status.neutral, reserve = reserve)
                 Box(Modifier.width(19.dp), contentAlignment = Alignment.CenterEnd) {
@@ -719,6 +725,7 @@ private fun workSummary(state: ReaderPreparationState, work: ReaderWork): String
 }
 
 private fun nextWorkSummary(next: ReaderNextChapterPreparation): String = when {
+    next.phase == ReaderNextChapterPreparationPhase.DEFERRED -> next.reason ?: "下一话准备暂缓"
     next.originalReadyPages > 0 -> "原图已备 ${next.originalReadyPages}/${next.requestedPages}" +
         if (next.failedPages > 0) " · ${next.failedPages} 页失败" else ""
     next.manifestQueued -> next.reason ?: "目录请求排队"

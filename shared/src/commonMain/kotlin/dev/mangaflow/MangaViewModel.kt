@@ -2801,6 +2801,25 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                                     withTimeout(manifestSeconds.toLong() * 1_000L) { repository.pages(owner, chapter.id) }
                                 }
                             }
+                        } catch (_: TimeoutCancellationException) {
+                            // A failed directory attempt must not terminate the policy observer. The
+                            // reader has already submitted this chapter once; a real policy change
+                            // (including off/on) can retry it without an automatic retry loop.
+                            currentCoroutineContext().ensureActive()
+                            if (!currentSession()) throw CancellationException("下一话准备已更新")
+                            _nextChapterPreparation.value = initial.copy(
+                                phase = ReaderNextChapterPreparationPhase.DEFERRED,
+                                reason = "下一话目录准备等待超时")
+                            return@collectLatest
+                        } catch (cancel: CancellationException) {
+                            throw cancel
+                        } catch (_: Exception) {
+                            currentCoroutineContext().ensureActive()
+                            if (!currentSession()) throw CancellationException("下一话准备已更新")
+                            _nextChapterPreparation.value = initial.copy(
+                                phase = ReaderNextChapterPreparationPhase.FAILED,
+                                reason = "下一话目录准备失败，翻章时可重试")
+                            return@collectLatest
                         } finally {
                             _nextChapterPreparation.update { value -> if (!currentSession()) value else
                                 value?.copy(manifestQueued = false, manifestActive = false) }
