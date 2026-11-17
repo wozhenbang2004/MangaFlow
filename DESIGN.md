@@ -3613,3 +3613,12 @@ Source/whitespace review only. No local build, automated tests or runtime UI acc
 - 已查看用户青之芦苇第二季截图：原生目录集名被同时当主标题和副标题，01–07集重复；播放解析失败信息为另一真实问题。
 - 播放器只省略与主标签等价的副标题（空白、纯数字集号前导零及集/话写法）；真实剧情标题保留。原生来源名称、集号、目录身份与映射不改。详情无障碍描述同步去重。
 - 解析错误、重试及换源入口完全保留。本改动不是播放修复；仅静态检查，未运行构建或设备验收。
+
+## Default route versus explicit category choice · 2026-11-17
+
+User (Sentinel_46e12f4a0754819183c1948f4f0c96f4): “bug 一大堆默认线路是什么他妈东西我们按类型针对每种设置了不一样的后，切换了默认线路后就又全部重置了”. Screenshot 1000121982.jpg shows Network & downloads → Connection with the default Direct/Proxy selector and a separate Categories tab.
+
+- ROUTE-INHERIT-01: The global default is a fallback, not an apply-to-all command. A category's explicit SYSTEM/DIRECT/PROXY value remains explicit even when equal to the global value. No migration, bulk rewrite, or inferred deletion of existing overrides is permitted.
+- ROUTE-INHERIT-02: Reuse the current RouteChoiceRow / Ovio Motion / retained glass popover. Show inherited categories as “默认 · [effective route]”; in their menu only “跟随默认” is selected. Direct/Proxy receive a check only for an explicit selection. Selecting either writes that exact category even when equal to the inherited route. Selecting “跟随默认” removes only that category override. The global heading states its fallback scope. Task-level inheritance stays scoped to the current task, including chapter tasks following the selected manga source.
+- Evidence at base 3ea24c7: setDefault writes only the `default` preference; setCategory writes/removes only `category.<name>`. Both backends merge editor changes, and the store serializes writes. Relay reads the complete settings and publishes a rule inventory, without writing route preferences. Auto-check applies a selected batch under a captured-settings identity guard; changes during checking invalidate that result. Periodic automatic optimization can separately update unlocked explicit rules after a fresh verified check. This existing policy and its lock controls are unchanged.
+- Confirmed defect: the old menu checked an effective Direct/Proxy value even when no category override existed, and offered no way to return to inheritance. Source inspection has **not reproduced loss of an already-persisted explicit category caused by the default button**; the user's report remains open for installed evidence. No local builds, tests, probes or UI automation were run. Updated UI and persistence behavior are pending actual device feedback; this patch must not be described as a verified data-reset fix.
