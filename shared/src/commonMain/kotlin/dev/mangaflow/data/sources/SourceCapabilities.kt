@@ -13,6 +13,7 @@ data class SourceCapabilities(
     val passwordLogin: Boolean = true,
     val cookieFields: List<String> = emptyList(),
     val credentialLabel: String = "Cookie",
+    val websiteLoginDeclared: Boolean = false,
 ) {
     fun supports(feature: SourceFeature): Boolean = feature in features
 }

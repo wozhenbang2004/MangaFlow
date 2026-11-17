@@ -52,7 +52,12 @@ internal actual fun readerFilePath(uri: String): String? =
 internal actual suspend fun decodeNativeReaderRegion(
     path: String, bounds: IntRect, sampleSize: Int, runtime: ExperienceRuntimePreferences,
 ): ReaderRegion {
-    checkedReaderFile(path, runtime)
+    val file = checkedReaderFile(path, runtime)
+    // Bounds use display orientation, while BitmapRegionDecoder crops raw coordinates.
+    // Keep Coil's correctly oriented preview rather than overlaying misplaced detail tiles.
+    val orientation = ExifInterface(file).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+    if (orientation != ExifInterface.ORIENTATION_NORMAL && orientation != ExifInterface.ORIENTATION_UNDEFINED)
+        throw ReaderDetailUnavailable("此图带旋转或镜像标记，当前显示预览")
     val decoder = requireNotNull(BitmapRegionDecoder.newInstance(path, false)) { "原图区域暂时无法读取" }
     return try {
         ReaderRegion(requireNotNull(decoder.decodeRegion(android.graphics.Rect(bounds.left, bounds.top, bounds.right, bounds.bottom),

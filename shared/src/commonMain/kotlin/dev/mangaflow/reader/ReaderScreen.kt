@@ -1,4 +1,18 @@
+@file:OptIn(me.saket.telephoto.ExperimentalTelephotoApi::class)
+
 package dev.mangaflow.reader
+
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.PointerEventPass
+import me.saket.telephoto.zoomable.ZoomableState
+import me.saket.telephoto.zoomable.rememberZoomableState
+import me.saket.telephoto.zoomable.ZoomableContentLocation
+import me.saket.telephoto.zoomable.zoomable
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.LayoutDirection
+import dev.mangaflow.storage.PageTurnGesture
 
 import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.mangaFontFamily
@@ -156,6 +170,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.layout.onGloballyPositioned
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.imagePlatformContext
@@ -320,7 +335,7 @@ fun ReaderScreen(
     val globalPreferences by libraryStore.preferences.collectAsStateWithLifecycle()
     val mangaPreferences by libraryStore.mangaPreferences.collectAsStateWithLifecycle()
     val savedPreferences = remember(globalPreferences, mangaPreferences, manga.id) {
-        mangaPreferences[manga.id] ?: globalPreferences
+        (mangaPreferences[manga.id] ?: globalPreferences).copy(pageTurnGesture = globalPreferences.pageTurnGesture)
     }
     var collectionLayout by remember(manga.id, initialCollection?.key) { mutableStateOf<ReaderPreferences?>(null) }
     val preferences = remember(savedPreferences, presentedCollection, collectionLayout) {
@@ -728,6 +743,8 @@ fun ReaderScreen(
         }
     }
     fun updatePreferences(next: ReaderPreferences) {
+        if (next.pageTurnGesture != globalPreferences.pageTurnGesture)
+            libraryStore.updatePageTurnGesture(next.pageTurnGesture)
         // Persist only settings the user actually changed, never the collection's temporary layout.
         val saved = savedPreferences.copy(
             mode = if (next.mode != preferences.mode) next.mode else savedPreferences.mode,
@@ -2060,6 +2077,17 @@ private fun ChapterPages(
         val dragging by pager.interactionSource.collectIsDraggedAsState()
         LaunchedEffect(dragging) { if (dragging) readingNavigation() }
         val swipeReadyPages = remember { mutableStateMapOf<Int, Boolean>() }
+        val spreadCameras = remember { mutableStateMapOf<Int, ZoomableState>() }
+        val spreadPinches = remember { mutableStateMapOf<Int, ZoomableState>() }
+        fun spreadZoomed(index: Int): Boolean = spreadPinches.containsKey(index) || spreadCameras[index]?.let {
+            (it.zoomFraction ?: 0f) > .001f || it.isAnimationRunning
+        } == true
+        val pageLayoutDirection = LocalLayoutDirection.current
+        val swipeRightNext = when (preferences.pageTurnGesture) {
+            PageTurnGesture.FOLLOW_READING_ORDER -> preferences.mode == ReadingMode.RIGHT_TO_LEFT
+            PageTurnGesture.SWIPE_LEFT_NEXT -> false
+            PageTurnGesture.SWIPE_RIGHT_NEXT -> true
+        }
         val atEnd by remember(pager, groups) {
             derivedStateOf {
                 pager.settledPage == groups.lastIndex && pager.currentPage == groups.lastIndex &&
@@ -2071,12 +2099,13 @@ private fun ChapterPages(
         }
         val pull = rememberBottomPullLoadState(
             key = pager,
-            enabled = active && onNext != null && atEnd && endReady,
+            enabled = active && onNext != null && atEnd && endReady && !spreadZoomed(pager.currentPage),
             loading = false,
             canScrollForward = { !atEnd || !endReady },
             onLoadMore = { onNext?.invoke() },
             actionLabel = "进入下一话",
             orientation = Orientation.Horizontal,
+            towardStart = swipeRightNext,
         )
         LaunchedEffect(atEnd) { atEndChanged(atEnd) }
         LaunchedEffect(pager, groups) {
@@ -2128,21 +2157,54 @@ private fun ChapterPages(
         }
         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
             .bottomPullLoad(pull)) {
+            // Physical swipe direction is a user preference, not the OS layout direction.
+            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
             HorizontalPager(
                 state = pager,
                 modifier = Modifier.fillMaxSize().onSizeChanged { contentWidthPx = it.width },
-                reverseLayout = preferences.mode == ReadingMode.RIGHT_TO_LEFT,
+                reverseLayout = swipeRightNext,
+                userScrollEnabled = active && !spreadZoomed(pager.currentPage),
                 // The separate bounded warmer owns offscreen previews; the pager composes only its viewport.
                 beyondViewportPageCount = 0,
                 key = { index -> "image:${groups[index].first}" },
             ) { index ->
                 val group = groups.getOrNull(index)
-                if (group != null) {
+                val replacements = LocalReaderPageRepair.current?.state?.replacements
+                if (group != null) key(sourceId, headers, pages[group.first], group.second?.let { pages[it] }, preferences.mode,
+                    replacements?.get(group.first), group.second?.let { replacements?.get(it) },
+                    contentWidthPx, previewHeightPx) {
+                    CompositionLocalProvider(LocalLayoutDirection provides pageLayoutDirection) {
+                    val second = group.second
+                    val spreadZoom = rememberZoomableState()
+                    var spreadViewport by remember { mutableStateOf(IntSize.Zero) }
+                    val spreadSlots = remember { mutableStateMapOf<Int, IntRect>() }
+                    if (second != null && spreadViewport.width > 0 && spreadViewport.height > 0) {
+                        spreadZoom.contentScale = ContentScale.Fit
+                        spreadZoom.contentAlignment = Alignment.Center
+                        spreadZoom.setContentLocation(ZoomableContentLocation.scaledInsideAndCenterAligned(
+                            Size(spreadViewport.width.toFloat(), spreadViewport.height.toFloat())))
+                    }
+                    DisposableEffect(index, second, spreadZoom) {
+                        if (second != null) spreadCameras[index] = spreadZoom
+                        onDispose {
+                            if (spreadCameras[index] === spreadZoom) spreadCameras.remove(index)
+                            if (spreadPinches[index] === spreadZoom) spreadPinches.remove(index)
+                        }
+                    }
                     val renderImage: @Composable (Int, Modifier, Alignment) -> Unit = { imageIndex, modifier, alignment ->
-                        Box(modifier) {
+                        Box(modifier.onGloballyPositioned { coordinates ->
+                            if (second != null) {
+                                val position = coordinates.positionInParent()
+                                val x = position.x.roundToInt()
+                                val y = position.y.roundToInt()
+                                spreadSlots[imageIndex] = IntRect(x, y, x + coordinates.size.width, y + coordinates.size.height)
+                            }
+                        }) {
                             ReaderPage(
                                 pages[imageIndex], headers, sourceId = sourceId, resolvePage = resolvePage, retryPage = retryPage,
                                 observePageTransfer = observePageTransfer, paged = true, pagedAlignment = alignment, onTap = onTap,
+                                spreadViewport = if (second != null) ReaderSpreadViewport(spreadZoom, spreadViewport,
+                                    spreadSlots[imageIndex] ?: IntRect.Zero) else null,
                                 sourceAlternatives = sourceAlternatives, sourceName = sourceName,
                                 readySourceVariants = readySourceVariants, prefetchFailure = prefetchFailures[imageIndex],
                                 pageCount = pages.size, foreground = preferences.theme.foreground(), onShowControls = onShowControls,
@@ -2167,12 +2229,26 @@ private fun ChapterPages(
                             )
                         }
                     }
-                    val second = group.second
                     if (second != null) {
                         // Pair the image edges at the spine, leaving unused space outside the spread.
                         // Reading direction, rather than the system locale, selects the physical sides.
                         Row(
-                            Modifier.fillMaxSize(),
+                            Modifier.fillMaxSize().clipToBounds().onSizeChanged { spreadViewport = it }
+                                .pointerInput(spreadZoom, active) {
+                                    if (active) awaitEachGesture {
+                                        try {
+                                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                            do {
+                                                if (currentEvent.changes.count { it.pressed } >= 2) spreadPinches[index] = spreadZoom
+                                                if (currentEvent.changes.none { it.pressed }) break
+                                                awaitPointerEvent(PointerEventPass.Initial)
+                                            } while (true)
+                                        } finally {
+                                            if (spreadPinches[index] === spreadZoom) spreadPinches.remove(index)
+                                        }
+                                    }
+                                }
+                                .zoomable(spreadZoom, enabled = active && pager.currentPage == index, onClick = { onTap() }),
                             horizontalArrangement = Arrangement.Absolute.Left,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -2191,7 +2267,9 @@ private fun ChapterPages(
                     } else {
                         renderImage(group.first, Modifier.fillMaxSize(), Alignment.Center)
                     }
+                    }
                 }
+            }
             }
             if (atEnd) Box(Modifier.align(Alignment.BottomCenter)
                 .windowInsetsPadding(dev.mangaflow.reader.readerNavigationInsets().union(WindowInsets.displayCutout)
@@ -2873,6 +2951,7 @@ private fun ReaderPage(
     observePageTransfer: (Page) -> Flow<DownloadProgress?>,
     paged: Boolean,
     pagedAlignment: Alignment = Alignment.Center,
+    spreadViewport: ReaderSpreadViewport? = null,
     onTap: () -> Unit,
     onShowControls: () -> Unit,
     sourceName: String,
@@ -2944,7 +3023,7 @@ private fun ReaderPage(
                 onDimensionsKnown = { dimensions -> if (replacement == null) onDimensionsKnown(dimensions) },
                 deferResize = deferResize, visibleWindow = visibleWindow, isVisible = isVisible,
                 onLayoutReady = onLayoutReady, onChapterSwipeReadyChanged = onChapterSwipeReadyChanged,
-                logicalPageIndex = page.index,
+                logicalPageIndex = page.index, spreadViewport = spreadViewport,
                 onSourceFailure = { failure ->
                     if (replacement == null && failure != null && isReaderPrefetchFailure(failure)) {
                         repair?.controller?.failed(page.index)
@@ -3000,6 +3079,7 @@ private fun ReaderPageImage(
     onLayoutReady: (Boolean) -> Unit = {},
     onChapterSwipeReadyChanged: (Boolean) -> Unit = {},
     logicalPageIndex: Int = page.index,
+    spreadViewport: ReaderSpreadViewport? = null,
     onSourceFailure: (Throwable?) -> Unit = {},
     onSlowWaiting: (Boolean) -> Unit = {},
 ) {
@@ -3377,16 +3457,20 @@ private fun ReaderPageImage(
             if (request != null && !awaitingPrefetch && imageError == null && (pageVisible || loadedImage != null)) key(reload) {
                 if (paged) {
                     val imageState = rememberZoomableImageState()
-                    LaunchedEffect(imageState) {
+                    LaunchedEffect(imageState, spreadViewport?.zoom) {
                         snapshotFlow {
                             imageState.isImageDisplayed &&
-                                (imageState.zoomableState.zoomFraction ?: 0f) <= .001f &&
-                                !imageState.zoomableState.isAnimationRunning
+                                ((spreadViewport?.zoom ?: imageState.zoomableState).zoomFraction ?: 0f) <= .001f &&
+                                !(spreadViewport?.zoom ?: imageState.zoomableState).isAnimationRunning
                         }.distinctUntilChanged().collect { chapterSwipeReadyChanged(it) }
                     }
                     DisposableEffect(imageState) { onDispose { chapterSwipeReadyChanged(false) } }
                     key(detailRetry) {
-                        ZoomableAsyncImage(
+                        if (spreadViewport != null) PortableReaderZoomableImage(
+                            model = request, contentDescription = "第 ${logicalPageIndex + 1} 页", modifier = Modifier.fillMaxSize(),
+                            state = imageState, alignment = pagedAlignment, contentScale = ContentScale.Fit,
+                            gesturesEnabled = false, onClick = null, spread = spreadViewport,
+                        ) else ZoomableAsyncImage(
                             model = request,
                             state = imageState,
                             contentDescription = "第 ${logicalPageIndex + 1} 页",

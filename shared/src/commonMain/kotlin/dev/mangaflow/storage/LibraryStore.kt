@@ -1025,6 +1025,14 @@ class LibraryStore(context: Context) {
         disk.edit().putString("reader_preferences", next.toJson().toString()).apply()
     }
 
+    /** Physical page-turn preference belongs to the reader, never to an individual source/work. */
+    fun updatePageTurnGesture(gesture: PageTurnGesture): Unit = synchronized(lock) {
+        if (deferUntilReady { updatePageTurnGesture(gesture) }) return@synchronized
+        val next = _preferences.value.copy(pageTurnGesture = gesture)
+        _preferences.value = next
+        disk.edit().putString("reader_preferences", next.toJson().toString()).apply()
+    }
+
     /**
      * Reading layout is remembered per work; glass material follows the component's role,
      * not a global or per-manga preference.
@@ -1037,7 +1045,7 @@ class LibraryStore(context: Context) {
         updated[mangaId] = next
         _mangaPreferences.value = updated
         val root = JSONObject()
-        updated.forEach { (id, value) -> root.put(id, value.toJson()) }
+        updated.forEach { (id, value) -> root.put(id, value.toJson().apply { remove("pageTurnGesture") }) }
         disk.edit().putString(MANGA_READER_PREFERENCES_KEY, root.toString()).apply()
     }
 
@@ -1081,6 +1089,8 @@ class LibraryStore(context: Context) {
                 it.name == optString("panelDirection")
             } ?: dev.mangaflow.reader.panels.PanelDirection.RIGHT_TO_LEFT,
             panelLearnedOrder = optBoolean("panelLearnedOrder", false),
+            pageTurnGesture = PageTurnGesture.entries.firstOrNull { it.name == optString("pageTurnGesture") }
+                ?: PageTurnGesture.FOLLOW_READING_ORDER,
         )
     }
 
@@ -1105,6 +1115,7 @@ class LibraryStore(context: Context) {
         put("panelEngine", panelEngine.name)
         put("panelDirection", panelDirection.name)
         put("panelLearnedOrder", panelLearnedOrder)
+        put("pageTurnGesture", pageTurnGesture.name)
     }
 
     private fun readLegacyLongImageMigration(): Boolean {

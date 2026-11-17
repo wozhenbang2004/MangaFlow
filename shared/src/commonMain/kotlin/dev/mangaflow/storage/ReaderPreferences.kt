@@ -5,6 +5,8 @@ import dev.mangaflow.reader.panels.PanelEngine
 
 enum class ReadingMode { VERTICAL, LEFT_TO_RIGHT, RIGHT_TO_LEFT }
 
+enum class PageTurnGesture { FOLLOW_READING_ORDER, SWIPE_LEFT_NEXT, SWIPE_RIGHT_NEXT }
+
 enum class ReaderTheme { INK, PAPER, SEPIA }
 
 data class ReaderPreferences(
@@ -24,4 +26,5 @@ data class ReaderPreferences(
     val panelEngine: PanelEngine = PanelEngine.OFF,
     val panelDirection: PanelDirection = PanelDirection.RIGHT_TO_LEFT,
     val panelLearnedOrder: Boolean = false,
+    val pageTurnGesture: PageTurnGesture = PageTurnGesture.FOLLOW_READING_ORDER,
 )

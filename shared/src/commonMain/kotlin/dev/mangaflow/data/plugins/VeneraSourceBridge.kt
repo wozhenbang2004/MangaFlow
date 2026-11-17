@@ -285,7 +285,7 @@ internal val VENERA_SOURCE_BRIDGE: String = """
         if(passwordLogin || cookieFields.length || hasManagedApiKey()) features.push('ACCOUNT');
         if(typeof provider.favorites?.loadComics==='function' || typeof provider.favorites?.loadNext==='function') features.push('FAVORITES');
         if(typeof provider.comic?.loadComments==='function') features.push('COMMENTS');
-        result={features,loginRequired:__mfMetadata.key==='picacg',passwordLogin,cookieFields,credentialLabel:nativeApiAccount(provider)?'API Key':'Cookie'}; break;
+        result={features,loginRequired:__mfMetadata.key==='picacg',passwordLogin,cookieFields,credentialLabel:nativeApiAccount(provider)?'API Key':'Cookie',websiteLoginDeclared:!!provider.account?.loginWithWebview}; break;
       }
       case 'feeds': result=await feeds(provider); break;
       case 'searchFilters': result=filters(provider.search?.optionList); break;

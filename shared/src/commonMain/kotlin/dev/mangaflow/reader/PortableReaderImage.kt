@@ -17,6 +17,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.ImageBitmap
@@ -26,6 +27,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.IntSize
 import coil3.compose.AsyncImagePainter
 import coil3.compose.rememberAsyncImagePainter
@@ -49,6 +51,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import me.saket.telephoto.zoomable.ZoomableState
 import me.saket.telephoto.zoomable.ZoomableContentLocation
 import me.saket.telephoto.zoomable.ZoomableContent
 import me.saket.telephoto.zoomable.Viewport
@@ -58,6 +61,9 @@ import me.saket.telephoto.zoomable.zoomable
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.roundToInt
+
+/** One spread camera; each source page retains its own file, cache lease and tile budget. */
+internal data class ReaderSpreadViewport(val zoom: ZoomableState, val viewport: IntSize, val slot: IntRect)
 
 private data class ReaderTile(val source: IntRect, val sample: Int)
 private data class DecodedReaderTile(val spec: ReaderTile, val bitmap: ImageBitmap, val notice: String? = null)
@@ -106,6 +112,7 @@ internal fun PortableReaderZoomableImage(
     model: Any?, contentDescription: String?, modifier: Modifier, state: ReaderImageState,
     alignment: Alignment, contentScale: ContentScale, gesturesEnabled: Boolean,
     onClick: ((Offset) -> Unit)?,
+    spread: ReaderSpreadViewport? = null,
 ) {
     val context = LocalMangaContext.current
     val policy = remember(context) { ExperiencePolicyStore.get(context) }
@@ -117,7 +124,7 @@ internal fun PortableReaderZoomableImage(
     var original by remember(model) { mutableStateOf<IntSize?>(null) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     val tileState = remember(model) { mutableStateOf<List<DecodedReaderTile>>(emptyList()) }
-    val zoom = state.zoomableState
+    val zoom = spread?.zoom ?: state.zoomableState
     LaunchedEffect(model) { state.detailError = null; state.detailNotice = null }
     LaunchedEffect(result) { state.isImageDisplayed = success != null }
     LaunchedEffect(model, success?.diskCacheKey, policy) {
@@ -149,10 +156,12 @@ internal fun PortableReaderZoomableImage(
     }
     // Tile arrivals invalidate drawing only; the zoom content keeps one stable painter.
     val painter = remember(preview, original, tileState) { OriginalTilePainter(preview, original, tileState) }
-    zoom.contentScale = contentScale
-    zoom.contentAlignment = alignment
-    zoom.setContentLocation(ZoomableContentLocation.scaledInsideAndCenterAligned(painter.intrinsicSize))
-    LaunchedEffect(path, original, zoom, policy) {
+    if (spread == null) {
+        zoom.contentScale = contentScale
+        zoom.contentAlignment = alignment
+        zoom.setContentLocation(ZoomableContentLocation.scaledInsideAndCenterAligned(painter.intrinsicSize))
+    }
+    LaunchedEffect(path, original, zoom, policy, spread, alignment) {
         val file = path ?: return@LaunchedEffect
         val imageSize = original ?: return@LaunchedEffect
         val retained = mutableMapOf<ReaderTile, ReaderRegion>()
@@ -167,11 +176,31 @@ internal fun PortableReaderZoomableImage(
                         val a = SpatialOffset(Offset.Zero, CoordinateSpace.Viewport).offsetIn(CoordinateSpace.ZoomableContent)
                         val b = SpatialOffset(Offset(viewport.width.toFloat(), viewport.height.toFloat()),
                             CoordinateSpace.Viewport).offsetIn(CoordinateSpace.ZoomableContent)
-                        val left = ((a.x - bounds.left) / bounds.width * imageSize.width).coerceIn(0f, imageSize.width.toFloat())
-                        val top = ((a.y - bounds.top) / bounds.height * imageSize.height).coerceIn(0f, imageSize.height.toFloat())
-                        val right = ((b.x - bounds.left) / bounds.width * imageSize.width).coerceIn(left, imageSize.width.toFloat())
-                        val bottom = ((b.y - bounds.top) / bounds.height * imageSize.height).coerceIn(top, imageSize.height.toFloat())
-                        val ratio = maxOf((right - left) / viewport.width, (bottom - top) / viewport.height)
+                        val view = spread?.viewport ?: viewport
+                        if (view.width <= 0 || view.height <= 0) return@runCatching emptyList<ReaderTile>()
+                        val pageBounds = if (spread == null) bounds else {
+                            val slot = spread.slot
+                            val fit = minOf(slot.width.toFloat() / imageSize.width, slot.height.toFloat() / imageSize.height)
+                            val drawn = IntSize((imageSize.width * fit).roundToInt(), (imageSize.height * fit).roundToInt())
+                            val offset = alignment.align(drawn, IntSize(slot.width, slot.height), LayoutDirection.Ltr)
+                            Rect(bounds.left + (slot.left + offset.x).toFloat() / view.width * bounds.width,
+                                bounds.top + (slot.top + offset.y).toFloat() / view.height * bounds.height,
+                                bounds.left + (slot.left + offset.x + drawn.width).toFloat() / view.width * bounds.width,
+                                bounds.top + (slot.top + offset.y + drawn.height).toFloat() / view.height * bounds.height)
+                        }
+                        if (view.width <= 0 || view.height <= 0 || pageBounds.width <= 0f || pageBounds.height <= 0f)
+                            return@runCatching emptyList<ReaderTile>()
+                        val viewportEnd = if (spread == null) b else SpatialOffset(
+                            Offset(view.width.toFloat(), view.height.toFloat()), CoordinateSpace.Viewport)
+                            .offsetIn(CoordinateSpace.ZoomableContent)
+                        val left = ((a.x - pageBounds.left) / pageBounds.width * imageSize.width).coerceIn(0f, imageSize.width.toFloat())
+                        val top = ((a.y - pageBounds.top) / pageBounds.height * imageSize.height).coerceIn(0f, imageSize.height.toFloat())
+                        val right = ((viewportEnd.x - pageBounds.left) / pageBounds.width * imageSize.width).coerceIn(left, imageSize.width.toFloat())
+                        val bottom = ((viewportEnd.y - pageBounds.top) / pageBounds.height * imageSize.height).coerceIn(top, imageSize.height.toFloat())
+                        // Scale comes from the entire viewport transform, not a clipped page region.
+                        val ratio = if (spread == null) maxOf((right - left) / viewport.width, (bottom - top) / viewport.height)
+                        else maxOf((viewportEnd.x - a.x) / view.width / pageBounds.width * imageSize.width,
+                            (viewportEnd.y - a.y) / view.height / pageBounds.height * imageSize.height)
                         var sample = 1
                         while (sample < 128 && sample * 2 <= ratio) sample *= 2
                         originalTiles(imageSize, left, top, right, bottom, sample)
@@ -189,7 +218,10 @@ internal fun PortableReaderZoomableImage(
                     tileState.value = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
                     state.detailNotice = retained.values.firstNotNullOfOrNull { it.notice }
                 }, onFailure = { failure ->
-                    state.detailError = failure.message?.takeIf { "当前显示预览" in it }
+                    if (failure is ReaderDetailUnavailable) {
+                        state.detailError = null
+                        state.detailNotice = failure.message
+                    } else state.detailError = failure.message?.takeIf { "当前显示预览" in it }
                         ?: "原图细节暂时无法读取，当前显示预览"
                 })
                 if (requested.isNotEmpty() && requested.all { it in retained }) {
@@ -199,8 +231,10 @@ internal fun PortableReaderZoomableImage(
             }
     }
     Image(painter, contentDescription,
-        modifier.onSizeChanged { viewport = it }.zoomable(zoom, enabled = gesturesEnabled, onClick = onClick),
-        alignment = Alignment.Center, contentScale = ContentScale.Inside)
+        modifier.onSizeChanged { viewport = it }.then(if (spread == null)
+            Modifier.zoomable(zoom, enabled = gesturesEnabled, onClick = onClick) else Modifier),
+        alignment = if (spread == null) Alignment.Center else alignment,
+        contentScale = if (spread == null) ContentScale.Inside else contentScale)
 }
 
 private fun originalTiles(size: IntSize, left: Float, top: Float, right: Float, bottom: Float, sample: Int): List<ReaderTile> {

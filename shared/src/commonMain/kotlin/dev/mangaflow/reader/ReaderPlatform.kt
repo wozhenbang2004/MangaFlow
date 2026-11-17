@@ -28,6 +28,8 @@ class ReaderImageState(val zoomableState: ZoomableState) {
         internal set
 }
 
+internal class ReaderDetailUnavailable(message: String) : Exception(message)
+
 internal data class ReaderRegion(val bitmap: ImageBitmap, val notice: String? = null)
 internal data class ReaderDetailStatus(val message: String, val retryable: Boolean)
 

@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.storage.ReaderPreferences
+import dev.mangaflow.storage.PageTurnGesture
 import dev.mangaflow.storage.ReadingMode
 import dev.mangaflow.reader.panels.PanelSettings
 import dev.mangaflow.reader.panels.PanelEngine
@@ -88,7 +89,7 @@ internal fun ReaderSettingsDialog(
     val motion = LocalMotionEnabled.current
     val desktop = platformKind == PlatformKind.DESKTOP
     val modes = listOf(ReadingMode.VERTICAL to "纵向",
-        ReadingMode.RIGHT_TO_LEFT to "右翻", ReadingMode.LEFT_TO_RIGHT to "左翻")
+        ReadingMode.RIGHT_TO_LEFT to "右至左", ReadingMode.LEFT_TO_RIGHT to "左至右")
     LaunchedEffect(visible, preferences.dimAmount) { if (visible) dimAmount = preferences.dimAmount }
 
     val panel: @Composable () -> Unit = {
@@ -104,7 +105,7 @@ internal fun ReaderSettingsDialog(
                 Column(Modifier.fillMaxWidth().verticalScroll(scroll)
                     .padding(end = if (desktop) 10.dp else 0.dp, bottom = 14.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp)) {
-                    ReaderSettingsSection("阅读") {
+                    ReaderSettingsSection("阅读顺序") {
                         MotionTabs(
                             selected = modes.indexOfFirst { it.first == preferences.mode },
                             labels = modes.map { it.second },
@@ -116,6 +117,17 @@ internal fun ReaderSettingsDialog(
                             controlHeight = 52.dp, fontSize = 14.sp, role = Role.RadioButton,
                             selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
                         )
+                        if (preferences.panelEngine == PanelEngine.OFF && preferences.mode != ReadingMode.VERTICAL) {
+                            Text("翻页手势 · 所有漫画", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                            val gestures = PageTurnGesture.entries
+                            MotionTabs(selected = gestures.indexOf(preferences.pageTurnGesture),
+                                labels = listOf("跟随顺序", "左滑下一页", "右滑下一页"),
+                                onSelect = { update(preferences.copy(pageTurnGesture = gestures[it])) },
+                                foreground = colors.onSurface, muted = colors.onSurfaceVariant,
+                                track = colors.onSurface.copy(alpha = .04f), indicator = colors.surface,
+                                fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
+                                controlHeight = 44.dp, fontSize = 12.sp, role = Role.RadioButton)
+                        }
                         Column(Modifier.fillMaxWidth().animateContentSize(
                             animationSpec = tween(if (motion) MangaMotion.Content else 0,
                                 easing = MangaMotion.EnterEasing),

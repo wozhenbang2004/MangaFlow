@@ -142,6 +142,8 @@ import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
+import androidx.compose.material.icons.outlined.SwapHoriz
+import dev.mangaflow.storage.PageTurnGesture
 import dev.mangaflow.storage.ReadingMode
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.WebDavBackupConfig
@@ -362,7 +364,7 @@ fun SettingsScreen(
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(if (desktop) 0.dp else 16.dp)) {
                 RetainedSettingsCategory(!desktop || settingsCategory == 0) {
                 SettingsSection("阅读", sourceBackdrop) {
-                    SettingsDisclosure("翻页方式", when (preferences.mode) {
+                    SettingsDisclosure("阅读顺序", when (preferences.mode) {
                         ReadingMode.VERTICAL -> "纵向滚动"
                         ReadingMode.LEFT_TO_RIGHT -> "从左至右"
                         ReadingMode.RIGHT_TO_LEFT -> "从右至左"
@@ -373,6 +375,18 @@ fun SettingsScreen(
                             selected = preferences.mode,
                             onSelected = { libraryStore.updatePreferences(preferences.copy(mode = it)) },
                         )
+                    }
+                    SettingsDisclosure("横向翻页手势", when (preferences.pageTurnGesture) {
+                        PageTurnGesture.FOLLOW_READING_ORDER -> "跟随阅读顺序"
+                        PageTurnGesture.SWIPE_LEFT_NEXT -> "左滑下一页"
+                        PageTurnGesture.SWIPE_RIGHT_NEXT -> "右滑下一页"
+                    }, Icons.Outlined.SwapHoriz, expandedSetting == "page-turn", { toggleSetting("page-turn") }) {
+                        SettingsChoices(choices = listOf(
+                            PageTurnGesture.FOLLOW_READING_ORDER to "跟随顺序",
+                            PageTurnGesture.SWIPE_LEFT_NEXT to "左滑下一页",
+                            PageTurnGesture.SWIPE_RIGHT_NEXT to "右滑下一页"),
+                            selected = preferences.pageTurnGesture,
+                            onSelected = { libraryStore.updatePageTurnGesture(it) })
                     }
                     SettingsDisclosure("阅读底色", when (preferences.theme) {
                         ReaderTheme.PAPER -> "纸白"

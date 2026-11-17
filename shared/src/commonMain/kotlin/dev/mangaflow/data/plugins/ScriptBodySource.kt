@@ -76,7 +76,8 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
             value.optJSONArray("cookieFields")?.let { fields ->
                 require(fields.length() <= 16) { "来源登录字段过多。" }
                 (0 until fields.length()).map { fields.getString(it).also { name -> require(name.length in 1..160) } }
-            }.orEmpty(), value.optString("credentialLabel", "Cookie").take(40)).also { declaredCapabilities = it }
+            }.orEmpty(), value.optString("credentialLabel", "Cookie").take(40),
+            value.optBoolean("websiteLoginDeclared", false)).also { declaredCapabilities = it }
     }
 
     override suspend fun feeds(): List<SourceFeed> {

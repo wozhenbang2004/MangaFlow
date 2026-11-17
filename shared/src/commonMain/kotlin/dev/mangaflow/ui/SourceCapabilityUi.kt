@@ -378,6 +378,13 @@ internal fun SourceCapabilityDetailsSheet(
                         account = it; folders = emptyList(); accountRevision++; onSourceChanged()
                     })
             }
+            if (capabilities.websiteLoginDeclared) Column {
+                Text("网页登录暂未开放", style = MaterialTheme.typography.titleSmall)
+                Text(if (capabilities.passwordLogin || capabilities.cookieFields.isNotEmpty())
+                    "此来源声明了网页登录，但当前平台尚无已验证的隔离接入。请使用账号区域列出的登录方式；匿名功能不受影响。"
+                    else "此来源只声明了网页登录，当前尚无可用的安全接入。暂不能使用需要账号的功能；匿名功能不受影响。",
+                    fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             if (source.id.startsWith("js_") && plugins != null) Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     MotionTextButton(onClick = { operate { updateAvailable = plugins.checkUpdate(source.id) != null
