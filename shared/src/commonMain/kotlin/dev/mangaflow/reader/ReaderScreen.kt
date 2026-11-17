@@ -207,6 +207,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.data.ChapterSemantics
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.Manga
@@ -367,7 +368,10 @@ fun ReaderScreen(
         ?: Chapter(chapterId, libraryStore.progressFor(manga.id)?.takeIf { it.chapterId == chapterId }?.chapterTitle ?: "正在阅读", 0)
     val localImport = manga.sourceUrl == LOCAL_SOURCE_URL
     val discussionState = rememberChapterDiscussionState(manga, chapter, communityRepository, reviewRepository)
-    val siblings = remember(chapters, chapter.group) { chapters.filter { it.group == chapter.group }.sortedBy(Chapter::index) }
+    val siblings = remember(chapters, chapter, chaptersLoading, chaptersError) {
+        ChapterSemantics.readingSequence(chapters, chapter,
+            catalogComplete = !chaptersLoading && chaptersError == null)
+    }
     val hasMultipleGroups = remember(chapters) { chapters.map(Chapter::group).distinct().size > 1 }
     val chapterIndex = siblings.indexOfFirst { it.id == chapterId }
     var retry by remember(chapterId) { mutableIntStateOf(0) }
@@ -449,9 +453,9 @@ fun ReaderScreen(
     var imageVisible by remember(chapterId) { mutableStateOf(false) }
     var recentConfirmed by remember(manga.id, chapterId) { mutableStateOf(false) }
     var chapterVisibilityReported by remember(manga.id, chapterId) { mutableStateOf(false) }
-    var nextChapterPrefetched by remember(manga.id, chapterId) { mutableStateOf(false) }
     var leavingReader by remember { mutableStateOf(false) }
     val nextChapter = siblings.getOrNull(chapterIndex + 1).takeIf { chapterIndex >= 0 }
+    var nextChapterPrefetched by remember(manga.id, chapterId, nextChapter?.id) { mutableStateOf(false) }
     val previousChapter = siblings.getOrNull(chapterIndex - 1).takeIf { chapterIndex > 0 }
     val openPreviousChapter: (() -> Unit)? = previousChapter?.let { previous ->
         {
@@ -1074,7 +1078,8 @@ fun ReaderScreen(
                             sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true
                         },
                         // Do not consume the one-shot request before the view model owns this visible chapter.
-                        nextChapterPages = if (experienceBudget.crossChapter && chapterVisibilityReported) experienceBudget.runtime.nextChapterPages else 0,
+                        nextChapterPages = if (experienceBudget.crossChapter && chapterVisibilityReported && nextChapter != null)
+                            experienceBudget.runtime.nextChapterPages else 0,
                         preferences = preferences, initialPage = pageIndex, initialPanel = cursor.panelIndex,
                         targetPage = targetPage,
                         onTargetConsumed = { targetPage = null; targetOffset = 0 },
@@ -1113,7 +1118,8 @@ fun ReaderScreen(
                         onShowControls = { controlsVisible = true },
                         retryTargetIndex = currentPageRetryIndex, retryPulse = currentPageRetrySerial,
                         // Do not consume the one-shot request before the view model owns this visible chapter.
-                        nextChapterPages = if (experienceBudget.crossChapter && chapterVisibilityReported) experienceBudget.runtime.nextChapterPages else 0,
+                        nextChapterPages = if (experienceBudget.crossChapter && chapterVisibilityReported && nextChapter != null)
+                            experienceBudget.runtime.nextChapterPages else 0,
                         onQuickSwitch = { failedIndex, variant -> repairs.select(failedIndex, variant) },
                         onRepairPage = openPageRepair,
                         onMoreSources = { anchor ->
@@ -1160,8 +1166,15 @@ fun ReaderScreen(
                         onNext = openNextChapter,
                         onPrevious = openPreviousChapter,
                         startContent = { pull ->
-                            ChapterEndFooter(pull, previousChapter?.title, "已到第一话", colors.onSurface,
-                                openPreviousChapter, null, previous = true)
+                            ChapterEndFooter(pull, previousChapter?.title,
+                                when {
+                                    chaptersLoading -> "正在读取目录"
+                                    chaptersError != null -> "目录暂未更新"
+                                    chapterIndex < 0 -> "目录暂不可用"
+                                    else -> "已到第一话"
+                                }, colors.onSurface, openPreviousChapter,
+                                onRetryChapters.takeIf { !chaptersLoading && (chaptersError != null || chapterIndex < 0) },
+                                previous = true)
                         },
                         endContent = { pull ->
                             if (!controlsVisible && !showComments && !showSettings && !showChapters && !showSpreadAdjustment) {
@@ -2664,10 +2677,13 @@ internal fun AdjacentPagePrefetch(
                 val aheadTargets = candidates(ahead, true).filter { it in pages.indices }
                 val behindTargets = candidates(window.behind, false).filter { it in pages.indices }
                 val networkDesired = if (window.bytes > 0L) (aheadTargets + behindTargets).filter(::eligible).toSet() else emptySet()
-                // Local/Coil originals can decode while offline or while HTTP prefetch is disabled.
-                val memoryWindow = if (window.decodeEnabled && window.decoded > 0)
-                    candidates(window.decoded, true).filter(::eligible).toSet() else emptySet()
-                val desired = networkDesired + memoryWindow
+                // One total preview count covers both sides; it does not double the
+                // encoded/network window. Extra nearby pages are cache-only candidates.
+                val previewTargets = if (window.enabled) readerNearbyPreviewPages(window.first, window.last,
+                    pages.size, window.decoded, direction, groups).toSet() else emptySet()
+                val memoryWindow = if (window.decodeEnabled) previewTargets.filter(::eligible).toSet() else emptySet()
+                // Near previews get their resolve/check turns before distant header inspections.
+                val desired = memoryWindow + networkDesired
                 val writable = experience.canWritePrefetch()
                 val recovery = PrefetchRecoveryKey(window.bytes, window.parallel, window.resolveParallel,
                     window.decodeParallel, writable, window.foregroundActive)
@@ -2678,10 +2694,10 @@ internal fun AdjacentPagePrefetch(
                 // Admission can pause while a newly visible page is loading. That does not
                 // remove the overlapping target window or its completed cache evidence.
                 val observationWindow = (aheadTargets + behindTargets).toSet() + visiblePages
-                inspectTargets = observationWindow
+                inspectTargets = observationWindow + previewTargets
                 inspectVisible = visiblePages
                 tracker?.window(owner, window.first, window.last, direction, aheadTargets, behindTargets,
-                    networkDesired, memoryWindow, window.foregroundActive,
+                    networkDesired, memoryWindow, previewTargets, window.foregroundActive,
                     when { !window.enabled -> "阅读暂缓"; !window.visibleReady -> "当前页优先"
                         window.bytes <= 0L -> currentBudget.reason
                         !writable -> "等待可回收空间；当前阅读和下载受保护"; else -> null })
@@ -2695,7 +2711,7 @@ internal fun AdjacentPagePrefetch(
                 // Preview preparation can extend beyond the original-image window when
                 // its independent decoded-page setting is larger. Keep that admitted work's
                 // exact resources without inflating the original-readiness target count.
-                val retained = observationWindow + desired + promoted
+                val retained = observationWindow + previewTargets + desired + promoted
                 cacheRangeOwner?.let { rangeStore.updateReadingRange(it, retained + window.composed) }
                 resolvedAttempts.retainAll(retained)
                 resolvedPages.keys.retainAll(retained)
@@ -2973,7 +2989,12 @@ internal fun AdjacentPagePrefetch(
                                 ReaderPagePreflightStatus.UNVERIFIED -> if (warmMemory) ReaderPreparationPhase.DEFERRED else ReaderPreparationPhase.SKIPPED
                                 ReaderPagePreflightStatus.DEFERRED -> ReaderPreparationPhase.DEFERRED
                                 ReaderPagePreflightStatus.FAILED -> ReaderPreparationPhase.FAILED
-                            }, if (result.status == ReaderPagePreflightStatus.DEFERRED) "等待可用解码资源" else null)
+                            }, when (result.status) {
+                                ReaderPagePreflightStatus.DEFERRED -> "等待可用解码资源"
+                                ReaderPagePreflightStatus.FAILED -> result.failure?.let(::readerPrefetchErrorLabel)
+                                    ?: "图片预读未完成"
+                                else -> null
+                            })
                             when (result.status) {
                                 ReaderPagePreflightStatus.READY, ReaderPagePreflightStatus.UNVERIFIED,
                                 ReaderPagePreflightStatus.FAILED -> {

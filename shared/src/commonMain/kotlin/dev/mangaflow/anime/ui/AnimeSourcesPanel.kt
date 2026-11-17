@@ -50,6 +50,7 @@ internal fun AnimeSourcesPanel(
     var manageExpanded by remember(subject?.id, focusEpisode?.id) {
         mutableStateOf(false)
     }
+    var aggregationExpanded by remember(subject?.id) { mutableStateOf(false) }
     var episodeQuery by remember(focusEpisode?.id) { mutableStateOf("") }
     var mappingLimit by remember(expandedSource, episodeQuery) { mutableIntStateOf(40) }
     var allPreviewEpisodes by remember(state.previewCatalog?.title?.id) { mutableStateOf(false) }
@@ -186,9 +187,56 @@ internal fun AnimeSourcesPanel(
                             AnimeQuietLabel("剧集统一显示，点击剧集自动选择线路；不确定的结果不会混入。")
                         }
                         if (state.sourceAggregationTotal > 0) item(key = "aggregation-progress") {
-                            AnimeQuietLabel(if (state.sourceAggregationRunning)
-                                "后台核对来源 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal} · 无需等待全部完成"
-                                else "本轮已核对 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal} 个来源；未确认结果不混入线路。")
+                            val counts = state.sourceAggregation.values.groupingBy { it.phase }.eachCount()
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                AnimeQuietLabel(if (state.sourceAggregationRunning)
+                                    "后台处理来源 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal} · 无需等待全部完成"
+                                    else "本轮来源处理已结束 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal}")
+                                val summary = listOfNotNull(
+                                    counts[AnimeAssociationPhase.LINKED]?.let { "作品已关联 $it" },
+                                    counts[AnimeAssociationPhase.NO_MATCH]?.let { "未找到可靠候选 $it" },
+                                    counts[AnimeAssociationPhase.NEEDS_SELECTION]?.let { "待确认 $it" },
+                                    counts[AnimeAssociationPhase.UNAVAILABLE]?.let { "未完成 $it" },
+                                    counts[AnimeAssociationPhase.EXCLUDED]?.let { "已排除 $it" },
+                                ).joinToString(" · ")
+                                if (summary.isNotBlank()) AnimeQuietLabel(summary)
+                                MotionTextButton(onClick = { aggregationExpanded = !aggregationExpanded },
+                                    modifier = Modifier.heightIn(min = 44.dp)) {
+                                    Icon(if (aggregationExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                                        null, Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(if (aggregationExpanded) "收起逐源结果" else "查看逐源结果")
+                                }
+                            }
+                        }
+                        if (aggregationExpanded) items(state.sourceAggregation.entries.toList(),
+                            key = { "aggregation-result:" + it.key }) { (sourceId, progress) ->
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                AnimeSectionTitle(animeSourceName(sourceId, state), when (progress.phase) {
+                                    AnimeAssociationPhase.QUEUED -> "等待处理"
+                                    AnimeAssociationPhase.SEARCHING -> "正在读取"
+                                    AnimeAssociationPhase.LINKED -> "作品已关联"
+                                    AnimeAssociationPhase.NO_MATCH -> "未找到可靠候选"
+                                    AnimeAssociationPhase.NEEDS_SELECTION -> "需要确认作品或版本"
+                                    AnimeAssociationPhase.UNAVAILABLE -> "本轮未完成"
+                                    AnimeAssociationPhase.EXCLUDED -> "已按你的选择排除"
+                                })
+                                // Aggregation messages may originate from provider exceptions or notices.
+                                // Keep this summary typed and fixed rather than exposing their raw text.
+                                AnimeQuietLabel(when (progress.phase) {
+                                    AnimeAssociationPhase.QUEUED -> "等待本轮来源处理。"
+                                    AnimeAssociationPhase.SEARCHING -> "正在搜索并核对作品与集数。"
+                                    AnimeAssociationPhase.LINKED -> "作品关联已确认，具体集数与播放地址仍需核对。"
+                                    AnimeAssociationPhase.NO_MATCH -> "本轮未找到可可靠关联的作品。"
+                                    AnimeAssociationPhase.NEEDS_SELECTION -> "请确认同一作品及季度，避免混入其他版本。"
+                                    AnimeAssociationPhase.UNAVAILABLE -> "搜索或目录读取未完成，可重试。"
+                                    AnimeAssociationPhase.EXCLUDED -> "不会自动重新关联这个来源。"
+                                })
+                            }
+                        }
+                        if (state.sourceError != null) item(key = "source-error") {
+                            Text("来源操作未完成，请重试或检查来源设置。", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         item(key = "retry-source-aggregation") {
                             MotionTextButton(onClick = controller::retrySourceAggregation,
@@ -324,10 +372,6 @@ internal fun AnimeSourcesPanel(
                                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("应用本集映射") }
                             }
                         } }
-                        if (state.sourceError != null) item {
-                            Text(state.sourceError.orEmpty(), style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
                         item {
                             AnimeSectionTitle("查找其他来源")
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {

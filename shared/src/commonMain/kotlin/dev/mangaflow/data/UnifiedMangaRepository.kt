@@ -983,6 +983,7 @@ class UnifiedMangaRepository(
                         throw CancellationException("来源已更新或移除，请重新打开作品。")
                     rememberRaw(loaded, native = true)
                     catalogFetchedAt[id] = CatalogStamp(generation, repositoryNanoTime())
+                    _catalogRevision.update { it + 1L }
                 }
                 // Usable source data is published independently of disposable cache persistence.
                 scope.launch {
@@ -1029,6 +1030,7 @@ class UnifiedMangaRepository(
                 val latest = copy.cachedDetail(ref.mangaId) ?: loaded
                 if (rawCatalogs[mangaId] !== latest) rememberRaw(latest, native = true)
                 catalogFetchedAt[mangaId] = CatalogStamp(generation, repositoryNanoTime())
+                _catalogRevision.update { it + 1L }
             }
             // Foreign success was stamped by detailSource; do not replace a newer queued result.
         }
@@ -1038,18 +1040,30 @@ class UnifiedMangaRepository(
         return result
     }
 
-    fun cachedDetail(mangaId: String): MangaDetail? {
-        if (!copy.contentCachePolicy().enabled) return null
-        val retained = synchronized(unifiedMangaRepositoryStateLock) {
-            rawCatalogs[mangaId]?.takeIf {
-                storageCache?.protectedCatalog(mangaId) == true || catalogFetchedAt[mangaId]?.let { stamp ->
-                    repositoryNanoTime() - stamp.at in 0L..copy.contentCachePolicy().retentionMillis * 1_000_000L
-                } == true
-            }
-        }
+    internal data class CatalogSnapshot(val detail: MangaDetail, val fresh: Boolean)
+
+    fun cachedDetail(mangaId: String): MangaDetail? = cachedCatalog(mangaId)?.detail
+
+    /** Freshness belongs to the raw directory that was projected, not a later cache entry. */
+    internal fun cachedCatalog(mangaId: String): CatalogSnapshot? {
+        val policy = copy.contentCachePolicy()
+        if (!policy.enabled) return null
         val ref = SourceKeys.decodeManga(mangaId)
-        val raw = retained ?: if (ref.sourceId == "copy") copy.cachedDetail(ref.mangaId) else null
-        return raw?.let(::project)
+        // Copy publishes its complete native catalog before its awaiting callers resume.
+        val nativeCopy = if (ref.sourceId == "copy") copy.cachedDetail(ref.mangaId) else null
+        val (raw, fresh) = if (nativeCopy != null) nativeCopy to true else synchronized(unifiedMangaRepositoryStateLock) {
+            val retained = rawCatalogs[mangaId] ?: return@synchronized null
+            val stamp = catalogFetchedAt[mangaId]
+            val age = stamp?.let { repositoryNanoTime() - it.at }
+            if (storageCache?.protectedCatalog(mangaId) != true &&
+                (age == null || age !in 0L..policy.retentionMillis * 1_000_000L)) return@synchronized null
+            val fresh = ref.sourceId != "copy" && mangaId in nativeCatalogIds && retained.chapters.isNotEmpty() &&
+                stamp?.generation == (pageCacheGenerations[ref.sourceId] ?: 0L) &&
+                age != null && age in 0L until
+                    policy.freshMillis(ContentCacheKind.DETAILS).coerceIn(0L, Long.MAX_VALUE / 1_000_000L) * 1_000_000L
+            retained to fresh
+        } ?: return null
+        return CatalogSnapshot(project(raw), fresh)
     }
 
     /** Stale catalogues remain readable; only proven fresh data may skip revalidation. */

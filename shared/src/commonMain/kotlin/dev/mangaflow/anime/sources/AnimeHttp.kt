@@ -75,7 +75,7 @@ internal class AnimeHttp(
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
-                throw AnimeSourceException(sourceId, stage, "来源连接或数据读取失败，请检查该来源的网络设置后重试。", cause = failure)
+                throw AnimeSourceException(sourceId, stage, "来源连接或数据读取未完成，请稍后重试。", cause = failure)
             }
             if (response.code in setOf(301, 302, 303, 307, 308)) {
                 if (method != "GET" || remainingRedirects-- <= 0)

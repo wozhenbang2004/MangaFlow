@@ -29,6 +29,7 @@ data class ExperienceOverrides(
     val refreshHz: Int? = null,
     val batteryProtection: Boolean = true,
     val allowBackgroundDownloads: Boolean = true,
+    /** Total nearby image count across both sides, excluding the visible viewport; not a resident-memory guarantee. */
     val decodedPrefetchPages: Int? = null,
     val sourceRecovery: SourceRecoveryMode? = null,
     val browseWarmup: Boolean = true,

@@ -193,6 +193,7 @@ internal fun readerPageErrorLabel(raw: String): String = when {
     raw.contains("401") || raw.contains("403") || raw.contains("拒绝") || raw.contains("forbidden", true) -> "来源拒绝了请求"
     raw.contains("404") || raw.contains("not found", true) -> "图片地址可能已失效"
     raw.contains("SSL", true) || raw.contains("certificate", true) || raw.contains("TLS", true) -> "安全连接未能建立"
+    raw.contains("图片还原") -> "图片还原失败"
     raw.contains("decode", true) || raw.contains("解码") -> "图片解码失败"
     raw.contains("本机存储") || raw.contains("本地") -> "本机文件暂时无法读取"
     raw.contains("来源版本已变化") -> "来源版本已变化，请重新读取"

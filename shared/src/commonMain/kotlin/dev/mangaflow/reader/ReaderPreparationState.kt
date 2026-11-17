@@ -16,7 +16,7 @@ import kotlin.coroutines.CoroutineContext
 import dev.mangaflow.experience.PrefetchWork
 
 internal enum class ReaderPreparationPhase { QUEUED, ACTIVE, COMPLETE, DEFERRED, FAILED, SKIPPED }
-internal enum class ReaderPreparationRole { VISIBLE, AHEAD, BEHIND }
+internal enum class ReaderPreparationRole { VISIBLE, AHEAD, BEHIND, NEARBY }
 internal data class ReaderPreparationStep(val phase: ReaderPreparationPhase = ReaderPreparationPhase.SKIPPED,
     val reason: String? = null)
 internal data class ReaderPreparationCounts(val queued: Int = 0, val active: Int = 0, val complete: Int = 0,
@@ -81,12 +81,14 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
     val state = mutableState.asStateFlow()
 
     fun window(owner: Any, first: Int, last: Int, direction: Int, ahead: List<Int>, behind: List<Int>,
-        network: Set<Int>, decoded: Set<Int>, active: Boolean, reason: String?) = synchronized(lock) {
+        network: Set<Int>, decoded: Set<Int>, nearby: Set<Int>, active: Boolean, reason: String?) = synchronized(lock) {
         if (this.owner !== owner) finishScanLocked(interrupted = true)
         this.owner = owner
         val roles = linkedMapOf<Int, ReaderPreparationRole>()
         (first..last).filter { it in 0 until pageCount }.forEach { roles[it] = ReaderPreparationRole.VISIBLE }
         ahead.forEach { roles[it] = ReaderPreparationRole.AHEAD }; behind.forEach { roles[it] = ReaderPreparationRole.BEHIND }
+        // Decode-only neighbours are observable without inflating original-window readiness.
+        nearby.filter { it in 0 until pageCount && it !in roles }.forEach { roles[it] = ReaderPreparationRole.NEARBY }
         rows.keys.retainAll(roles.keys)
         tickets.filterKeys { it.first !in roles }.values.forEach { activeTickets.remove(it); ticketOwners.remove(it) }
         tickets.keys.removeAll { it.first !in roles }
@@ -282,7 +284,7 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
         val now = monotonicTimeMillis()
         // Count original-artifact observations before expiry masks their value. Never change
         // the value or deadline to make a readiness count look stable.
-        val candidates = rows.values.filter { it.role != ReaderPreparationRole.VISIBLE }
+        val candidates = rows.values.filter { it.role == ReaderPreparationRole.AHEAD || it.role == ReaderPreparationRole.BEHIND }
         val unobserved = candidates.count { it.inspectedAt == null }
         val expired = candidates.count { it.inspectedAt != null && (it.freshUntil ?: 0L) < now }
         val fresh = candidates.filter { it.inspectedAt != null && (it.freshUntil ?: 0L) >= now }

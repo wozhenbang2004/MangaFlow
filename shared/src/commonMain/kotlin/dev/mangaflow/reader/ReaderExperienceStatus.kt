@@ -565,12 +565,12 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
     StatusExplanation("底栏依次为预读、任务、补页、内存、磁盘。数字是已备页数、活动任务数与可用源数；99+ 只缩写显示，不限制配置。? 表示尚有未核实项。")
     when (section) {
         ReaderStatusSection.PREPARATION -> {
-            StatusExplanation("已备 / 目标。绿点表示原图备齐；? 待核实。页码下方是准备阶段；完成不代表缓存仍然存在。")
+            StatusExplanation("已备 / 目标只统计当前窗口已核实的本地原图，不是内存预览数或整章缓存总数。绿点表示原图备齐；? 待核实。页码下方是任务阶段，完成不保证缓存此刻仍在。")
             FlowRow(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 StatusToken(Icons.Outlined.KeyboardDoubleArrowRight, "前读配置", "${budget.prefetchAhead} 页")
                 StatusToken(Icons.Outlined.KeyboardDoubleArrowLeft, "回看配置", "${budget.prefetchBehind} 页")
-                StatusToken(Icons.Outlined.PhotoSizeSelectLarge, "预解码配置", "${budget.decodedPrefetchPages} 页")
+                StatusToken(Icons.Outlined.PhotoSizeSelectLarge, "双向预解码合计", "${budget.decodedPrefetchPages} 页")
             }
             StatusExplanation(budget.reason)
             val observation = preparation.observations
@@ -590,7 +590,7 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
                 StatusToken(Icons.AutoMirrored.Outlined.MenuBook, "当前页并发配置", "当前页 ${budget.readerRequests}")
                 StatusToken(Icons.Outlined.PhotoSizeSelectLarge, "解码并发配置", "解码 ${budget.decodeRequests}")
             }
-            StatusExplanation("解码含本地核验；下一话的完成数是已备原图。")
+            StatusExplanation("解码含本地核验；临近预解码前后共用页数额度，只从本地原图生成内存预览。下一话的完成数是已备原图。")
         }
         ReaderStatusSection.SOURCES -> {
             StatusIconValue(Icons.Outlined.CropFree, "单页", "对齐画面后补当前页")
@@ -838,9 +838,10 @@ private fun statusNumberWidth(reserve: String, decoration: Dp): Dp {
 private fun stripCount(value: Int): String = if (value > 99) "99+" else value.toString()
 
 @Composable
-private fun StatusNumber(value: String, modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.onSurface) {
+private fun StatusNumber(value: String, modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.onSurface,
+    textAlign: TextAlign = TextAlign.End) {
     Text(value, modifier, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace,
-        color = color, maxLines = 1, softWrap = false, textAlign = TextAlign.End)
+        color = color, maxLines = 1, softWrap = false, textAlign = textAlign)
 }
 
 @Composable
@@ -860,7 +861,8 @@ private fun StatusMicro(icon: ImageVector, value: String, label: String,
                     Icon(icon, null, Modifier.size(15.dp), tint = accent)
                     StatusMark(mark, Modifier.align(Alignment.TopEnd).size(8.dp))
                 }
-                StatusNumber(value, Modifier.width(numberWidth), color = accent)
+                // Keep the reserved width stable, but anchor short counts beside their own icon.
+                StatusNumber(value, Modifier.width(numberWidth), color = accent, textAlign = TextAlign.Start)
             }
             if (stages.isNotEmpty()) Row(Modifier.width(24.dp).height(2.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 stages.forEach { stage ->
@@ -1478,6 +1480,7 @@ private fun standbyPhaseLabel(phase: ReaderSourceStandbyPhase) = when (phase) {
 }
 private fun roleLabel(role: ReaderPreparationRole) = when (role) {
     ReaderPreparationRole.VISIBLE -> "当前"; ReaderPreparationRole.AHEAD -> "前方"; ReaderPreparationRole.BEHIND -> "回翻"
+    ReaderPreparationRole.NEARBY -> "仅近页预解码"
 }
 private fun phaseLabel(phase: ReaderPreparationPhase) = when (phase) {
     ReaderPreparationPhase.QUEUED -> "排队"; ReaderPreparationPhase.ACTIVE -> "进行中"
@@ -1485,7 +1488,7 @@ private fun phaseLabel(phase: ReaderPreparationPhase) = when (phase) {
     ReaderPreparationPhase.FAILED -> "失败"; ReaderPreparationPhase.SKIPPED -> "未安排"
 }
 private fun presenceLabel(present: Boolean?) = when (present) { true -> "已备"; false -> "未备"; null -> "待核实" }
-private fun previewPresenceLabel(present: Boolean?) = when (present) { true -> "预览已缓存"; false -> "预览未缓存"; null -> "待核实" }
+private fun previewPresenceLabel(present: Boolean?) = when (present) { true -> "预览在内存"; false -> "预览不在内存"; null -> "内存待核实" }
 private data class PreparationIssue(val index: Int, val stage: String, val phase: ReaderPreparationPhase, val reason: String)
 private fun pageRanges(indices: List<Int>): String {
     val pages = indices.distinct().sorted()

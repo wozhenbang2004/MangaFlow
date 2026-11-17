@@ -82,7 +82,9 @@ class MangaDexBodySource : BodySource {
                 val rawTitle = attributes.bodyText("title")
                 val title = if (number.isNotBlank()) "第${number}话" + rawTitle.takeIf(String::isNotBlank)?.let { " · $it" }.orEmpty()
                     else rawTitle.ifBlank { "短篇" }
-                val language = languageName(attributes.bodyText("translatedLanguage"))
+                val languageCode = attributes.bodyText("translatedLanguage")
+                // Keep the native code: zh and zh-ro must not become one continuation language.
+                val language = "${languageName(languageCode)} [$languageCode]"
                 val scanlator = row.optJSONArray("relationships")?.bodyObjects().orEmpty()
                     .filter { it.bodyText("type") == "scanlation_group" }
                     .mapNotNull { it.optJSONObject("attributes")?.bodyText("name")?.takeIf(String::isNotBlank) }.joinToString(" / ")
@@ -191,7 +193,7 @@ class MangaDexBodySource : BodySource {
         require(it.matches(Regex("[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}"))) { "MangaDex 标识无效。" }
     }
     private fun languageName(value: String) = when (value) {
-        "zh", "zh-ro" -> "简中"; "zh-hk", "zh-tw" -> "繁中"; "en" -> "英语"; else -> value.ifBlank { "未知语言" }
+        "zh" -> "简中"; "zh-ro" -> "中文罗马字"; "zh-hk", "zh-tw" -> "繁中"; "en" -> "英语"; else -> value.ifBlank { "未知语言" }
     }
 
     companion object {

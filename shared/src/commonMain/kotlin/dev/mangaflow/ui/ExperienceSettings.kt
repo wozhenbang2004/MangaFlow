@@ -596,13 +596,13 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 if (finishEditor()) change(currentDraft().copy(prefetchMode = it))
             }
             ExperienceReveal(custom.prefetchMode == PrefetchMode.MANUAL) {
-                ExperienceLiveNumber("待读窗口", custom.ahead, budget.goal.prefetchAhead, 0..40, "页",
+                ExperienceLiveNumber("待读原图", custom.ahead, budget.goal.prefetchAhead, 0..40, "页",
                     editor, active && expanded == "reading" && custom.prefetchMode == PrefetchMode.MANUAL, effective = appliedBudget.prefetchAhead) { change(custom.copy(ahead = it)) }
-                ExperienceLiveNumber("回看窗口", custom.behind, budget.goal.prefetchBehind, 0..8, "页",
+                ExperienceLiveNumber("回看原图", custom.behind, budget.goal.prefetchBehind, 0..8, "页",
                     editor, active && expanded == "reading" && custom.prefetchMode == PrefetchMode.MANUAL, effective = appliedBudget.prefetchBehind) { change(custom.copy(behind = it)) }
             }
             ExperienceReveal(custom.prefetchMode != PrefetchMode.OFF) {
-                ExperienceLiveNumber("临近页预解码", custom.decodedPrefetchPages, budget.goal.decodedPrefetchPages, 0..8, "页",
+                ExperienceLiveNumber("双向预解码合计", custom.decodedPrefetchPages, budget.goal.decodedPrefetchPages, 0..8, "页",
                     editor, active && expanded == "reading" && custom.prefetchMode != PrefetchMode.OFF,
                     effective = appliedBudget.decodedPrefetchPages) { change(custom.copy(decodedPrefetchPages = it)) }
                 SettingsToggle("提前准备下一章", custom.crossChapter, Icons.Outlined.SkipNext) { change(custom.copy(crossChapter = it)) }
@@ -640,9 +640,11 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                         editor, active && expanded == "reading" && detail == "reading-advanced", ::change)
                 }) {
                 ExperienceBudgetRow("窗口目标", budget.goal.prefetchAhead.toString() + " 待读 · " + budget.goal.prefetchBehind + " 回看")
-                ExperienceHint("待读和回看跟随实际翻页方向，不固定为屏幕左右。窗口是候选页数，解析、传输、解码各有并发上限；原图存磁盘，临近预览进内存。")
+                ExperienceHint("待读和回看是磁盘原图的准备窗口，跟随主阅读方向，不固定为屏幕左右；40 页不代表 40 张图常驻内存。解析、传输、解码各有并发额度。")
+                ExperienceHint("临近预解码是当前画面前后两侧合计的内存预览页数：单页阅读配置 8 页通常前后各 4 页，奇数优先主方向，章首尾余量给另一侧；双页不拆组。只读取本地原图，不额外扩大联网窗口，也不保证全部常驻。")
+                ExperienceHint("预读准备是后台任务，已备是核实原图存在，预览是可显示的解码图像；缓存是这些结果的存放与回收。范围、容量与闲置过期在“缓存”中独立管理。")
                 ExperienceHint("自动图标表示跟随策略，强调色表示手动值。拖动直接保存，手动输入不设业务上限；配置数量不等于正在执行的数量。")
-                ExperienceHint("阅读底栏贴近安全区，四个固定槽位只展示状态。点击槽位查看数量、原因和操作，不自动展开遮挡画面。")
+                ExperienceHint("阅读状态栏贴近安全区，固定图标只展示状态。点击查看数量、原因和操作，不自动展开遮挡画面。")
             }
         }
 
@@ -876,7 +878,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 automaticLabel = "默认值") { change(custom.copy(contentCache = custom.contentCache.copy(imageRetentionHours = it ?: 0))) }
             if (custom.contentCache.imageRetentionHours == 0) ExperienceHint(if (custom.runtime.automaticCleanup) "0 小时：不过期，满额时仍按所选顺序淘汰。" else "0 小时：不过期；容量整理、范围清理仍独立生效。")
             }
-            ExperienceLiveNumber("原图预取窗口", custom.prefetchMiB, (budget.goal.prefetchBytes / EXPERIENCE_MIB).toInt(), 1..512, "MB",
+            ExperienceLiveNumber("原图预取额度", custom.prefetchMiB, (budget.goal.prefetchBytes / EXPERIENCE_MIB).toInt(), 1..512, "MB",
                 editor, active && expanded == "cache", effective = (appliedBudget.prefetchBytes / EXPERIENCE_MIB).toInt()) {
                 change(custom.copy(prefetchMiB = it))
             }

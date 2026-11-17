@@ -99,5 +99,54 @@ internal object ChapterSemantics {
         return unambiguousVolumes(base).intersect(unambiguousVolumes(candidate)).size >= 3
     }
 
+    private data class ReadingVolume(val number: BigDecimal, val language: String, val edition: String)
+
+    private fun readingVolume(group: String): ReadingVolume? {
+        // This is MangaDexBodySource's native grouping, not a guess about arbitrary source groups.
+        val parts = group.split(" · ")
+        if (parts.size != 3 || parts[0] != "连载" ||
+            !Regex(".+ \\[(zh|zh-hk|zh-ro|en)\\]").matches(parts[2])) return null
+        val match = volume.matchEntire(parts[1]) ?: return null
+        val value = number(match.groupValues[1])?.takeIf { it.signum() > 0 } ?: return null
+        return ReadingVolume(value, parts[2], "连载版 · ${parts[1]}")
+    }
+
+    /** Keep ordinary groups intact; join only complete, unambiguous native MangaDex volumes. */
+    fun readingSequence(chapters: List<Chapter>, current: Chapter, catalogComplete: Boolean): List<Chapter> {
+        val sameGroup = chapters.filter { it.group == current.group }.sortedBy(Chapter::index)
+        if (!catalogComplete || current.sourceId != "mangadex" || sameGroup.none { it.id == current.id })
+            return sameGroup
+        val currentVolume = readingVolume(current.group) ?: return sameGroup
+        fun selectedVariant(chapter: Chapter): ChapterVariant? = chapter.variants.singleOrNull {
+            it.sourceId == "mangadex" && chapter.sourceId == it.sourceId &&
+                it.mangaId.isNotBlank() && chapter.sourceMangaId == it.mangaId &&
+                it.chapterId.isNotBlank() && chapter.sourceChapterId == it.chapterId
+        }
+        val selected = selectedVariant(current)?.takeIf { it.scanlator.isNotBlank() } ?: return sameGroup
+        val volumes = mutableListOf<Pair<ReadingVolume, List<Chapter>>>()
+        val seenVolumes = mutableSetOf<String>()
+        for ((group, entries) in chapters.groupBy(Chapter::group)) {
+            val label = readingVolume(group) ?: continue
+            if (label.language != currentVolume.language) continue
+            // Do not skip an ambiguous middle volume to reach a later one. DecimalNumber
+            // comparison is exact, but equality is identity-based, so key by canonical text.
+            if (!seenVolumes.add(label.number.toPlainString()) || entries.any { chapter ->
+                    val variant = selectedVariant(chapter)
+                    variant == null || variant.mangaId != selected.mangaId ||
+                        variant.language != label.language || variant.edition != label.edition ||
+                        variant.scanlator != selected.scanlator
+                }) return sameGroup
+            val numbers = entries.mapNotNull { chapter ->
+                parse(chapter)?.takeIf { it.system == "chapter" }?.key
+            }
+            if (numbers.distinct().size != numbers.size ||
+                entries.map(Chapter::id).distinct().size != entries.size ||
+                entries.map(Chapter::index).distinct().size != entries.size) return sameGroup
+            volumes += label to entries
+        }
+        return volumes.sortedWith { left, right -> left.first.number.compareTo(right.first.number) }
+            .flatMap { (_, entries) -> entries.sortedBy(Chapter::index) }
+    }
+
     fun independentId(storageId: String): String = "logical:" + sha256(storageId.encodeToByteArray()).take(16).toByteArray().hexString()
 }

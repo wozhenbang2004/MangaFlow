@@ -38,6 +38,7 @@ import dev.mangaflow.account.CopyShelfMetadata
 import dev.mangaflow.storage.SavedResumeTarget
 import dev.mangaflow.ui.CopyProgressHintState
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.data.ChapterSemantics
 import dev.mangaflow.data.DiscoveryMode
 import dev.mangaflow.data.RankPeriod
 import dev.mangaflow.data.RankAudience
@@ -1264,7 +1265,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         try {
             // Reuse the real source catalogue/cache once. Nothing blocks scrolling, Back or a new search.
             val cached = withContext(Dispatchers.Default) {
-                repository.cachedDetail(selected.id)?.takeIf { repository.isCatalogFresh(selected.id) }
+                repository.cachedCatalog(selected.id)?.takeIf { it.fresh }?.detail
             }
             val retained = if (cached == null) readerCatalogs.read(selected.id)?.takeIf {
                 siteRankingsRepository.sameSourceResult(work, selected, it.manga)
@@ -1412,7 +1413,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             var supplementaryStarted = false
             try {
                 val offline = downloadedChapters(manga.id)
-                val (cached, retained, initialChapters) = cachedDetailForDisplay(manga.id, previous?.detail, offline)
+                val (snapshot, retained, initialChapters) = cachedDetailForDisplay(manga.id, previous?.detail, offline)
+                val cached = snapshot?.detail
                 if (requestId != detailRequestId) return@launch
                 val restoredManga = (retained?.manga ?: initialManga).let {
                     val totalHeat = it.totalHeat() ?: manga.totalHeat()
@@ -1421,7 +1423,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 checkRankedIdentity(restoredManga)
                 if (cached == null) repository.retainWork(MangaDetail(restoredManga, initialChapters))
                 val reuseCatalog = cached != null && cached.chapters.isNotEmpty() && !forceRefresh &&
-                    repository.isCatalogFresh(manga.id) &&
+                    snapshot?.fresh == true &&
                     (manga.latestChapter.isBlank() || manga.latestChapter == cached.manga.latestChapter) &&
                     (continueChapterId == null || findSourceChapter(initialChapters, continueChapterId) != null)
                 _detail.update { current ->
@@ -1522,13 +1524,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     /** Keep the view's cached projection off Main and reject concurrent source-setting changes. */
     private suspend fun cachedDetailForDisplay(mangaId: String, previous: MangaDetail?,
-        offline: List<Chapter>): Triple<MangaDetail?, MangaDetail?, List<Chapter>> {
+        offline: List<Chapter>): Triple<UnifiedMangaRepository.CatalogSnapshot?, MangaDetail?, List<Chapter>> {
         while (true) {
             val settings = unifiedChapters.revision.value
             val catalogs = repository.catalogRevision.value
             val prepared = withContext(Dispatchers.Default) {
-                val cached = repository.cachedDetail(mangaId)
-                val retained = cached?.takeIf { it.chapters.isNotEmpty() }
+                val cached = repository.cachedCatalog(mangaId)
+                val retained = cached?.detail?.takeIf { it.chapters.isNotEmpty() }
                     ?: previous?.takeIf { it.chapters.isNotEmpty() }
                 Triple(cached, retained, retainedChapters(retained?.chapters.orEmpty(), offline))
             }
@@ -1757,7 +1759,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val group = chapters.indexOfFirst { it.logicalId.ifBlank { it.id } == logical ||
             it.variants.any { variant -> variant.storageId == selected.id } }
         return if (group >= 0) chapters.mapIndexed { index, chapter ->
-            if (index == group) selected.copy(logicalId = chapter.logicalId.ifBlank { chapter.id }, variants = chapter.variants, index = chapter.index) else chapter
+            // Keep the open native source/cursor, but use the current directory's grouping.
+            if (index == group) selected.copy(title = chapter.title, group = chapter.group,
+                logicalId = chapter.logicalId.ifBlank { chapter.id }, variants = chapter.variants, index = chapter.index) else chapter
         } else (chapters + selected).distinctBy(Chapter::id).sortedBy(Chapter::index)
     }
 
@@ -2323,9 +2327,16 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 }
                 require(verifiedTargetCurrent()) { "来源或恢复设置已变化，请重新确认。" }
                 val projected = selectedChapters(currentCatalog, resolveChapter(current, available))
+                val pendingCatalog = if (session != null) _reading.value?.let {
+                    it.chaptersLoading || it.chaptersError != null
+                } == true else _detail.value?.let { it.loading || it.error != null || it.detail == null } == true
+                val needsCatalog = pendingCatalog ||
+                    work.sourceUrl != LOCAL_SOURCE_URL && !repository.isCatalogFresh(work.id)
                 _chapterSourceOperation.value = ChapterSourceOperation()
                 failedSourcePage = null
-                beginReading(ReadingSession(work, projected, selected.id, initialPageIndex = targetPageIndex))
+                beginReading(ReadingSession(work, projected, selected.id,
+                    chaptersLoading = needsCatalog, initialPageIndex = targetPageIndex))
+                if (needsCatalog) loadReadingCatalog()
                 if (automaticKey != null) automaticSourceSwitches[automaticKey] = monotonicTimeMillis()
                 if (!undoing && session != null && originalVariant != null && originalPages != null &&
                     originalPage in originalPages.indices && originalEpoch != null) {
@@ -2395,7 +2406,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val current = _detail.value ?: return
         val chapters = current.detail?.chapters ?: downloadedChapters(current.manga.id)
         if (findSourceChapter(chapters, chapter.id) == null) return
-        val needsCatalog = current.loading || current.error != null || current.detail == null
+        val needsCatalog = current.loading || current.error != null || current.detail == null ||
+            current.manga.sourceUrl != LOCAL_SOURCE_URL && !repository.isCatalogFresh(current.manga.id)
         beginReading(ReadingSession(current.manga, selectedChapters(chapters, chapter), chapter.id, chaptersLoading = needsCatalog))
         if (needsCatalog) loadReadingCatalog()
     }
@@ -2404,7 +2416,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val current = _detail.value ?: return
         val chapters = current.detail?.chapters ?: downloadedChapters(current.manga.id)
         if (chapters.none { it.id == chapter.id }) return
-        val needsCatalog = current.loading || current.error != null || current.detail == null
+        val needsCatalog = current.loading || current.error != null || current.detail == null ||
+            current.manga.sourceUrl != LOCAL_SOURCE_URL && !repository.isCatalogFresh(current.manga.id)
         beginReading(ReadingSession(current.manga, chapters, chapter.id,
             chaptersLoading = needsCatalog, startAtBeginning = true))
         if (needsCatalog) loadReadingCatalog()
@@ -2461,23 +2474,24 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     return@launch
                 }
                 val memory = withContext(Dispatchers.Default) {
-                    repository.cachedDetail(manga.id)?.takeIf { it.chapters.isNotEmpty() }
+                    repository.cachedCatalog(manga.id)?.takeIf { it.detail.chapters.isNotEmpty() }
                 }
                 val saved = if (memory == null) readerCatalogs.read(manga.id) else null
                 if (requestId != libraryOpenRequestId) return@launch
                 // Only a full directory establishes the first chapter; a download may start midway.
-                val catalog = memory ?: saved ?: repository.detail(manga.id)
+                val catalog = memory?.detail ?: saved ?: repository.detail(manga.id)
                 if (requestId != libraryOpenRequestId) return@launch
                 val first = catalog.chapters.minByOrNull(Chapter::index)?.takeIf { it.id.isNotBlank() }
                     ?: throw IllegalStateException("暂时没有可读章节，请稍后重试。")
                 if (requestId != libraryOpenRequestId) return@launch
+                val needsCatalog = saved != null || memory?.fresh == false
                 // Detach before beginReading invalidates other navigation intents; do not cancel this job.
                 libraryOpenJob = null
                 _libraryOpening.value = null
                 closeDetail()
                 beginReading(ReadingSession(catalog.manga, catalog.chapters, first.id,
-                    chaptersLoading = saved != null))
-                if (saved != null) loadReadingCatalog()
+                    chaptersLoading = needsCatalog))
+                if (needsCatalog) loadReadingCatalog()
                 // The reader can draw while this valid directory is persisted.
                 if (memory == null && saved == null) readerCatalogs.save(catalog)
             } catch (cancel: CancellationException) {
@@ -2536,7 +2550,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             try {
                 val local = manga.sourceUrl == LOCAL_SOURCE_URL
                 // Keep the exact stored source chapter; its projection can be large.
-                val cached = if (local) null else cachedDetailForDisplay(manga.id, null, emptyList()).first
+                val snapshot = if (local) null else cachedDetailForDisplay(manga.id, null, emptyList()).first
+                val cached = snapshot?.detail
                 if (requestId != libraryOpenRequestId) return@launch
                 val offline = if (local) downloadedChapters(manga.id) else knownDownloadChapters(manga.id)
                 val chapter = cached?.chapters?.let { findSourceChapter(it, chapterId) }
@@ -2544,7 +2559,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     ?: fallback
                     ?: Chapter(chapterId, chapterTitle.ifBlank { "继续阅读" }, 0)
                 val chapters = selectedChapters(retainedChapters(cached?.chapters.orEmpty(), offline), chapter)
-                val hasCurrentCatalog = cached?.chapters?.let { findSourceChapter(it, chapterId) != null } == true
+                val hasCurrentCatalog = cached?.chapters?.let { findSourceChapter(it, chapterId) != null } == true &&
+                    snapshot?.fresh == true
                 val needsCatalog = if (local) offline.isEmpty() else !hasCurrentCatalog
                 // Detach before beginReading cancels previous navigation intents.
                 libraryOpenJob = null
@@ -2593,9 +2609,6 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             return
         }
         _reading.update { it?.copy(chaptersLoading = true, chaptersError = null) }
-        val pendingDetail = detailJob?.takeIf {
-            !forceRefresh && it.isActive && _detail.value?.manga?.id == session.manga.id
-        }
         readingCatalogJob = viewModelScope.launch {
             try {
                 downloads.awaitReady()
@@ -2607,29 +2620,16 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     else current.copy(
                         manga = if (current.manga.sourceUuid.isBlank()) current.manga.copy(
                             sourceUuid = saved?.manga?.sourceUuid.orEmpty()) else current.manga,
-                        chapters = (saved?.chapters.orEmpty() + offline + current.chapters).distinctBy(Chapter::id)
-                            .sortedBy(Chapter::index),
+                        chapters = retainedChapters(current.chapters, saved?.chapters.orEmpty() + offline),
                     )
                 }
-                // A verified catalogue can be ready before the detail coroutine finishes
-                // its unrelated persistence and metrics. Share only work still needed here.
-                val earlyCatalog = if (forceRefresh) null else withContext(Dispatchers.Default) {
-                    repository.cachedDetail(session.manga.id)?.takeIf {
-                        repository.isCatalogFresh(session.manga.id) &&
-                            findSourceChapter(it.chapters, session.chapterId) != null
-                    }
-                }
-                val directoryWork = pendingDetail.takeIf { earlyCatalog == null }
-                directoryWork?.join()
-                if (requestId != readingRequestId) return@launch
-                if (directoryWork != null && detailJob === directoryWork) {
-                    _detail.value?.takeIf { it.manga.id == session.manga.id }?.error?.let { failure ->
-                        throw IllegalStateException(failure)
-                    }
-                }
-                val cached = earlyCatalog ?: if (forceRefresh) null else withContext(Dispatchers.Default) {
-                    repository.cachedDetail(session.manga.id)
-                        ?.takeIf { findSourceChapter(it.chapters, session.chapterId) != null }
+                // Retained chapters are readable, not evidence of a complete directory.
+                // Join the repository's source request rather than the whole detail job,
+                // whose persistence/metrics may still be running after the catalog is ready.
+                val cached = if (forceRefresh) null else withContext(Dispatchers.Default) {
+                    repository.cachedCatalog(session.manga.id)?.takeIf {
+                        it.fresh && findSourceChapter(it.detail.chapters, session.chapterId) != null
+                    }?.detail
                 }
                 // Downloaded chapters are immediately usable, but they are not
                 // a complete directory for continuing into the next chapter.
@@ -2765,7 +2765,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 chapterSourceMangaId(reading.manga.id, it) == intent.currentOwner }) return
         reading.chapters.firstOrNull { it.id == intent.targetId &&
             chapterSourceMangaId(intent.workId, it) == intent.targetOwner }?.let {
-            // Entry revalidates immediate same-group successor, installed source and owner;
+            // Entry revalidates the reader's immediate successor, installed source and owner;
             // replacement work joins all retiring generations before acquiring its budget.
             prefetchNextChapter(reading.manga, it)
         }
@@ -2788,14 +2788,15 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         _nextChapterPreparation.value = null
     }
 
-    /** Only a visible chapter can request its immediate same-group successor. */
+    /** Only a visible chapter can request its immediate reader-sequence successor. */
     fun prefetchNextChapter(manga: Manga, chapter: Chapter) {
         if (manga.sourceUrl == LOCAL_SOURCE_URL) return
         val session = _reading.value ?: return
         val visible = visibleReading ?: return
         if (session.manga.id != manga.id || visible.first.id != manga.id) return
         val current = session.chapters.firstOrNull { it.id == visible.second.id } ?: return
-        val siblings = session.chapters.filter { it.group == current.group }.sortedBy(Chapter::index)
+        val siblings = ChapterSemantics.readingSequence(session.chapters, current,
+            catalogComplete = !session.chaptersLoading && session.chaptersError == null)
         val next = siblings.getOrNull(siblings.indexOfFirst { it.id == current.id } + 1) ?: return
         if (next.id != chapter.id) return
         if (downloads.entries.value.any { it.manga.id == manga.id && it.chapter.id == chapter.id &&
@@ -2853,7 +2854,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             val reading = _reading.value?.takeIf { it.manga.id == manga.id } ?: return false
             val origin = reading.chapters.firstOrNull { it.id == currentChapter } ?: return false
             if (chapterSourceMangaId(manga.id, origin) != currentOwner || repository.sources.none { it.id == source }) return false
-            val ordered = reading.chapters.filter { it.group == origin.group }.sortedBy(Chapter::index)
+            val ordered = ChapterSemantics.readingSequence(reading.chapters, origin,
+                catalogComplete = !reading.chaptersLoading && reading.chaptersError == null)
             val target = ordered.getOrNull(ordered.indexOfFirst { it.id == origin.id } + 1) ?: return false
             return target.id == chapter.id && chapterSourceMangaId(manga.id, target) == owner
         }

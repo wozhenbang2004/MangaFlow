@@ -14,6 +14,7 @@ import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.experience.ExperienceImageTimeouts
 import dev.mangaflow.experience.ExperiencePolicyStore
+import dev.mangaflow.experience.ExperienceRuntimePreferences
 import dev.mangaflow.experience.ExperienceAdmissionDeferred
 import dev.mangaflow.experience.PrefetchBudgetExceeded
 import dev.mangaflow.experience.PrefetchPromoted
@@ -98,6 +99,15 @@ catch (failure: java.io.IOException) {
     throw DownloadStorageException("无法读写禁漫图片缓存，请检查可用空间。", failure)
 } catch (failure: SecurityException) {
     throw DownloadStorageException("无法访问禁漫图片缓存，请检查存储权限。", failure)
+}
+
+/** Keep header inspection on the reader's runtime-bounded codec path. Desktop fallback
+ * may buffer encoded bytes, so its temporary copies share the existing work reservation. */
+private suspend fun readJmImageBounds(file: StorageFile, runtime: ExperienceRuntimePreferences,
+    policy: ExperiencePolicyStore, owner: PrefetchResourceOwner, optional: Boolean,
+): androidx.compose.ui.unit.IntSize? {
+    val release = policy.reserveMaterialization(file.length() * 2L, optional, owner)
+    return try { jmCacheIo { readNativeReaderSize(file.path, runtime) } } finally { release() }
 }
 
 /** Guard before upstream getContent() can buffer an unbounded response; count consumed body bytes only. */
@@ -643,7 +653,11 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                 // killed retry whose earlier published target is still a valid cache hit.
                 raw.delete(); pending.delete()
                 recoverTemporaryImages()
-                if (!retry && target.isFile && target.length() in 128L..maximumBytes) {
+                // A previous write's length is not proof of an image. Keep a suspect
+                // file until a fresh, checked replacement can be published atomically.
+                if (!retry && target.isFile && target.length() in 128L..maximumBytes &&
+                    readJmImageBounds(target, runtime, policy, resourceOwner, !token.isForeground) != null) {
+                    current()
                     token.ifOptional { receipt?.accept(target.length()) }
                     policy.recordImage(monotonicTimeMillis() - started, memory = false, disk = true,
                         prefetch = !token.isForeground, key = page.url, bytes = target.length())
@@ -770,8 +784,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                         policy.withDecodeAdmission(optional = budget != null, promoted = { token.isForeground },
                             onWaiting = { token.admission(PrefetchStage.CHECKING, it) }) {
                             current()
-                            val inspectLease = policy.reserveMaterialization(raw.length() * 2L, !token.isForeground, resourceOwner)
-                            val bounds = try { readNativeReaderSize(raw.path, runtime) } finally { inspectLease() }
+                            val bounds = readJmImageBounds(raw, runtime, policy, resourceOwner, !token.isForeground)
                                 ?: throw SourceException("禁漫返回的内容不是可读取的图片。")
                             val pixels = bounds.width.toLong() * bounds.height
                             val restoresPixels = !image.isGif && JmImageTool.calculateNumSegments(
@@ -798,6 +811,8 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                                     }
                                 }
                                 jmCacheIo { pending.writeBytes(bytes); syncStorageFile(pending) }
+                                if (readJmImageBounds(pending, runtime, policy, resourceOwner, !token.isForeground) == null)
+                                    throw SourceException("禁漫图片还原结果不是可读取的图片，请重试本页。")
                                 mutex.withLock {
                                     current()
                                     if (!pending.renameTo(target)) throw DownloadStorageException("解码后的图片无法缓存。")
@@ -975,6 +990,8 @@ private class RoutedJmDownloadSession(
         currentCoroutineContext().ensureActive()
         if (closed) throw CancellationException("下载已停止")
         require(page.index in 0..9_999) { "图片序号无效。" }
+        val policy = ExperiencePolicyStore.get(context)
+        val runtime = policy.state.value.runtime
         // Reuse the exact previously materialized image before opening a routed connection.
         val fingerprint = jmImageFingerprint(chapterId, page,
             page.sourceSessionEpoch.ifBlank { jmDigest("native-jm-anonymous") }, route)
@@ -983,8 +1000,12 @@ private class RoutedJmDownloadSession(
             dev.mangaflow.storage.CacheBackend.JM, cached, SourceKeys.manga("jmcomic", mangaId),
             SourceKeys.chapter("jmcomic", mangaId, chapterId), "jmcomic", page.index)
         try {
-            if (cached.isFile && cached.length() in 128L..dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.runtime.maxImageBytes)
-                return@withContext cached.readBytes()
+            if (cached.isFile && cached.length() in 128L..runtime.maxImageBytes &&
+                readJmImageBounds(cached, runtime, policy, PrefetchResourceOwner(), optional = false) != null) {
+                currentCoroutineContext().ensureActive()
+                if (closed) throw CancellationException("下载已停止")
+                return@withContext jmCacheIo { cached.readBytes() }
+            }
         } finally { releaseCache() }
         val owned = acquireClient()
         try {

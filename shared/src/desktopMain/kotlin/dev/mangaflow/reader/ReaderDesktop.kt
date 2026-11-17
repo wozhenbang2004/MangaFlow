@@ -18,8 +18,13 @@ import dev.mangaflow.experience.ExperienceRuntimePreferences
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
+import java.io.InterruptedIOException
+import java.io.RandomAccessFile
 import java.net.URI
+import java.nio.channels.ClosedByInterruptException
 import javax.imageio.ImageIO
+import javax.imageio.stream.FileImageInputStream
 import com.luciad.imageio.webp.WebPReadParam
 import kotlin.math.ceil
 
@@ -40,8 +45,9 @@ internal actual fun readerFilePath(uri: String): String? =
 
 internal actual suspend fun readNativeReaderSize(path: String, runtime: ExperienceRuntimePreferences): IntSize? {
     val file = checkedReaderFile(path, runtime)
-    try {
-        ImageIO.createImageInputStream(file)?.use { input ->
+    ReaderHeaderInput(RandomAccessFile(file, "r")).use { input ->
+        var dimensions: IntSize? = null
+        try {
             val readers = ImageIO.getImageReaders(input)
             if (readers.hasNext()) {
                 val reader = readers.next()
@@ -52,17 +58,38 @@ internal actual suspend fun readNativeReaderSize(path: String, runtime: Experien
                     }
                     val width = reader.getWidth(0)
                     val height = reader.getHeight(0)
-                    if (width <= 0 || height <= 0) return null
-                    return if (jpegOrientation(path) in 5..8) IntSize(height, width) else IntSize(width, height)
+                    if (width > 0 && height > 0) dimensions = IntSize(width, height)
                 } finally { reader.dispose() }
             }
-        }
-    } catch (_: LinkageError) { /* The native codec is unavailable on this CPU; use the bounded Skia path. */ }
+        } catch (failure: IOException) {
+            if (failure is InterruptedIOException || failure is ClosedByInterruptException) throw failure
+            // A codec can reject a truncated header with IOException. Only a real
+            // stream failure is a storage error; invalid data may try the next codec.
+        } catch (_: LinkageError) { /* The native codec is unavailable on this CPU. */ }
+        // ImageIO's provider selection may swallow an input error, so check even
+        // when it returned no reader or an apparently successful header result.
+        input.failure?.let { throw it }
+        dimensions?.let { return if (jpegOrientation(path) in 5..8) IntSize(it.height, it.width) else it }
+    }
     // Skia handles native formats absent from the installed ImageIO readers; size is header-only.
-    return runCatching {
-        org.jetbrains.skia.Image.makeFromEncoded(file.readReaderBytes(runtime.maxImageBytes))
-            .use { IntSize(it.width, it.height) }
-    }.getOrNull()
+    // Keep file IO, configured limits, cancellation and memory pressure outside
+    // the malformed-encoding catch. The JM owner reserves this encoded buffer.
+    val bytes = file.readReaderBytes(runtime.maxImageBytes)
+    return try {
+        org.jetbrains.skia.Image.makeFromEncoded(bytes).use { IntSize(it.width, it.height) }
+    } catch (_: IllegalArgumentException) { null }
+}
+
+/** Track the file boundary, not the exception class chosen by an image codec. */
+private class ReaderHeaderInput(private val file: RandomAccessFile) : FileImageInputStream(file) {
+    var failure: IOException? = null
+        private set
+    private inline fun <T> readFile(block: () -> T): T = try { block() }
+    catch (failure: IOException) { this.failure = this.failure ?: failure; throw failure }
+    override fun read(): Int = readFile { super.read() }
+    override fun read(bytes: ByteArray, offset: Int, length: Int): Int = readFile { super.read(bytes, offset, length) }
+    override fun seek(position: Long) = readFile { super.seek(position) }
+    override fun length(): Long = readFile { file.length() }
 }
 
 internal actual suspend fun decodeNativeReaderRegion(

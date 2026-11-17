@@ -117,7 +117,7 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
                         Spacer(Modifier.width(7.dp))
                         Text(if (resume != null) "继续 " + animeEpisodeLabel(resume) + " · " + animeTime(entry?.resume?.positionMs ?: 0L)
                             else first?.let { "播放 " + animeEpisodeLabel(it) } ?: if (state.detailLoading) "正在载入集数"
-                            else if (state.detailError != null) "集数未取得"
+                            else if (state.detailError != null) "暂无可选集数"
                             else if (pendingNativeCatalog != null) "等待原线路集数" else "暂无集数",
                             maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
@@ -154,7 +154,8 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
                 AnimeMessage("正在载入集数", "已保存的作品与续看记录会保留。")
             }
             if (state.detailError != null) item(key = "episode-error") {
-                AnimeMessage("集数未取得", state.detailError, action = "重试",
+                AnimeMessage(if (detail.episodes.isEmpty()) "番剧资料未完整取得" else "部分资料未更新",
+                    state.detailError, action = "重试",
                     onAction = { controller.open(subject) })
             }
             if (state.sourceError != null) item(key = "source-error") {
@@ -201,7 +202,8 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
                         onAction = { if (missingSelectedGroup) onSources(null)
                             else controller.refreshSource(pendingNativeCatalog.title.sourceId) })
                 } else AnimeMessage(if (episodeQuery.isNotBlank()) "没有匹配的集数" else "这组还没有集数",
-                    if (episodeQuery.isNotBlank()) "试试其他集号或标题。" else "作品资料尚未提供集数时，不按列表位置猜配播放资源。",
+                    if (episodeQuery.isNotBlank()) "试试其他集号或标题。"
+                    else "资料收录不代表已经开播或片源已更新；目录未列出集数时，不按其他季度或列表位置猜配播放资源。",
                     action = if (episodeQuery.isNotBlank()) "清除查找" else "查看来源",
                     onAction = { if (episodeQuery.isNotBlank()) episodeQuery = "" else onSources(null) })
             }

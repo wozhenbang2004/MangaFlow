@@ -712,9 +712,15 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     rebuildOptions()
                     startSourceAggregation(cached)
                 }
-                val detail = metadata.detail(subject)
+                val result = metadata.detail(subject)
                 if (!currentDetail(generation, subject.id)) return@launch
-                mutableState.update { it.copy(detail = detail, detailLoading = false, detailFromCache = false) }
+                val previous = mutableState.value.detail
+                val detail = AnimeDetail(result.subject ?: previous?.subject ?: subject,
+                    result.episodes ?: previous?.episodes.orEmpty())
+                val failure = listOfNotNull(result.subjectError?.let { "作品资料：$it" },
+                    result.episodeError?.let { "集数目录：$it" }).joinToString("\n").ifBlank { null }
+                mutableState.update { it.copy(detail = detail, detailLoading = false, detailError = failure,
+                    detailFromCache = it.detailFromCache && (result.subject == null || result.episodes == null)) }
                 rebuildOptions()
                 startSourceAggregation(detail)
             } catch (cancel: CancellationException) { throw cancel }

@@ -13,6 +13,7 @@ import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,6 +21,13 @@ import kotlinx.coroutines.withContext
 
 /** Official Bangumi v0 contract: bangumi/api/open-api/v0.yaml, read 2026-11-16. */
 data class AnimeMetadataPage(val items: List<AnimeSubject>, val page: Int, val hasMore: Boolean)
+data class AnimeMetadataDetailResult(
+    val subject: AnimeSubject?,
+    val episodes: List<AnimeEpisode>?,
+    val subjectError: String? = null,
+    val episodeError: String? = null,
+)
+private class AnimeMetadataIdentityException(message: String) : IllegalStateException(message)
 
 class AnimeMetadataRepository(context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
@@ -92,48 +100,63 @@ class AnimeMetadataRepository(context: PlatformContext) {
         withContext(Dispatchers.Default) { runCatching { AnimeDocumentCodec.detail(JSONObject(it.text)) }.getOrNull() }?.takeIf { detail -> detail.subject.id == subject.id }
     }
 
-    suspend fun detail(subject: AnimeSubject): AnimeDetail = withContext(Dispatchers.Default) {
+    suspend fun detail(subject: AnimeSubject): AnimeMetadataDetailResult = withContext(Dispatchers.Default) {
         require(subject.id.startsWith("bangumi:")) { "请选择有效的番剧条目。" }
         val id = animeNumericId(subject.id.removePrefix("bangumi:"))
         val key = "detail:${subject.id}"
         cache.read(key)?.takeIf { cache.isFresh(it, ContentCacheKind.DETAILS) }?.let {
             runCatching { AnimeDocumentCodec.detail(JSONObject(it.text)) }.getOrNull()
-                ?.takeIf { detail -> detail.subject.id == subject.id }?.let { detail -> return@withContext detail }
+                ?.takeIf { detail -> detail.subject.id == subject.id }?.let { detail ->
+                    return@withContext AnimeMetadataDetailResult(detail.subject, detail.episodes)
+                }
         }
         val cacheGeneration = cache.generation
         val http = AnimeHttp(BANGUMI_PROVIDER)
         try {
-            // Both endpoints are keyed by the same exact subject ID. Fetch independently rather
-            // than holding the episode grid behind a completed metadata round trip.
+            // Both reads have exact subject ownership, but separate failure boundaries. A
+            // metadata failure must not cancel/discard a successful episode catalogue (or vice versa).
             val (canonical, episodes) = coroutineScope {
-                val metadata = async {
+                val metadata = async { metadataRead {
                     val result = bangumiSubject(http.json(BANGUMI_API.newBuilder().addPathSegment("subjects")
                         .addPathSegment(id.toString()).build(), AnimeSourceStage.METADATA))
-                        ?: throw AnimeSourceException(BANGUMI_PROVIDER, AnimeSourceStage.METADATA,
-                            "该条目不是动画，请重新选择正确的番剧或季度。")
-                    check(result.id == subject.id) { "返回的番剧身份与请求不一致，请重新选择条目。" }
+                        ?: throw AnimeMetadataIdentityException("该条目不是动画，请重新选择正确的番剧或季度。")
+                    if (result.id != subject.id)
+                        throw AnimeMetadataIdentityException("返回的番剧身份与请求不一致，请重新选择条目。")
                     result
-                }
-                val catalogue = async { bangumiEpisodes(http, id) }
+                } }
+                val catalogue = async { metadataRead {
+                    bangumiEpisodes(http, id).map { episode ->
+                        val number = episode.finiteNumber("sort")
+                            ?: throw AnimeSourceException(BANGUMI_PROVIDER, AnimeSourceStage.METADATA, "番剧目录缺少剧集编号，暂时无法建立准确映射。")
+                        val episodeId = episode.positiveInt("id")
+                            ?: throw AnimeSourceException(BANGUMI_PROVIDER, AnimeSourceStage.METADATA, "番剧目录缺少剧集身份，请刷新后重试。")
+                        AnimeEpisode(
+                            id = "bangumi:$episodeId", subjectId = subject.id,
+                            title = episode.text("name_cn", "name").ifBlank { "第 ${animeEpisodeLabel(number)} 集" },
+                            number = number, kind = bangumiEpisodeKind(episode.optInt("type", -1)),
+                            durationMs = bangumiDuration(episode.text("duration")),
+                            airDate = episode.text("airdate").takeIf { it.isNotBlank() && it != "0000-00-00" },
+                        )
+                    }.sortedWith(compareBy<AnimeEpisode> { it.kind.ordinal }.thenBy { it.number }.thenBy { it.id })
+                } }
                 metadata.await() to catalogue.await()
             }
-            AnimeDetail(canonical, episodes.map { episode ->
-                val number = episode.finiteNumber("sort")
-                    ?: throw AnimeSourceException(BANGUMI_PROVIDER, AnimeSourceStage.METADATA, "番剧目录缺少剧集编号，暂时无法建立准确映射。")
-                val episodeId = episode.positiveInt("id")
-                    ?: throw AnimeSourceException(BANGUMI_PROVIDER, AnimeSourceStage.METADATA, "番剧目录缺少剧集身份，请刷新后重试。")
-                AnimeEpisode(
-                    id = "bangumi:$episodeId", subjectId = canonical.id,
-                    title = episode.text("name_cn", "name").ifBlank { "第 ${animeEpisodeLabel(number)} 集" },
-                    number = number, kind = bangumiEpisodeKind(episode.optInt("type", -1)),
-                    durationMs = bangumiDuration(episode.text("duration")),
-                    airDate = episode.text("airdate").takeIf { it.isNotBlank() && it != "0000-00-00" },
-                )
-            }.sortedWith(compareBy<AnimeEpisode> { it.kind.ordinal }.thenBy { it.number }.thenBy { it.id })).also {
-                cache.write(key, AnimeDocumentCodec.detail(it).toString(), cacheGeneration)
+            if (canonical.isSuccess && episodes.isSuccess) {
+                val complete = AnimeDetail(canonical.getOrThrow(), episodes.getOrThrow())
+                cache.write(key, AnimeDocumentCodec.detail(complete).toString(), cacheGeneration)
             }
+            // Partial responses never replace the complete persisted snapshot or its freshness.
+            AnimeMetadataDetailResult(canonical.getOrNull(), episodes.getOrNull(),
+                canonical.exceptionOrNull()?.let { (it as? AnimeSourceException)?.message ?: "作品资料未能读取。" },
+                episodes.exceptionOrNull()?.let { (it as? AnimeSourceException)?.message ?: "集数目录未能读取。" })
         } finally { http.close() }
     }
+
+    private suspend fun <T> metadataRead(block: suspend () -> T): Result<T> = try {
+        Result.success(block())
+    } catch (cancel: CancellationException) { throw cancel }
+    catch (failure: AnimeMetadataIdentityException) { throw failure }
+    catch (failure: Exception) { Result.failure(failure) }
 
     suspend fun related(subject: AnimeSubject): List<AnimeSubject> = withContext(Dispatchers.Default) {
         require(subject.id.startsWith("bangumi:")) { "请选择有效的番剧条目。" }
