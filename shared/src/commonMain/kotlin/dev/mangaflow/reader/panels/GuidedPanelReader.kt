@@ -65,7 +65,7 @@ import dev.mangaflow.reader.LocalReaderPageRepair
 import dev.mangaflow.reader.ReaderPreparationWorkContext
 import dev.mangaflow.reader.ReaderPreparationPhase
 import dev.mangaflow.reader.readerPageErrorLabel
-import dev.mangaflow.reader.AdjacentPagePrefetch
+import dev.mangaflow.reader.ReaderPrefetchViewport
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.reader.isReaderPrefetchFailure
 import dev.mangaflow.reader.readerTimeoutIsSource
@@ -99,8 +99,8 @@ internal fun GuidedPanelReader(
     pages: List<Page>,
     headers: Map<String, String>,
     sourceId: String,
-    prefetchPage: suspend (Page) -> Page?,
-    scriptPrefetch: suspend (Page, PrefetchByteBudget, PrefetchWork) -> Page?,
+    prefetchRequests: MutableMap<Int, ReaderPagePrefetch>,
+    prefetchFailures: MutableMap<Int, String>,
     resolvePage: ReaderPageResolver,
     retryPage: ReaderPageResolver,
     observePageTransfer: (Page) -> Flow<DownloadProgress?>,
@@ -132,7 +132,7 @@ internal fun GuidedPanelReader(
     active: Boolean,
     backdrop: HazeState,
     bottomClearancePx: Int,
-) {
+): ReaderPrefetchViewport {
     val context = LocalContext.current
     val primaryPreparationTracker = LocalReaderPreparationTracker.current
     val repair = LocalReaderPageRepair.current
@@ -140,8 +140,7 @@ internal fun GuidedPanelReader(
     val experience = remember(context) { ExperiencePolicyStore.get(context) }
     val nearEnd by rememberUpdatedState(onNearEnd)
     val pageFailed by rememberUpdatedState(onPrefetchFailure)
-    val prefetchFailures = remember(pages, headers, sourceId) { mutableStateMapOf<Int, String>() }
-    val prefetchRequests = remember(pages, headers, sourceId) { mutableStateMapOf<Int, ReaderPagePrefetch>() }
+    val preparationLayout = remember { Any() }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     val repository = remember(context) { PanelRepository(context) }
     val models = remember(context) { PanelModelStore.get(context) }
@@ -426,25 +425,6 @@ internal fun GuidedPanelReader(
             if (attempt.acceptsResult && requestedRun.acceptsResult && latestDetectionRun === requestedRun) loading = false
         }
     }
-    // Ordinary and guided reading share one bounded resolve/original/preview pipeline.
-    // Detection remains current-page-only and finishes before optional future work starts.
-    AdjacentPagePrefetch(
-        pages = pages, headers = headers, mode = preferences.mode,
-        composedPages = mapOf(pageIndex to true),
-        loadedPages = if (imageReady) mapOf(pageIndex to primaryPage.url) else emptyMap(),
-        requests = prefetchRequests, resolvePage = prefetchPage, scriptPrefetch = scriptPrefetch,
-        enabled = active && imageReady && error == null && detection != null,
-        foregroundActive = active,
-        sourceId = sourceId, viewportWidth = { viewport.width }, viewportHeight = viewport.height,
-        onPageRecovered = { index -> prefetchFailures.remove(index) },
-        onPageFailure = { index, failure ->
-            if (active && attempt.acceptsResult && index in pages.indices) {
-                prefetchFailures[index] = failure
-                pageFailed(pages[index])
-            }
-        },
-        position = { pageIndex.toFloat() }, visibleRange = { pageIndex to pageIndex },
-    )
     LaunchedEffect(pageIndex, selected, detection, imageReady, active) {
         // The parent needs the displayed page for retry/source/ordinary-reading actions,
         // even when this page has no usable image yet. Only ready content is saved.
@@ -606,4 +586,22 @@ internal fun GuidedPanelReader(
             }
         }
     }
+    val preparationReady = imageReady && !loading && error == null && detection != null
+    return ReaderPrefetchViewport(
+        visibleRange = { pageIndex to pageIndex }, position = { pageIndex.toFloat() },
+        composed = mapOf(pageIndex to true),
+        // Recognition must finish before any NEW optional preparation is admitted.
+        // Already owned originals can remain within the shared host's bounded window.
+        loaded = if (preparationReady) mapOf(pageIndex to primaryPage.url) else emptyMap(),
+        width = { viewport.width }, height = viewport.height, active = active, layoutKey = preparationLayout,
+        foregroundPending = active && error == null && attempt.acceptsResult && detectionRun.acceptsResult &&
+            (!imageReady || loading),
+        recovered = { index -> prefetchFailures.remove(index) },
+        failed = { index, failure ->
+            if (active && attempt.acceptsResult && index in pages.indices) {
+                prefetchFailures[index] = failure
+                pageFailed(pages[index])
+            }
+        })
+
 }

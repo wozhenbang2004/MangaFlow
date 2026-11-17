@@ -447,9 +447,6 @@ fun ReaderScreen(
     var progressInteracting by remember(chapterId) { mutableStateOf(false) }
     val dimPreview = remember { mutableStateOf<Float?>(null) }
     var imageVisible by remember(chapterId) { mutableStateOf(false) }
-    LaunchedEffect(readerForeground, loading, imageVisible) {
-        experience.setReaderWaiting(readerForeground && (loading || !imageVisible))
-    }
     var recentConfirmed by remember(manga.id, chapterId) { mutableStateOf(false) }
     var chapterVisibilityReported by remember(manga.id, chapterId) { mutableStateOf(false) }
     var nextChapterPrefetched by remember(manga.id, chapterId) { mutableStateOf(false) }
@@ -502,7 +499,9 @@ fun ReaderScreen(
     }
     val isolatedPanelLayout = if (preferences.panelEngine == PanelEngine.OFF) null else
         listOf(preferences.mode, preferences.panelLayoutKey, preferences.doublePage, preferences.coverAlone)
-    val preparationTracker = remember(sourceIdentity, pages, headers, isolatedPanelLayout) { ReaderPreparationTracker(chapter.sourceId, pages.size) }
+    val preparationTracker = remember(sourceIdentity, pages, headers) { ReaderPreparationTracker(chapter.sourceId, pages.size) }
+    val sharedPrefetchRequests = remember(sourceIdentity, pages, headers) { mutableStateMapOf<Int, ReaderPagePrefetch>() }
+    val sharedPrefetchFailures = remember(sourceIdentity, pages, headers) { mutableStateMapOf<Int, String>() }
     val preparation by preparationTracker.state.collectAsStateWithLifecycle()
     LaunchedEffect(sourceIdentity, chapter, pageIndex, pages, standbyActive, loading, error,
         sourcePickerBlocking, chapterChangeRequested, experienceBudget.standbySources, preparation.direction) {
@@ -1035,6 +1034,7 @@ fun ReaderScreen(
                 onClickLabel = "显示或收起阅读工具",
                 onClick = { controlsVisible = !controlsVisible },
             ) else Modifier)) {
+            var preparationViewport: ReaderPrefetchViewport? = null
             when {
                 loading || error != null -> if (chapterWaitVisible && (delayedLoading || error != null)) ReaderImageRecovery(
                     index = null, failure = error.orEmpty(), pending = loading,
@@ -1058,10 +1058,10 @@ fun ReaderScreen(
                 )
                 pages.isNotEmpty() -> key(chapterId, sourceIdentity, isolatedPanelLayout,
                     manualSingles.takeIf { preferences.panelEngine != PanelEngine.OFF }) {
-                    if (preferences.panelEngine != PanelEngine.OFF) GuidedPanelReader(
+                    preparationViewport = if (preferences.panelEngine != PanelEngine.OFF) GuidedPanelReader(
                         pages = pages, headers = headers, resolvePage = resolvePage, retryPage = retryPage,
                         observePageTransfer = observePageTransfer,
-                        sourceId = chapter.sourceId, prefetchPage = prefetchPage, scriptPrefetch = scriptPrefetch,
+                        sourceId = chapter.sourceId, prefetchRequests = sharedPrefetchRequests, prefetchFailures = sharedPrefetchFailures,
                         sourceName = currentSourceName.orEmpty(), sourceAlternatives = alternativeSources,
                         readySourceVariants = readySourceVariants, onPrefetchFailure = reportPrefetchFailure,
                         externalRetrySerial = currentPageRetrySerial,
@@ -1102,7 +1102,7 @@ fun ReaderScreen(
                         backdrop = readerBackdrop,
                         bottomClearancePx = if (controlsVisible) bottomControlsHeightPx else 0,
                     ) else ChapterPages(
-                        pages = pages, sourceId = chapter.sourceId, prefetchPage = prefetchPage, scriptPrefetch = scriptPrefetch,
+                        pages = pages, sourceId = chapter.sourceId, prefetchRequests = sharedPrefetchRequests, prefetchFailures = sharedPrefetchFailures,
                         headers = headers,
                         resolvePage = resolvePage,
                         retryPage = retryPage,
@@ -1183,6 +1183,25 @@ fun ReaderScreen(
                         },
                     )
                 }
+            }
+
+            // One primary-source preparation owner outlives either visual renderer.
+            // The descriptor is returned synchronously from the selected branch above.
+            val foregroundPreparationPending = preparationViewport?.foregroundPending == true
+            LaunchedEffect(readerForeground, loading, imageVisible, foregroundPreparationPending) {
+                experience.setReaderWaiting(readerForeground &&
+                    (loading || !imageVisible || foregroundPreparationPending))
+            }
+            preparationViewport?.let { viewport ->
+                AdjacentPagePrefetch(pages, headers, preferences.mode, viewport.composed, viewport.loaded,
+                    sharedPrefetchRequests, prefetchPage, scriptPrefetch = scriptPrefetch,
+                    enabled = viewport.active, foregroundActive = viewport.active, sourceId = chapter.sourceId,
+                    viewportWidth = viewport.width, viewportHeight = viewport.height,
+                    onPageFailure = viewport.failed, onPageRecovered = viewport.recovered,
+                    onPageDimensions = viewport.dimensions, position = viewport.position, groups = viewport.groups,
+                    scrollDirection = viewport.scrollDirection, directionAnchor = viewport.directionAnchor,
+                    directionBaseline = viewport.directionBaseline, layoutKey = viewport.layoutKey,
+                    retainOriginalsAcrossLayouts = true, visibleRange = viewport.visibleRange)
             }
 
             // Read the live dim preview during drawing; dragging does not publish or persist preferences.
@@ -1709,8 +1728,8 @@ fun ReaderScreen(
 private fun ChapterPages(
     pages: List<Page>,
     sourceId: String,
-    prefetchPage: suspend (Page) -> Page?,
-    scriptPrefetch: suspend (Page, PrefetchByteBudget, PrefetchWork) -> Page?,
+    prefetchRequests: MutableMap<Int, ReaderPagePrefetch>,
+    prefetchFailures: MutableMap<Int, String>,
     headers: Map<String, String>,
     resolvePage: ReaderPageResolver,
     retryPage: ReaderPageResolver,
@@ -1748,7 +1767,7 @@ private fun ChapterPages(
     onPrevious: (() -> Unit)?,
     startContent: @Composable (BottomPullLoadState) -> Unit,
     endContent: @Composable (BottomPullLoadState) -> Unit,
-) {
+): ReaderPrefetchViewport {
     val save by rememberUpdatedState(onSave)
     val readingNavigation by rememberUpdatedState(onReadingNavigation)
     val location by rememberUpdatedState(onLocation)
@@ -1759,10 +1778,6 @@ private fun ChapterPages(
     val layoutKey = remember(preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles) { Any() }
     val loadedPages = remember(pages, headers, sourceId, layoutKey) { mutableStateMapOf<Int, String>() }
     val composedPages = remember(pages, headers, sourceId, layoutKey) { mutableStateMapOf<Int, Boolean>() }
-    val prefetchRequests = remember(pages, headers, sourceId) {
-        mutableStateMapOf<Int, ReaderPagePrefetch>()
-    }
-    val prefetchFailures = remember(pages, headers, sourceId) { mutableStateMapOf<Int, String>() }
     val pageDimensions = remember(pages, headers, sourceId) { mutableStateMapOf<String, IntSize>() }
     val startPage = remember(layoutKey) { initialPage.coerceIn(0, pages.lastIndex) }
     val startOffset = remember(layoutKey) { initialOffset.coerceAtLeast(0) }
@@ -2279,27 +2294,24 @@ private fun ChapterPages(
         }
     }
     }
-    // Both visual branches publish their viewport in this composition, before this
-    // one chapter-owned host. No asynchronous unregister/register handoff gap.
-    prefetchViewport?.let { viewport ->
-        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, loadedPages, prefetchRequests, prefetchPage,
-            scriptPrefetch = scriptPrefetch, enabled = active, sourceId = sourceId,
-            viewportWidth = { contentWidthPx }, viewportHeight = previewHeightPx,
-            onPageFailure = { index, failure -> prefetchFailures[index] = failure; onPrefetchFailure(pages[index]) },
-            onPageRecovered = { index -> prefetchFailures.remove(index) },
-            onPageDimensions = { index, size -> pageDimensions[pages[index].url] = size },
-            position = viewport.position, groups = viewport.groups,
-            scrollDirection = viewport.scrollDirection, directionAnchor = viewport.directionAnchor,
-            directionBaseline = viewport.directionBaseline, layoutKey = layoutKey,
-            retainOriginalsAcrossLayouts = true,
-            visibleRange = viewport.visibleRange)
-    }
+    // Layout-specific state is returned, never published by an asynchronous effect.
+    return checkNotNull(prefetchViewport).copy(
+        composed = composedPages, loaded = loadedPages, width = { contentWidthPx }, height = previewHeightPx,
+        active = active, layoutKey = layoutKey,
+        failed = { index, failure -> prefetchFailures[index] = failure; onPrefetchFailure(pages[index]) },
+        recovered = { index -> prefetchFailures.remove(index) },
+        dimensions = { index, size -> pageDimensions[pages[index].url] = size })
 }
 
-private data class ReaderPrefetchViewport(
+internal data class ReaderPrefetchViewport(
     val visibleRange: () -> Pair<Int, Int>, val position: () -> Float,
     val groups: List<PageSpread>? = null, val scrollDirection: (() -> Int)? = null,
     val directionAnchor: (() -> Long)? = null, val directionBaseline: (() -> Pair<Long, Long>)? = null,
+    val composed: Map<Int, Boolean> = emptyMap(), val loaded: Map<Int, String> = emptyMap(),
+    val width: () -> Int = { 0 }, val height: Int = 0, val active: Boolean = false,
+    val foregroundPending: Boolean = false, val layoutKey: Any? = null,
+    val failed: (Int, String) -> Unit = { _, _ -> }, val recovered: (Int) -> Unit = {},
+    val dimensions: (Int, IntSize) -> Unit = { _, _ -> },
 )
 
 private data class ReaderSourceIdentity(val logicalId: String, val chapterId: String,
