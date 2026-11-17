@@ -392,6 +392,7 @@ fun ReaderScreen(
     val sourceSwitchWait = remember(sourceLoading, sourceSwitchName) { ReaderLoadAttempt() }
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var topControlsHeightPx by remember { mutableIntStateOf(0) }
+    var cornerStatusWidthPx by remember { mutableIntStateOf(0) }
     var bottomControlsHeightPx by remember { mutableIntStateOf(0) }
     var readerStatusInspecting by remember(chapterId) { mutableStateOf(false) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
@@ -1529,6 +1530,8 @@ fun ReaderScreen(
                 if (controlsVisible) (bottomControlsHeightPx - readerNavigationInsets().getBottom(this))
                     .coerceAtLeast(0).toDp().coerceAtLeast(112.dp) else 0.dp
             }),
+            bottomEndClearance = if (!controlsVisible && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF)
+                with(LocalDensity.current) { cornerStatusWidthPx.toDp().coerceAtLeast(112.dp) } else 0.dp,
             onInspectingChange = { readerStatusInspecting = it },
             onOpenSources = if (alternativeSources.isEmpty()) null else ({
                 sourceTriggerAnchor = null
@@ -1557,15 +1560,21 @@ fun ReaderScreen(
             },
         )
 
-        if (!controlsVisible && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF) Text(
-            "$clock · ${pageIndex + 1} / ${pages.size}",
-            color = preferences.theme.foreground().copy(alpha = .5f), fontSize = 11.sp,
-            modifier = Modifier.align(Alignment.BottomEnd).windowInsetsPadding(dev.mangaflow.reader.readerNavigationInsets().union(WindowInsets.displayCutout)
+        if (!controlsVisible && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF) Box(
+            modifier = Modifier.align(Alignment.BottomEnd)
+                .windowInsetsPadding(readerNavigationInsets().union(WindowInsets.displayCutout)
                     .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
-                .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = if (atChapterEnd) 72.dp else 12.dp)
+                .padding(end = 12.dp, bottom = (if (atChapterEnd) 72.dp else 0.dp) + 2.dp),
+        ) {
+            Box(Modifier.widthIn(max = LocalMangaWindow.current.width * .45f).heightIn(min = 44.dp)
+                .onSizeChanged { cornerStatusWidthPx = it.width }
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { controlsVisible = true }
-                .padding(horizontal = 4.dp, vertical = 4.dp),
-        )
+                .padding(horizontal = 4.dp), contentAlignment = Alignment.Center) {
+                Text("$clock · ${pageIndex + 1} / ${pages.size}",
+                    color = preferences.theme.foreground().copy(alpha = .5f), fontSize = 11.sp,
+                    maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+            }
+        }
         AnimatedVisibility(
             visible = downloadMessage != null,
             modifier = Modifier.align(Alignment.Center),
@@ -2280,8 +2289,8 @@ internal fun AdjacentPagePrefetch(
             if (sourceFailure) { resourceDeferred -= key; pageFailed(index, reason) }
             else if (key in capacityDeferred) resourceDeferred -= key
             else resourceDeferred += key
-            val attempts = (retryAttempts[key] ?: 0L) + 1L
-            retryAttempts[key] = attempts
+            val attempts = (retryAttempts[key] ?: 0L) + if (sourceFailure) 1L else 0L
+            if (sourceFailure) retryAttempts[key] = attempts
             // Local protection is not a source retry. It resumes only after a real budget change;
             // real failures have the user's finite extra attempts within this exact live window.
             val runtime = currentBudget.runtime
@@ -2472,7 +2481,6 @@ internal fun AdjacentPagePrefetch(
                 val recovery = PrefetchRecoveryKey(window.bytes, window.parallel, window.resolveParallel,
                     window.decodeParallel, writable, window.foregroundActive)
                 if (recoveryKey != null && recoveryKey != recovery) resourceDeferred.forEach { key ->
-                    retryAttempts.remove(key)
                     retryAfter[key] = now
                 }
                 recoveryKey = recovery
@@ -2527,7 +2535,6 @@ internal fun AdjacentPagePrefetch(
                         writable && window.foregroundActive && byteWindow.remaining > 0L &&
                         experience.estimatedPageBytes(resolvedPages[index]?.url ?: pages[index].url) <= byteWindow.remaining) {
                         val key = index to PrefetchStage.DOWNLOADING
-                        retryAttempts.remove(key)
                         retryAfter[key] = now
                     }
                 }
@@ -2586,6 +2593,7 @@ internal fun AdjacentPagePrefetch(
                                 if (resource.url.startsWith("file:")) {
                                     originalReady(index, resource, readerPageCacheKey(resource, headers, sourceId))
                                     originalFinished += index
+                                    tracker?.localOriginal(index, owner)
                                 }
                             }
                             end(index, PrefetchStage.RESOLVING, if (resource != null) ReaderPreparationPhase.COMPLETE

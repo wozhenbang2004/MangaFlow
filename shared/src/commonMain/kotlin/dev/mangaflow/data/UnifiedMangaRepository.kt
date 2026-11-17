@@ -798,9 +798,12 @@ class UnifiedMangaRepository(
         for (query in bodySourceSearchTerms(work.title, aliases)) {
             currentCoroutineContext().ensureActive()
             ensureEligibility(eligibility, info.id)
-            results = searchSource(info.id, query, forceRefresh = force).items.distinctBy(Manga::id)
+            val found = searchSource(info.id, query, forceRefresh = force).items
+            results = (results + found).distinctBy(Manga::id)
             ensureEligibility(eligibility, info.id)
-            if (results.isNotEmpty()) break
+            // A broad upstream search may return unrelated hits for the first spelling.
+            // Continue the existing bounded alias list until a full-title match is present.
+            if (results.any { SourceDiscoveryIdentity.titleMatches(work, it, aliases) }) break
         }
         if (results.isEmpty()) {
             report(SourceDiscoveryStatus.NO_MATCH, "该来源暂未找到这部作品。")

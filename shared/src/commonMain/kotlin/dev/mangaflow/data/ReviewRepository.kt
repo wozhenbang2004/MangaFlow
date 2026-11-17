@@ -624,7 +624,7 @@ class ReviewRepository(context: Context) {
             matchedTitle = subject.text("name_cn").ifBlank { subject.text("name") },
             score = rating?.nullableScore("score", 10)?.takeIf { total != 0 }, scoreScale = 10,
             ratingCount = total, subjectId = id.toString(), message = "中文短评 · 最新动态",
-            aliases = bangumiNames(subject))
+            aliases = bangumiNames(subject), authorAliases = bangumiAuthors(subject))
         return BangumiMatch(if (includeComments) withFirstPage(base) { bangumiComments(id, 0) } else base, bangumiNames(subject))
     }
 

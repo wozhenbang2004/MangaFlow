@@ -98,7 +98,7 @@ internal class ManhuaguiReviewProvider(private val http: ReviewProviderHttp) : E
         return ReviewSource(
             id = this.id, name = name, status = ReviewStatus.READY,
             url = publicUrl, matchedTitle = details.titles.first(), subjectId = subjectId,
-            aliases = details.titles, externalIds = mapOf(this.id to subjectId),
+            aliases = details.titles, authorAliases = details.authors, externalIds = mapOf(this.id to subjectId),
             score = score, scoreScale = 10, scoreLabel = "投票均分", ratingCount = total.toInt(),
             hasWorkReviews = false,
             message = if (score == null) "暂无投票评分。" else "",

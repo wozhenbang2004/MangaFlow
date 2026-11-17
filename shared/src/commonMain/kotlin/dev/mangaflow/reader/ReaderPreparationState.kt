@@ -109,6 +109,15 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
             windowRevision = snapshot.windowRevision + if (changed) 1 else 0, active = active, pauseReason = reason)
         publishLocked()
     }
+    /** Resolution already supplied a local original, so no transfer will be queued.
+     * Cache presence/bytes still come from artifact inspection, not this task outcome. */
+    fun localOriginal(index: Int, owner: Any) = synchronized(lock) {
+        if (this.owner !== owner || tickets[index to PrefetchStage.DOWNLOADING]?.let { it in activeTickets } == true)
+            return@synchronized
+        updateStep(index, PrefetchStage.DOWNLOADING,
+            ReaderPreparationStep(ReaderPreparationPhase.COMPLETE, "复用本地原图，无需网络请求"))
+        publishLocked()
+    }
     fun close(owner: Any) = synchronized(lock) {
         // A layout/window effect can restart while the same visible image keeps transferring.
         // Retire that effect's work only; the foreground attempt owns its own ticket lifetime.

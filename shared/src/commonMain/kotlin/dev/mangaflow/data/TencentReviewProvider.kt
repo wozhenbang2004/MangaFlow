@@ -76,7 +76,7 @@ internal class TencentReviewProvider(private val http: ReviewProviderHttp) : Ext
         return ReviewSource(
             id = this.id, name = name, status = ReviewStatus.READY,
             url = comicUrl(comicId), matchedTitle = detail.title, subjectId = comicId,
-            aliases = listOf(detail.title), score = detail.score, scoreScale = 0,
+            aliases = listOf(detail.title), authorAliases = detail.authors, score = detail.score, scoreScale = 0,
             scoreLabel = "原站评分", ratingCount = detail.ratingCount,
             message = if (detail.insufficientRatings) "评分人数不足，原站尚未公布评分。" else "",
             hasWorkReviews = false,

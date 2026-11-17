@@ -85,6 +85,7 @@ internal class BahamutReviewProvider(private val http: ReviewProviderHttp) : Ext
             status = ReviewStatus.READY,
             url = publicUrl,
             matchedTitle = details.titles.first(),
+            authorAliases = details.authors,
             subjectId = subjectId,
             score = score,
             scoreScale = 5,

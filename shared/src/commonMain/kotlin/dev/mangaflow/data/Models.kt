@@ -137,6 +137,8 @@ data class ReviewSource(
     val supportsReplies: Boolean = false,
     val scoreLabel: String = "",
     val hasWorkReviews: Boolean = true,
+    /** Creator names explicitly returned by the matched metadata subject, never inferred readings. */
+    val authorAliases: List<String> = emptyList(),
 )
 
 enum class ReviewKind { COMMENT, REVIEW, CHAPTER }

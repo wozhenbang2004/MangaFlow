@@ -1839,7 +1839,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val unique = ids.mapNotNull { (provider, values) ->
             values.distinct().singleOrNull()?.let { provider to it }
         }.toMap()
-        val identity = work.copy(alternativeTitles = aliases, externalIds = unique)
+        val identity = work.copy(alternativeTitles = aliases, externalIds = unique,
+            authorAliases = (work.authorAliases + ready.flatMap { it.authorAliases })
+                .filter(String::isNotBlank).distinct())
         if (metadataOnly) repository.reconsiderSourceCandidates(identity, aliases, conflicts)
         else if (force) repository.retryFailedSources(identity, aliases, conflicts, onlySourceId,
             _sourceManagement.value?.takeIf { it.work.id == work.id }?.discovery.orEmpty()

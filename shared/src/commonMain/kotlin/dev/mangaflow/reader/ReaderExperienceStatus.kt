@@ -91,6 +91,7 @@ internal fun ReaderExperienceStatus(
     topClearance: Dp,
     bottomClearance: Dp,
     onInspectingChange: (Boolean) -> Unit,
+    bottomEndClearance: Dp = 0.dp,
     preparation: ReaderPreparationState = ReaderPreparationState(),
     nextChapterPreparation: ReaderNextChapterPreparation? = null,
     standbyAvailability: ReaderSourceStandbyAvailability = ReaderSourceStandbyAvailability(),
@@ -174,8 +175,8 @@ internal fun ReaderExperienceStatus(
         while (true) { store.refreshCacheUsage(); delay(store.state.value.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L) }
     }
     val top = placement == ReaderStatusPlacement.TOP
-    // The old strip reserved 24dp above the bottom corner controls. A narrow centered
-    // rail clears those controls horizontally; larger toolbar/chapter-end clearances remain authoritative.
+    // Share the idle corner control's bottom row; reserve its measured width rather
+    // than assuming a centered rail can never overlap long page counts or large type.
     val restingBottom = if (bottomClearance <= 24.dp) 0.dp else bottomClearance
     val clearance by animateDpAsState(
         if (top) topClearance else restingBottom,
@@ -236,12 +237,14 @@ internal fun ReaderExperienceStatus(
         selected = section
     }
     Box(modifier.fillMaxSize()) {
-        Box(Modifier.align(if (top) Alignment.TopCenter else Alignment.BottomCenter)
+        Box(Modifier.align(if (top) Alignment.TopCenter else if (bottomEndClearance > 0.dp) Alignment.BottomStart else Alignment.BottomCenter)
             .windowInsetsPadding(
                 (if (top) readerStatusInsets().union(WindowInsets.captionBar) else readerNavigationInsets())
                     .union(WindowInsets.displayCutout)
                     .only(WindowInsetsSides.Horizontal + if (top) WindowInsetsSides.Top else WindowInsetsSides.Bottom))
-            .padding(start = 52.dp, end = 52.dp, top = if (top) clearance + 2.dp else 0.dp,
+            .padding(start = if (!top && bottomEndClearance > 0.dp) 12.dp else 52.dp,
+                end = if (!top && bottomEndClearance > 0.dp) bottomEndClearance + 24.dp else 52.dp,
+                top = if (top) clearance + 2.dp else 0.dp,
                 bottom = if (top) 0.dp else clearance + 2.dp)
             .widthIn(max = 304.dp)) {
             AnimatedVisibility(shown,
@@ -813,7 +816,7 @@ private fun StatusMicro(icon: ImageVector, value: String, label: String,
     mark: ReaderStatusMark, detail: String, progress: Float?, selected: Boolean,
     stages: List<ReaderStatusMark> = emptyList()) {
     val colors = MaterialTheme.colorScheme
-    val accent = if (selected) colors.primary else colors.onSurface
+    val accent = if (selected) colors.primary else colors.onSurface.copy(alpha = .62f)
     val progressColor = statusTone(mark)
     Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp).semantics(mergeDescendants = true) {
             contentDescription = label
@@ -827,12 +830,12 @@ private fun StatusMicro(icon: ImageVector, value: String, label: String,
             if (stages.isNotEmpty()) Row(Modifier.fillMaxWidth().height(2.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                 stages.forEach { stage ->
                     Box(Modifier.weight(1f).fillMaxHeight().background(statusTone(stage).copy(
-                        alpha = if (stage == ReaderStatusMark.IDLE || stage == ReaderStatusMark.UNKNOWN) .20f else .85f), CircleShape))
+                        alpha = if (stage == ReaderStatusMark.IDLE || stage == ReaderStatusMark.UNKNOWN) .20f else if (selected) .85f else .55f), CircleShape))
                 }
             } else Box(Modifier.fillMaxWidth().height(2.dp)
                 .background(colors.onSurface.copy(alpha = if (progress != null) .08f else 0f), CircleShape)) {
                 if (progress != null) Box(Modifier.fillMaxHeight().fillMaxWidth(progress.coerceIn(0f, 1f))
-                    .background(progressColor.copy(alpha = .8f), CircleShape))
+                    .background(progressColor.copy(alpha = if (selected) .8f else .55f), CircleShape))
             }
     }
 }
@@ -1346,7 +1349,7 @@ private fun ReaderCacheEntry(store: ExperiencePolicyStore, selected: Boolean) {
     val memory = cacheState(cache.memoryBytes, cache.memoryLimit)
     val disk = cacheState(cache.diskBytes, cache.diskLimit, cache.pending)
     val status = mangaStatusColors()
-    val accent = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+    val accent = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = .62f)
     Row(Modifier.semantics(mergeDescendants = true) {
         contentDescription = "共享图片缓存"
         stateDescription = "解码内存${statusCacheUsage(cache.memoryBytes, cache.memoryLimit)}，${memory.label}；" +

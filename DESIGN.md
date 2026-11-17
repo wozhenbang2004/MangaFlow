@@ -3662,3 +3662,14 @@ Final foreground image failures explicitly finish their captured preparation sta
 ### BROWSE-FAILURE-01 — Operation-owned safe errors
 
 Discovery/search source rows classify their own caught exception, not the latest shared source-health slot: concurrent successful or newer operations must not replace a failed lane's cause. Reuse the existing fixed-label classifier and numeric HTTP status only; never render raw exception messages, URLs, response bodies or credentials. Cancellation and request-generation guards remain unchanged. The screenshot's generic failure does not establish a login, network or parser cause for any specific source. This correction changes diagnosis only, not adapters, authentication, transport, or retry behavior. Static review only; no local build/test or device verification.
+
+
+### Reader idle rail alignment (2026-11-17)
+
+The viewed screenshot 1000122019 shows the bottom experience rail overlapping the idle clock/page corner. Reserve the corner's measured width (bounded for narrow windows), share its safe-area bottom alignment and retain 44dp interaction height. The rail preserves its scrollable slots, expanded controls, top placement and toolbar/chapter-end clearances. Resting neutral glyphs and decorative tracks are quieter; selected controls and error/unknown state semantics remain intact. No preparation, retry, cache or source logic changes. Source-reviewed only, no local build or visual/device acceptance claimed.
+
+### Reader retry and manga author identity follow-up (2026-11-17)
+
+A resolved local original completes only its transfer-stage projection under the current window owner, without inventing cache presence or overriding an active transfer ticket. Resource deferrals do not consume source retry attempts, and capacity changes do not reset already-spent source attempts. The finite source-failure retry budget, visible-page ownership and same-ticket terminal diagnostics remain authoritative.
+
+Trusted review metadata carries author aliases into source identity reconsideration. Bounded alternate-title searches continue past unrelated results until an exact-title candidate is present; strict work/author/ID confirmation remains separate. This is not evidence that the pictured title has been automatically linked or read on a device.
