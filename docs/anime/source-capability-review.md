@@ -41,3 +41,13 @@ explicit stations. Multiple automatic groups, multiple/empty editions, duplicate
 (kind,number), missing/nonfinite numbers and absent requested episodes still fail
 closed. Station resolution still uses the chosen real episode ID; no synthesized
 future playback, cross-season selection or array-position mapping was added.
+
+## AniCh detail-year correction
+
+The observed `airdate=1791043200000` is epoch milliseconds, not the previously
+expected formatted date. The adapter now accepts bounded 12/13-digit millisecond
+values using UTC, plus valid date-only or zoned ISO timestamps. It does not guess
+seconds or use the device timezone. Missing, malformed or conflicting years remain
+unconfirmed; exact source URL, title and routing checks remain unchanged. This is
+trusted identity enrichment, not evidence of video playback success. The patch was
+independently statically reviewed; no local build or automated tests were run.

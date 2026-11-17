@@ -12,6 +12,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.datetime.LocalDate
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
+import kotlin.time.Instant
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
@@ -82,9 +86,7 @@ internal class AniChAnimeProvider(override val revision: String) : AnimeProvider
                     else withContext(Dispatchers.Default) { JSONObject(response.text) }
                 } ?: JSONObject()
                 val detailName = detail.optString("title", "").trim()
-                val date = detail.optString("airdate", "").trim()
-                val year = Regex("""^(\d{4})-\d{2}-\d{2}(?:[T ].*)?$""")
-                    .matchEntire(date)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it in 1900..2100 }
+                val year = aniChAirdateYear(detail.optString("airdate", ""))
                 if (detailName == title.title.trim() && year != null && (title.year == null || title.year == year))
                     title.copy(year = year) else title
             } catch (cancel: CancellationException) { throw cancel }
@@ -205,4 +207,22 @@ private class AniChWire(private val bytes: ByteArray) {
     fun number(number: Int): Long = field(number)?.let { requireNotNull(it.integer) } ?: 0L
     fun string(number: Int): String = field(number)?.let { requireNotNull(it.data).decodeToString(throwOnInvalidSequence = true) }.orEmpty()
     fun messages(number: Int): List<AniChWire> = fields.filter { it.number == number }.map { AniChWire(requireNotNull(it.data)) }
+}
+
+/** AniCh's public detail airdate is epoch milliseconds; never infer seconds or device timezone. */
+internal fun aniChAirdateYear(raw: String): Int? {
+    val value = raw.trim()
+    val year = runCatching {
+        when {
+            // Reject missing/zero/second-like values rather than inventing a 1970 release year.
+            Regex("""-?\d{12,13}""").matches(value) -> {
+                val millis = value.toLongOrNull() ?: return null
+                if (millis !in -2_208_988_800_000L until 4_133_980_800_000L) return null
+                Instant.fromEpochMilliseconds(millis).toLocalDateTime(TimeZone.UTC).year
+            }
+            Regex("""\d{4}-\d{2}-\d{2}""").matches(value) -> LocalDate.parse(value).year
+            else -> Instant.parse(value).toLocalDateTime(TimeZone.UTC).year
+        }
+    }.getOrNull()
+    return year?.takeIf { it in 1900..2100 }
 }
