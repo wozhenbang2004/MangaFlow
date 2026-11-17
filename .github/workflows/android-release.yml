@@ -208,6 +208,11 @@ jobs:
             --ks-pass env:MANGAFLOW_SIGNING_PASSWORD --key-pass env:MANGAFLOW_SIGNING_PASSWORD \
             --v4-signing-enabled false \
             --out "dist/MangaFlow-$RELEASE_VERSION_NAME.apk" "$SIGN_DIR/aligned.apk"
+          # Assemble/sign success is not enough. Verify the distributed archive
+          # from Android 8's minimum API before attaching or publishing it.
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify \
+            --verbose --print-certs --min-sdk-version 26 \
+            "dist/MangaFlow-$RELEASE_VERSION_NAME.apk"
           openssl pkcs12 -in "$SIGN_DIR/mangaflow.p12" \
             -passin env:MANGAFLOW_SIGNING_PASSWORD -nocerts -nodes -out "$SIGN_DIR/private.pem"
           unset MANGAFLOW_SIGNING_PASSWORD

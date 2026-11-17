@@ -242,7 +242,11 @@ actual class UpdateManager private constructor(private val context: Context) {
             val incoming = File(root, release.sha256 + ".part")
             val validator = File(root, release.sha256 + ".validator")
             partial = incoming
-            root.listFiles()?.filter { it.isFile && it != target && it != incoming && it != validator }?.forEach { it.delete() }
+            // A previously verified APK may still be held by the package installer
+            // through a FileProvider URI from an older installed build. Do not sweep
+            // other versions here: the OS may open the granted file after handoff.
+            // Finished APKs are discarded on confirmed upgrade recovery; the cache
+            // directory also remains reclaimable under system storage pressure.
             if (incoming.length() > release.bytes) incoming.delete()
             if (incoming.length() == release.bytes) {
                 if (runCatching { validateApk(incoming, release) }.isSuccess) {
