@@ -237,3 +237,23 @@ For GiriGiriLove, only exact `chs`/`cht` groups from a positively identified nat
 AGE group equivalence is limited to the known xigua/ffm3u8/bfzym3u8/wjm3u8/lzm3u8 routes emitted from one requested detail response, with identical complete episode keys and labels. Unknown/partial groups stay manual. M3U8-named routes precede xigua only as a parsing order, never a measured health claim. New native default groups are marked automatic so equivalent tracks can expand them; legacy saved groups remain explicit because their original user intent cannot be reconstructed. Background association can invalidate a prior whole-entry undo receipt; stale undo remains refused rather than overwriting newer bindings.
 
 Validation: independent static review completed; whitespace checked. No local build/tests, live-source requests or device execution was performed for this change. Structural association, successful address resolution and actual first-frame playback remain separate results.
+
+
+### Fair bounded playback recovery · 2026-11-17
+
+Default resolution keeps the 45-second foreground budget and at most eight seconds
+per option, but no longer spends that budget on every route from the first source.
+It visits sources round-robin. Failed or timed-out actual resolutions join the same
+60-second low-priority cooldown as player errors; cancellation is not failure.
+Within each cooldown tier, bounded in-memory canonical-work/episode/route source and option attempt
+order makes later retries start with least-recently attempted candidates, rather
+than repeating a fixed prefix. Cooldown demotes candidates instead of hiding them.
+
+The budget is checked before attempt admission, so an option not requested due to
+exhausted time is not marked tried or failed. Stale candidates rejected before
+admission are excluded from that foreground cycle without being recorded as network
+attempts. Explicit option playback remains one locked option. All identity, route,
+source-revision, cancellation and delayed-start checks remain in force. Histories
+are in-memory only and bounded to 256 entries per map; no health/speed claims,
+persistent blacklist or background media requests were introduced. Admission captures the exact candidate, source revisions and route; configuration changes and stale identities never add a failure penalty to the new route. Invalid route settings have no sortable history key and fail only that candidate inside resolution, without aborting healthy sources or substituting a direct/system route. Static review
+is required; no local builds or automated tests are run for this slice.
