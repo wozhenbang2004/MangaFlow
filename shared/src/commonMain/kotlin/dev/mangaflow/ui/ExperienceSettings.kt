@@ -842,14 +842,15 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 change(custom.copy(diskMiB = it))
             }
             SettingsDisclosure("清理规则", (if (custom.contentCache.diskOutsideWindowCleanup) "范围外清理" else "不按范围清理") +
-                if (custom.runtime.automaticCleanup) " · 到期/满额淘汰" else " · 定期清理关闭",
+                if (custom.runtime.automaticCleanup) " · 容量整理 · 自动过期" else " · 容量整理 · 不自动过期",
                 Icons.Outlined.Tune, expanded = detail == "cache-disk-rules", compact = true,
                 onToggle = { toggleDetail("cache-disk-rules") }) {
-            SettingsToggle("磁盘到期与满额整理", custom.runtime.automaticCleanup, Icons.Outlined.CleaningServices) {
+            SettingsToggle("自动清理过期缓存", custom.runtime.automaticCleanup, Icons.Outlined.CleaningServices) {
                 if (active && detail == "cache-disk-rules") change(custom.copy(runtime = custom.runtime.copy(automaticCleanup = it)))
             }
-            ExperienceHint(if (custom.runtime.automaticCleanup) "到期或达到容量上限时清理未受保护的内容。"
-                else "定期到期/满额整理关闭；缓存硬上限仍生效，范围外清理单独设置。")
+            ExperienceHint(if (custom.runtime.automaticCleanup) "按闲置时间清理过期缓存；容量整理与范围清理独立生效。"
+                else "不按时间自动删除；容量整理仍生效，范围外清理单独设置。")
+            ExperienceHint("磁盘容量是共享缓存的整理目标，不是强制硬上限。当前阅读、播放与在途内容受保护时可能暂时超额，释放后继续整理。")
             SettingsToggle("范围外清理原图", custom.contentCache.diskOutsideWindowCleanup, Icons.Outlined.FilterCenterFocus) {
                 if (active && detail == "cache-disk-rules") change(custom.copy(contentCache = custom.contentCache.copy(diskOutsideWindowCleanup = it)))
             }
@@ -860,10 +861,10 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 Triple(CacheEvictionOrder.UNUSED_FIRST, "未使用", Icons.Outlined.VisibilityOff),
                 Triple(CacheEvictionOrder.LEAST_RECENT, "最久未用", Icons.Outlined.History),
                 Triple(CacheEvictionOrder.LARGEST_FIRST, "较大优先", Icons.Outlined.PhotoSizeSelectLarge))
-            Text("容量达到上限时优先清理", style = MaterialTheme.typography.labelMedium,
+            Text("达到容量预算时优先清理", style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             ExperienceIconChoices(evictionChoices, custom.runtime.evictionOrder,
-                enabled = active && detail == "cache-disk-rules" && custom.runtime.automaticCleanup, selectedLabel = true) {
+                enabled = active && detail == "cache-disk-rules", selectedLabel = true) {
                 if (finishEditor()) {
                     val latest = currentDraft()
                     change(latest.copy(runtime = latest.runtime.copy(evictionOrder = it)))
@@ -873,7 +874,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
             ExperienceLiveNumber("图片闲置多久过期", custom.contentCache.imageRetentionHours, 0, 0..720, "小时",
                 editor, active && expanded == "cache" && detail == "cache-disk-rules", effective = appliedCustom.contentCache.imageRetentionHours,
                 automaticLabel = "默认值") { change(custom.copy(contentCache = custom.contentCache.copy(imageRetentionHours = it ?: 0))) }
-            if (custom.contentCache.imageRetentionHours == 0) ExperienceHint(if (custom.runtime.automaticCleanup) "0 小时：不过期，满额时仍按所选顺序淘汰。" else "0 小时：不过期；缓存硬上限、范围清理仍独立生效。")
+            if (custom.contentCache.imageRetentionHours == 0) ExperienceHint(if (custom.runtime.automaticCleanup) "0 小时：不过期，满额时仍按所选顺序淘汰。" else "0 小时：不过期；容量整理、范围清理仍独立生效。")
             }
             ExperienceLiveNumber("原图预取窗口", custom.prefetchMiB, (budget.goal.prefetchBytes / EXPERIENCE_MIB).toInt(), 1..512, "MB",
                 editor, active && expanded == "cache", effective = (appliedBudget.prefetchBytes / EXPERIENCE_MIB).toInt()) {
@@ -973,10 +974,10 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                     ExperienceRuntimeSettings(ExperienceRuntimeGroup.CACHE, custom, budget, appliedBudget, usage, store,
                         editor, active && expanded == "cache" && detail == "cache-advanced", ::change)
                 }) {
-                ExperienceHint("用量 / 上限；— 表示尚未取得。内存缓存只包含可复用的解码图像，手动容量按输入保存。磁盘缓存可自动回收，离线章节独立保存；可回收内容在缓存管理中清理。")
+                ExperienceHint("用量 / 配置额度（磁盘为整理目标）；— 表示尚未取得。内存缓存只包含可复用的解码图像，手动容量按输入保存。磁盘缓存可自动回收，离线章节独立保存；可回收内容在缓存管理中清理。")
                 ExperienceHint("闲置时间 0 仅关闭时间过期；范围清理与容量策略独立。内存到期只移除可复用缓存引用，不强行释放当前画面；磁盘图片过期也适用于封面。")
                 ExperienceHint("自动磁盘预算会为设备预留空闲空间；手动值按输入保留。共享磁盘包含图片、目录、列表和番剧缓冲，不含离线章节。")
-                ExperienceHint("范围清理、容量淘汰与闲置过期是独立触发条件。内存默认清理范围外缓存；磁盘默认不因离窗删除原图。磁盘定期整理开关不关闭范围清理或缓存硬上限。")
+                ExperienceHint("范围清理、容量淘汰与闲置过期是独立触发条件。内存默认清理范围外缓存；磁盘默认不因离窗删除原图。自动过期开关不关闭范围清理或容量整理；正在使用的内容可能使磁盘暂时超额。")
                 ExperienceHint("页面资料间隔 0＝不复用已完成结果，进行中的请求仍合并。允许先显示旧快照再更新；更新失败保留旧内容。关闭资料缓存不会删除历史、收藏和离线章节。")
                 ExperienceHint("预读调度与缓存删除不同：离开窗口取消未完成任务；已完成图片仅在相应清理策略允许且无人使用时移除。范围清理不等于立刻清空用量，阅读记录、收藏和离线章节不受影响。")
             }

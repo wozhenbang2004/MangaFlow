@@ -134,12 +134,12 @@ internal class AnimeMetadataCache private constructor(private val context: Platf
     }
 
     private fun trimDisk() {
-        if (!ExperiencePolicyStore.get(context).state.value.runtime.automaticCleanup) return
         val snapshot = files.snapshot { versions[it] ?: 0L }.sortedBy { it.modifiedAt }
         var bytes = snapshot.sumOf { it.bytes }
-        val limit = policy.snapshotDiskMiB * 1024L * 1024L
         snapshot.forEach { entry ->
-            if (bytes > limit || wallTimeMillis() - entry.modifiedAt > policy.retentionMillis) {
+            val current = policy
+            if (bytes > current.snapshotDiskMiB * 1024L * 1024L || ExperiencePolicyStore.get(context).state.value.runtime.automaticCleanup &&
+                wallTimeMillis() - entry.modifiedAt > current.retentionMillis) {
                 if (files.entry(entry.key, versions[entry.key] ?: 0L, verifyBytes = true) == entry) {
                     bytes -= files.removeReviewed(entry)
                 }

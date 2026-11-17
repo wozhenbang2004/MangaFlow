@@ -164,7 +164,7 @@ class ReaderCatalogStore(private val context: Context) {
     }
 
     suspend fun clear() {
-        trimToSize(0L, StorageCacheStore.get(context)::protectedCatalog)
+        trimToSize(0L, protect = StorageCacheStore.get(context)::protectedCatalog)
     }
 
     /** Parse only bounded catalogue metadata under the same gate as readers and writers. */
@@ -176,7 +176,7 @@ class ReaderCatalogStore(private val context: Context) {
         }
     }
 
-    internal suspend fun trimToSize(maxBytes: Long, protect: (String) -> Boolean): Long = withContext(Dispatchers.IO) {
+    internal suspend fun trimToSize(maxBytes: Long, expire: Boolean = true, protect: (String) -> Boolean): Long = withContext(Dispatchers.IO) {
         state.files.withLock {
             var total = root.listFiles().orEmpty().sumOf { it.length() }
             val retention = contentCachePreferences(context).retentionMillis
@@ -188,7 +188,7 @@ class ReaderCatalogStore(private val context: Context) {
                 }.forEach { file ->
                     val owner = catalogOwner(file) ?: return@forEach
                     val last = StorageCacheStore.get(context).catalogAccess(owner).takeIf { it > 0L } ?: file.lastModified()
-                    if (total <= maxBytes && now - last < retention) return@forEach
+                    if (total <= maxBytes && (!expire || now - last < retention)) return@forEach
                     // Re-evaluate dependencies immediately before removing this AtomicFile family.
                     if (protect(owner)) return@forEach
                     val bytes = file.length()

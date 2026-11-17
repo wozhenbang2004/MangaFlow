@@ -28,7 +28,7 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
     private val sessions = AtomicInteger(0)
     private val accessed = AtomicLong(wallTimeMillis())
     private val store = StorageCacheStore.get(context)
-    private val evictor = AdjustableAnimeEvictor {
+    private val evictor = AdjustableAnimeEvictor(canTrim = { sessions.get() == 0 }) {
         revision.incrementAndGet()
         accessed.set(wallTimeMillis())
         store.cacheWorkFinished()
@@ -69,6 +69,9 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
 
     override fun resize(bytes: Long, canResize: () -> Boolean, commitResize: (() -> Unit) -> Boolean) {
         synchronized(cache) {
+            // An active player owns its spans. Its final release schedules one new sweep;
+            // do not self-schedule repeated failed resizes while playback remains active.
+            if (sessions.get() > 0) return
             if (!evictor.resize(cache, bytes.coerceAtLeast(0L), canResize, commitResize)) store.cacheWorkFinished()
         }
     }
@@ -91,7 +94,7 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
 }
 
 /** Callbacks and eviction are serialized by SimpleCache's own monitor. */
-private class AdjustableAnimeEvictor(private val changed: () -> Unit) : CacheEvictor {
+private class AdjustableAnimeEvictor(private val canTrim: () -> Boolean, private val changed: () -> Unit) : CacheEvictor {
     // Reopening a cache must not delete a user's larger cache before the storage
     // controller restores its configured budget.
     @Volatile var targetBytes: Long = Long.MAX_VALUE
@@ -131,9 +134,9 @@ private class AdjustableAnimeEvictor(private val changed: () -> Unit) : CacheEvi
         canEvict: () -> Boolean = { true }): Boolean {
         val available = (limit - incoming).coerceAtLeast(0L)
         while (bytes > available && spans.isNotEmpty()) {
-            if (!canEvict()) return false
+            if (!canTrim() || !canEvict()) return false
             cache.removeSpan(spans.first())
         }
-        return canEvict()
+        return canTrim() && canEvict()
     }
 }

@@ -265,13 +265,12 @@ class BrowseCache(context: Context) {
     }
 
     private fun trimDisk() {
-        if (!automaticCleanup) return
         val files = ownedFiles.snapshot().sortedByDescending { it.modifiedAt }
         var bytes = 0L
         files.forEach { file ->
             bytes += file.bytes
             if (bytes > policy.snapshotDiskMiB * 1_048_576L ||
-                wallTimeMillis() - file.modifiedAt > policy.retentionMillis) ownedFiles.removeReviewed(file)
+                automaticCleanup && wallTimeMillis() - file.modifiedAt > policy.retentionMillis) ownedFiles.removeReviewed(file)
         }
     }
 

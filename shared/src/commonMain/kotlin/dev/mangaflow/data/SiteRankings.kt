@@ -576,13 +576,13 @@ class SiteRankingsRepository(context: PlatformContext) {
                 throw failure
             }
             try {
-                if (automaticCleanup) {
-                    val policy = contentCachePolicy()
+                run {
                     var total = 0L
                     ownedFiles.snapshot().sortedByDescending { it.modifiedAt }.forEach { item ->
+                        val policy = contentCachePolicy()
                         total += item.bytes
                         if (total > policy.snapshotDiskMiB * 1_048_576L ||
-                            wallTimeMillis() - item.modifiedAt > policy.retentionMillis) ownedFiles.removeReviewed(item)
+                            automaticCleanup && wallTimeMillis() - item.modifiedAt > policy.retentionMillis) ownedFiles.removeReviewed(item)
                     }
                 }
             } finally { StorageCacheStore.get(cacheContext).cacheWorkFinished() }

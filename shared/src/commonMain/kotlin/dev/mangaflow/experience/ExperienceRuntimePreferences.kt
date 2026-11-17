@@ -44,6 +44,7 @@ data class ExperienceRuntimePreferences(
     val cpuBusyPercent: Int = 85,
     val heapBusyPercent: Int = 88,
     val lowBatteryPercent: Int = 20,
+    // Legacy persisted name: now controls age-based disk expiry only. Capacity is independent.
     val automaticCleanup: Boolean = true,
     val evictionOrder: CacheEvictionOrder = CacheEvictionOrder.UNUSED_FIRST,
 ) {

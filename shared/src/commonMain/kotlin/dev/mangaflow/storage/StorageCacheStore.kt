@@ -55,10 +55,13 @@ internal data class StorageCacheSnapshot(val items: List<StoredCacheItem>, val c
 }
 internal data class CacheClearResult(val freedBytes: Long, val skipped: Int, val failed: Int, val removedKeys: Set<String>)
 
+internal enum class CacheMaintenanceTrigger { CAPACITY, EXPIRY }
+
 /** An automatic sweep must not keep old candidates after any relevant setting changes. */
 internal data class CacheMaintenanceFence(
     val policy: ExperienceRuntimePreferences, val limit: Long, val ageMillis: Long,
     val runtimeVersion: Long, val budgetVersion: Long, val retentionVersion: Long,
+    val trigger: CacheMaintenanceTrigger = CacheMaintenanceTrigger.CAPACITY,
 )
 
 /** One app-wide disposable budget. Offline files and optional components never enter this store. */
@@ -185,7 +188,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
         }
         if (changed) {
             val needsDiskSweep = synchronized(lock) {
-                diskRangeCleanup || runtime.automaticCleanup && cachedBytes >= budget
+                diskRangeCleanup || cachedBytes >= budget
             }
             // Releasing an exact window can make space reclaimable even if no new
             // transfer is admitted. Range cleanup being off must not strand capacity.
@@ -524,7 +527,8 @@ class StorageCacheStore private constructor(context: PlatformContext) {
     }
 
     private fun maintenanceAllowed(fence: CacheMaintenanceFence?): Boolean = fence == null ||
-        runtime.automaticCleanup && runtimeVersion == fence.runtimeVersion && budgetVersion == fence.budgetVersion &&
+        (fence.trigger != CacheMaintenanceTrigger.EXPIRY || runtime.automaticCleanup) &&
+        runtimeVersion == fence.runtimeVersion && budgetVersion == fence.budgetVersion &&
         retentionVersion == fence.retentionVersion && runtime == fence.policy && budget == fence.limit &&
         retentionMillis == fence.ageMillis
 
@@ -732,21 +736,15 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                         runtimeVersion, budgetVersion, retentionVersion) }
                     val limit = fence.limit
                     val policy = fence.policy
-                    if (!policy.automaticCleanup) {
-                        val other = snapshot.totalBytes - snapshot.items.filter { it.resource.backend == CacheBackend.COIL }.sumOf { it.bytes } - snapshot.coilUnclassifiedBytes
-                        val publication = synchronized(lock) { budget to budgetVersion }
-                        synchronized(lock) { coil }?.resize((publication.first - other).coerceAtLeast(0L), publication.second)
-                        return@launch
-                    }
                     val age = fence.ageMillis
                     val now = wallTimeMillis()
-                    val expired = if (age <= 0L) emptyList() else snapshot.items.filterNot { it.protected }.filter { item ->
+                    val expired = if (!policy.automaticCleanup || age <= 0L) emptyList() else snapshot.items.filterNot { it.protected }.filter { item ->
                         item.resource.area == CacheArea.READING || item.resource.area == CacheArea.ARTWORK
                     }.filter { item ->
                         val last = item.resource.accessedAt.takeIf { it > 0L } ?: item.modifiedAt
                         last > 0L && now - last >= age
                     }
-                    if (expired.isNotEmpty()) clear(expired, maintenanceFence = fence)
+                    if (expired.isNotEmpty()) clear(expired, maintenanceFence = fence.copy(trigger = CacheMaintenanceTrigger.EXPIRY))
                     val afterExpiry = if (expired.isEmpty()) snapshot else snapshot()
                     // At exact capacity optional writers are already closed. Trimming only an
                     // overage can leave that state forever, with no next write to wake eviction.
@@ -768,7 +766,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                             legacyRevision = afterExpiry.legacyRevision, legacyStamp = afterExpiry.legacyStamp, maintenanceFence = fence)
                     }
                     ReaderCatalogStore(app).trimToSize(policy.catalogMiB?.toLong()?.times(MIB)
-                        ?: (limit / 16).coerceAtMost(32L * MIB)) { owner ->
+                        ?: (limit / 16).coerceAtMost(32L * MIB), expire = policy.automaticCleanup) { owner ->
                             !synchronized(lock) { maintenanceAllowed(fence) } || protectedCatalog(owner)
                         }
                     val beforeVideo = snapshot()
