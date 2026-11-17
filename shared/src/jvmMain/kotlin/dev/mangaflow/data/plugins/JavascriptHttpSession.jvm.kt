@@ -153,7 +153,7 @@ internal actual class JavascriptHttpSession actual constructor(private val enabl
                             }
                             val retry = retrySeconds(current.header("Retry-After"))
                             if (retry > 0 || current.code == 429) rememberPause(request.url, retry.takeIf { it > 0 } ?: 60L)
-                            if (current.code == 429) throw SourceException("漫画源请求受限，请稍后重试。", request.url.toString(), retry)
+                            if (current.code == 429) throw SourceException("漫画源请求受限，请稍后重试。", request.url.toString(), retry, httpStatus = 429)
                             if (current.code in REDIRECTS || request.method == "HEAD") return@use HttpResult(current.code, headers, "")
                             val source = current.body ?: throw SourceException("漫画源响应为空。", request.url.toString())
                             require(source.contentLength() <= maximumBytes) { "漫画源响应过大。" }

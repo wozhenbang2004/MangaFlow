@@ -91,7 +91,7 @@ internal actual class JavascriptHttpSession actual constructor(
                 nativePauses[url.origin()] = wallTimeMillis() + retry * 1000L
                 while (nativePauses.size > 128) nativePauses.remove(nativePauses.keys.first())
             }
-            if (result.status == 429) throw SourceException("漫画源请求受限，请稍后重试。", retryAfterSeconds = retry)
+            if (result.status == 429) throw SourceException("漫画源请求受限，请稍后重试。", retryAfterSeconds = retry, httpStatus = 429)
             if (result.status in setOf(301, 302, 303, 307, 308) && input.optBoolean("followRedirects", true)) {
                 require(allowRedirects) { "来源登录请求发生重定向，请更新来源地址后重试。" }
                 require(!input.optBoolean("rejectRedirects", false)) { "源文件地址发生重定向，请使用最终 HTTPS 直链。" }
