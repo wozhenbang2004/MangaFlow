@@ -82,6 +82,8 @@ data class ExperienceBudget(
     /** Working encoded buffers for memory-backed script transfers, separate from the disk window. */
     val materializationBytes: Long = 0L,
     val crossChapter: Boolean = false,
+    /** New background admissions yield; already admitted transfers may still be running. */
+    val downloadsYieldingToReader: Boolean = false,
     val memoryCacheBytes: Long? = null,
     val refreshHz: Int? = null,
     val protections: List<String> = emptyList(),

@@ -115,6 +115,7 @@ internal fun GuidedPanelReader(
     onReadingNavigation: () -> Unit,
     onVisibleImageChanged: (Boolean) -> Unit,
     onNearEnd: () -> Unit,
+    nextChapterPages: Int,
     onAtEndChanged: (Boolean) -> Unit,
     onTap: () -> Unit,
     onShowControls: () -> Unit,
@@ -137,6 +138,7 @@ internal fun GuidedPanelReader(
     val repair = LocalReaderPageRepair.current
     val repairController = repair?.controller
     val experience = remember(context) { ExperiencePolicyStore.get(context) }
+    val nearEnd by rememberUpdatedState(onNearEnd)
     val pageFailed by rememberUpdatedState(onPrefetchFailure)
     val prefetchFailures = remember(pages, headers, sourceId) { mutableStateMapOf<Int, String>() }
     val prefetchRequests = remember(pages, headers, sourceId) { mutableStateMapOf<Int, ReaderPagePrefetch>() }
@@ -448,11 +450,14 @@ internal fun GuidedPanelReader(
         // even when this page has no usable image yet. Only ready content is saved.
         if (active) location(pageIndex, if (detection != null && imageReady) selected else 0)
         if (detection != null && imageReady && active) {
-            if (experience.state.value.runtime.nextChapterPages > 0 &&
-                pageIndex.toLong() >= pages.lastIndex.toLong() - experience.state.value.runtime.nextChapterPages.toLong()) onNearEnd()
             delay(350)
             save(pageIndex, selected)
         }
+    }
+    // Re-evaluate a stationary final page when next-chapter preparation is enabled again.
+    LaunchedEffect(pageIndex, detection, imageReady, active, nextChapterPages) {
+        if (detection != null && imageReady && active && nextChapterPages > 0 &&
+            pageIndex.toLong() >= pages.lastIndex.toLong() - nextChapterPages.toLong()) nearEnd()
     }
     LaunchedEffect(imageReady, active) { visibleImage(imageReady && active) }
     LaunchedEffect(atEnd) { onAtEndChanged(atEnd) }

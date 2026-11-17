@@ -1181,6 +1181,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             prefetchBytes = prefetchBytes, materializationBytes = o.runtime.materializationMiB?.toLong()?.times(EXPERIENCE_MIB) ?: transportHeadroom,
             crossChapter = o.crossChapter && prefetchBytes > 0L && (manualReading || !warm && !power && !cpuBusy && !lowRam) &&
                 (resources.metered == false || o.allowMeteredPrefetch),
+            downloadsYieldingToReader = reading && readerWaiting,
             memoryCacheBytes = o.memoryMiB?.toLong()?.times(EXPERIENCE_MIB),
             refreshHz = requestedHz, protections = protections, foreground = foreground,
             decodedPrefetchPages = decodedPages, standbySources = standby,

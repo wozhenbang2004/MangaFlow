@@ -1044,6 +1044,7 @@ fun ReaderScreen(
                             sourceTriggerAnchor = anchor
                             sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true
                         },
+                        nextChapterPages = if (experienceBudget.crossChapter) experienceBudget.runtime.nextChapterPages else 0,
                         preferences = preferences, initialPage = pageIndex, initialPanel = cursor.panelIndex,
                         targetPage = targetPage,
                         onTargetConsumed = { targetPage = null; targetOffset = 0 },
@@ -1081,7 +1082,7 @@ fun ReaderScreen(
                         sourceName = currentSourceName.orEmpty(),
                         onShowControls = { controlsVisible = true },
                         retryTargetIndex = currentPageRetryIndex, retryPulse = currentPageRetrySerial,
-                        nextChapterPages = experienceBudget.runtime.nextChapterPages,
+                        nextChapterPages = if (experienceBudget.crossChapter) experienceBudget.runtime.nextChapterPages else 0,
                         onQuickSwitch = { failedIndex, variant -> repairs.select(failedIndex, variant) },
                         onRepairPage = openPageRepair,
                         onMoreSources = { anchor ->
