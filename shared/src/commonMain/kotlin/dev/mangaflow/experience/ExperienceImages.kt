@@ -361,9 +361,10 @@ internal suspend fun inspectReaderPreparedArtifacts(
     context: PlatformContext, page: Page, headers: Map<String, String>, source: String,
     diskCacheKey: String? = null, memoryCacheKey: MemoryCache.Key? = null,
 ): ReaderPreparedArtifacts = withContext(Dispatchers.IO) {
-    val loader = SingletonImageLoader.get(imagePlatformContext(context))
-    val preview = memoryCacheKey?.let { key -> loader.memoryCache?.keys?.contains(key) }
+    var preview: Boolean? = null
     try {
+        val loader = SingletonImageLoader.get(imagePlatformContext(context))
+        preview = memoryCacheKey?.let { key -> loader.memoryCache?.keys?.contains(key) }
         val local = readerFilePath(page.url)
         val bytes = if (local != null) StorageFile(local).takeIf { it.isFile }?.length()
         else loader.diskCache?.let { cache ->
@@ -376,6 +377,9 @@ internal suspend fun inspectReaderPreparedArtifacts(
             runtime = ExperiencePolicyStore.get(context).state.value.runtime) != null
         ReaderPreparedArtifacts(present, bytes?.takeIf { present }, preview)
     } catch (cancelled: CancellationException) { throw cancelled }
+    // Header/EXIF inspection is optional evidence, not permission to kill the
+    // chapter scheduler or declare an existing original missing under pressure.
+    catch (_: OutOfMemoryError) { ReaderPreparedArtifacts(null, null, preview) }
     catch (_: Exception) { ReaderPreparedArtifacts(null, null, preview) }
 }
 private class PrefetchCacheUnavailable : IOException("预取原图已不在缓存中")
@@ -446,6 +450,22 @@ private suspend fun awaitWarmReaderPreview(request: ImageRequest, size: Size, po
 private suspend fun inspectReaderPage(
     context: PlatformContext, page: Page, headers: Map<String, String>, source: String,
     viewportWidthPx: Int, viewportHeightPx: Int, diskCacheKey: String? = null,
+    warmMemory: Boolean, work: PrefetchWork, maxWidthPx: Int, maxHeightPx: Int,
+): ReaderPagePreflight {
+    return try {
+        inspectReaderPageBytes(context, page, headers, source, viewportWidthPx, viewportHeightPx,
+            diskCacheKey, warmMemory, work, maxWidthPx, maxHeightPx)
+    } catch (_: OutOfMemoryError) {
+        // The surrounding warm flight still completes/releases its waiters. This
+        // optional byte/decode inspection must not cancel the chapter scheduler.
+        // Cancellation and other fatal errors are deliberately not caught here.
+        ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED, diskCacheKey = diskCacheKey)
+    }
+}
+
+private suspend fun inspectReaderPageBytes(
+    context: PlatformContext, page: Page, headers: Map<String, String>, source: String,
+    viewportWidthPx: Int, viewportHeightPx: Int, diskCacheKey: String?,
     warmMemory: Boolean, work: PrefetchWork, maxWidthPx: Int, maxHeightPx: Int,
 ): ReaderPagePreflight {
     val policy = ExperiencePolicyStore.get(context)
