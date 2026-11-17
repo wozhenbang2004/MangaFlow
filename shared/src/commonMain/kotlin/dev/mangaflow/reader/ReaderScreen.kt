@@ -181,6 +181,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -407,7 +408,6 @@ fun ReaderScreen(
     val sourceSwitchWait = remember(sourceLoading, sourceSwitchName) { ReaderLoadAttempt() }
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var topControlsHeightPx by remember { mutableIntStateOf(0) }
-    var cornerStatusWidthPx by remember { mutableIntStateOf(0) }
     var bottomControlsHeightPx by remember { mutableIntStateOf(0) }
     var readerStatusInspecting by remember(chapterId) { mutableStateOf(false) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
@@ -723,6 +723,14 @@ fun ReaderScreen(
     val chapterPageCount = pages.size
 
     val clock = rememberReaderClock(active && !leavingReader)
+    val cornerStatusStyle = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, fontFeatureSettings = "tnum")
+    val cornerStatusMeasurer = rememberTextMeasurer()
+    // Reserve the chapter's widest page count before layout, so every turn keeps
+    // the neighbouring status slots in place and no first-frame measurement jumps.
+    val cornerStatusWidth = with(LocalDensity.current) {
+        cornerStatusMeasurer.measure("88:88 · ${"8".repeat(pages.size.toString().length)} / ${pages.size}",
+            cornerStatusStyle, maxLines = 1, softWrap = false).size.width.toDp() + 8.dp
+    }.coerceAtMost(LocalMangaWindow.current.width * .45f)
     val readingEligible = active && !leavingReader && !loading && error == null && imageVisible &&
         !panelBlocksReading && !showPanelModels && !showComments && !showSpreadAdjustment && !showPageNavigator &&
         !showReaderActions && !readerActionsPresent && !sourcePickerBlocking && !readerStatusInspecting &&
@@ -1550,7 +1558,7 @@ fun ReaderScreen(
                     .coerceAtLeast(0).toDp().coerceAtLeast(112.dp) else 0.dp
             }),
             bottomEndClearance = if (!controlsVisible && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF)
-                with(LocalDensity.current) { cornerStatusWidthPx.toDp().coerceAtLeast(112.dp) } else 0.dp,
+                cornerStatusWidth else 0.dp,
             onInspectingChange = { readerStatusInspecting = it },
             onOpenSources = if (alternativeSources.isEmpty()) null else ({
                 sourceTriggerAnchor = null
@@ -1585,12 +1593,11 @@ fun ReaderScreen(
                     .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                 .padding(end = 12.dp, bottom = (if (atChapterEnd) 72.dp else 0.dp) + 2.dp),
         ) {
-            Box(Modifier.widthIn(max = LocalMangaWindow.current.width * .45f).heightIn(min = 44.dp)
-                .onSizeChanged { cornerStatusWidthPx = it.width }
+            Box(Modifier.width(cornerStatusWidth).heightIn(min = 44.dp)
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { controlsVisible = true }
                 .padding(horizontal = 4.dp), contentAlignment = Alignment.Center) {
                 Text("$clock · ${pageIndex + 1} / ${pages.size}",
-                    color = preferences.theme.foreground().copy(alpha = .5f), fontSize = 11.sp,
+                    color = preferences.theme.foreground().copy(alpha = .58f), style = cornerStatusStyle,
                     maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             }
         }

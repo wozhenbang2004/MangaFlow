@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Reading footer status refinement · source checkpoint 2026-11-17
+
+Current request and screenshot `1000122025.jpg` are recorded in DESIGN READFOOTER-01–06. Scope is the left reading status strip, its existing detail popover and adjacent time/page alignment. Baseline is main `d28d32ed9226757394ec215cee6d6468020de38c`; preserve concurrent experience-center, cache/read-count and anime work. Root is the only implementation/integration writer for this slice; the reviewer is read-only.
+
+Implemented five separate entry targets while retaining the four existing detail bodies. Memory/disk clicks expand their own cache row; the strip uses the existing Ovio capsule, fixed measured count widths and shorter consistent indicator tracks. The visible 28dp material/selection is centered in the 44dp hit area, aligned with the stable chapter-width time/page label. Idle task counts no longer imply success; source failures remain visible during page-repair activity. Work details use shared metric axes, cache rows expose their names and actual usage, and memory lifecycle facts stay within its disclosure. No scheduler, manual value, source/page/route/cache/lease owner or backend cache policy changes.
+
+Evidence is the user's before screenshot, pinned source/interface reads, verified existing Ovio/Gestalt reference material and the bounded source diff. No local tests, builds, compiles, probes, generated UI or UI automation. Next delivery action is integrated source review, reconcile latest main, publish one expected-head batch and confirm ordinary Android/native CI activation. Installed appearance, touch and motion remain pending user feedback; source completion must not be described as visual acceptance or a successful build.
+
 ## Reader selection and cache meaning · source checkpoint 2026-11-17
 
 The user asks whether decoded memory expires by idle time or is evicted when a16-page prefetch/review window moves, and requests clearer selection, richer meaningful accent and less document-like details. Exact wording and six requirements are DESIGN READER-DETAIL-01–06. Route DELIVERY with a read-only cache-lifecycle diagnosis; stage SOURCE_COMPLETE. This is a bounded refinement of the broadly liked READBAR/STATUSCOLOR layout, not a cache-policy rewrite or whole-application redesign.
