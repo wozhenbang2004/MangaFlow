@@ -13,6 +13,8 @@ import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.decodeUrlComponent
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -96,6 +98,7 @@ private abstract class RoutedAnimeProvider : AnimeProvider {
 }
 
 private class TvtFunProvider : RoutedAnimeProvider() {
+    override val revision = "2026-11-17-lazy-episodes"
     override val id = "anime-tvtfun"
     override val name = "TvTFun"
     override val homeUrl = "https://www.tvtfun.net/"
@@ -155,7 +158,17 @@ private class TvtFunProvider : RoutedAnimeProvider() {
                     val number = ep.finiteNumber("number")
                     if (epId.isBlank() || number == null) return@flatMap emptyList()
                     val label = ep.text("title").ifBlank { "第 ${animeEpisodeLabel(number)} 集" }
-                    episodeLines(http, ep, AnimeSourceStage.CATALOG).mapIndexedNotNull { lineIndex, line ->
+                    val embedded = ep.optJSONArray("sources")?.objects().orEmpty()
+                    // Every real episode belongs to the automatic group, even when only some
+                    // rows embed stations. Group choice must not hide the rest of the season.
+                    val automaticUrl = animePublicUrl(homeUrl).newBuilder().addPathSegment("watch").addPathSegment(slug)
+                        .addPathSegment(animeEpisodeLabel(number)).addQueryParameter("episodeId", epId).build()
+                    val automaticEpisode = AnimeSourceEpisode(
+                        id = "$seasonKey:$epId:auto", title = label, url = automaticUrl.toString(), number = number,
+                        kind = sourceEpisodeKind(label), group = "$seasonLabel · 自动线路 [$seasonKey]",
+                        edition = seasonLabel, playbackData = "automatic",
+                    )
+                    listOf(automaticEpisode) + embedded.mapIndexedNotNull { lineIndex, line ->
                         val lineId = line.text("id")
                         if (lineId.isBlank()) return@mapIndexedNotNull null
                         val lineLabel = line.text("lineName", "name").ifBlank { "线路 ${lineIndex + 1}" }
@@ -180,7 +193,9 @@ private class TvtFunProvider : RoutedAnimeProvider() {
         selected(catalog, episode)
         val selection = animePublicUrl(episode.url)
         val episodeId = animeRemoteId(selection.queryParameter("episodeId").orEmpty())
-        val sourceId = animeRemoteId(selection.queryParameter("sourceId").orEmpty())
+        val automatic = episode.playbackData == "automatic"
+        val requestedSourceId = selection.queryParameter("sourceId")?.let(::animeRemoteId)
+        require(automatic || requestedSourceId != null) { "所选线路缺少身份，请刷新剧集。" }
         val http = AnimeHttp(id)
         return try {
             // Refresh exact IDs: a changed/missing line must never fall back to the first episode.
@@ -190,41 +205,59 @@ private class TvtFunProvider : RoutedAnimeProvider() {
                 .filter { it.text("id") == episodeId }
             if (matches.size != 1) throw AnimeSourceException(id, AnimeSourceStage.RESOLVE,
                 "该剧集身份已变化，请刷新剧集并重新选择。")
-            val line = episodeLines(http, matches.single(), AnimeSourceStage.RESOLVE).singleOrNull { it.text("id") == sourceId }
-                ?: throw AnimeSourceException(id, AnimeSourceStage.RESOLVE, "所选线路已变化，请刷新后重新选择。")
-            var playback = line.optJSONObject("playback")
-            var subtitles = emptyList<AnimeSubtitle>()
-            if (playback == null || playback.optBoolean("requiresResolve", true) || playback.text("url").isBlank()) {
-                val resolved = checked(http.json(
-                    animePublicUrl(homeUrl).newBuilder().addPathSegments("api/site-auth/playback-resolve").build(),
-                    AnimeSourceStage.RESOLVE, "POST", JSONObject().put("episodeId", episodeId).put("sourceId", sourceId),
-                    referer = episode.url), AnimeSourceStage.RESOLVE).requiredObject("data", id, AnimeSourceStage.RESOLVE)
-                if (resolved.text("sourceId").isNotEmpty() && resolved.text("sourceId") != sourceId)
-                    throw AnimeSourceException(id, AnimeSourceStage.RESOLVE, "来源返回了另一条线路，已停止播放以避免串集。")
-                playback = resolved.optJSONObject("playback")
-                subtitles = resolved.optJSONArray("subtitles")?.objects().orEmpty().mapIndexedNotNull { index, subtitle ->
-                    val url = runCatching { animeAbsolute(homeUrl, subtitle.text("url")) }.getOrNull()
-                        ?: return@mapIndexedNotNull null
-                    AnimeSubtitle(subtitle.text("id").ifBlank { "subtitle-$index" }, url,
-                        subtitle.text("label", "language").ifBlank { "字幕 ${index + 1}" },
-                        subtitle.text("language").takeIf { it.isNotBlank() },
-                        when (subtitle.text("format").lowercase()) { "vtt" -> "text/vtt"; "srt" -> "application/x-subrip"; else -> null },
-                        mapOf("User-Agent" to AnimeHttp.USER_AGENT, "Referer" to homeUrl))
-                }
+            val available = episodeLines(http, matches.single(), AnimeSourceStage.RESOLVE)
+            if (!automatic) {
+                val line = available.singleOrNull { it.text("id") == requestedSourceId }
+                    ?: throw AnimeSourceException(id, AnimeSourceStage.RESOLVE, "所选线路已变化，请刷新后重新选择。")
+                return resolveLine(http, episode, episodeId, line)
             }
-            val url = playback?.text("url").orEmpty()
-            if (url.isBlank()) throw AnimeSourceException(id, AnimeSourceStage.RESOLVE, "该线路尚未提供播放地址，请选择另一条线路。")
-            val mediaType = when (playback?.text("mediaType")?.lowercase()) {
-                "hls", "m3u8" -> "application/vnd.apple.mpegurl"
-                "mp4" -> "video/mp4"
-                "dash", "mpd" -> "application/dash+xml"
-                else -> animeMediaType(url)
+            var lastFailure: Exception? = null
+            for (line in available.filter { it.text("id").isNotBlank() }.take(3)) {
+                try {
+                    withTimeoutOrNull(5_000L) { resolveLine(http, episode, episodeId, line) }?.let { return it }
+                } catch (cancel: CancellationException) { throw cancel }
+                catch (failure: Exception) { lastFailure = failure }
             }
-            if (mediaType == null) {
-                val stream = AnimeStreamResolver(http).resolve(url, homeUrl)
-                asset(http, episode, stream.url, stream.mimeType, stream.referer, subtitles + stream.subtitles)
-            } else asset(http, episode, url, mediaType, subtitles = subtitles)
+            throw lastFailure ?: AnimeSourceException(id, AnimeSourceStage.RESOLVE,
+                "所选剧集暂未返回可用线路，请重试或选择其他来源。")
         } finally { http.close() }
+    }
+
+    private suspend fun resolveLine(http: AnimeHttp, episode: AnimeSourceEpisode, episodeId: String,
+        line: JSONObject): AnimePlaybackAsset {
+        val sourceId = animeRemoteId(line.text("id"))
+        var playback = line.optJSONObject("playback")
+        var subtitles = emptyList<AnimeSubtitle>()
+        if (playback == null || playback.optBoolean("requiresResolve", true) || playback.text("url").isBlank()) {
+            val resolved = checked(http.json(
+                animePublicUrl(homeUrl).newBuilder().addPathSegments("api/site-auth/playback-resolve").build(),
+                AnimeSourceStage.RESOLVE, "POST", JSONObject().put("episodeId", episodeId).put("sourceId", sourceId),
+                referer = episode.url), AnimeSourceStage.RESOLVE).requiredObject("data", id, AnimeSourceStage.RESOLVE)
+            if (resolved.text("sourceId").isNotEmpty() && resolved.text("sourceId") != sourceId)
+                throw AnimeSourceException(id, AnimeSourceStage.RESOLVE, "来源返回了另一条线路，已停止播放以避免串集。")
+            playback = resolved.optJSONObject("playback")
+            subtitles = resolved.optJSONArray("subtitles")?.objects().orEmpty().mapIndexedNotNull { index, subtitle ->
+                val url = runCatching { animeAbsolute(homeUrl, subtitle.text("url")) }.getOrNull()
+                    ?: return@mapIndexedNotNull null
+                AnimeSubtitle(subtitle.text("id").ifBlank { "subtitle-$index" }, url,
+                    subtitle.text("label", "language").ifBlank { "字幕 ${index + 1}" },
+                    subtitle.text("language").takeIf { it.isNotBlank() },
+                    when (subtitle.text("format").lowercase()) { "vtt" -> "text/vtt"; "srt" -> "application/x-subrip"; else -> null },
+                    mapOf("User-Agent" to AnimeHttp.USER_AGENT, "Referer" to homeUrl))
+            }
+        }
+        val url = playback?.text("url").orEmpty()
+        if (url.isBlank()) throw AnimeSourceException(id, AnimeSourceStage.RESOLVE, "该线路尚未提供播放地址，请选择另一条线路。")
+        val mediaType = when (playback?.text("mediaType")?.lowercase()) {
+            "hls", "m3u8" -> "application/vnd.apple.mpegurl"
+            "mp4" -> "video/mp4"
+            "dash", "mpd" -> "application/dash+xml"
+            else -> animeMediaType(url)
+        }
+        return if (mediaType == null) {
+            val stream = AnimeStreamResolver(http).resolve(url, homeUrl)
+            asset(http, episode, stream.url, stream.mimeType, stream.referer, subtitles + stream.subtitles)
+        } else asset(http, episode, url, mediaType, subtitles = subtitles)
     }
 
     private fun checked(json: JSONObject, stage: AnimeSourceStage): JSONObject {

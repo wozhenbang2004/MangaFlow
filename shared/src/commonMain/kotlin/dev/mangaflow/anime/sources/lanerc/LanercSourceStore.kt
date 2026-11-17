@@ -148,10 +148,12 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         val expected = packages.value[id]
         if (!update && expected != null) return
         if (update) check(expected != null) { "请先安装该来源。" }
+        var stage = "下载"
         try {
             // The existing installer transport keeps its DNS/public-IP, route and redirect guards.
             val code = fetchPluginText(application, descriptor.scriptUrl)
             require(code.encodeToByteArray().size in 1..MAX_CODE_BYTES) { "脚本文件过大或为空。" }
+            stage = "校验"
             val digest = animeHash(code)
             if (digest != descriptor.observedDigest) throw LanercPackageIntegrityException()
             val version = Regex("(?im)(?:version|版本)\\s*[:=]\\s*['\"]?([A-Za-z0-9._-]{1,48})")
@@ -159,7 +161,9 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             val next = LanercInstalledPackage(id, code, digest, version, expected?.enabled ?: true,
                 randomUuid(), expected?.optionsJson ?: "{}", expected?.code, expected?.digest, expected?.version,
                 optionsKey = expected?.optionsKey.orEmpty())
+            stage = "兼容验证"
             runtime.validate(next, descriptor)
+            stage = "保存"
             withContext(Dispatchers.IO) {
                 writer.withLock {
                     check(packages.value[id]?.revision == expected?.revision) { "来源已被其他操作更改，请重新安装或更新。" }
@@ -175,7 +179,12 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             val message = when (failure) {
                 is LanercPackageIntegrityException -> "来源脚本与内置校验记录不一致，已阻止执行；已安装版本仍然保留，需更新应用中的来源记录后再试。"
                 is LanercCapabilityException -> failure.message ?: "该来源需要尚未支持的宿主能力。"
-                else -> "来源下载、校验或保存失败；已安装版本仍然保留，可重试。"
+                else -> when (stage) {
+                    "下载" -> "${descriptor.name} 下载失败，请检查网络；已有版本仍保留，内置来源无需下载。"
+                    "校验" -> "${descriptor.name} 文件校验失败，未执行脚本；已有版本仍保留。"
+                    "兼容验证" -> "${descriptor.name} 兼容验证失败，未启用此包；请使用内置来源或更新应用。"
+                    else -> "${descriptor.name} 保存失败，请检查存储空间；已有版本仍保留。"
+                }
             }
             mutableState.value = mutableState.value.map { if (it.id == id) it.copy(error = message) else it }
             throw IllegalStateException(message)

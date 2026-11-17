@@ -6,25 +6,18 @@ import dev.mangaflow.anime.AnimeSourceEpisode
 import dev.mangaflow.anime.AnimeSourceTitle
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
-import dev.mangaflow.platform.wallTimeMillis
-import dev.mangaflow.net.DownloadRouteSnapshot
-import kotlinx.atomicfu.locks.SynchronizedObject
-import kotlinx.atomicfu.locks.synchronized
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.withTimeoutOrNull
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRoutingStore
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
 /** Original native implementation of anonymous AniCh wire contracts observed 2026-11-16.
  * No external implementation, embedded credentials, guest registration or remote JS is bundled.
- * Each returned station belongs to its actual episode. Missing stations fail, never switch.
+ * Automatic station selection stays inside the selected actual episode; explicit stations stay exact.
  */
 internal class AniChAnimeProvider(override val revision: String) : AnimeProvider {
     override val id = "anime-native-ani"
@@ -66,57 +59,19 @@ internal class AniChAnimeProvider(override val revision: String) : AnimeProvider
                     row.number(2).also { require(it in 1L..Int.MAX_VALUE.toLong()) } to row.string(8)
                 }.also { rows -> require(rows.map { it.first }.distinct().size == rows.size) }.sortedBy { it.first }
             }
-            val cacheKey = CatalogueKey(title.id, revision, http.route)
-            val entry = synchronized(cacheLock) {
-                val now = wallTimeMillis()
-                catalogueCache.entries.removeAll { now - it.value.touchedAt > 120_000L }
-                if (cacheKey !in catalogueCache && catalogueCache.size >= 16)
-                    catalogueCache.minByOrNull { it.value.touchedAt }?.key?.let(catalogueCache::remove)
-                catalogueCache.getOrPut(cacheKey) { CatalogueEntry(now) }.also { entry ->
-                    entry.touchedAt = now
-                    entry.stations.entries.removeAll { now - it.value.observedAt > 120_000L }
-                }
+            // The episode feed is the catalogue. Resolving every episode's media stations here
+            // made opening a long show wait on hundreds of requests and hid unfinished episodes.
+            // Keep exact feed identities; obtain stations only for the episode the user selects.
+            val episodes = available.map { (sort, caption) ->
+                val label = "第 $sort 集" + caption.takeIf { it.isNotBlank() }?.let { " $it" }.orEmpty()
+                AnimeSourceEpisode(id = "${title.id}:$sort:auto", title = label,
+                    url = vodUrl(title.id, sort), number = sort.toDouble(), group = "自动线路",
+                    playbackData = JSONObject().put("work", title.id).put("sort", sort).put("automatic", true).toString())
             }
-            val missing = synchronized(cacheLock) {
-                available.filter { it.first !in entry.stations }.sortedBy { entry.attempts[it.first] ?: 0 }
-            }
-            // Return already-known real rows promptly. A slow episode cannot hold the entire work;
-            // another refresh continues missing episodes using the short-lived route/revision cache.
-            withTimeoutOrNull(8_000L) {
-                for (batch in missing.chunked(4)) coroutineScope {
-                    batch.map { (sort, _) -> async {
-                        try {
-                            synchronized(cacheLock) { entry.attempts[sort] = (entry.attempts[sort] ?: 0) + 1 }
-                            val stations = withTimeoutOrNull(2_500L) {
-                                lines(http, title.id, sort, AnimeSourceStage.CATALOG).map { it.slug }
-                            }
-                            if (!stations.isNullOrEmpty()) synchronized(cacheLock) {
-                                entry.stations[sort] = StationObservation(stations, wallTimeMillis())
-                            }
-                        } catch (cancel: CancellationException) { throw cancel }
-                        catch (_: Exception) { /* This episode remains explicitly incomplete and retryable. */ }
-                    } }.awaitAll()
-                }
-            }
-            val stations = synchronized(cacheLock) {
-                val now = wallTimeMillis()
-                entry.stations.filterValues { now - it.observedAt <= 120_000L }.mapValues { it.value.slugs }
-            }
-            val episodes = available.flatMap { (sort, caption) ->
-                stations[sort].orEmpty().map { slug ->
-                    val label = "第 $sort 集" + caption.takeIf { it.isNotBlank() }?.let { " $it" }.orEmpty()
-                    AnimeSourceEpisode(id = "${title.id}:$sort:${animeHash(slug)}", title = label,
-                        url = vodUrl(title.id, sort), number = sort.toDouble(), group = slug,
-                        playbackData = JSONObject().put("work", title.id).put("sort", sort).put("slug", slug).toString())
-                }
-            }
-            val pending = available.count { it.first !in stations }
             if (episodes.isEmpty()) throw AnimeSourceException(id, AnimeSourceStage.CATALOG,
-                if (pending > 0) "AniCh 剧集目录已读取，线路尚未加载成功，请刷新重试。"
-                else "AniCh 未返回实际可选线路，未按总集数补造。")
+                "AniCh 未返回实际可选剧集，未按总集数补造。")
             checkRoute(http, AnimeSourceStage.CATALOG)
-            AnimeSourceCatalog(title, episodes, if (pending > 0)
-                "已加载 ${available.size - pending}/${available.size} 集的线路；其余 $pending 集尚未完成，刷新可继续。" else null)
+            AnimeSourceCatalog(title, episodes)
         } finally { http.close() }
     }
 
@@ -125,25 +80,41 @@ internal class AniChAnimeProvider(override val revision: String) : AnimeProvider
         val selected = JSONObject(requireNotNull(episode.playbackData))
         val work = selected.getString("work")
         val sort = selected.getLong("sort")
-        val slug = selected.getString("slug")
-        require(work == catalog.title.id && episode.url == vodUrl(work, sort) && episode.group == slug &&
-            episode.id == "$work:$sort:${animeHash(slug)}")
+        val automatic = selected.optBoolean("automatic", false)
+        val slug = if (automatic) null else selected.getString("slug")
+        require(work == catalog.title.id && episode.url == vodUrl(work, sort))
+        require(if (automatic) episode.id == "$work:$sort:auto" && episode.group == "自动线路"
+            else episode.group == slug && episode.id == "$work:$sort:${animeHash(requireNotNull(slug))}")
         val http = AnimeHttp(id)
         return try {
-            val line = lines(http, work, sort, AnimeSourceStage.RESOLVE).singleOrNull { it.slug == slug }
-                ?: throw AnimeSourceException(id, AnimeSourceStage.RESOLVE, "所选 AniCh 线路已不可用，请刷新目录并重新选择；未自动替换线路。")
-            val stream = AnimeStreamResolver(http).resolve(line.url, homeUrl)
+            val available = lines(http, work, sort, AnimeSourceStage.RESOLVE)
+            // Automatic is explicit in the catalogue; legacy user-selected stations stay exact.
+            val line = if (automatic) available.firstOrNull() else available.singleOrNull { it.slug == slug }
+            if (line == null) throw AnimeSourceException(id, AnimeSourceStage.RESOLVE,
+                "所选 AniCh 剧集暂未提供可用线路，请重试或选择其他来源。")
+            val stream = if (!automatic) AnimeStreamResolver(http).resolve(line.url, homeUrl)
+                else resolveAutomatic(http, available)
             checkRoute(http, AnimeSourceStage.RESOLVE)
             AnimePlaybackAsset(id = "$id:${animeHash(episode.id + "\n" + animeContentIdentity(stream.url))}",
                 sourceId = id, sourceEpisodeId = episode.id, url = stream.url, route = http.route,
                 title = episode.title, edition = episode.edition, mimeType = stream.mimeType,
                 headers = mapOf("User-Agent" to AnimeHttp.USER_AGENT, "Referer" to stream.referer),
                 subtitles = stream.subtitles, sourceRevision = revision)
-        } catch (cancel: CancellationException) { throw cancel }
-        catch (failure: Exception) {
-            synchronized(cacheLock) { catalogueCache[CatalogueKey(work, revision, http.route)]?.stations?.remove(sort) }
-            throw failure
         } finally { http.close() }
+    }
+
+    private suspend fun resolveAutomatic(http: AnimeHttp, available: List<Line>): ResolvedAnimeStream {
+        var lastFailure: Exception? = null
+        for (line in available.take(3)) {
+            checkRoute(http, AnimeSourceStage.RESOLVE)
+            try {
+                withTimeoutOrNull(5_000L) { AnimeStreamResolver(http).resolve(line.url, homeUrl) }
+                    ?.let { return it }
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) { lastFailure = failure }
+        }
+        throw lastFailure ?: AnimeSourceException(id, AnimeSourceStage.RESOLVE,
+            "所选剧集的线路解析超时，请重试或选择其他来源。")
     }
 
     private fun checkRoute(http: AnimeHttp, stage: AnimeSourceStage) {
@@ -177,17 +148,6 @@ internal class AniChAnimeProvider(override val revision: String) : AnimeProvider
     }
 
     private data class Line(val slug: String, val url: String)
-    private data class CatalogueKey(val work: String, val revision: String, val route: DownloadRouteSnapshot)
-    private data class StationObservation(val slugs: List<String>, val observedAt: Long)
-    private class CatalogueEntry(var touchedAt: Long) {
-        val stations = mutableMapOf<Long, StationObservation>()
-        val attempts = mutableMapOf<Long, Int>()
-    }
-    companion object {
-        private val cacheLock = SynchronizedObject()
-        // Only observed station identities, no media URLs, account state or persisted credentials.
-        private val catalogueCache = mutableMapOf<CatalogueKey, CatalogueEntry>()
-    }
 }
 
 /** Strict, bounded protobuf wire reader. Field meanings stay at the call sites above. */

@@ -1,7 +1,8 @@
 package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -18,7 +19,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -39,6 +41,12 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
         catalog.title.sourceId == subject.externalIds["native-source"] &&
             !catalog.notice.isNullOrBlank() && detail.episodes.isEmpty()
     }
+    val missingSelectedGroup = pendingNativeCatalog?.let { catalog ->
+        val selectedGroup = state.sourceBindings.firstOrNull { binding ->
+            binding.catalog.sourceId == catalog.title.sourceId && binding.catalog.id == catalog.title.id
+        }?.selectedGroup
+        selectedGroup != null && catalog.episodes.none { it.group == selectedGroup }
+    } == true
     val entry = state.library.firstOrNull { it.subject.id == subject.id }
     var episodeTab by rememberSaveable(subject.id) { mutableIntStateOf(0) }
     var descriptionExpanded by rememberSaveable(subject.id) { mutableStateOf(false) }
@@ -67,7 +75,8 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
             animeSourceName(binding.catalog.sourceId, state))
     }
     BoxWithConstraints(modifier.fillMaxSize()) {
-        val columns = if (maxWidth >= 760.dp) 2 else 1
+        val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+        val columns = ((maxWidth - 40.dp).value / (76f * fontScale)).toInt().coerceIn(1, 8)
         LazyColumn(Modifier.fillMaxSize().motionInputGate(active && !statusPresent && episodeMenuOwner == null), state = scroll,
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -136,17 +145,6 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
                     }
                 }
             }
-            item(key = "playback-source") {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text("播放来源", style = MaterialTheme.typography.labelLarge)
-                        AnimeQuietLabel(if (sourceNames.isEmpty()) "选择来源并核对集数" else
-                            sourceNames.distinctBy { it.first }.joinToString(" · ") { it.second })
-                    }
-                    AnimeSourceStack(sourceNames, onClick = { onSources(null) })
-                }
-            }
             if (state.detailLoading) item(key = "episode-loading") {
                 AnimeMessage("正在载入集数", "已保存的作品与续看记录会保留。")
             }
@@ -169,8 +167,9 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
                 }
             }
             item(key = "episodes-heading") {
-                AnimeSectionTitle("选集", action = {
-                    Row {
+                AnimeSectionTitle("选集 · ${episodes.size}", action = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        AnimeSourceStack(sourceNames, onClick = { onSources(null) })
                         MotionIconButton(onClick = { episodeSearch = !episodeSearch; if (!episodeSearch) episodeQuery = "" },
                             modifier = Modifier.size(44.dp), tooltip = "查找集数") {
                             Icon(Icons.Outlined.Search, "查找集数", Modifier.size(19.dp))
@@ -189,16 +188,17 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
             }
             if (episodes.isEmpty() && !state.detailLoading && state.detailError == null) item(key = "empty-episodes") {
                 if (pendingNativeCatalog != null) {
-                    AnimeMessage("所选线路尚未加载完整", pendingNativeCatalog.notice,
-                        action = "继续加载原线路",
-                        onAction = { controller.refreshSource(pendingNativeCatalog.title.sourceId) })
+                    AnimeMessage(if (missingSelectedGroup) "需要重新选择线路" else "所选线路尚未加载完整", pendingNativeCatalog.notice,
+                        action = if (missingSelectedGroup) "选择新线路" else "继续加载原线路",
+                        onAction = { if (missingSelectedGroup) onSources(null)
+                            else controller.refreshSource(pendingNativeCatalog.title.sourceId) })
                 } else AnimeMessage(if (episodeQuery.isNotBlank()) "没有匹配的集数" else "这组还没有集数",
                     if (episodeQuery.isNotBlank()) "试试其他集号或标题。" else "作品资料尚未提供集数时，不按列表位置猜配播放资源。",
                     action = if (episodeQuery.isNotBlank()) "清除查找" else "查看来源",
                     onAction = { if (episodeQuery.isNotBlank()) episodeQuery = "" else onSources(null) })
             }
             items(episodes.chunked(columns), key = { row -> row.first().id }) { row ->
-                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     row.forEach { episode ->
                         AnimeEpisodeCell(episode, completed = episode.id in entry?.completedEpisodeIds.orEmpty(),
                             resume = episode.id == resume?.id,
@@ -212,7 +212,7 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
                             onCompleted = { controller.setEpisodeCompleted(episode.id, episode.id !in entry?.completedEpisodeIds.orEmpty()) },
                             modifier = Modifier.weight(1f))
                     }
-                    if (row.size < columns) Spacer(Modifier.weight(1f))
+                    repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
             if (subject.description.isNotBlank()) item(key = "description") {
@@ -240,54 +240,56 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AnimeEpisodeCell(episode: AnimeEpisode, completed: Boolean, resume: Boolean, matched: Int,
     backdrop: HazeState, active: Boolean, onPlay: () -> Unit, onSources: () -> Unit, onCompleted: () -> Unit,
     onMenuPresenceChange: (Boolean) -> Unit, modifier: Modifier = Modifier) {
     val native = episode.subjectId.startsWith("native:")
-    val unknownNumber = native && episode.kind == AnimeEpisodeKind.OTHER && episode.number == 0.0
     val interaction = remember(episode.id) { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
     var menuVisible by remember(episode.id) { mutableStateOf(false) }
     var sourcesAfterMenu by remember(episode.id) { mutableStateOf(false) }
     LaunchedEffect(active) { if (!active) { menuVisible = false; sourcesAfterMenu = false } }
-    Row(modifier.heightIn(min = 60.dp).clip(RoundedCornerShape(12.dp))
-        .background(if (resume) colors.onSurface.copy(alpha = .05f) else Color.Transparent),
-        verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.weight(1f).heightIn(min = 60.dp).motionPress(interaction, pressedScale = .99f)
-            .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onPlay)
-            .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (!unknownNumber) Text(animeEpisodeNumber(episode.number), Modifier.widthIn(min = 28.dp),
-                style = MaterialTheme.typography.titleSmall, color = colors.onSurfaceVariant)
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(if (native || episode.kind == AnimeEpisodeKind.MAIN) episode.title.ifBlank { animeEpisodeLabel(episode) }
-                    else animeEpisodeLabel(episode) + " · " + episode.title, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodyMedium)
-                if (resume) AnimeQuietLabel("续看")
-            }
-            if (completed) Icon(Icons.Outlined.CheckCircle, "已看", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+    Box(modifier) {
+        Column(Modifier.fillMaxWidth().heightIn(min = 64.dp).clip(RoundedCornerShape(12.dp))
+            .background(if (resume) colors.primary.copy(alpha = .12f) else colors.surfaceContainerLow)
+            .motionPress(interaction, pressedScale = .97f)
+            .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
+                onClickLabel = "播放" + animeEpisodeLabel(episode), onClick = onPlay,
+                onLongClickLabel = "本集操作", onLongClick = { menuVisible = true })
+            .semantics(mergeDescendants = true) {
+                contentDescription = animeEpisodeLabel(episode) + " " + episode.title
+                stateDescription = when { resume -> "续看"; completed -> "已看"; else -> "未看" }
+                customActions = listOf(CustomAccessibilityAction("本集操作") { menuVisible = true; true })
+            }.padding(horizontal = 6.dp, vertical = 9.dp),
+            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            Text(if (native) episode.title.ifBlank { "来源剧集" } else animeEpisodeLabel(episode),
+                minLines = if (native) 2 else 1, maxLines = if (native) 2 else 1,
+                textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelLarge, color = if (resume) colors.primary else colors.onSurface)
+            if (!native) Text(episode.title, minLines = 1, maxLines = 1,
+                textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
         }
-        Box {
-            MotionIconButton(onClick = { menuVisible = true }, modifier = Modifier.size(44.dp), tooltip = "本集操作") {
-                Icon(Icons.Outlined.MoreHoriz, animeEpisodeLabel(episode) + "的操作", Modifier.size(19.dp), tint = colors.onSurfaceVariant)
-            }
-            CompactGlassPopover(menuVisible, backdrop,
-                onDismiss = { menuVisible = false; sourcesAfterMenu = false },
-                onPresenceChange = { present ->
-                    onMenuPresenceChange(present)
-                    if (!present && sourcesAfterMenu) {
-                        sourcesAfterMenu = false
-                        if (active) onSources()
-                    }
-                }) {
-                AnimeQuietLabel(if (matched == 0) "尚未匹配播放来源" else "已匹配 " + matched + " 个来源",
-                    Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
-                CompactMenuAction(if (completed) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-                    if (completed) "取消已看" else "标记已看", onClick = { menuVisible = false; onCompleted() })
-                CompactMenuAction(Icons.Outlined.SwapHoriz, "本集来源与映射",
-                    onClick = { sourcesAfterMenu = true; menuVisible = false })
-            }
+        if (resume || completed) Icon(if (resume) Icons.Outlined.PlayArrow else Icons.Outlined.Check,
+            null, Modifier.align(Alignment.TopEnd).padding(3.dp).size(12.dp),
+            tint = if (resume) colors.primary else colors.onSurfaceVariant)
+        CompactGlassPopover(menuVisible, backdrop,
+            onDismiss = { menuVisible = false; sourcesAfterMenu = false },
+            onPresenceChange = { present ->
+                onMenuPresenceChange(present)
+                if (!present && sourcesAfterMenu) {
+                    sourcesAfterMenu = false
+                    if (active) onSources()
+                }
+            }) {
+            AnimeQuietLabel(if (matched == 0) "尚未匹配播放来源" else "已匹配 " + matched + " 个来源",
+                Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+            CompactMenuAction(if (completed) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                if (completed) "取消已看" else "标记已看", onClick = { menuVisible = false; onCompleted() })
+            CompactMenuAction(Icons.Outlined.SwapHoriz, "本集来源与映射",
+                onClick = { sourcesAfterMenu = true; menuVisible = false })
         }
     }
 }

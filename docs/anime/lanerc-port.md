@@ -157,3 +157,23 @@ The current base had real shared Kotlin compiler failures. Android [run 43853588
 Root publishes the integrated latest-main batch with an expected-head guard, confirms ordinary Android and multiplatform CI activation, and stops waiting for artifacts. The resulting commit and run links are delivered in chat. No status-only follow-up push or invented runtime result is part of this checkpoint.
 
 Additional public protocol references: [Bangumi v0 specification](https://github.com/bangumi/api/blob/master/open-api/v0.yaml), [Bangumi calendar specification](https://github.com/bangumi/api/blob/master/open-api/api.yml), [Mediamp v0.5.1](https://github.com/open-ani/mediamp/tree/v0.5.1). Existing dependency versions and licenses are retained; no new native engine is bundled by this work.
+
+
+## Episode-first source loading · 2026-11-17
+
+User feedback: “动漫功能要全部重做卡的要死一堆加载不出来而且 uiux 也不好你看看人家 lanerc 呢人家从来都不会说加载不出来” (message Sentinel_7da0b9f533c08191804a56b38203d928). This slice addresses source catalogue work, not a claim that the entire request is complete.
+
+- AniCh previously fetched every episode's `/vod` station list before returning a catalogue, under an eight-second budget, so a real episode could disappear from the visible catalogue merely because its media request had not finished. The catalogue now comes solely from actual `bangumi/episodes` rows, never the metadata total. Each row exposes explicit automatic selection; only selecting that exact work/episode requests `/vod`.
+- TvTFun previously fetched missing station lists serially for every episode in `catalog`. It now gives every real episode an automatic-group entry, retains embedded explicit stations as additional choices, and defers absent station lists until that actual episode is selected. A partly embedded season therefore still has one complete automatic group. Automatic selection tries at most three returned stations, with five-second per-station resolve budgets; it never crosses an episode identity. Legacy explicitly chosen station IDs/slugs stay exact and are not silently replaced.
+- Native revisions change with this catalogue contract. Existing source bindings may need fresh catalogue/group confirmation; user library data is not removed or inferred from a failed request. Automatic station resolution is not proof that the resulting media actually plays on a device.
+- Seven native adapters are already available without script installation (TvTFun, AGE, GiriGiri, LMM, AniCh, AkiAnime and DMBus), subject to saved disable/removal choices. Optional scripts still use pinned-byte verification; download, validation and save failures now report the actual phase and source name without exposing response data or credentials. The screenshot's old combined failure message did not prove which phase failed.
+- Dynamic browser sniffing remains unimplemented: `sniffMedia`/`sniffAll` explicitly fail in the JS host. This change does not borrow Lanerc credentials, alter TLS, install certificates or pretend static resolvers have full browser execution.
+
+Validation: source review and whitespace/diff checks only. No tests, local build, network probes or installed performance/visual acceptance.
+
+### Integration note · 2026-11-17
+
+- Legacy calendar cover failure was traced to the actual official `/calendar` JSON advertising `http://lain.bgm.tv/...`, while the same subject's v0 endpoint advertises HTTPS at the same large-cover path. Normalize only this known CDN from HTTP port 80 to HTTPS port 443; retain public-source HTTPS validation and use the next valid declared size when necessary. Raw calendar caches benefit from decoding the corrected URL without deleting the cache.
+- Metadata search, detail, related JSON/HTML parsing and discovery-document serialization now run away from the UI dispatcher. Subject and episode metadata requests share exact subject identity and run concurrently; neither incomplete identity nor failed episodes are presented as a complete detail.
+- Existing native bindings whose selected group disappeared are retained and explicitly ask for a new line selection rather than silently selecting the first new group. Original resume records remain intact and cannot be applied to a guessed new episode ID. Existing source-panel selection is the recovery action.
+- This batch was inspected statically, with whitespace validation only. No local build or tests ran; user-device loading speed, images, playback and UI remain pending built-app experience.

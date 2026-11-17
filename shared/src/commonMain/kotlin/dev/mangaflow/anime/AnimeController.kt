@@ -603,7 +603,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     val resumeGroup = resumeEpisodeId?.let { id -> catalog.episodes.firstOrNull { nativeEpisodeId(subject, it) == id }?.group }
                     // A budgeted/failed read is not evidence that the user's saved line disappeared.
                     // Keep the binding and pending resume untouched until that exact line is observed.
-                    val preserveSaved = catalog.notice != null && saved != null
+                    val changedSavedGroup = saved?.selectedGroup?.let { it !in groups } == true
+                    val preserveSaved = saved != null && (catalog.notice != null || changedSavedGroup)
                     val unresolvedResume = catalog.notice != null && resumeEpisodeId != null && resumeGroup == null
                     val group = when {
                         preserveSaved -> saved?.selectedGroup
@@ -627,8 +628,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     if (!currentDetail(generation, subject.id) || library.state.value.restoreEpoch != openingRestoreEpoch ||
                         discoverySourceRevision(sourceId) != revision || sources.provider(sourceId) == null) return@launch
                     retryNativeReference = null
-                    val shownCatalog = if (catalog.notice != null && (group !in groups || unresolvedResume))
-                        catalog.copy(notice = catalog.notice + " 已保留原线路与续看位置，待对应剧集加载后继续。") else catalog
+                    val shownCatalog = when {
+                        changedSavedGroup -> catalog.copy(notice = listOfNotNull(catalog.notice,
+                            "来源线路结构已更新，原线路与续看记录已保留；请打开来源面板选择新线路后继续。")
+                            .joinToString(" "))
+                        catalog.notice != null && (group !in groups || unresolvedResume) ->
+                            catalog.copy(notice = catalog.notice + " 已保留原线路与续看位置，待对应剧集加载后继续。")
+                        else -> catalog
+                    }
                     mutableState.update { it.copy(detail = group?.let { selected -> nativeDetail(subject, shownCatalog, selected) }
                         ?: AnimeDetail(subject, emptyList()), detailLoading = false,
                         sourceBindings = listOf(binding), sourceCatalogs = listOf(shownCatalog)) }

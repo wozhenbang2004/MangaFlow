@@ -67,10 +67,26 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
         LazyVerticalGrid(GridCells.Fixed(columns), state = scrolls.grid("home"), modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = contentBottomPadding),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item(key = "source-update-heading", span = { GridItemSpan(maxLineSpan) }) {
+                AnimeDiscoverySectionHeading("最近更新", "AGE", refreshing = latest.loading,
+                    moreLabel = if (expandedUpdates) "收起最近更新" else "展开最近更新",
+                    onMore = if (latest.items.size > (if (columns == 1) 4 else columns * 2)) ({
+                        expandedUpdates = !expandedUpdates
+                    }) else null)
+            }
+            if (latest.error != null) item(key = "source-update-error", span = { GridItemSpan(maxLineSpan) }) {
+                AnimeDiscoveryInlineStatus(latest.error.orEmpty(), retry = { controller.sourceBrowse.refreshLatest(force = true) })
+            }
+            if (latest.items.isEmpty()) item(key = "source-update-empty", span = { GridItemSpan(maxLineSpan) }) {
+                AnimeDiscoveryInlineStatus(if (latest.loading) "正在读取更新" else if (latest.error == null) "来源暂无更新" else "")
+            }
+            else items(latest.items.take(if (expandedUpdates) Int.MAX_VALUE else if (columns == 1) 4 else columns * 2), key = { "update:" + it.sourceId + ":" + it.id }) { title ->
+                AnimeSourceDiscoveryCard(title, list = columns == 1, onOpen = { onChooseReference(title, true) })
+            }
             state.discoverySections.forEach { section ->
                 val feed = state.discoveryFeeds[section.key]
                 item(key = "section:${section.key}", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeDiscoverySectionHeading(section.title, animeDiscoveryCaption(section.query),
+                    AnimeDiscoverySectionHeading(section.title, animeDiscoveryProviderLabel(section.query.provider),
                         refreshing = feed?.loading == true,
                         onMore = { controller.openDiscoverySection(section.key) })
                 }
@@ -84,39 +100,22 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
                     AnimeDiscoveryCard(item, feed.query, list = columns == 1, onOpen = { onOpen(item) })
                 }
             }
-            item(key = "source-update-heading", span = { GridItemSpan(maxLineSpan) }) {
-                AnimeDiscoverySectionHeading("最近更新", "AGE · 更新标注", refreshing = latest.loading,
-                    onMore = {
-                        expandedUpdates = !expandedUpdates
-                    })
-            }
-            if (latest.error != null) item(key = "source-update-error", span = { GridItemSpan(maxLineSpan) }) {
-                AnimeDiscoveryInlineStatus(latest.error.orEmpty(), retry = { controller.sourceBrowse.refreshLatest(force = true) })
-            }
-            if (latest.items.isEmpty()) item(key = "source-update-empty", span = { GridItemSpan(maxLineSpan) }) {
-                AnimeDiscoveryInlineStatus(if (latest.loading) "正在读取更新" else if (latest.error == null) "来源暂无更新" else "")
-            }
-            else items(latest.items.take(if (expandedUpdates) Int.MAX_VALUE else if (columns == 1) 3 else columns), key = { "update:" + it.sourceId + ":" + it.id }) { title ->
-                AnimeSourceDiscoveryCard(title, list = columns == 1, onOpen = { onChooseReference(title, true) })
-            }
         }
     }
 }
 
 @Composable
 internal fun AnimeDiscoverySectionHeading(title: String, caption: String, refreshing: Boolean = false,
-    onMore: (() -> Unit)? = null) {
-    Row(Modifier.fillMaxWidth().padding(top = 8.dp).heightIn(min = 48.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(caption, style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        if (refreshing) Text("更新中", style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (onMore != null) MotionIconButton(onClick = onMore, modifier = Modifier.size(44.dp), tooltip = "查看全部$title") {
-            Icon(Icons.Outlined.ChevronRight, "查看全部$title", Modifier.size(21.dp))
+    onMore: (() -> Unit)? = null, moreLabel: String = "查看全部$title") {
+    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(caption, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (refreshing) Icon(Icons.Outlined.Sync, "正在更新$title", Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (onMore != null) MotionIconButton(onClick = onMore, modifier = Modifier.size(44.dp), tooltip = moreLabel) {
+            Icon(Icons.Outlined.ChevronRight, moreLabel, Modifier.size(21.dp))
         }
     }
 }

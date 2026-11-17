@@ -56,7 +56,8 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
                 else -> JSONObject().put("payload", anilist(http, query, page)).put("fetchedAt", wallTimeMillis())
             }
             val result = withContext(Dispatchers.Default) { decode(response, query, page) }
-            cache.write(cacheKey(query, page), response.toString(), generation)
+            val encoded = withContext(Dispatchers.Default) { response.toString() }
+            cache.write(cacheKey(query, page), encoded, generation)
             result
         } catch (cancel: CancellationException) {
             throw cancel
