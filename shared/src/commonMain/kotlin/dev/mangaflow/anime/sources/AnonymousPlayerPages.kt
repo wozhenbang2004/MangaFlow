@@ -7,13 +7,15 @@ import dev.mangaflow.platform.decodeUrlComponent
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import dev.mangaflow.net.HttpUrl
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRoutingStore
 import io.ktor.http.encodeURLParameter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /** Original, bounded data-only reader for public Aki player declarations. No JS evaluator,
- * embedded keys, browser cookies, account tokens or challenge solving. No parser POST is enabled:
- * available offline evidence does not establish a trusted external parser origin.
+ * embedded keys, browser cookies, account tokens or challenge solving. The DMBus HHJX
+ * adapter only returns page-issued parameters to its exact same-origin public parser.
  */
 internal class AnonymousPlayerPages(private val http: AnimeHttp) {
     suspend fun akiParser(from: String, token: String, page: HttpUrl): HttpUrl? {
@@ -54,8 +56,12 @@ internal class AnonymousPlayerPages(private val http: AnimeHttp) {
     }
 
     @OptIn(ExperimentalEncodingApi::class)
-    fun dmbusPublicMedia(page: HttpUrl, html: String): String? {
-        if (http.sourceId != "anime-native-dmbus" || page.host != "hhjx.hhplayer.com" || html.length > 1_048_576) return null
+    suspend fun dmbusPublicMedia(page: HttpUrl, html: String): String? {
+        if (http.sourceId != "anime-native-dmbus" || page.host != "hhjx.hhplayer.com" ||
+            page.scheme != "https" || page.port != 443 || html.length > 1_048_576) return null
+        val bootstrap = withContext(Dispatchers.Default) { literalObject(html,
+            Regex("""\bwindow\.__HHJX_BOOTSTRAP__\s*=\s*\{""")) }
+        if (bootstrap != null) return dmbusDeclaredMedia(page, bootstrap)
         val match = Regex("""\b(?:var|let|const)\s+url\s*=\s*("(?:\\.|[^"\\])*")""").find(html) ?: return null
         val raw = runCatching { JSONArray("[${match.groupValues[1]}]").getString(0) }.getOrNull() ?: return null
         if (raw.length !in 1..16384) return null
@@ -72,6 +78,36 @@ internal class AnonymousPlayerPages(private val http: AnimeHttp) {
             runCatching { animePublicUrl(animeAbsolute(page.toString(), candidate)).toString() }.getOrNull()
                 ?.takeIf { animeMediaType(it) != null }
         }
+    }
+
+    private suspend fun dmbusDeclaredMedia(page: HttpUrl, data: JSONObject): String? {
+        // Observed public HHJX page contract: parameters belong to this exact episode URL.
+        // Never retain them, forward them across origins, or execute the page's JavaScript.
+        val opaque = data.optString("url")
+        val key = data.optString("key")
+        val time = data.optString("t").toLongOrNull()
+        if (data.optString("error").isNotBlank() || data.has("act") ||
+            opaque.length !in 1..16384 || opaque != page.queryParameter("url") ||
+            !Regex("""[0-9a-fA-F]{64}""").matches(key) || time == null ||
+            time !in 946_684_800L until 4_133_980_800L)
+            throw AnimeSourceException(http.sourceId, AnimeSourceStage.RESOLVE,
+                "此线路的公开解析参数已变化或需要验证，请刷新或选择其他线路。")
+        if (http.route != DownloadRoutingStore.activeSourceSnapshot(http.sourceId, DownloadCategory.ANIME))
+            throw AnimeSourceException(http.sourceId, AnimeSourceStage.RESOLVE, "动漫来源路由已变化，请重新读取。")
+        val endpoint = animePublicUrl("https://hhjx.hhplayer.com/api/parse")
+        val response = http.request(endpoint, AnimeSourceStage.RESOLVE, method = "POST",
+            payload = JSONObject().put("url", opaque).put("t", time).put("key", key).put("client_fallback", false),
+            referer = anonymousMediaReferer(page.toString()), sameOriginRedirects = true)
+        val result = withContext(Dispatchers.Default) { JSONObject(response.text) }
+        if (result.optInt("code") != 200) throw AnimeSourceException(http.sourceId, AnimeSourceStage.RESOLVE,
+            "此线路的公开解析暂未成功，请刷新或选择其他线路。")
+        // Only literal public HTTPS media is supported. Browser instructions such as youku
+        // remain unsupported, rather than being executed or mistaken for playable content.
+        if (result.optString("ext").equals("youku", ignoreCase = true)) return null
+        if (http.route != DownloadRoutingStore.activeSourceSnapshot(http.sourceId, DownloadCategory.ANIME))
+            throw AnimeSourceException(http.sourceId, AnimeSourceStage.RESOLVE, "动漫来源路由已变化，请重新读取。")
+        val media = runCatching { animePublicUrl(result.optString("url")) }.getOrNull() ?: return null
+        return media.toString().takeIf { media.scheme == "https" && animeMediaType(it) != null }
     }
 
     suspend fun rejectAccessPage(html: String): Unit = withContext(Dispatchers.Default) {
