@@ -17,6 +17,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.datetime.LocalDate
 
 interface AnimeProvider {
     val id: String
@@ -439,6 +440,7 @@ private class GiriGiriProvider : RoutedAnimeProvider() {
 private class LmmProvider : RoutedAnimeProvider() {
     override val supportsSearchPagination = false
     override val id = "anime-lmm"
+    override val revision = "2026-11-17-detail-year"
     override val name = "LMM 动漫"
     override val homeUrl = "https://www.lmm22.com/"
 
@@ -480,7 +482,27 @@ private class LmmProvider : RoutedAnimeProvider() {
                         sourceEpisodeKind(episodeLabel), "$label [${groupIndex + 1}]")
                 }
             }
-            requireEpisodes(title, episodes)
+            // LMM22's observed work-local release row (not LMM85's contract or a
+            // recommendation/filter year). Missing/conflicting evidence stays unconfirmed.
+            val identity = withContext(Dispatchers.Default) {
+                val info = document.selectFirst(".video-info")
+                val name = info?.selectFirst(".video-info-header h1.page-title")?.text().orEmpty().trim()
+                val releaseDates = info?.select(".video-info-items").orEmpty().filter { row ->
+                    row.selectFirst(".video-info-itemtitle")?.text()?.trim() == "上映："
+                }.map { row -> row.selectFirst(".video-info-item")?.text().orEmpty().trim() }.distinct()
+                val year = releaseDates.singleOrNull()?.let { value ->
+                    if (!Regex("""\d{4}-\d{2}-\d{2}""").matches(value)) null
+                    else runCatching { LocalDate.parse(value).year }.getOrNull()?.takeIf { it in 1900..2100 }
+                }
+                val home = animePublicUrl(homeUrl)
+                val trustedOrigin = url.scheme == home.scheme && url.host == home.host && url.port == home.port
+                val samePage = response.url.scheme == url.scheme && response.url.host == url.host &&
+                    response.url.port == url.port && response.url.encodedPath == url.encodedPath
+                val exactWork = url.encodedPath == "/index.php/vod/detail/id/${title.id}.html"
+                if (trustedOrigin && samePage && exactWork && name == title.title.trim() && year != null &&
+                    (title.year == null || title.year == year)) title.copy(year = year) else title
+            }
+            requireEpisodes(identity, episodes)
         } finally { http.close() }
     }
 }

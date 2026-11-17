@@ -24,7 +24,11 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
     override val revision: String get() = store.snapshot(id)?.revision
         ?: throw LanercCapabilityException("该来源未安装或已停用，请先启用来源。")
     // A page argument in a function declaration alone is not pagination evidence.
-    override val supportsSearchPagination: Boolean get() = id == "anime-lanerc-ani"
+    // Audited scripts actually send the page: ani skip, yzx search/{key}/{page}.json,
+    // sd new_search/result_v2 pn. Other declarations alone do not imply pagination.
+    override val supportsSearchPagination: Boolean get() = id in setOf(
+        "anime-lanerc-ani", "anime-lanerc-yzx", "anime-lanerc-sd",
+    )
 
     override suspend fun search(query: String, page: Int): List<AnimeSourceTitle> {
         require(query.isNotBlank() && query.length <= 500 && page >= 1) { "请输入名称并使用有效页码。" }

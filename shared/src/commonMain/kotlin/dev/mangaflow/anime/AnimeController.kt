@@ -750,21 +750,28 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     private suspend fun loadBoundCatalogs(detail: AnimeDetail, generation: Long) = coroutineScope {
         library.state.value.bindings.filter { it.subjectId == detail.subject.id }.forEach { binding ->
-            launch { loadBoundCatalog(binding, generation) }
+            val request = ++catalogGeneration
+            catalogRequests[binding.catalog.sourceId] = request
+            launch { loadBoundCatalog(binding, generation, request) }
         }
     }
 
-    private suspend fun loadBoundCatalog(binding: AnimeSourceBinding, generation: Long) {
+    private suspend fun loadBoundCatalog(binding: AnimeSourceBinding, generation: Long, request: Long) {
         val sourceId = binding.catalog.sourceId
-        if (!currentDetail(generation, binding.subjectId) || !stillBound(binding.subjectId, binding.catalog)) return
-        val request = ++catalogGeneration
-        catalogRequests[sourceId] = request
+        if (catalogRequests[sourceId] != request || !currentDetail(generation, binding.subjectId) ||
+            !stillBound(binding.subjectId, binding.catalog)) return
+        val revision = discoverySourceRevision(sourceId)
+        val epoch = library.state.value.restoreEpoch
         mutableState.update { it.copy(sourceCatalogErrors = it.sourceCatalogErrors - sourceId) }
         fun current() = request == catalogRequests[sourceId] &&
-            currentDetail(generation, binding.subjectId) && stillBound(binding.subjectId, binding.catalog)
+            currentDetail(generation, binding.subjectId) && stillBound(binding.subjectId, binding.catalog) &&
+            library.state.value.restoreEpoch == epoch && discoverySourceRevision(sourceId) == revision &&
+            sources.provider(sourceId) != null
+        if (current()) publishAssociation(sourceId, AnimeAssociationProgress(AnimeAssociationPhase.SEARCHING))
         try {
             val provider = sources.provider(sourceId) ?: error("这个来源当前不可用，可以解除关联。")
-            val received = provider.catalog(binding.catalog)
+            val received = withTimeoutOrNull(15_000) { provider.catalog(binding.catalog) }
+                ?: error("来源目录刷新超时，已保留现有目录。")
             val catalog = retainPartialCatalog(mutableState.value.sourceCatalogs.firstOrNull { it.title == binding.catalog }, received)
             check(catalog.title.sourceId == sourceId && catalog.title.id == binding.catalog.id &&
                 catalog.title.url == binding.catalog.url) { "来源目录身份已变化，请重新搜索并确认关联。" }
@@ -774,10 +781,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 sourceCatalogErrors = it.sourceCatalogErrors - sourceId,
             ) }
             rebuildOptions()
+            if (current()) publishAssociation(sourceId, AnimeAssociationProgress(AnimeAssociationPhase.LINKED, catalog.notice))
         } catch (cancel: CancellationException) { throw cancel }
         catch (failure: Exception) {
-            if (current()) mutableState.update { it.copy(sourceCatalogErrors = it.sourceCatalogErrors +
-                (sourceId to (failure.message ?: "目录暂不可用，请重试。"))) }
+            if (current()) {
+                val message = failure.message ?: "目录暂不可用，请重试。"
+                mutableState.update { it.copy(sourceCatalogErrors = it.sourceCatalogErrors + (sourceId to message)) }
+                publishAssociation(sourceId, AnimeAssociationProgress(AnimeAssociationPhase.UNAVAILABLE, message))
+            }
         }
     }
 
@@ -787,7 +798,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             it.subjectId == detail.subject.id && it.catalog.sourceId == sourceId
         } ?: return
         val generation = detailGeneration
-        scope.launch { loadBoundCatalog(binding, generation) }
+        val request = ++catalogGeneration
+        catalogRequests[sourceId] = request
+        scope.launch { loadBoundCatalog(binding, generation, request) }
     }
 
     fun searchSources(query: String = mutableState.value.detail?.subject?.title.orEmpty()) {
@@ -1115,8 +1128,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     /** Detail-owned discovery, independent of player preparation and its cancellation. */
-    private fun startSourceAggregation(detail: AnimeDetail, force: Boolean = false, retryFailed: Boolean = false) {
-        if (mutableState.value.detail?.subject?.id != detail.subject.id) return
+    private fun startSourceAggregation(requestedDetail: AnimeDetail, force: Boolean = false, retryFailed: Boolean = false) {
+        // Awaiting library/extension readiness can outlive a metadata refresh. The visible
+        // current detail, not the caller's older title/year snapshot, owns discovery evidence.
+        val detail = mutableState.value.detail?.takeIf { it.subject.id == requestedDetail.subject.id } ?: return
         val owner = detailGeneration
         val generation = associationGeneration
         val epoch = library.state.value.restoreEpoch
@@ -1143,9 +1158,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             associationSignatures[sourceId] = signature
             val attempt = ++associationSequence
             associationAttempts[sourceId] = attempt
+            // Allocate at scheduling, before the permit wait: an older queued discovery
+            // must not regain ownership after an explicit refresh has started.
+            val catalogRequest = ++catalogGeneration
+            catalogRequests[sourceId] = catalogRequest
             fun current() = currentDetail(owner, detail.subject.id) && generation == associationGeneration &&
                 epoch == library.state.value.restoreEpoch && associationSignatures[sourceId] == signature &&
                 associationAttempts[sourceId] == attempt &&
+                catalogRequests[sourceId] == catalogRequest &&
                 sources.provider(sourceId) != null && discoverySourceRevision(sourceId) == revision
             fun report(phase: AnimeAssociationPhase, message: String? = null) {
                 if (current()) publishAssociation(sourceId, AnimeAssociationProgress(phase, message))
@@ -1185,28 +1205,49 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 ?.takeIf { it.first == revision }?.second.orEmpty().toMutableList()
                             var searchSucceeded = false
                             var searchFailure: String? = null
-                            for (keyword in keywords) {
-                                if (!force && rows.any { autoPlaySubjectCandidate(detail.subject, it) }) break
-                                val page = try {
-                                    withTimeoutOrNull(4_000) { provider.search(keyword, 1) }?.also { searchSucceeded = true } ?: run {
-                                        searchFailure = "来源搜索超时，未将失败当作没有作品。"
-                                        emptyList()
+                            val seenByKeyword = keywords.associateWith { mutableSetOf<Pair<String, String>>() }
+                            val finishedKeywords = mutableSetOf<String>()
+                            // Recall only. Round-robin keywords so extra title pages cannot
+                            // starve the original-title first page. Keep the shared 15s budget.
+                            val lastPage = if (provider.supportsSearchPagination) 3 else 1
+                            searchPages@ for (pageNumber in 1..lastPage) {
+                                for (keyword in keywords) {
+                                    if (!force && rows.any { autoPlaySubjectCandidate(detail.subject, it) }) break@searchPages
+                                    if (keyword in finishedKeywords) continue
+                                    if (!current()) return@aggregation false
+                                    val page = try {
+                                        withTimeoutOrNull(4_000) { provider.search(keyword, pageNumber) }
+                                            ?.also { searchSucceeded = true } ?: run {
+                                            searchFailure = "来源搜索超时，本次搜索尚未完成。"
+                                            null
+                                        }
+                                    } catch (cancel: CancellationException) { throw cancel }
+                                    catch (failure: Exception) {
+                                        searchFailure = failure.message ?: "来源搜索失败，本次搜索尚未完成。"
+                                        null
                                     }
-                                } catch (cancel: CancellationException) { throw cancel }
-                                catch (failure: Exception) {
-                                    searchFailure = failure.message ?: "来源搜索失败，尚未确认结果。"
-                                    emptyList()
+                                    if (page == null) {
+                                        finishedKeywords += keyword
+                                        continue
+                                    }
+                                    check(page.all { it.sourceId == sourceId }) { "来源搜索身份不一致。" }
+                                    val seen = seenByKeyword.getValue(keyword)
+                                    val fresh = page.distinctBy { it.id to it.url }.filter { seen.add(it.id to it.url) }
+                                    if (fresh.isEmpty()) {
+                                        finishedKeywords += keyword // Empty or repeated page, never loop on ignored pagination.
+                                        continue
+                                    }
+                                    rows += fresh.filter { found -> rows.none { it.id == found.id && it.url == found.url } }
+                                    if (rows.any { autoPlaySubjectCandidate(detail.subject, it) }) break@searchPages
                                 }
-                                check(page.all { it.sourceId == sourceId }) { "来源搜索身份不一致。" }
-                                rows += page.filter { found -> rows.none { it.id == found.id && it.url == found.url } }
-                                if (rows.any { autoPlaySubjectCandidate(detail.subject, it) }) break
+                                if (finishedKeywords.size == keywords.size) break
                             }
                             if (!current()) return@aggregation false
                             if (searchSucceeded) associationCandidates[sourceId] = revision to rows.toList()
                             val titles = rows.filter { autoPlaySubjectCandidate(detail.subject, it) }
                             if (titles.isEmpty()) {
                                 if (searchFailure != null) report(AnimeAssociationPhase.UNAVAILABLE, searchFailure)
-                                else report(AnimeAssociationPhase.NO_MATCH, "未找到足够可靠的同作品候选。")
+                                else report(AnimeAssociationPhase.NO_MATCH, "本次有界搜索未找到可靠的同作品候选，可手动继续搜索。")
                                 return@aggregation true
                             }
                             if (titles.size > 2) {
