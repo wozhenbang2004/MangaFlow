@@ -262,7 +262,7 @@ private fun AnimeEpisodeCell(episode: AnimeEpisode, completed: Boolean, resume: 
                 onClickLabel = "播放" + animeEpisodeLabel(episode), onClick = onPlay,
                 onLongClickLabel = "本集操作", onLongClick = { menuVisible = true })
             .semantics(mergeDescendants = true) {
-                contentDescription = animeEpisodeLabel(episode) + " " + episode.title
+                contentDescription = listOfNotNull(animeEpisodeLabel(episode), animeEpisodeSubtitle(episode)).joinToString(" ")
                 stateDescription = when { resume -> "续看"; completed -> "已看"; else -> "未看" }
                 customActions = listOf(CustomAccessibilityAction("本集操作") { menuVisible = true; true })
             }.padding(horizontal = 6.dp, vertical = 9.dp),

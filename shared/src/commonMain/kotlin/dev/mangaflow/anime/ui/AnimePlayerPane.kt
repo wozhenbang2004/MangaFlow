@@ -502,7 +502,7 @@ private fun AnimePlayerEpisodes(episodes: List<AnimeEpisode>, currentId: String?
             if (shown.isEmpty()) item { AnimeMessage("没有匹配的集数",
                 action = if (query.isNotBlank()) "清除查找" else null, onAction = { query = "" }) }
             items(shown, key = { it.id }) { episode ->
-                AnimeSelection(animeEpisodeLabel(episode), episode.title,
+                AnimeSelection(animeEpisodeLabel(episode), animeEpisodeSubtitle(episode),
                     titleMaxLines = 1, detailMaxLines = 1,
                     selected = episode.id == currentId, onClick = { onEpisode(episode) })
             }

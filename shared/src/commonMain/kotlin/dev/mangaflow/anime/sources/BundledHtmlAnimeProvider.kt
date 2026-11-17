@@ -102,7 +102,22 @@ internal class BundledHtmlAnimeProvider(
                 val identity = if (response.url.host == url.host && response.url.encodedPath == url.encodedPath &&
                     detailName.trim() == title.title.trim() && year != null && (title.year == null || title.year == year))
                     title.copy(year = year) else title
-                identity to episodes
+                // Aki's visual tab order is not its default playback choice. Follow only
+                // the work-local primary Play button when it points to an actual parsed
+                // episode; never infer line quality or rewrite saved/user-selected groups.
+                val sameDetail = response.url.scheme == url.scheme && response.url.host == url.host &&
+                    response.url.port == url.port && response.url.encodedPath == url.encodedPath
+                val primary = if (aki && sameDetail) document.select(".detail-get-bnt .vod-detail-bnt [data-link]")
+                    .mapNotNull { button ->
+                        val declared = runCatching { animePublicUrl(animeAbsolute(homeUrl, button.attr("data-link"))) }
+                            .getOrNull() ?: return@mapNotNull null
+                        if (declared.scheme != url.scheme || declared.host != url.host || declared.port != url.port ||
+                            !pathPattern.matches(declared.encodedPath)) return@mapNotNull null
+                        episodes.singleOrNull { it.url == declared.toString() }
+                    }.map { it.group }.distinct().singleOrNull() else null
+                val orderedEpisodes = if (primary == null) episodes
+                    else episodes.sortedBy { if (it.group == primary) 0 else 1 }
+                identity to orderedEpisodes
             }
             if (episodes.isEmpty()) throw AnimeSourceException(id, AnimeSourceStage.CATALOG,
                 "来源未返回可识别的剧集，可能需要原站验证或页面规则已变化。")

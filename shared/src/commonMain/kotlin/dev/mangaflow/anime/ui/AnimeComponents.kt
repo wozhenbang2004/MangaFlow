@@ -40,6 +40,16 @@ import dev.mangaflow.ui.motion.motionPress
 internal fun animeEpisodeNumber(value: Double): String =
     if (value % 1.0 == 0.0) value.toLong().toString() else value.toString()
 
+/** Keep a real episode title, but do not repeat a native/number-only primary label. */
+internal fun animeEpisodeSubtitle(episode: AnimeEpisode): String? {
+    fun normalized(value: String): String {
+        val compact = value.filterNot(Char::isWhitespace)
+        val numberOnly = Regex("^第0*([0-9]+)[集话話]$").matchEntire(compact)
+        return numberOnly?.groupValues?.get(1)?.toLongOrNull()?.let { "episode:$it" } ?: compact
+    }
+    return episode.title.trim().takeIf { it.isNotEmpty() && normalized(it) != normalized(animeEpisodeLabel(episode)) }
+}
+
 internal fun animeEpisodeLabel(episode: AnimeEpisode): String =
     if (episode.subjectId.startsWith("native:")) episode.title.ifBlank { "来源剧集" }
     else when (episode.kind) {
