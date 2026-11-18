@@ -169,8 +169,9 @@ internal fun SourceAccountControls(
                 val credentialMode = capabilities.cookieFields.isNotEmpty() && (!capabilities.passwordLogin || cookieMode)
                 if (registerMode && capabilities.registrationFields.isNotEmpty()) {
                     val fields = capabilities.registrationFields
-                    val visible = if (registerStage == 0) fields.take(6) else fields.drop(6)
-                    Text(if (registerStage == 0) "注册 · 基本资料" else "注册 · 安全问题",
+                    val secondPage = fields.size > 6
+                    val visible = if (!secondPage) fields else if (registerStage == 0) fields.take(6) else fields.drop(6)
+                    Text(if (!secondPage) "注册账号" else if (registerStage == 0) "注册 · 基本资料" else "注册 · 安全问题",
                         fontSize = 12.sp, color = colors.onSurfaceVariant)
                     visible.forEach { field ->
                         val value = registerValues[field.id].orEmpty()
@@ -194,7 +195,7 @@ internal fun SourceAccountControls(
                                 registerValues = registerValues + (field.id to it)
                         }
                     }
-                    if (registerStage == 0) {
+                    if (registerStage == 0 && secondPage) {
                         MotionButton(onClick = { registerStage = 1 }, enabled = enabled && !running &&
                             fields.take(5).all { registerValues[it.id].orEmpty().isNotBlank() }) {
                             Text("下一步", fontSize = 12.sp)
@@ -208,7 +209,7 @@ internal fun SourceAccountControls(
                                 modifier = Modifier.weight(1f))
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            MotionTextButton(onClick = { registerStage = 0 }, enabled = enabled && !running) {
+                            if (secondPage) MotionTextButton(onClick = { registerStage = 0 }, enabled = enabled && !running) {
                                 Text("上一步", fontSize = 12.sp)
                             }
                             MotionButton(onClick = {
@@ -218,7 +219,8 @@ internal fun SourceAccountControls(
                                     repository.sourceRegister(source.id, captured)
                                 }
                             }, enabled = enabled && !running && registerConsent &&
-                                fields.all { it.id == "gender" || registerValues[it.id].orEmpty().isNotBlank() }) {
+                                fields.all { field -> registerValues[field.id].orEmpty().isNotBlank() ||
+                                    (field.id == "gender" && field.choices.any { it.id == "bot" }) }) {
                                 Text("提交注册", fontSize = 12.sp)
                             }
                         }

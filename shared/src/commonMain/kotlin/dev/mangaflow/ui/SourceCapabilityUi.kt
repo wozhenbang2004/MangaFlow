@@ -78,6 +78,13 @@ internal fun SourceCapabilityBrowseControls(
     val failed = browse.searchSources.values.filter { it.error != null }
     val filters = if (browse.isSearch) current.searchFilters else current.feeds.firstOrNull { it.id == current.feedId }?.filters.orEmpty()
     val sourceName = current.sources.firstOrNull { it.id == current.selectedSource }?.name ?: "全部来源"
+    var hotTags by remember(current.selectedSource) { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(current.selectedSource) {
+        hotTags = if (current.selectedSource == "jmcomic") try {
+            repository.sourceHotTags(current.selectedSource).take(8)
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { emptyList() } else emptyList()
+    }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(1.dp)) {
         starters?.let { StarterSourcePreparation(it) }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -126,7 +133,7 @@ internal fun SourceCapabilityBrowseControls(
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        if (!browse.isSearch && browse.mode == DiscoveryMode.RECOMMENDED && current.feeds.size > 1) {
+        if (!browse.isSearch && browse.mode != DiscoveryMode.RANKING && current.feeds.size > 1) {
             if (current.feeds.size <= 4) Row(Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 current.feeds.forEach { feed ->
@@ -142,6 +149,18 @@ internal fun SourceCapabilityBrowseControls(
                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
                 Text(current.feeds.firstOrNull { it.id == current.feedId }?.title ?: "选择分类", fontSize = 12.sp)
                 Icon(Icons.Outlined.ExpandMore, null, Modifier.padding(start = 3.dp).size(15.dp))
+            }
+        }
+        if (!browse.isSearch && hotTags.isNotEmpty() && current.selectedSource == "jmcomic") {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                hotTags.forEach { tag ->
+                    MotionTextButton(onClick = { controller.setQuery(tag) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 3.dp)) {
+                        Icon(Icons.Outlined.Tag, null, Modifier.size(13.dp))
+                        Text(tag, fontSize = 11.sp, maxLines = 1)
+                    }
+                }
             }
         }
         if (filters.isNotEmpty()) Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {

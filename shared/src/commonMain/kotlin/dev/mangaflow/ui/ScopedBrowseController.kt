@@ -470,7 +470,10 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                                                     SourceFeedKind.RANKING else SourceFeedKind.LATEST
                                                 val feeds = if (selectedSource != ALL && selectedControls.feeds.isNotEmpty())
                                                     selectedControls.feeds else repository.sourceFeeds(id)
-                                                val feed = feeds.firstOrNull { it.kind == kind } ?: return@withTimeout null
+                                                val feed = (if (selectedSource != ALL) feeds.firstOrNull {
+                                                    it.id == selectedControls.feedId && it.kind == kind
+                                                } else null) ?: feeds.firstOrNull { it.kind == kind }
+                                                    ?: return@withTimeout null
                                                 val remembered = if (selectedSource != ALL && selectedControls.feedId == feed.id)
                                                     selectedControls.options else emptyList()
                                                 val options = if (kind == SourceFeedKind.RANKING)

@@ -55,6 +55,10 @@ import io.github.jukomu.jmcomic.api.model.JmSearchPage
 import io.github.jukomu.jmcomic.core.client.impl.JmApiClient
 import io.github.jukomu.jmcomic.core.config.JmConfiguration
 import io.github.jukomu.jmcomic.core.crypto.JmImageTool
+import io.github.jukomu.jmcomic.core.crypto.JmCryptoTool
+import io.github.jukomu.jmcomic.core.constant.JmConstants
+import io.github.jukomu.jmcomic.core.net.model.JmApiResponse
+import io.github.jukomu.jmcomic.api.model.JmPromoteCategory
 import io.github.jukomu.jmcomic.core.net.OkHttpBuilder
 import dev.mangaflow.reader.readNativeReaderSize
 import dev.mangaflow.reader.ReaderPreparationWorkContext
@@ -80,6 +84,7 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.FormBody
 
 private data class JmImageTransfer(
     val url: HttpUrl,
@@ -324,21 +329,107 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
 
     override suspend fun capabilities() = SourceCapabilities(setOf(SourceFeature.DISCOVERY, SourceFeature.SEARCH,
         SourceFeature.CATEGORIES, SourceFeature.RANKING, SourceFeature.ACCOUNT, SourceFeature.FAVORITES,
-        SourceFeature.COMMENTS))
+        SourceFeature.COMMENTS), registrationFields = listOf(
+        SourceRegistrationField("username", "用户名"),
+        SourceRegistrationField("email", "邮箱"),
+        SourceRegistrationField("password", "密码", secret = true),
+        SourceRegistrationField("confirm", "确认密码", secret = true),
+        SourceRegistrationField("gender", "性别", choices = listOf(
+            SourceChoice("Male", "男"), SourceChoice("Female", "女"))),
+    ))
 
-    override suspend fun feeds(): List<SourceFeed> = listOf(
-        SourceFeed("latest", "最近更新", SourceFeedKind.LATEST),
-        SourceFeed("ranking", "热榜", SourceFeedKind.RANKING,
-            listOf(periodFilter.copy(defaultValue = "w"), sortFilter.copy(defaultValue = "mv"))),
-    ) + Category.values().filter { it != Category.ALL }.map { category ->
-        SourceFeed("category:${category.value}", category.description, SourceFeedKind.CATEGORY, listOf(sortFilter, periodFilter))
+    override suspend fun feeds(): List<SourceFeed> {
+        val foundation = listOf(
+            SourceFeed("latest", "最近更新", SourceFeedKind.LATEST),
+            SourceFeed("new", "新上架", SourceFeedKind.LATEST),
+            SourceFeed("random", "随机推荐", SourceFeedKind.EXPLORE),
+            SourceFeed("serialization", "连载作品", SourceFeedKind.EXPLORE),
+            SourceFeed("hot-tags", "热门搜索", SourceFeedKind.EXPLORE),
+            SourceFeed("ranking", "热榜", SourceFeedKind.RANKING,
+                listOf(periodFilter.copy(defaultValue = "w"), sortFilter.copy(defaultValue = "mv"))),
+        ) + Category.values().filter { it != Category.ALL }.map { category ->
+            SourceFeed("category:${category.value}", category.description, SourceFeedKind.CATEGORY,
+                listOf(sortFilter, periodFilter))
+        }
+        // Promotional data is optional. Its temporary outage cannot remove the core feeds.
+        val additions = try { clientCall { active ->
+            val weekly = active.weeklyPicksList.categories().orEmpty()
+                .filter { it.id()?.matches(Regex("[A-Za-z0-9_-]{1,80}")) == true && !it.title().isNullOrBlank() }
+                .take(16).map { SourceFeed("weekly:${it.id()}", "每周必看 · ${it.title().trim()}", SourceFeedKind.EXPLORE) }
+            val promoted = active.promote.orEmpty().filter { category ->
+                category.type() in setOf("promote", "category_id", "not_in_category_id") &&
+                    category.id()?.matches(Regex("[A-Za-z0-9_-]{1,80}")) == true &&
+                    category.title()?.isNotBlank() == true
+            }.take(16).map { category -> SourceFeed("promote:${category.id()}", category.title().trim(), SourceFeedKind.EXPLORE) }
+            weekly + promoted
+        } } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { emptyList() }
+        val personal = if (accountName.isNotBlank()) listOf(
+            SourceFeed("site-history", "站点浏览记录", SourceFeedKind.EXPLORE),
+            SourceFeed("tracking", "追更作品", SourceFeedKind.EXPLORE),
+        ) else emptyList()
+        return (foundation + additions + personal).distinctBy(SourceFeed::id)
     }
 
     override suspend fun browse(request: SourceBrowseRequest): MangaPage {
         checkPage(request.page)
-        if (request.feedId == "latest") {
-            require(request.options.isEmpty()) { "最近更新不支持附加条件。" }
-            return discover(request.page)
+        if (request.feedId in setOf("latest", "new", "random", "serialization",
+                "site-history", "tracking") ||
+            request.feedId.startsWith("weekly:") || request.feedId.startsWith("promote:")) {
+            require(request.options.isEmpty()) { "当前栏目不支持附加筛选。" }
+            return clientCall { active ->
+                when (request.feedId) {
+                    "latest" -> toPage(active.getCategories(SearchQuery.Builder()
+                        .category(Category.ALL).orderBy(OrderBy.LATEST).page(request.page + 1).build()), request.page)
+                    "new" -> toPage(active.getLatest(request.page + 1), request.page)
+                    "random" -> if (request.page == 0)
+                        MangaPage(active.randomRecommend.orEmpty().take(200).mapNotNull { runCatching { manga(it) }.getOrNull() }
+                            .distinctBy(Manga::id), false)
+                        else MangaPage(emptyList(), false)
+                    "serialization" -> toPage(active.getSerialization(request.page + 1), request.page)
+                    "site-history" -> {
+                        requireAccount()
+                        val items = active.getWatchHistory(request.page + 1).orEmpty()
+                            .take(200).mapNotNull { runCatching { manga(it) }.getOrNull() }.distinctBy(Manga::id)
+                        // The upstream API doesn't expose a reliable total or next cursor.
+                        MangaPage(items, false)
+                    }
+                    "tracking" -> {
+                        requireAccount()
+                        val tracked = active.getAlbumTrackingList(request.page + 1)
+                        val items = tracked.item().orEmpty().take(200).mapNotNull { record ->
+                            val id = record.id()?.takeIf { it.matches(Regex("[0-9]{1,14}")) }
+                                ?: return@mapNotNull null
+                            Manga(SourceKeys.manga(info.id, id), record.name().orEmpty().ifBlank { "JM$id" },
+                                coverUrl = record.image()?.takeIf { it.startsWith("https://") }.orEmpty(),
+                                sourceUrl = "${info.homeUrl}/album/$id", sourceId = info.id,
+                                sourceMangaId = id, sourceName = info.name)
+                        }.distinctBy(Manga::id)
+                        // Tracking response has total count, but no explicit per-page page size.
+                        val count = tracked.totalCnt()?.toIntOrNull()?.coerceIn(0, 100_000) ?: 0
+                        val hasMore = items.isNotEmpty() && items.size >= 20 &&
+                            (request.page + 1) * 20 < count && request.page < 49
+                        MangaPage(items, hasMore, if (hasMore) request.page + 1 else null)
+                    }
+                    else -> {
+                        if (request.page > 0) return@clientCall MangaPage(emptyList(), false)
+                        val rawId = request.feedId.substringAfter(':')
+                        require(rawId.matches(Regex("[A-Za-z0-9_-]{1,80}"))) { "来源栏目编号无效。" }
+                        val works = if (request.feedId.startsWith("weekly:")) {
+                            val valid = active.weeklyPicksList.categories().orEmpty().any { it.id() == rawId }
+                            require(valid) { "每周必看栏目已更新，请刷新来源。" }
+                            active.getWeeklyPicksDetail(rawId).list().orEmpty()
+                        } else {
+                            val category = active.promote.orEmpty().firstOrNull { it.id() == rawId &&
+                                it.type() in setOf("promote", "category_id", "not_in_category_id") }
+                                ?: throw SourceException("专题推荐已更新，请刷新来源。")
+                            return@clientCall toPage(active.getPromoteList(category, request.page + 1), request.page)
+                        }
+                        MangaPage(works.take(200).mapNotNull { runCatching { manga(it) }.getOrNull() }
+                            .distinctBy(Manga::id), false)
+                    }
+                }
+            }
         }
         require(request.options.size <= 2) { "禁漫浏览条件无效。" }
         val rank = request.feedId == "ranking"
@@ -349,6 +440,12 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
         val time = time(request.options.getOrNull(if (rank) 0 else 1), if (rank) TimeOption.WEEK else TimeOption.ALL)
         return clientCall { active -> toPage(active.getCategories(SearchQuery.Builder()
             .category(category).orderBy(order).time(time).page(request.page + 1).build()), request.page) }
+    }
+
+    override suspend fun hotTags(): List<String> = clientCall { active ->
+        active.hotTags.orEmpty().mapNotNull { tag ->
+            tag?.trim()?.takeIf { it.length in 1..48 && it.none { char -> char.code < 0x20 || char.code in 0x7f..0x9f } }
+        }.distinct().take(12)
     }
 
     override suspend fun searchFilters() = listOf(sortFilter, periodFilter,
@@ -367,6 +464,73 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
 
     override suspend fun accountState(): SourceAccountState = mutex.withLock {
         SourceAccountState(accountName.isNotBlank(), accountName)
+    }
+
+    /**
+     * The original SDK's deprecated register() submits hard-coded adult/PrivacyPolicy=false.
+     * Delta Comic's independent client confirms the active field names and Male/Female values.
+     * Use a new anonymous SDK-configured client and its maintained token/decryption tools.
+     * Registration must never borrow an existing account session or persist credentials.
+     */
+    override suspend fun register(request: SourceRegistrationRequest): Unit = withContext(Dispatchers.IO) {
+        require(request.confirmedAdult && request.acceptedTerms) {
+            "注册前需确认年满18岁，并同意站点注册条款。"
+        }
+        val fields = request.values
+        val username = fields["username"].orEmpty().trim()
+        val email = fields["email"].orEmpty().trim()
+        val password = fields["password"].orEmpty()
+        val confirmation = fields["confirm"].orEmpty()
+        val gender = fields["gender"].orEmpty()
+        require(username.length in 2..80 && username.none { it == '\n' || it == '\r' }) {
+            "用户名需要2至80个字符。"
+        }
+        require(email.length in 5..160 && '@' in email && '.' in email.substringAfter('@') &&
+            email.none { it == '\n' || it == '\r' || it.isWhitespace() }) {
+            "请填写有效邮箱地址。"
+        }
+        require(password.length in 6..512 && password == confirmation) { "两次密码不一致或密码过短。" }
+        require(gender in setOf("Male", "Female")) { "请选择站点支持的性别字段。" }
+        val route = currentCoroutineContext()[ChapterDownloadTransport]?.route
+            ?: DownloadRoutingStore.get(context).sourceSnapshot(info.id)
+        val timeouts = dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.imageTimeouts()
+        // A newly constructed client has its own empty cookie jar and cannot carry a logged-in session.
+        val (temporary, _, http) = runInterruptible {
+            createClient(pinDomain = true, route = route, timeouts = timeouts)
+        }
+        try {
+            currentCoroutineContext().ensureActive()
+            runInterruptible {
+                val host = temporary.usedDomain?.takeIf { it.isNotBlank() }
+                    ?: throw SourceException("禁漫注册服务器尚未准备好，请稍后重试。")
+                val timestamp = (System.currentTimeMillis() / 1000L).toString()
+                val token = JmCryptoTool.generateToken(timestamp, JmConstants.APP_TOKEN_SECRET, JmConstants.APP_VERSION)
+                val url = HttpUrl.Builder().scheme("https").host(host).addPathSegment("register").build()
+                val body = FormBody.Builder()
+                    .add("username", username).add("email", email)
+                    .add("password", password).add("password_confirm", confirmation)
+                    .add("gender", gender).build()
+                val signed = Request.Builder().url(url).post(body)
+                    .header(JmConstants.APP_HEADER_TOKEN, token[0])
+                    .header(JmConstants.APP_HEADER_TOKEN_PARAM, token[1]).build()
+                http.newCall(signed).execute().use { response ->
+                    require(response.peekBody(65_537).bytes().size <= 65_536) { "注册响应过大。" }
+                    val wrapped = JmApiResponse(response, timestamp)
+                    try { wrapped.requireSuccess() }
+                    catch (_: Exception) { throw SourceException("禁漫未接受注册请求，请核对资料和站点提示。") }
+                    val result = try { JSONObject(wrapped.decodedData) }
+                    catch (_: Exception) { throw SourceException("禁漫注册响应无法确认，请勿连续重复提交。") }
+                    val status = result.optString("status").lowercase()
+                    if ((result.has("success") && !result.optBoolean("success")) ||
+                        status.isNotBlank() && status !in setOf("success", "ok") &&
+                        result.optInt("code", -1) != 200 && !result.optBoolean("success", false))
+                        throw SourceException("禁漫未确认账号创建，请核对站点提示。")
+                }
+            }
+        } finally {
+            runCatching { temporary.close() }
+        }
+        Unit
     }
 
     override suspend fun login(username: String, password: String): Unit = withContext(Dispatchers.IO) {

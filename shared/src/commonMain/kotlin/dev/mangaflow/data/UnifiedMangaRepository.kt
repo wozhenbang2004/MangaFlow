@@ -268,6 +268,7 @@ class UnifiedMangaRepository(
     suspend fun sourceFeeds(id: String): List<SourceFeed> = if (id == "copy") emptyList() else adapter(id).feeds()
     suspend fun sourceFeedFilters(id: String, feedId: String): List<SourceFilter> = if (id == "copy") emptyList() else adapter(id).feedFilters(feedId)
     suspend fun sourceSearchFilters(id: String): List<SourceFilter> = if (id == "copy") emptyList() else adapter(id).searchFilters()
+    suspend fun sourceHotTags(id: String): List<String> = if (id == "copy") emptyList() else adapter(id).hotTags()
     suspend fun sourceFilteredSearch(id: String, query: String, page: Int, options: List<String>, forceRefresh: Boolean = false): MangaPage =
         if (options.isEmpty()) searchSource(id, query, page, forceRefresh) else diagnostics.track(id, SourceStage.SEARCH) {
             adapter(id).searchFiltered(query, page, options)

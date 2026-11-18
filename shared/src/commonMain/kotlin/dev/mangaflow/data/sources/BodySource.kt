@@ -38,6 +38,7 @@ interface BodySource : MangaRepository {
         return search(query, page)
     }
     suspend fun searchFilters(): List<SourceFilter> = emptyList()
+    suspend fun hotTags(): List<String> = emptyList()
     suspend fun settings(): List<SourceSetting> = emptyList()
     suspend fun saveSetting(key: String, value: String): Unit = unsupportedSourceFeature()
     suspend fun accountState(): SourceAccountState = SourceAccountState()
