@@ -7,6 +7,7 @@ import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Manga
+import dev.mangaflow.data.MangaTag
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.plugins.SourcePluginStore
@@ -1202,6 +1203,13 @@ internal fun Manga.toJson(): JSONObject = JSONObject().apply {
     put("sourceName", sourceName)
     if (alternativeTitles.isNotEmpty()) put("alternativeTitles", JSONArray(alternativeTitles))
     if (authorAliases.isNotEmpty()) put("authorAliases", JSONArray(authorAliases))
+    if (originals.isNotEmpty()) put("originals", JSONArray(originals.map { original -> JSONObject().apply {
+        put("name", original.name)
+        put("path", original.path)
+        original.count?.takeIf { it >= 0 }?.let { put("count", it) }
+    } }))
+    if (clubs.isNotEmpty()) put("clubs", JSONArray(clubs))
+    if (contentType.isNotBlank()) put("contentType", contentType)
     val identities = externalIds.filter { (key, value) ->
         key.isNotBlank() && key.length <= 80 && value.isNotBlank() && value.length <= 2048 &&
             value.none { it < ' ' || it == '\u007f' }
@@ -1235,6 +1243,17 @@ internal fun readManga(json: JSONObject): Manga = Manga(
     sourceName = json.optString("sourceName"),
     alternativeTitles = json.optJSONArray("alternativeTitles").strings().distinct(),
     authorAliases = json.optJSONArray("authorAliases").strings().distinct(),
+    originals = json.optJSONArray("originals")?.let { rows ->
+        (0 until rows.length()).mapNotNull { index ->
+            val row = rows.optJSONObject(index) ?: return@mapNotNull null
+            val name = (row.opt("name") as? String)?.trim()?.takeIf(String::isNotBlank)
+                ?: return@mapNotNull null
+            MangaTag(name, (row.opt("path") as? String).orEmpty(),
+                row.opt("count")?.toString()?.toIntOrNull()?.takeIf { it >= 0 })
+        }.distinctBy { it.name to it.path }
+    }.orEmpty(),
+    clubs = json.optJSONArray("clubs").strings().map(String::trim).filter(String::isNotBlank).distinct(),
+    contentType = (json.opt("contentType") as? String).orEmpty(),
     externalIds = json.optJSONObject("externalIds")?.let { identities ->
         identities.keys().asSequence().mapNotNull { key ->
             (identities.opt(key) as? String)?.takeIf { value ->

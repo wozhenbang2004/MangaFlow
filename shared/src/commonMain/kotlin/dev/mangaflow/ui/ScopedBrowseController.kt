@@ -323,6 +323,11 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         } else refresh()
     }
     override fun setSearchTarget(target: SearchTarget) {
+        if (target == SearchTarget.TRANSLATION_GROUP) {
+            cancelRequest()
+            mutableState.value = state.value.copy(error = "汉化组搜索仅在普通漫画区的拷贝来源可用。")
+            return
+        }
         if (target != state.value.searchTarget) show(selection(state.value).copy(searchTarget = target), retain = false)
     }
     override fun toggleSearchTag(tag: MangaTag) {

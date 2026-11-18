@@ -245,6 +245,7 @@ private sealed interface Frame {
     data class Root(val section: Section, val profile: String) : Frame {
         override val key = "root-$profile-${section.name}"
     }
+    data object CopyExplore : Frame { override val key = "copy-explore" }
     class Detail(private val snapshot: State<DetailState>) : Frame {
         val state: DetailState get() = snapshot.value
         override val key = "detail-${snapshot.value.manga.id}"
@@ -254,8 +255,9 @@ private sealed interface Frame {
 
 private val Frame.depth: Int get() = when (this) {
     is Frame.Root -> 0
-    is Frame.Detail -> 1
-    is Frame.Reader -> 2
+    Frame.CopyExplore -> 1
+    is Frame.Detail -> 2
+    is Frame.Reader -> 3
 }
 
 /** Keep the last drawn snapshot while its page is covered; resubscription receives current data. */
@@ -322,6 +324,18 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     LaunchedEffect(account.profile?.username) { copySyncOpen = false; copySyncFocus = null }
     val update by model.updates.state.collectAsStateWithLifecycle()
     var restrictedMode by remember { mutableStateOf(false) }
+    var copyExploreOpen by rememberSaveable { mutableStateOf(false) }
+    var copyExploreReturnManga by remember { mutableStateOf<Manga?>(null) }
+    val closeCopyExplore: () -> Unit = {
+        val returnManga = copyExploreReturnManga
+        copyExploreReturnManga = null
+        copyExploreOpen = false
+        if (returnManga != null) model.openManga(returnManga)
+    }
+    val backFromCopyExplore: () -> Unit = {
+        if (model.copyExplore.state.value.topic != null) model.copyExplore.closeTopic()
+        else closeCopyExplore()
+    }
     LaunchedEffect(restrictedMode) { if (restrictedMode) model.starterSources.start() }
     var profileSourcesOpen by remember { mutableStateOf(false) }
     var sourceDetailsId by remember { mutableStateOf<String?>(null) }
@@ -378,6 +392,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         derivedStateOf { drawerAction?.let { (it.destination != null || it.restricted != null) && !it.rootCommitted } == true }
     }
     val changeSection: (Section) -> Unit = { destination ->
+        copyExploreOpen = false
+        copyExploreReturnManga = null
         if (section == Section.ANIME && destination != Section.ANIME) model.services.anime.closePlayback()
         model.cancelLibraryReading()
         // Root pages share one shell, so every entry must use its interruptible handoff.
@@ -561,7 +577,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             remember(snapshot) { Frame.Detail(snapshot) }
         }
     }
-    val frame: Frame = reading?.let { Frame.Reader(it) } ?: detailFrame ?: Frame.Root(section, profileKey)
+    val frame: Frame = reading?.let { Frame.Reader(it) } ?: detailFrame ?:
+        if (copyExploreOpen && !restrictedMode) Frame.CopyExplore else Frame.Root(section, profileKey)
     val desktop = platformKind == PlatformKind.DESKTOP
     val desktopNavigationVisible = desktop && reading == null && windowSize.width >= 760.dp &&
         !(section == Section.ANIME && animeImmersive)
@@ -616,6 +633,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     LaunchedEffect(frame.key) { focus.clearFocus(force = true); keyboard?.hide() }
     val commitProfile: (Boolean) -> Unit = { restricted ->
         if (restricted != restrictedMode) {
+            copyExploreOpen = false
+            copyExploreReturnManga = null
             if (section == Section.ANIME) model.services.anime.closePlayback()
             model.cancelLibraryReading()
             model.closeReader()
@@ -704,6 +723,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     }
                 }
                 DiscoverySearchResults(browse, expanded = true, active = true,
+                    translationGroupAvailable = !restrictedMode,
                     sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
                         model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources) } } else null,
                     maxHeight = panelHeight, repository = model.repository,
@@ -804,6 +824,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 if (event.type == KeyEventType.KeyUp) when {
                     reading != null -> model.returnToMangaDetail()
                     detail != null -> model.closeDetail()
+                    copyExploreOpen -> backFromCopyExplore()
                     section == Section.ANIME -> animeBackRequest++
                     searchExpanded -> { searchExpanded = false; browseActions.suspendBrowseSearch(); focus.clearFocus(force = true) }
                     section != Section.DISCOVER -> changeSection(Section.DISCOVER)
@@ -920,8 +941,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     if (!motion || (initialState is Frame.Root && targetState is Frame.Root &&
                         (targetState as Frame.Root).section == drawerRootTransition))
                         (fadeIn(snap()) togetherWith fadeOut(snap())).using(null)
-                    else if ((initialState is Frame.Root && targetState is Frame.Detail ||
-                        initialState is Frame.Detail && targetState is Frame.Root) &&
+                    else if (((initialState is Frame.Root || initialState is Frame.CopyExplore) && targetState is Frame.Detail ||
+                        initialState is Frame.Detail && (targetState is Frame.Root || targetState is Frame.CopyExplore)) &&
                         selectedCover?.mangaId == ((targetState as? Frame.Detail)?.state?.manga?.id
                             ?: (initialState as? Frame.Detail)?.state?.manga?.id)) {
                         // The matched cover owns the spatial journey; a second route slide
@@ -968,12 +989,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 MotionBackHandler(
                     enabled = current.key == frame.key && !drawerVisible && libraryOpening == null &&
                         !recentReadingOpen && authorWorks == null &&
-                        (reading != null || detail != null || section != Section.DISCOVER && section != Section.ANIME),
+                        (reading != null || detail != null || copyExploreOpen || section != Section.DISCOVER && section != Section.ANIME),
                     state = currentBack,
                 ) {
                     when {
                         reading != null -> model.returnToMangaDetail()
                         detail != null -> model.closeDetail()
+                        copyExploreOpen -> backFromCopyExplore()
                         else -> changeSection(Section.DISCOVER)
                     }
                 }
@@ -983,6 +1005,16 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 Box(Modifier.fillMaxSize().motionBackPreview(currentBack)
                     .motionInputGate(current.key == frame.key && !currentBack.gesturing && !currentBack.completed)) {
                 when (current) {
+                    Frame.CopyExplore -> savedState.SaveableStateProvider(current.key) {
+                        CopyExploreScreen(
+                            controller = model.copyExplore, repository = model.repository,
+                            active = current.key == frame.key && !currentBack.gesturing && !currentBack.completed,
+                            onBack = closeCopyExplore,
+                            onOpen = { model.openManga(it) },
+                            isFavorite = { manga -> favorites.any { it.id == manga.id } },
+                            onToggleFavorite = model::toggleFavorite,
+                        )
+                    }
                     is Frame.Reader -> ReaderScreen(
                         manga = current.session.manga, chapters = current.session.chapters,
                         initialChapterId = current.session.chapterId,
@@ -1095,6 +1127,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     browseActions.setSearchTarget(SearchTarget.AUTHOR)
                                     browseActions.setQuery(name)
                                     searchExpanded = true
+                                },
+                                onOriginal = { original ->
+                                    if (!restrictedMode && original.path.isNotBlank()) {
+                                        if (!copyExploreOpen) copyExploreReturnManga = current.state.manga
+                                        model.copyExplore.openOriginal(original)
+                                        copyExploreOpen = true
+                                        selectedCover = null
+                                        model.closeDetail()
+                                    }
                                 },
                                 onReadVariant = model::readChapterVariant,
                                 onSetPreferredSource = model::preferBodySource,
@@ -1285,6 +1326,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 onRefresh = browseActions::refresh,
                                                 onRetry = browseActions::retryBrowse, onMore = browseActions::loadMore,
                                                 onManageSources = if (restrictedMode) manageProfileSources else null,
+                                                onExplore = if (restrictedMode) null else {
+                                                    {
+                                                        selectedCover = null
+                                                        copyExploreReturnManga = null
+                                                        copyExploreOpen = true
+                                                        searchExpanded = false
+                                                    }
+                                                },
                                                 sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
                                                     model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources) } } else null,
                                                 onOpen = { model.openManga(it) },
@@ -1300,7 +1349,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                     sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
                                                         model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources) } } else null,
                                                     maxHeight = maxHeight, repository = model.repository,
-                                                    backdrop = searchBackdrop, scopeInToolbar = true,
+                                                    backdrop = searchBackdrop, scopeInToolbar = true, translationGroupAvailable = !restrictedMode,
                                                     desktopMainContent = true,
                                                     desktopActions = { manga -> listOf(
                                                         DesktopMenuAction("详情与目录", onClick = { model.openManga(manga) }),
@@ -1510,7 +1559,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             copyOnly = false,
                                             active = rootActive, focusRequest = desktopSearchRequest,
                                             backdrop = searchBackdrop, modifier = inputModifier,
-                                            showScopeSelector = true,
+                                            showScopeSelector = true, translationGroupAvailable = !restrictedMode,
                                             onOpen = { browseActions.resumeBrowseSearch(); searchExpanded = true },
                                             onQuery = browseActions::setQuery,
                                             onSubmit = browseActions::submitSearch,
@@ -1596,9 +1645,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         if (current.section == Section.DISCOVER && !desktop) ExpandingSearchBar(
                             expanded = searchExpanded,
                             query = browse.query,
-                            placeholder = "搜索",
+                            placeholder = when (browse.searchTarget) {
+                                SearchTarget.TRANSLATION_GROUP -> "搜索汉化组名称"
+                                SearchTarget.AUTHOR -> "搜索作者"
+                                SearchTarget.TAG -> "筛选标签"
+                                SearchTarget.TITLE -> "搜索作品"
+                            },
                             searchTarget = browse.searchTarget,
                             scopeCopyOnly = false,
+                            translationGroupAvailable = !restrictedMode,
                             onSearchTarget = browseActions::setSearchTarget,
                             active = rootActive,
                             backdrop = searchBackdrop,
@@ -1615,7 +1670,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
                                     model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources) } } else null,
                                 state = browse, expanded = searchExpanded, active = searchActive,
-                                scopeInToolbar = true,
+                                scopeInToolbar = true, translationGroupAvailable = !restrictedMode,
                                 maxHeight = maxHeight, repository = model.repository,
                                 backdrop = searchBackdrop,
                                 onRetry = browseActions::retryBrowse, onMore = browseActions::loadMore,

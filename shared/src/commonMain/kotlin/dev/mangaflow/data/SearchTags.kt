@@ -1,8 +1,8 @@
 package dev.mangaflow.data
 
-enum class SearchTarget { TITLE, AUTHOR, TAG }
+enum class SearchTarget { TITLE, AUTHOR, TAG, TRANSLATION_GROUP }
 
-data class MangaTag(val name: String, val path: String)
+data class MangaTag(val name: String, val path: String, val count: Int? = null)
 
 /** Map display names to real Copy identifiers; another source's native path is never reused. */
 fun copyTagForName(name: String, tags: List<MangaTag> = CopySearchTags): MangaTag? {
@@ -31,6 +31,8 @@ fun copyTagForName(name: String, tags: List<MangaTag> = CopySearchTags): MangaTa
  * a04e05591f7832f7166d6660546613c114d6738a / copy_manga.js category_param_dict.
  * A known directory of actual source identifiers, not romanized display text.
  * Current comic metadata can add further source-returned names/paths.
+ * C102-C108 identifiers are also present in CopyManga_Neo's ComicFilterDefaults
+ * at 36ec484fb6ee166456f8025917963fcf8e9e2ce8 and Copy's public theme directory.
  */
 val CopySearchTags: List<MangaTag> = listOf(
     MangaTag("愛情", "aiqing"),
@@ -81,6 +83,13 @@ val CopySearchTags: List<MangaTag> = listOf(
     MangaTag("重生", "chongsheng"),
     MangaTag("C99", "comiket99"),
     MangaTag("C101", "comiket101"),
+    MangaTag("C102", "comiket102"),
+    MangaTag("C103", "comiket103"),
+    MangaTag("C104", "comiket104"),
+    MangaTag("C105", "comiket105"),
+    MangaTag("C106", "comiket106"),
+    MangaTag("C107", "comiket107"),
+    MangaTag("C108", "comiket108"),
     MangaTag("C97", "comiket97"),
     MangaTag("C96", "comiket96"),
     MangaTag("生存", "shengcun"),

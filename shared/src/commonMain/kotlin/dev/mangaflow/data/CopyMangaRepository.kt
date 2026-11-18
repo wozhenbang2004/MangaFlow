@@ -73,6 +73,163 @@ class CopyMangaRepository(
         catalogPage(apiJson(url, "漫画发现"), page * 21, 21)
     }
 
+    /** Read every native directory page; an unavailable count remains unknown. */
+    suspend fun themeDirectory(): List<MangaTag> = withContext(Dispatchers.IO) {
+        val tags = linkedMapOf<String, MangaTag>()
+        var offset = 0
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val url = apiOrigin.newBuilder().addPathSegments("api/v3/theme/comic/count")
+                .addQueryParameter("free_type", "1").addQueryParameter("limit", "500")
+                .addQueryParameter("offset", offset.toString()).addQueryParameter("_update", "true").build()
+            val data = apiJson(url, "题材目录")
+            demandPublic(data)
+            val rows = directoryPage(data, offset, 500, "题材目录")
+            val pageTags = directoryTags(rows, "题材目录")
+            val previousCount = tags.size
+            pageTags.forEach { tags[it.path] = it }
+            val next = offset + rows.length()
+            val total = data.nonNegativeInt("total")!!
+            if (rows.length() > 0 && tags.size == previousCount) {
+                throw SourceException("题材目录未返回新的分类，请稍后刷新。", webOrigin.toString())
+            }
+            if (next >= total) break
+            offset = next
+        }
+        tags.values.toList()
+    }
+
+    /** Preserve source-provided options; a failed response never becomes the bundled list. */
+    suspend fun filterDirectory(): CopyFilterDirectory = withContext(Dispatchers.IO) {
+        val url = apiOrigin.newBuilder().addPathSegments("api/v3/h5/filter/comic/tags")
+            .addQueryParameter("type", "1").build()
+        val data = apiJson(url, "漫画筛选")
+        demandPublic(data)
+        if (listOf("theme", "top", "ordering").none { data.optJSONArray(it) != null }) {
+            throw SourceException("来源未返回漫画筛选目录。", webOrigin.toString())
+        }
+        fun options(key: String): List<MangaTag> {
+            if (data.isNull(key)) return emptyList()
+            val rows = data.optJSONArray(key)
+                ?: throw SourceException("漫画筛选目录格式已变化。", webOrigin.toString())
+            return directoryTags(rows, "漫画筛选")
+        }
+        CopyFilterDirectory(themes = options("theme"), scopes = options("top"), orderings = options("ordering"))
+    }
+
+    /** Native single-theme and original-work filters; no inferred region/status parameters. */
+    suspend fun browseCatalog(selection: CopyCatalogSelection, page: Int = 0): MangaPage =
+        withContext(Dispatchers.IO) {
+            require(page in 0..950) { "漫画分页超出范围。" }
+            val offset = page * 21
+            val url = apiOrigin.newBuilder().addPathSegments("api/v3/comics")
+                .addQueryParameter("free_type", "1").addQueryParameter("limit", "21")
+                .addQueryParameter("offset", offset.toString())
+                .addQueryParameter("ordering", segment(selection.ordering))
+                .addQueryParameter("_update", "true").apply {
+                    selection.theme?.let { addQueryParameter("theme", segment(it.path)) }
+                    selection.scope?.let { addQueryParameter("top", segment(it.path)) }
+                    selection.original?.let { addQueryParameter("parody", segment(it.path)) }
+                }.build()
+            val data = apiJson(url, "分类漫画")
+            demandPublic(data)
+            catalogPage(data, offset, 21).let { it.copy(nextPage = if (it.hasMore) page + 1 else null) }
+        }
+
+    suspend fun topics(page: Int = 0): CopyTopicPage = withContext(Dispatchers.IO) {
+        require(page in 0..1000) { "专题分页超出范围。" }
+        val offset = page * 20
+        val url = apiOrigin.newBuilder().addPathSegments("api/v3/topics")
+            .addQueryParameter("type", "1").addQueryParameter("limit", "20")
+            .addQueryParameter("offset", offset.toString()).addQueryParameter("_update", "true").build()
+        val data = apiJson(url, "漫画专题")
+        demandPublic(data)
+        val rows = directoryPage(data, offset, 20, "漫画专题")
+        val items = mutableListOf<CopyTopic>()
+        var malformed = 0
+        for (index in 0 until rows.length()) {
+            currentCoroutineContext().ensureActive()
+            val row = rows.optJSONObject(index)
+            if (row == null) { malformed++; continue }
+            if (restricted(row)) continue
+            if (!row.isNull("type") && row.nonNegativeInt("type") != 1) continue
+            try { items += parseTopic(row) }
+            catch (_: IllegalArgumentException) { malformed++ }
+            catch (_: SourceException) { malformed++ }
+        }
+        if (rows.length() > 0 && malformed == rows.length()) {
+            throw SourceException("来源返回了无法识别的漫画专题。", webOrigin.toString())
+        }
+        val hasMore = offset + rows.length() < data.nonNegativeInt("total")!!
+        if (hasMore && data.nonNegativeInt("limit")?.let { it != 20 } == true) {
+            throw SourceException("漫画专题分页长度已变化，请稍后刷新。", webOrigin.toString())
+        }
+        CopyTopicPage(items.distinctBy(CopyTopic::path), hasMore, if (hasMore) page + 1 else null)
+    }
+
+    suspend fun topic(path: String): CopyTopic = withContext(Dispatchers.IO) {
+        val id = segment(path)
+        val url = apiOrigin.newBuilder().addPathSegments("api/v3/topic").addPathSegment(id).build()
+        val data = apiJson(url, "专题详情")
+        demandPublic(data)
+        val topic = parseTopic(data)
+        if (topic.path != id) throw SourceException("来源返回的专题与请求不匹配。", webOrigin.toString())
+        topic
+    }
+
+    suspend fun topicContents(topic: CopyTopic, page: Int = 0): MangaPage = withContext(Dispatchers.IO) {
+        require(page in 0..1000) { "专题分页超出范围。" }
+        require(topic.type == 1) { "当前仅支持漫画专题。" }
+        val offset = page * 20
+        val url = apiOrigin.newBuilder().addPathSegments("api/v3/topic")
+            .addPathSegment(segment(topic.path)).addPathSegment("contents")
+            .addQueryParameter("type", topic.type.toString()).addQueryParameter("limit", "20")
+            .addQueryParameter("offset", offset.toString()).build()
+        val data = apiJson(url, "专题漫画")
+        demandPublic(data)
+        catalogPage(data, offset, 20, comicTopic = true)
+            .let { it.copy(nextPage = if (it.hasMore) page + 1 else null) }
+    }
+
+    private fun directoryPage(data: JSONObject, offset: Int, size: Int, label: String): JSONArray {
+        val rows = data.optJSONArray("list") ?: throw SourceException("$label 格式已变化。", webOrigin.toString())
+        val total = data.nonNegativeInt("total")
+        val reportedOffset = data.nonNegativeInt("offset")
+        if (total == null || reportedOffset != offset || rows.length() > size ||
+            rows.length() > 0 && offset.toLong() + rows.length() > total.toLong() ||
+            rows.length() == 0 && offset < total) {
+            throw SourceException("$label 分页数据不完整，请稍后刷新。", webOrigin.toString())
+        }
+        return rows
+    }
+
+    private fun directoryTags(rows: JSONArray, label: String): List<MangaTag> {
+        val tags = mutableListOf<MangaTag>()
+        for (index in 0 until rows.length()) {
+            val row = rows.optJSONObject(index) ?: throw SourceException("$label 格式已变化。", webOrigin.toString())
+            val name = row.requiredText("name")
+            val rawPath = row.text("path_word")
+            // A blank identifier represents no filter and is owned by the caller's clear action.
+            if (rawPath.isBlank()) continue
+            val path = runCatching { segment(rawPath) }.getOrNull()
+                ?: throw SourceException("$label 返回了无效分类标识。", webOrigin.toString())
+            tags += MangaTag(name, path, row.nonNegativeInt("count"))
+        }
+        return tags.distinctBy(MangaTag::path)
+    }
+
+    private fun parseTopic(data: JSONObject): CopyTopic {
+        // The comic-scoped endpoint's detail model permits an omitted type; explicit types remain authoritative.
+        val type = if (data.isNull("type")) 1 else data.nonNegativeInt("type")
+            ?: throw SourceException("专题类型格式已变化。", webOrigin.toString())
+        if (type != 1) throw SourceException("当前仅支持漫画专题。", webOrigin.toString())
+        return CopyTopic(
+            path = segment(data.requiredText("path_word")), title = data.requiredText("title"),
+            coverUrl = optionalCover(data.text("cover")), brief = data.text("brief"), intro = data.text("intro"),
+            period = data.text("period"), date = data.text("datetime_created"), type = type,
+        )
+    }
+
     override suspend fun search(query: String, page: Int): MangaPage = withContext(Dispatchers.IO) {
         keywordSearch(query, SearchTarget.TITLE, page)
     }
@@ -83,7 +240,11 @@ class CopyMangaRepository(
         require(page in 0..1000) { "漫画分页超出范围。" }
         val url = apiOrigin.newBuilder().addPathSegments("api/v3/search/comic")
             .addQueryParameter("q", keyword)
-            .addQueryParameter("q_type", if (target == SearchTarget.AUTHOR) "author" else "name")
+            .addQueryParameter("q_type", when (target) {
+                SearchTarget.AUTHOR -> "author"
+                SearchTarget.TRANSLATION_GROUP -> "local"
+                else -> "name"
+            })
             .addQueryParameter("ordering", "-popular")
             .addQueryParameter("free_type", "1")
             .addQueryParameter("limit", "20")
@@ -406,6 +567,13 @@ class CopyMangaRepository(
         }.sortedBy { it.first }.mapIndexed { index, (_, asset) -> Page(index, asset) }
     }
 
+    /** Topic artwork keeps its own referer and never masquerades as a readable comic. */
+    fun topicImageHeaders(topicPath: String): Map<String, String> = mapOf(
+        "User-Agent" to "Mozilla/5.0",
+        "Referer" to webOrigin.newBuilder().addPathSegment("topic").addPathSegment(segment(topicPath)).build().toString(),
+        "Accept" to "image/jpeg,image/png,image/*;q=0.5,*/*;q=0.1",
+    )
+
     override fun imageHeaders(mangaId: String, chapterId: String): Map<String, String> {
         segment(mangaId)
         val referer = if (chapterId.isBlank()) comicUrl(mangaId) else webOrigin.newBuilder()
@@ -428,7 +596,7 @@ class CopyMangaRepository(
         return result as? JSONObject ?: throw SourceException("$label 返回了空数据或不完整的数据结构。", webOrigin.toString())
     }
 
-    private suspend fun catalogPage(data: JSONObject, offset: Int, size: Int): MangaPage {
+    private suspend fun catalogPage(data: JSONObject, offset: Int, size: Int, comicTopic: Boolean = false): MangaPage {
         val list = data.optJSONArray("list") ?: throw SourceException("漫画列表格式已变化。", webOrigin.toString())
         if (list.length() > size) throw SourceException("漫画列表分页异常。", webOrigin.toString())
         val items = mutableListOf<Manga>()
@@ -437,6 +605,7 @@ class CopyMangaRepository(
             currentCoroutineContext().ensureActive()
             val row = list.optJSONObject(index)
             if (row == null) { malformed++; continue }
+            if (comicTopic && !row.isNull("type") && row.nonNegativeInt("type") != 1) continue
             val comic = row.optJSONObject("comic") ?: row
             if (restricted(row) || restricted(comic)) continue
             try {
@@ -469,6 +638,32 @@ class CopyMangaRepository(
     /** The App API supplies real alternative names as a comma-delimited alias string. */
     private fun comicAliases(comic: JSONObject): List<String> =
         comic.text("alias").split(',').map(String::trim).filter(String::isNotBlank).distinct()
+
+    private fun originalWorks(comic: JSONObject): List<MangaTag> {
+        val rows = comic.optJSONArray("parodies") ?: return emptyList()
+        return (0 until rows.length()).mapNotNull { index ->
+            when (val value = rows.opt(index)) {
+                is String -> value.trim().takeIf(String::isNotBlank)?.let { MangaTag(it, "") }
+                is JSONObject -> value.text("name").takeIf(String::isNotBlank)?.let { name ->
+                    val rawPath = value.text("path_word").ifBlank { value.text("pathWord") }
+                    val path = runCatching { segment(rawPath) }.getOrNull().orEmpty()
+                    MangaTag(name, path)
+                }
+                else -> null
+            }
+        }.distinctBy { it.name to it.path }
+    }
+
+    private fun clubNames(comic: JSONObject): List<String> {
+        val rows = comic.optJSONArray("clubs") ?: return emptyList()
+        return (0 until rows.length()).mapNotNull { index ->
+            when (val value = rows.opt(index)) {
+                is String -> value.trim()
+                is JSONObject -> value.text("name")
+                else -> null
+            }?.takeIf(String::isNotBlank)
+        }.distinct()
+    }
 
     private suspend fun comicMetadata(mangaId: String): JSONObject {
         val url = apiOrigin.newBuilder().addPathSegments("api/v3/comic2").addPathSegment(mangaId).build()
@@ -503,6 +698,9 @@ class CopyMangaRepository(
             sourceUuid = comicUuid,
             popularity = comic.optLong("popular", -1).takeIf { it >= 0 },
             totalPopularity = comic.optLong("popular", -1).takeIf { it >= 0 },
+            originals = originalWorks(comic),
+            clubs = clubNames(comic),
+            contentType = comic.optJSONObject("reclass")?.text("display").orEmpty(),
         )
         currentCoroutineContext().ensureActive()
         onMetadata?.invoke(manga)
@@ -613,6 +811,8 @@ class CopyMangaRepository(
         return value.optJSONObject("free_type")?.let { it.optInt("value", 1) != 1 } ?: false
     }
     private fun JSONObject.text(key: String) = (opt(key) as? String).orEmpty().trim()
+    private fun JSONObject.nonNegativeInt(key: String): Int? =
+        opt(key)?.toString()?.toIntOrNull()?.takeIf { it >= 0 }
     private fun JSONObject.requiredText(key: String) = text(key).takeIf(String::isNotBlank)
         ?: throw SourceException("来源数据缺少必要字段（$key）。", webOrigin.toString())
     private fun JSONArray.objects() = (0 until length()).mapNotNull(::optJSONObject)

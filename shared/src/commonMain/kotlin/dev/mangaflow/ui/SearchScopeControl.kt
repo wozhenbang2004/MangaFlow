@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
+import androidx.compose.material.icons.outlined.Translate
 import dev.mangaflow.data.SearchTarget
 import dev.mangaflow.ui.motion.FeelEvent
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -64,9 +65,15 @@ internal fun SearchScopeControl(
     onExpandedChange: (Boolean) -> Unit,
     onTarget: (SearchTarget) -> Unit,
     modifier: Modifier = Modifier,
+    translationGroupAvailable: Boolean = true,
 ) {
-    val targets = remember { listOf(SearchTarget.TITLE, SearchTarget.AUTHOR, SearchTarget.TAG) }
-    val labels = remember { listOf("作品", "作者", "标签") }
+    val targets = remember(translationGroupAvailable) {
+        listOf(SearchTarget.TITLE, SearchTarget.AUTHOR, SearchTarget.TAG) +
+            if (translationGroupAvailable) listOf(SearchTarget.TRANSLATION_GROUP) else emptyList()
+    }
+    val labels = remember(translationGroupAvailable) {
+        listOf("作品", "作者", "标签") + if (translationGroupAvailable) listOf("汉化组") else emptyList()
+    }
     val selected = targets.indexOf(target).coerceAtLeast(0)
     val direction = LocalLayoutDirection.current
     val motion = LocalMotionEnabled.current
@@ -77,7 +84,7 @@ internal fun SearchScopeControl(
         if (motion) spring(MangaMotion.SearchDamping, MangaMotion.SearchStiffness) else snap()
     }, label = "search-scope-reveal") { if (it) 1f else 0f }
     val progress = reveal.value.coerceIn(0f, 1f)
-    val fullWidth = minOf(132.dp, maxWidth.coerceAtLeast(36.dp))
+    val fullWidth = minOf((44 * targets.size).dp, maxWidth.coerceAtLeast(36.dp))
     val choicesReady = progress >= .55f
     val visibleWidth = 36.dp + (fullWidth - 36.dp) * progress
     var preview by remember { mutableStateOf<Int?>(null) }
@@ -125,7 +132,7 @@ internal fun SearchScopeControl(
             cornerRadius = 22.dp, role = GlassSurfaceRole.CONTROL,
             interactionSource = interaction, materialExpansion = { progress }) {}
 
-        // Measure the three fixed cells once; the moving clip never changes input/results geometry.
+        // Measure the fixed scope cells once; the moving clip never changes input/results geometry.
         Box(Modifier.fillMaxSize().layout { measurable, constraints ->
             val width = fullWidth.roundToPx()
             val placeable = measurable.measure(constraints.copy(minWidth = width, maxWidth = width))
@@ -143,7 +150,9 @@ internal fun SearchScopeControl(
                             SearchTarget.TITLE -> Icons.AutoMirrored.Outlined.MenuBook
                             SearchTarget.AUTHOR -> Icons.Outlined.PersonOutline
                             SearchTarget.TAG -> Icons.AutoMirrored.Outlined.Label
-                        }, labels[index] + "，当前分区已启用来源",
+                            SearchTarget.TRANSLATION_GROUP -> Icons.Outlined.Translate
+                        }, labels[index] + if (targets[index] == SearchTarget.TRANSLATION_GROUP)
+                            "，拷贝来源" else "，当前分区已启用来源",
                             Modifier.align(Alignment.Center).size(17.dp), tint = color)
 
                     }
@@ -156,7 +165,8 @@ internal fun SearchScopeControl(
             .motionPress(interaction, enabled, pressedScale = .94f)
             .semantics(mergeDescendants = true) {
                 contentDescription = "搜索范围：" + labels[selected]
-                stateDescription = "当前分区全部已启用来源，已收起"
+                stateDescription = if (target == SearchTarget.TRANSLATION_GROUP) "拷贝来源，已收起"
+                    else "当前分区全部已启用来源，已收起"
             }
         else Modifier.clearAndSetSemantics { }
         Box(Modifier.align(Alignment.CenterEnd).size(36.dp).then(trigger)
@@ -167,6 +177,7 @@ internal fun SearchScopeControl(
                     SearchTarget.TITLE -> Icons.AutoMirrored.Outlined.MenuBook
                     SearchTarget.AUTHOR -> Icons.Outlined.PersonOutline
                     SearchTarget.TAG -> Icons.AutoMirrored.Outlined.Label
+                    SearchTarget.TRANSLATION_GROUP -> Icons.Outlined.Translate
                 }, null, Modifier.align(Alignment.Center).size(17.dp))
 
             }

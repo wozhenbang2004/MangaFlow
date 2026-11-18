@@ -21,6 +21,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.PersonOutline
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Translate
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -165,13 +166,18 @@ internal fun DesktopSearchField(
     onClear: () -> Unit,
     modifier: Modifier = Modifier,
     showScopeSelector: Boolean = true,
+    translationGroupAvailable: Boolean = true,
 ) {
     val requester = remember { FocusRequester() }
     val focus = LocalFocusManager.current
     var appliedRequest by remember { mutableIntStateOf(0) }
     var scopeOpen by remember { mutableStateOf(false) }
     val inputInteraction = remember { MutableInteractionSource() }
-    val searchLabel = if (showScopeSelector) "搜索漫画、作者或标签" else "搜索漫画标题"
+    val searchLabel = when {
+        !showScopeSelector -> "搜索漫画标题"
+        target == SearchTarget.TRANSLATION_GROUP -> "搜索汉化组名称"
+        else -> "搜索漫画、作者或标签"
+    }
     LaunchedEffect(focusRequest, active) {
         if (active && focusRequest > appliedRequest) {
             withFrameNanos { }
@@ -217,27 +223,33 @@ internal fun DesktopSearchField(
                     SearchTarget.TITLE -> Icons.AutoMirrored.Outlined.MenuBook
                     SearchTarget.AUTHOR -> Icons.Outlined.PersonOutline
                     SearchTarget.TAG -> Icons.AutoMirrored.Outlined.Label
+                    SearchTarget.TRANSLATION_GROUP -> Icons.Outlined.Translate
                 }
                 val targetLabel = when (target) {
                     SearchTarget.TITLE -> "作品"
                     SearchTarget.AUTHOR -> "作者"
                     SearchTarget.TAG -> "标签"
+                    SearchTarget.TRANSLATION_GROUP -> "汉化组"
                 }
                 Box {
                     MotionIconButton(onClick = { scopeOpen = !scopeOpen }, enabled = active,
                         modifier = Modifier.size(36.dp), tooltip = "搜索范围：" + targetLabel) {
                         Box(Modifier.size(22.dp)) {
                             Icon(targetIcon, "搜索范围：" + targetLabel, Modifier.align(Alignment.Center).size(18.dp))
-                            if (copyOnly || target != SearchTarget.TITLE)
+                            if (copyOnly || target == SearchTarget.TRANSLATION_GROUP)
                                 BodySourceMark("copy", "拷贝", Modifier.align(Alignment.BottomEnd).size(8.dp))
                         }
                     }
                     CompactGlassPopover(scopeOpen, backdrop, onDismiss = { scopeOpen = false }, maximumWidth = 200.dp) {
-                        listOf(SearchTarget.TITLE to "作品", SearchTarget.AUTHOR to "作者", SearchTarget.TAG to "标签").forEach { (value, label) ->
+                        listOf(SearchTarget.TITLE to "作品", SearchTarget.AUTHOR to "作者", SearchTarget.TAG to "标签",
+                            SearchTarget.TRANSLATION_GROUP to "汉化组")
+                            .filter { translationGroupAvailable || it.first != SearchTarget.TRANSLATION_GROUP }
+                            .forEach { (value, label) ->
                             CompactMenuAction(if (value == target) Icons.Outlined.Check else when (value) {
                                 SearchTarget.TITLE -> Icons.AutoMirrored.Outlined.MenuBook
                                 SearchTarget.AUTHOR -> Icons.Outlined.PersonOutline
                                 SearchTarget.TAG -> Icons.AutoMirrored.Outlined.Label
+                                SearchTarget.TRANSLATION_GROUP -> Icons.Outlined.Translate
                             }, label) {
                                 scopeOpen = false; onOpen(); onTarget(value)
                             }

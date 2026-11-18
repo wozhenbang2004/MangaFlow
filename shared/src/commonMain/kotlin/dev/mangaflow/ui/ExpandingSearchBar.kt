@@ -110,6 +110,7 @@ internal fun ExpandingSearchBar(
     searchTarget: SearchTarget? = null,
     scopeCopyOnly: Boolean = false,
     onSearchTarget: (SearchTarget) -> Unit = {},
+    translationGroupAvailable: Boolean = true,
     results: @Composable (maxHeight: Dp, active: Boolean) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
@@ -322,6 +323,7 @@ internal fun ExpandingSearchBar(
         if (searchTarget != null && present && (expanded || visibleForeground.value > .02f)) SearchScopeControl(
             target = searchTarget, expanded = scopeExpanded,
             enabled = expanded && active, copyOnly = scopeCopyOnly,
+            translationGroupAvailable = translationGroupAvailable,
             backdrop = backdrop, maxWidth = (panelWidth - 52.dp).coerceAtLeast(36.dp),
             onExpandedChange = {
                 if (it) { keyboard?.hide(); focus.clearFocus(force = true) }

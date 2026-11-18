@@ -1,5 +1,17 @@
 # MangaFlow · current work
 
+## Copy conventions, catalogue and topics · source checkpoint 2026-11-18
+
+Route DISCOVERY → DELIVERY; stage SOURCE_COMPLETE, with publication and installed outcomes reported separately. The current request and screenshot 1000122068.jpg are mapped to DESIGN COPY-DISCOVERY-01–08 and QF-COPY-DIRECTORY/TOPICS/UI. Research, fixed-source references and the full open capability inventory are [COPY-API-20261118](../research/COPY-API-20261118.md). Research base: main `9d46c8e1926293de922e7b47d5e99ea15181ece3`; integration rebased onto `028da73e6e72c1e3bad6eded7ef69ad718993d8e`. Preserve its ordinary/adult search isolation, native author/tag search and JM shelf reconciliation. Translation-group availability is ordinary-profile-only and non-federated, with explicit enabled-Copy and configuration guards. Root is the only commit/ref/document integrator; separate source owners delivered isolated overlays.
+
+Implemented six native read operations for theme/filter/catalogue/topic discovery, translation-group search, original-work/social/type metadata and compatible shared persistence. Discover opens a contextual 分类 / 专题 page using current controls; full-detail original links enter that same catalogue. Queries retain native order, full loaded ranges, bounded snapshots/positions, honest errors and source/profile identity. Topic artwork uses its own headers without manufacturing a readable comic identity. Do not repeat C103 as a dedicated endpoint, artbook/age classifier, or year filter.
+
+The broader request remains open for homeIndex versions/banners, rank movement, newest feed, Copy account/community writes, quota-based official downloads and novels; unsupported or uncertain entries have explicit evidence gaps in the report. APK/current-client evidence can resolve artbook UI, current enum combinations and remaining contracts. Do not claim every interface was integrated or invent a need for account secrets.
+
+Source/diff review only: no tests, local builds/compiles, API probes, device operations or UI automation. UI appearance, keyboard/touch behavior, current service results and actual installation remain unverified. The workflow and build task definitions were inspected for the existing no-test packaging route; no CI configuration was changed.
+
+Next exact action at this source checkpoint: publish the complete batch on latest main with expected-head protection and confirm ordinary Android/native workflow activation. If this source is already present, do not publish it again or send a status-only follow-up commit; continue from actual CI failure evidence, installed feedback or the APK-specific open research questions. Preserve concurrent ranking/awards, JM registration, anime and reader changes. Raw-feedback coverage reaches the current C10x/API request, recorded 2026-11-18 18:42 Asia/Shanghai (documentation checkpoint; exact user message timestamp unavailable).
+
 ## Native manga ranking filters and annual awards · source checkpoint 2026-11-18
 
 Route DELIVERY; stage SOURCE_COMPLETE, with publication and installed outcomes reported separately. Current user wording and screenshot 1000122064.jpg are recorded in DESIGN RANK-DISCOVERY-01–08. Scope is the existing three-site manga ranking page, richer provider-supported discovery filters and a separate annual award route. The initial base was main 056ca0200e3f9925a65205920d94da36e49472ce; the later 4af96624b0d51da13fe65d0a563f70395075d99e adult-source/signup/recommendation batch touches no files in this slice and must be preserved.

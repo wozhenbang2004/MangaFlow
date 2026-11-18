@@ -224,8 +224,14 @@ class UnifiedMangaRepository(
 
     override suspend fun discover(page: Int): MangaPage = copy.discover(page)
     override suspend fun search(query: String, page: Int): MangaPage = copy.search(query, page)
-    suspend fun search(query: String, target: SearchTarget, selectedTags: List<MangaTag>, page: Int): MangaPage =
-        copy.search(query, target, selectedTags, page)
+    suspend fun search(query: String, target: SearchTarget, selectedTags: List<MangaTag>, page: Int): MangaPage {
+        val eligibility = sourceEligibility.takeIf { target == SearchTarget.TRANSLATION_GROUP }
+        if (eligibility != null && "copy" !in eligibility.ids)
+            throw SourceException("拷贝来源已停用，请先启用拷贝再搜索汉化组。")
+        val result = copy.search(query, target, selectedTags, page)
+        if (eligibility != null) ensureEligibility(eligibility, "copy")
+        return result
+    }
 
     suspend fun searchSource(sourceId: String, query: String, page: Int = 0, forceRefresh: Boolean = false): MangaPage {
         val key = SearchKey(sourceId, query.trim(), page)
@@ -270,7 +276,8 @@ class UnifiedMangaRepository(
     suspend fun sourceSearchFilters(id: String): List<SourceFilter> = if (id == "copy") emptyList() else adapter(id).searchFilters()
     suspend fun sourceHotTags(id: String): List<String> = if (id == "copy") emptyList() else adapter(id).hotTags()
     suspend fun sourceTargetSearch(id: String, query: String, target: SearchTarget, page: Int): MangaPage =
-        diagnostics.track(id, SourceStage.SEARCH) {
+        if (target == SearchTarget.TRANSLATION_GROUP) throw SourceException("汉化组仅支持拷贝专用检索。")
+        else diagnostics.track(id, SourceStage.SEARCH) {
             require(id != "copy") { "请走拷贝专用检索接口。" }
             adapter(id).searchTarget(query, target, page)
         }
@@ -358,6 +365,8 @@ class UnifiedMangaRepository(
     suspend fun searchAll(query: String, pages: Map<String, Int>? = null, forceRefresh: Boolean = false,
         target: SearchTarget = SearchTarget.TITLE, selectedTags: List<MangaTag> = emptyList(),
         onUpdate: (FederatedSearchPage) -> Unit = {}): FederatedSearchPage = withContext(Dispatchers.IO) {
+        if (target == SearchTarget.TRANSLATION_GROUP)
+            throw SourceException("汉化组仅支持拷贝专用检索。")
         val text = query.trim()
         val tags = selectedTags.distinctBy { it.name.trim().lowercase() }.take(12)
         require(text.length in 1..120 || text.isEmpty() && tags.isNotEmpty()) {

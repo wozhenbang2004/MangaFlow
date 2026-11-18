@@ -149,6 +149,7 @@ import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.data.Manga
+import dev.mangaflow.data.MangaTag
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.data.MangaDetail
 import dev.mangaflow.data.Page
@@ -237,6 +238,7 @@ fun DetailScreen(
     onRetryCloudProgress: (() -> Unit)? = null,
     preferredResumeChapter: Chapter? = null,
     onContinuePreferred: (() -> Unit)? = null,
+    onOriginal: (MangaTag) -> Unit = {},
 ) {
     val current = detail?.manga ?: manga
     var pendingDownload by remember(current.id) { mutableStateOf<Chapter?>(null) }
@@ -760,6 +762,7 @@ fun DetailScreen(
     if (fullIntroduction) DetailIntroduction(current, backdrop = readingBackdrop,
         onAuthor = onAuthor?.let { action -> { name -> fullIntroduction = false; action(current, name) } },
         onTag = onTag?.let { action -> { tag -> fullIntroduction = false; action(current, tag) } },
+        onOriginal = { original -> if (active) { fullIntroduction = false; onOriginal(original) } },
         onDismiss = { fullIntroduction = false })
     if (fullRatings) DetailRatingSheet(current, backdrop = readingBackdrop) { fullRatings = false }
     pendingDownload?.takeIf { active }?.let { pending ->
@@ -1006,7 +1009,7 @@ private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: B
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DetailIntroduction(manga: Manga, backdrop: HazeState, onAuthor: ((String) -> Unit)?,
-    onTag: ((String) -> Unit)?, onDismiss: () -> Unit) {
+    onTag: ((String) -> Unit)?, onOriginal: (MangaTag) -> Unit, onDismiss: () -> Unit) {
     MotionBottomSheet(
         onDismissRequest = onDismiss,
         backdrop = backdrop, desktopCloseButton = true,
@@ -1023,6 +1026,7 @@ private fun DetailIntroduction(manga: Manga, backdrop: HazeState, onAuthor: ((St
                     color = DetailForeground, fontWeight = FontWeight.SemiBold)
                 AuthorNames(manga.authors, DetailSecondary, onAuthor = onAuthor)
                 DetailTags(manga, onTag = onTag)
+                DetailSourceMetadata(manga, onOriginal)
                 MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = DetailForeground)
                 Text(manga.description.ifBlank { "来源暂无简介" },
                     fontFamily = mangaFontFamily(MangaFontScene.READING), fontSize = 16.sp, lineHeight = 26.sp, color = DetailSecondary)
@@ -1030,6 +1034,52 @@ private fun DetailIntroduction(manga: Manga, backdrop: HazeState, onAuthor: ((St
         }
     }
 }
+
+/** Source-provided relationships live in the existing expanded information surface. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DetailSourceMetadata(manga: Manga, onOriginal: (MangaTag) -> Unit) {
+    val originals = remember(manga.originals) {
+        manga.originals.filter { it.name.isNotBlank() }.distinctBy { it.name to it.path }
+    }
+    val clubs = remember(manga.clubs) { manga.clubs.map(String::trim).filter(String::isNotBlank).distinct() }
+    if (originals.isEmpty() && clubs.isEmpty() && manga.contentType.isBlank()) return
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (originals.isNotEmpty()) Row(Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+            Text("原作", color = DetailSecondary, fontSize = 11.sp, lineHeight = 18.sp,
+                modifier = Modifier.padding(vertical = 4.dp))
+            FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                originals.forEach { original ->
+                    val canBrowse = manga.sourceId == "copy" && CopyOriginalPath.matches(original.path)
+                    val interaction = remember(original.name, original.path) { MutableInteractionSource() }
+                    Text(original.name, color = if (canBrowse) DetailForeground else DetailSecondary,
+                        fontSize = 12.sp, lineHeight = 18.sp,
+                        modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                            .then(if (canBrowse) Modifier.clickable(
+                                interactionSource = interaction, indication = null, role = Role.Button,
+                                onClickLabel = "查看原作${original.name}的作品") { onOriginal(original) }
+                                .motionPress(interaction) else Modifier)
+                            .padding(vertical = 4.dp))
+                }
+            }
+        }
+        if (clubs.isNotEmpty()) Row(Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+            Text("社团", color = DetailSecondary, fontSize = 11.sp, lineHeight = 18.sp)
+            Text(clubs.joinToString(" · "), color = DetailSecondary, fontSize = 12.sp, lineHeight = 18.sp,
+                modifier = Modifier.weight(1f))
+        }
+        if (manga.contentType.isNotBlank()) Row(Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+            Text("类型", color = DetailSecondary, fontSize = 11.sp, lineHeight = 18.sp)
+            Text(manga.contentType, color = DetailSecondary, fontSize = 12.sp, lineHeight = 18.sp,
+                modifier = Modifier.weight(1f))
+        }
+    }
+}
+
+private val CopyOriginalPath = Regex("[A-Za-z0-9_-]{1,160}")
 
 @Composable
 private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false,

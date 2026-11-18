@@ -82,6 +82,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.ViewModule
 import androidx.compose.material.icons.outlined.Female
 import androidx.compose.material.icons.outlined.Male
@@ -200,6 +201,7 @@ fun DiscoverScreen(
     isFavorite: (Manga) -> Boolean,
     onToggleFavorite: (Manga) -> Unit,
     onManageSources: (() -> Unit)? = null,
+    onExplore: (() -> Unit)? = null,
     sourceControls: (@Composable () -> Unit)? = null,
     active: Boolean = true,
 ) {
@@ -255,7 +257,7 @@ fun DiscoverScreen(
                     active = unobscured && selectedPane,
                     canAutoAdvance = canAutoAdvance,
                     onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
-                    onManageSources = onManageSources, sourceControls = sourceControls,
+                    onManageSources = onManageSources, sourceControls = sourceControls, onExplore = onExplore,
                     onManage = { actionsManga = it }, onRatings = { ratingsManga = it },
                     desktopActions = desktopActions,
                     topPadding = if (selectedPane) contentTopPadding else exitTopPadding)
@@ -324,6 +326,7 @@ internal fun DiscoverySearchResults(
     desktopMainContent: Boolean = false,
     desktopActions: ((Manga) -> List<DesktopMenuAction>)? = null,
     sourceControls: (@Composable () -> Unit)? = null,
+    translationGroupAvailable: Boolean = true,
 ) {
     var retainedSearch by remember { mutableStateOf(state) }
     SideEffect { if (expanded) retainedSearch = state }
@@ -406,7 +409,8 @@ internal fun DiscoverySearchResults(
                 sourceControls?.invoke()
                 SearchScopeBar(search.searchTarget, search.query, search.selectedTags, search.availableTags,
                     search.tagsLoading, search.tagsError, onTarget, onTag, onRetryTags, tagsOnly = tagsOnly,
-                    onTagQuery = onTagQuery, maxChoicesHeight = choicesRoom, showScope = !scopeInToolbar)
+                    onTagQuery = onTagQuery, maxChoicesHeight = choicesRoom, showScope = !scopeInToolbar,
+                    translationGroupAvailable = translationGroupAvailable)
                 if (showSummary) Row(
                     Modifier.fillMaxWidth().heightIn(min = if (showCacheStatus) 44.dp else 28.dp)
                         .padding(horizontal = if (tagsOnly) 0.dp else 6.dp),
@@ -641,6 +645,7 @@ private fun DiscoveryPane(
     onRetry: () -> Unit,
     onMore: () -> Unit,
     onManageSources: (() -> Unit)?,
+    onExplore: (() -> Unit)?,
     sourceControls: (@Composable () -> Unit)?,
     onOpen: (Manga) -> Unit,
     onManage: (Manga) -> Unit,
@@ -723,6 +728,10 @@ private fun DiscoveryPane(
             Text(if (state.mode == DiscoveryMode.LATEST) "最近更新" else "为你发现",
                 modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
+            if (onExplore != null) MotionIconButton(onClick = onExplore, enabled = active,
+                modifier = Modifier.size(36.dp), tooltip = "分类与专题") {
+                Icon(Icons.Outlined.Explore, "分类与专题", Modifier.size(19.dp))
+            }
             DiscoveryLayoutControl(columns, visibleColumns, backdrop, active, onColumnsChange,
                 onPresenceChange = { layoutPresent = it })
             BrowseCacheStatus(state, backdrop, active)

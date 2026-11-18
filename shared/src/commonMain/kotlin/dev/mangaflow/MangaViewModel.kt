@@ -156,11 +156,17 @@ data class BrowseState(
     val sourceScope: String = "",
 ) {
     val isSearch: Boolean get() = searchTarget != SearchTarget.TITLE || query.isNotBlank() || selectedTags.isNotEmpty()
-    val isFederatedSearch: Boolean get() = query.isNotBlank() || selectedTags.isNotEmpty()
+    val isFederatedSearch: Boolean get() = searchTarget != SearchTarget.TRANSLATION_GROUP &&
+        (query.isNotBlank() || selectedTags.isNotEmpty())
     val cacheKey: String get() = when {
         isSearch -> {
             val keyword = if (searchTarget == SearchTarget.TAG) "" else query.trim()
-            "${if (isFederatedSearch) "search-v10-fields:$sourceScope" else "search-v3-heat"}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
+            val prefix = when {
+                isFederatedSearch -> "search-v10-fields:$sourceScope"
+                searchTarget == SearchTarget.TRANSLATION_GROUP -> "copy-translation-v1:$sourceScope"
+                else -> "search-v3-heat"
+            }
+            "${prefix}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
         }
         mode == DiscoveryMode.RANKING -> "ranking:${period.name}:${audience.name}"
         else -> "discover:${mode.name}"
@@ -278,6 +284,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     val picacgSource = services.picacgSource
     val unifiedChapters = services.unifiedChapters
     val repository = services.repository
+    val copyExplore = CopyExploreController(repository.copy, viewModelScope) { "copy" in repository.enabledSources() }
+    private var copyExploreSourceScope = repository.sourceConfigurationKey()
     val bodySources = services.bodySources
     val sourcePlugins = services.sourcePlugins
     internal val starterSources = services.starterSources
@@ -314,6 +322,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private var tagLookupJob: Job? = null
     private var tagLookupRequest = 0L
     private var pendingTagLookup: Pair<Manga, String>? = null
+    private data class SearchTagDirectory(
+        val themes: List<MangaTag>, val loading: Boolean, val error: String?, val updatedAt: Long,
+    )
     private val _detail = MutableStateFlow<DetailState?>(null)
     val detail = _detail.asStateFlow()
     private val _authorWorks = MutableStateFlow<AuthorWorksState?>(null)
@@ -411,14 +422,28 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         showBrowse(_browse.value)
         restoreAccount()
         viewModelScope.launch {
+            copyExplore.state.map { SearchTagDirectory(it.themes, it.directoryLoading, it.themeError,
+                it.directoryUpdatedAt) }.distinctUntilChanged().collect { directory ->
+                // Native labels/counts replace older values without losing detail-returned identifiers.
+                knownSearchTags = (knownSearchTags + directory.themes).associateBy(MangaTag::path).values.toList()
+                _browse.update { current -> current.withSearchTagDirectory() }
+            }
+        }
+        viewModelScope.launch {
             services.sourceConfiguration.drop(1).collect { scope ->
+                if (scope == services.sourceConfiguration.value && scope == repository.sourceConfigurationKey() &&
+                    scope != copyExploreSourceScope) {
+                    copyExploreSourceScope = scope
+                    invalidateCopySearchDirectory()
+                }
                 val current = _browse.value
                 cancelReaderSourceStandbys()
                 val intent = chapterPrefetchIntent
                 cancelNextChapterPrefetch(clearIntent = false)
                 if (services.sourceConfiguration.value == scope && repository.sourceConfigurationKey() == scope)
                     resumeNextChapterIntent(intent)
-                if (current.isFederatedSearch && current.sourceScope != scope) showBrowse(current.copy(
+                if ((current.isFederatedSearch || current.searchTarget == SearchTarget.TRANSLATION_GROUP) &&
+                    current.sourceScope != scope) showBrowse(current.copy(
                     items = emptyList(), sourceMatches = emptyMap(), sourceChoiceIds = emptySet(),
                     searchSources = emptyMap(), sourceNextPages = emptyMap(), hasMore = false,
                     loading = true, loadingMore = false, refreshing = false, error = null,
@@ -492,7 +517,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         cancelTagLookup()
         val previous = _browse.value
         if (previous.searchTarget == SearchTarget.TAG) {
-            _browse.update { it.copy(query = query) }
+            _browse.update { it.copy(query = query).withSearchTagDirectory() }
             return
         }
         showBrowse(BrowseState(query = query, mode = previous.mode, period = previous.period,
@@ -502,10 +527,17 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     fun setSearchTarget(target: SearchTarget) {
         val previous = _browse.value
-        if (previous.searchTarget == target) return
+        if (previous.searchTarget == target) {
+            if (target == SearchTarget.TAG) {
+                copyExplore.ensureDirectory()
+                _browse.update { it.withSearchTagDirectory() }
+            }
+            return
+        }
         cancelTagLookup()
         showBrowse(BrowseState(query = previous.query, searchTarget = target, selectedTags = previous.selectedTags,
             mode = previous.mode, period = previous.period, audience = previous.audience))
+        if (target == SearchTarget.TAG) copyExplore.ensureDirectory()
     }
 
     fun submitSearch() {
@@ -554,6 +586,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val selection = retainedSearchSelection ?: return
         retainedSearchSelection = null
         showBrowse(selection)
+        if (selection.searchTarget == SearchTarget.TAG) copyExplore.ensureDirectory()
     }
 
     fun clearSearch() {
@@ -576,12 +609,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             searchTarget = SearchTarget.TAG, selectedTags = listOfNotNull(tag),
             tagsLoading = tag == null,
             mode = previous.mode, period = previous.period, audience = previous.audience)
+        if (tag == null) pendingTagLookup = manga to name
         showBrowse(selection)
+        copyExplore.ensureDirectory()
         if (tag != null) {
             knownSearchTags = (knownSearchTags + tag).distinctBy(MangaTag::path)
             return
         }
-        pendingTagLookup = manga to name
         _browse.update { it.copy(tagsLoading = true) }
         val request = ++tagLookupRequest
         tagLookupJob = viewModelScope.launch {
@@ -603,7 +637,24 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     fun retrySearchTags() {
         pendingTagLookup?.let { (manga, tag) -> openTagSearch(manga, tag); return }
-        _browse.update { it.copy(availableTags = knownSearchTags, tagsLoading = false, tagsError = null) }
+        copyExplore.refreshDirectory()
+        _browse.update { it.withSearchTagDirectory() }
+    }
+
+    private fun BrowseState.withSearchTagDirectory(): BrowseState {
+        val directory = copyExplore.state.value
+        val ownsStatus = searchTarget == SearchTarget.TAG && pendingTagLookup == null
+        return copy(availableTags = knownSearchTags,
+            tagsLoading = if (ownsStatus) directory.directoryLoading else tagsLoading,
+            tagsError = if (ownsStatus) directory.themeError else tagsError)
+    }
+
+    /** Invalidation retires old work and errors; only a visible user action starts a new request. */
+    private fun invalidateCopySearchDirectory() {
+        cancelTagLookup()
+        knownSearchTags = CopySearchTags
+        copyExplore.clearCache()
+        _browse.update { it.withSearchTagDirectory() }
     }
 
     private fun cancelTagLookup() {
@@ -640,8 +691,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         browseJob?.cancel()
         val requestId = ++browseRequestId
         val generation = browseCache.generation
-        val configured = selection.copy(availableTags = knownSearchTags,
-            sourceScope = repository.sourceConfigurationKey())
+        val configured = selection.copy(sourceScope = repository.sourceConfigurationKey()).withSearchTagDirectory()
         val memory = browseCache.cached(configured.cacheKey)
         _browse.value = memory?.restore(configured) ?: configured
         browseJob = viewModelScope.launch {
@@ -655,7 +705,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                         val selectionWithCurrentFilter = if (configured.searchTarget == SearchTarget.TAG &&
                             current.cacheKey == configured.cacheKey) configured.copy(query = current.query)
                         else configured
-                        snapshot.restore(selectionWithCurrentFilter)
+                        snapshot.restore(selectionWithCurrentFilter).copy(
+                            tagsLoading = current.tagsLoading, tagsError = current.tagsError,
+                        ).withSearchTagDirectory()
                     }
                 }
                 // Fresh selections need no request. Stale rankings refresh their complete
@@ -934,6 +986,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     suspend fun clearBrowseCache() {
         browseJob?.cancel()
         browseRequestId++
+        invalidateCopySearchDirectory()
         _browse.update { it.copy(loading = false, refreshing = false, loadingMore = false,
             error = null, failedPage = null, updatedAt = 0) }
         browseCache.clear()

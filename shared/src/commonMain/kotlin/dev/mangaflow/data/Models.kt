@@ -26,6 +26,11 @@ data class Manga(
     val authorAliases: List<String> = emptyList(),
     /** Confirmed provider identities; absent in legacy catalogs/backups. */
     val externalIds: Map<String, String> = emptyMap(),
+    /** Source-returned original works; an empty path retains a display-only name. */
+    val originals: List<MangaTag> = emptyList(),
+    val clubs: List<String> = emptyList(),
+    /** Native reclass display text, never inferred from a title or convention tag. */
+    val contentType: String = "",
 )
 
 data class Chapter(

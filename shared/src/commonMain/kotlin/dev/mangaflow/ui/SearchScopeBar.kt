@@ -46,6 +46,7 @@ import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.PersonOutline
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Translate
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -89,13 +90,18 @@ internal fun SearchScopeBar(
     onTagQuery: ((String) -> Unit)? = null,
     maxChoicesHeight: Dp = 200.dp,
     showScope: Boolean = true,
+    translationGroupAvailable: Boolean = true,
 ) {
     val colors = MaterialTheme.colorScheme
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
-    val targets = listOf(SearchTarget.TITLE, SearchTarget.AUTHOR, SearchTarget.TAG)
-    val labels = listOf("作品", "作者", "标签")
-    val icons = listOf(Icons.AutoMirrored.Outlined.MenuBook, Icons.Outlined.PersonOutline, Icons.AutoMirrored.Outlined.Label)
+    val targets = listOf(SearchTarget.TITLE, SearchTarget.AUTHOR, SearchTarget.TAG) +
+        if (translationGroupAvailable) listOf(SearchTarget.TRANSLATION_GROUP) else emptyList()
+    val labels = listOf("作品", "作者", "标签") +
+        if (translationGroupAvailable) listOf("汉化组") else emptyList()
+    val icons = listOf(Icons.AutoMirrored.Outlined.MenuBook, Icons.Outlined.PersonOutline,
+        Icons.AutoMirrored.Outlined.Label) +
+        if (translationGroupAvailable) listOf(Icons.Outlined.Translate) else emptyList()
     val selectedPaths = remember(selectedTags) { selectedTags.mapTo(mutableSetOf()) { it.path } }
     val tagChoices = remember(availableTags) {
         availableTags.distinctBy { it.path }.map { tag -> tag to simplifiedTagQuery(tag.name) }
@@ -115,16 +121,18 @@ internal fun SearchScopeBar(
             if (targets[it] == SearchTarget.TAG) releaseInput()
             onTarget(targets[it])
         },
-            modifier = Modifier.width(132.dp),
+            modifier = Modifier.width(44.dp * targets.size),
             controlHeight = 36.dp, indicatorHeight = 28.dp, indicatorCornerRadius = 8.dp,
             fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
             fontSize = 11.sp, itemContent = { index, _, color ->
-                Icon(icons[index], labels[index], Modifier.size(17.dp), tint = color)
+                Icon(icons[index], if (targets[index] == SearchTarget.TRANSLATION_GROUP)
+                    "汉化组，输入汉化组名称搜索拷贝作品" else labels[index], Modifier.size(17.dp), tint = color)
             })
 
         }
         if (target != SearchTarget.TITLE && showScope) {
-            Text("优先使用来源的原生检索；不支持的来源按返回的作者／标签核对，结果可能不完整。",
+            Text(if (target == SearchTarget.TRANSLATION_GROUP) "汉化组搜索使用拷贝来源。"
+                else "优先使用来源的原生检索；不支持的来源按返回的作者／标签核对，结果可能不完整。",
                 fontSize = 10.sp, color = colors.onSurfaceVariant, maxLines = 2)
         }
         if (selectedTags.isNotEmpty()) {
@@ -206,15 +214,37 @@ internal fun SearchScopeBar(
                     }
                     matches.isEmpty() -> if (tagsError == null) Text(if (query.isBlank()) "暂无可选标签" else "没有匹配的标签",
                         color = colors.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.padding(vertical = 8.dp))
-                    else -> FlowRow(Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
-                        matches.forEach { tag -> SearchTagChoice(tag, tag.path in selectedPaths) { chooseTag(tag) } }
+                    else -> {
+                        val events = remember(matches) {
+                            matches.mapNotNull { tag -> copyEventNumber(tag)?.let { it to tag } }
+                                .sortedWith(compareByDescending<Pair<Int, MangaTag>> { it.first }
+                                    .thenBy { it.second.path }).map { it.second }
+                        }
+                        val themes = remember(matches) { matches.filter { copyEventNumber(it) == null } }
+                        if (events.isNotEmpty()) {
+                            Text("展会", color = colors.onSurfaceVariant, fontSize = 10.sp,
+                                modifier = Modifier.padding(top = 2.dp))
+                            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                events.forEach { tag -> SearchTagChoice(tag, tag.path in selectedPaths) { chooseTag(tag) } }
+                            }
+                        }
+                        if (themes.isNotEmpty()) {
+                            if (events.isNotEmpty()) Text("题材", color = colors.onSurfaceVariant, fontSize = 10.sp,
+                                modifier = Modifier.padding(top = 2.dp))
+                            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                themes.forEach { tag -> SearchTagChoice(tag, tag.path in selectedPaths) { chooseTag(tag) } }
+                            }
+                        }
                     }
                 }
             } else Spacer(Modifier.height(0.dp))
         }
     }
 }
+
+private val CopyEventName = Regex("C\\s*(\\d{1,4})", RegexOption.IGNORE_CASE)
+private fun copyEventNumber(tag: MangaTag): Int? =
+    CopyEventName.matchEntire(tag.name.trim())?.groupValues?.get(1)?.toIntOrNull()
 
 // Search aliases for the traditional characters in the source's archived theme names.
 // Only display-name matching changes; selected values always retain the original path.
@@ -241,7 +271,10 @@ private fun SearchTagChoice(tag: MangaTag, selected: Boolean, remove: Boolean = 
         .toggleable(selected, interactionSource = interaction, indication = null, role = Role.Checkbox,
             onValueChange = { onClick() })
         .motionPress(interaction, pressedScale = .97f)
-        .semantics(mergeDescendants = true) { contentDescription = tag.name },
+        .semantics(mergeDescendants = true) {
+            contentDescription = tag.name + if (!remove && tag.count != null && tag.count >= 0)
+                "，${tag.count} 部" else ""
+        },
         contentAlignment = Alignment.Center) {
         Row(Modifier.clip(RoundedCornerShape(7.dp))
             .background(accent.copy(alpha = if (selected) .14f else .06f))
@@ -252,6 +285,10 @@ private fun SearchTagChoice(tag: MangaTag, selected: Boolean, remove: Boolean = 
             Text(tag.name, fontSize = if (remove) 11.sp else 10.sp, lineHeight = 15.sp,
                 color = accent,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (!remove) tag.count?.takeIf { it >= 0 }?.let { count ->
+                Text(count.toString(), fontSize = 9.sp, lineHeight = 15.sp,
+                    color = accent.copy(alpha = .72f), maxLines = 1)
+            }
         }
     }
 }
