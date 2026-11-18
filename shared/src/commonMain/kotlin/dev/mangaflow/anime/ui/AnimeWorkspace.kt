@@ -62,7 +62,8 @@ internal fun AnimeWorkspace(
     var tab by rememberSaveable { mutableIntStateOf(0) }
     val page = if (tab == 1) AnimeWorkspacePage.LIBRARY else
         AnimeWorkspacePage.entries.firstOrNull { it.discovery == state.discoveryTab } ?: AnimeWorkspacePage.HOME
-    val discoveryScrolls = remember { AnimeDiscoveryScrolls() }
+    val homeSource = rememberSaveable { mutableStateOf<String?>(null) }
+    val discoveryScrolls = remember(homeSource) { AnimeDiscoveryScrolls(homeSource) }
     val libraryScroll = rememberLazyListState()
     val libraryViewState = rememberAnimeLibraryViewState()
     val detailState = rememberSaveableStateHolder()

@@ -429,9 +429,18 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         ScopedBrowseController(model.repository, scope)
     }
     val browseActions: BrowseUiActions = if (restrictedMode) scopedBrowse else ordinaryBrowse
+    val openScopedTagSearch: (String) -> Unit = { tag ->
+        if (restrictedMode) {
+            scopedBrowse.setSearchTarget(SearchTarget.TAG)
+            scopedBrowse.setQuery(tag)
+            scopedBrowse.submitSearch()
+            searchExpanded = true
+        }
+    }
     val browse by browseActions.state.collectVisibleAsState(
         reading == null && detail == null || tagSearchVisible ||
             searchExpanded && platformKind != PlatformKind.DESKTOP)
+    val scopedControls by scopedBrowse.controls.collectAsStateWithLifecycle()
     val favorites by model.library.favorites.collectVisibleAsState(reading == null)
     val history by model.library.history.collectVisibleAsState(reading == null || recentReadingOpen)
     LaunchedEffect(favorites, history, adoptedResumeTargets, account.profile?.username) {
@@ -724,8 +733,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 }
                 DiscoverySearchResults(browse, expanded = true, active = true,
                     translationGroupAvailable = !restrictedMode,
-                    sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
-                        model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources) } } else null,
+                    sourceControls = if (restrictedMode) { { onPresence -> SourceCapabilityBrowseControls(scopedBrowse,
+                        model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources,
+                        backdrop = drawerBackdrop, onSearchTag = openScopedTagSearch,
+                        onPresenceChange = onPresence) } } else null,
                     maxHeight = panelHeight, repository = model.repository,
                     onRetry = browseActions::retryBrowse, onMore = browseActions::loadMore,
                     onOpen = { manga -> selectedCover = null; dismiss(); model.openManga(manga) },
@@ -1295,8 +1306,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 // Settings reserves chrome inside its scrolling content, so it
                                 // can pass beneath the floating header without an inset clip.
                                 Box(Modifier.fillMaxSize()) {
-                                savedState.SaveableStateProvider(current.key +
-                                    if (restrictedMode && current.section == Section.DISCOVER) ":" + browse.sourceScope else "") {
+                                // Discovery retains its own complete per-query grid keys. Replacing
+                                // this host for every feed/filter discarded its in-flight UI state.
+                                savedState.SaveableStateProvider(current.key) {
                                 when (current.section) {
                                     Section.DISCOVER -> {
                                         val gallery: @Composable () -> Unit = {
@@ -1334,8 +1346,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                         searchExpanded = false
                                                     }
                                                 },
-                                                sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
-                                                    model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources) } } else null,
+                                                sectionTitle = if (restrictedMode && scopedControls.selectedSource != "*")
+                                                    scopedControls.feeds.firstOrNull { it.id == scopedControls.feedId }?.title else null,
+                                                showFeatured = !restrictedMode || scopedControls.selectedSource == "*",
+                                                sourceControls = if (restrictedMode) { { onPresence -> SourceCapabilityBrowseControls(scopedBrowse,
+                                                    model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources,
+                                                    backdrop = searchBackdrop, active = rootActive && !searchVisible,
+                                                    onSearchTag = openScopedTagSearch, onPresenceChange = onPresence) } } else null,
                                                 onOpen = { model.openManga(it) },
                                                 isFavorite = { manga -> favorites.any { it.id == manga.id } },
                                                 onToggleFavorite = model::toggleFavorite,
@@ -1346,8 +1363,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 .mangaHazeSource(searchBackdrop)) {
                                                 DiscoverySearchResults(
                                                     state = browse, expanded = true, active = rootActive,
-                                                    sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
-                                                        model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources) } } else null,
+                                                    sourceControls = if (restrictedMode) { { onPresence -> SourceCapabilityBrowseControls(scopedBrowse,
+                                                        model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources,
+                                                        backdrop = searchBackdrop, active = rootActive, onSearchTag = openScopedTagSearch,
+                                                        onPresenceChange = onPresence) } } else null,
                                                     maxHeight = maxHeight, repository = model.repository,
                                                     backdrop = searchBackdrop, scopeInToolbar = true, translationGroupAvailable = !restrictedMode,
                                                     desktopMainContent = true,
@@ -1667,8 +1686,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 .padding(horizontal = 8.dp, vertical = 2.dp),
                         ) { maxHeight, searchActive ->
                             DiscoverySearchResults(
-                                sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
-                                    model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources) } } else null,
+                                sourceControls = if (restrictedMode) { { onPresence -> SourceCapabilityBrowseControls(scopedBrowse,
+                                    model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources,
+                                    backdrop = searchBackdrop, active = searchActive, onSearchTag = openScopedTagSearch,
+                                    onPresenceChange = onPresence) } } else null,
                                 state = browse, expanded = searchExpanded, active = searchActive,
                                 scopeInToolbar = true, translationGroupAvailable = !restrictedMode,
                                 maxHeight = maxHeight, repository = model.repository,

@@ -15,6 +15,7 @@ import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.sources.*
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.normalizedBodySourceTitle
+import dev.mangaflow.json.JSONArray
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.supervisorScope
@@ -119,24 +120,32 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
     private val backgrounds = mutableMapOf<String, BrowseState>()
     private val requestSlots = Semaphore(3)
 
-    fun savedSelection(): List<String> = state.value.let { listOf(sourceId, it.query,
+    fun savedSelection(): List<String> = state.value.let { listOf(SAVED_SELECTION_V2, sourceId, it.query,
         it.searchTarget.name, it.mode.name, it.period.name, it.audience.name,
-        controls.value.feedId) + controls.value.options }
+        controls.value.feedId, JSONArray(it.selectedTags.map { tag -> listOf(tag.name, tag.path) }).toString()) +
+        controls.value.options }
 
     fun restoreSelection(saved: List<String>) {
         if (disposed || active || sources.isNotEmpty()) return
-        sourceId = saved.getOrNull(0).orEmpty().ifBlank { ALL }
-        val restored = emptyState().copy(query = saved.getOrNull(1).orEmpty(),
-            mode = saved.getOrNull(3)?.let { runCatching { DiscoveryMode.valueOf(it) }.getOrNull() }
+        // Legacy lists have no tag field: every entry after the feed belongs to its options.
+        val versioned = saved.firstOrNull() == SAVED_SELECTION_V2
+        val values = if (versioned) saved.drop(1) else saved
+        sourceId = values.getOrNull(0).orEmpty().ifBlank { ALL }
+        val target = values.getOrNull(2)?.let { runCatching { SearchTarget.valueOf(it) }.getOrNull() }
+            ?.takeUnless { it == SearchTarget.TRANSLATION_GROUP } ?: SearchTarget.TITLE
+        val tags = if (versioned) restoreTags(values.getOrNull(7)) else emptyList()
+        mutableControls.value = ScopedSourceControls(selectedSource = sourceId,
+            feedId = values.getOrNull(6).orEmpty(), options = values.drop(if (versioned) 8 else 7))
+        val restored = emptyState().copy(query = values.getOrNull(1).orEmpty(),
+            searchTarget = target, selectedTags = tags,
+            mode = values.getOrNull(3)?.let { runCatching { DiscoveryMode.valueOf(it) }.getOrNull() }
                 ?: DiscoveryMode.RECOMMENDED,
-            period = saved.getOrNull(4)?.let { runCatching { RankPeriod.valueOf(it) }.getOrNull() }
+            period = values.getOrNull(4)?.let { runCatching { RankPeriod.valueOf(it) }.getOrNull() }
                 ?: RankPeriod.WEEK,
-            audience = saved.getOrNull(5)?.let { runCatching { RankAudience.valueOf(it) }.getOrNull() }
+            audience = values.getOrNull(5)?.let { runCatching { RankAudience.valueOf(it) }.getOrNull() }
                 ?: RankAudience.MALE,
             sourceScope = scopeKey())
         selections[sourceId] = restored
-        mutableControls.value = ScopedSourceControls(selectedSource = sourceId,
-            feedId = saved.getOrNull(6).orEmpty(), options = saved.drop(7))
         sourceControls[sourceId] = controls.value
         mutableState.value = restored
     }
@@ -580,6 +589,21 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
     }
     private companion object {
         const val ALL = "*"
+        const val SAVED_SELECTION_V2 = "scoped-browse-selection:v2"
+        fun restoreTags(encoded: String?): List<MangaTag> = runCatching {
+            val value = encoded?.takeIf { it.length <= 8192 } ?: return@runCatching emptyList()
+            val tags = JSONArray(value)
+            (0 until minOf(tags.length(), 12)).mapNotNull { index ->
+                val entry = tags.optJSONArray(index) ?: return@mapNotNull null
+                val name = entry.opt(0) as? String ?: return@mapNotNull null
+                val path = entry.opt(1) as? String ?: return@mapNotNull null
+                if (name.isBlank() || name.length > 120 || name.any { it.code < 0x20 || it.code in 0x7f..0x9f })
+                    return@mapNotNull null
+                val label = normalizedBodySourceTitle(name)
+                if (label.isBlank() || path != "label:$label") return@mapNotNull null
+                MangaTag(name, path)
+            }.distinctBy(MangaTag::path)
+        }.getOrDefault(emptyList())
         fun emptyState() = BrowseState(availableTags = emptyList(), loading = false)
     }
 }

@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
+import dev.mangaflow.anime.sources.AnimeSourceHomeFeed
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 import dev.mangaflow.ui.platform.localToday
@@ -37,7 +38,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
     }
     MotionTabContent(state.discoveryTab, Modifier.fillMaxSize(), contentKey = { it }, order = { it.ordinal }) { tab ->
         when (tab) {
-            AnimeDiscoveryTab.HOME -> AnimeDiscoveryHome(state, controller, scrolls, contentBottomPadding,
+            AnimeDiscoveryTab.HOME -> AnimeDiscoveryHome(state, controller, backdrop, scrolls, contentBottomPadding,
                 onOpen = ::open, onChooseReference = onChooseReference,
                 active = active && state.discoveryTab == tab)
             AnimeDiscoveryTab.SOURCES -> Unit
@@ -58,12 +59,24 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
 }
 
 @Composable
-private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeController,
+private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeController, backdrop: HazeState,
     scrolls: AnimeDiscoveryScrolls, contentBottomPadding: Dp, onOpen: (AnimeDiscoveryItem) -> Unit,
     onChooseReference: (AnimeSourceTitle, Boolean) -> Unit, active: Boolean) {
     val homeFeeds by controller.sourceBrowse.homeFeeds.collectAsStateWithLifecycle()
-    var expandedSections by remember { mutableStateOf(emptySet<String>()) }
     val homeScroll = scrolls.grid("home")
+    val availableFeeds = remember(homeFeeds) { homeFeeds.values.toList() }
+    val firstContent = availableFeeds.filter { feed -> feed.sections.any { it.items.isNotEmpty() } }
+        .minByOrNull { it.fetchedAt ?: Long.MAX_VALUE }
+    val selectedFeed = availableFeeds.firstOrNull { it.source.id == scrolls.homeSourceId }
+        ?: firstContent ?: availableFeeds.firstOrNull()
+    // Only the first usable feed is chosen automatically. A deliberate selection, including
+    // a failed source, remains selected while its own refresh/retry updates the same objects.
+    LaunchedEffect(firstContent?.source?.id, scrolls.homeSourceId) {
+        if (scrolls.homeSourceId == null && firstContent != null)
+            scrolls.homeSourceId = firstContent.source.id
+    }
+    var sourceMenuPresent by remember { mutableStateOf(false) }
+    val contentActive = active && !sourceMenuPresent
     val featured = remember(homeFeeds) {
         val rows = homeFeeds.values.filter { it.source.videoSource }
             .sortedBy { it.fetchedAt ?: Long.MAX_VALUE }.map { feed ->
@@ -101,75 +114,146 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
         val columns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
         val previewCount = if (columns == 1) 4 else columns * 2
         LazyVerticalGrid(GridCells.Fixed(columns), state = homeScroll, modifier = Modifier.fillMaxSize(),
+            userScrollEnabled = contentActive,
             contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = contentBottomPadding),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (featured.isNotEmpty()) item(key = "featured", span = { GridItemSpan(maxLineSpan) }) {
-                AnimeFeaturedCarousel(featured, active = active, visible = active && galleryInView,
+                AnimeFeaturedCarousel(featured, active = contentActive, visible = contentActive && galleryInView,
                     selectedKey = scrolls.featuredKey, onSelected = { scrolls.featuredKey = it },
                     onOpen = { entry ->
-                        if (active) entry.sourceTitle?.let { onChooseReference(it, true) }
+                        if (contentActive) entry.sourceTitle?.let { onChooseReference(it, true) }
                     })
             }
-            // Show available content before still-loading sources; each source retains its own status.
-            homeFeeds.values.sortedBy { feed -> if (feed.sections.any { it.items.isNotEmpty() }) 0 else 1 }
-                .forEach { feed ->
+            if (selectedFeed != null) {
+                item(key = "home-source-selector", span = { GridItemSpan(maxLineSpan) }) {
+                    AnimeHomeSourceSelector(availableFeeds, selectedFeed, backdrop, active,
+                        onSelect = { scrolls.homeSourceId = it },
+                        onPresence = { sourceMenuPresent = it },
+                        onRefresh = { controller.sourceBrowse.refreshHomeSource(selectedFeed.source.id) })
+                }
+                selectedFeed.let { feed ->
                     val source = feed.source
                     val prefix = "source-home:" + source.id + ":" + source.revision
-                    if (feed.sections.isEmpty()) {
-                        item(key = "${prefix}:heading", span = { GridItemSpan(maxLineSpan) }) {
-                            AnimeDiscoverySectionHeading("来源内容", source.name, refreshing = feed.loading)
-                        }
+                    val sections = feed.sections.withIndex().filter { it.value.items.isNotEmpty() }
+                    if (feed.error != null) item(key = "${prefix}:error", span = { GridItemSpan(maxLineSpan) }) {
+                        AnimeDiscoveryInlineStatus(feed.error, retry = {
+                            if (contentActive) controller.sourceBrowse.refreshHomeSource(source.id)
+                        })
+                    }
+                    if (sections.isEmpty() && feed.error == null) {
                         item(key = "${prefix}:state", span = { GridItemSpan(maxLineSpan) }) {
                             AnimeDiscoveryInlineStatus(
-                                feed.error ?: if (feed.loading || feed.fetchedAt == null) "正在读取来源内容" else "暂无内容",
-                                retry = if (feed.error != null) ({
-                                    if (active) controller.sourceBrowse.refreshHomeSource(source.id)
-                                }) else null,
+                                if (feed.loading || feed.fetchedAt == null) "正在读取来源内容" else "这个来源暂时没有内容",
                             )
                         }
-                    } else feed.sections.forEachIndexed { index, section ->
+                    }
+                    sections.forEach { (index, section) ->
                         val sectionKey = prefix + ":" + section.key + ":" + index
-                        val expanded = sectionKey in expandedSections
+                        val expanded = sectionKey in scrolls.expandedHomeSections
                         item(key = "${sectionKey}:heading", span = { GridItemSpan(maxLineSpan) }) {
-                            AnimeDiscoverySectionHeading(section.title, source.name,
-                                refreshing = feed.loading && index == 0,
+                            AnimeDiscoverySectionHeading(section.title, "", expanded = expanded,
                                 moreLabel = if (expanded) "收起" + section.title else "展开" + section.title,
-                                onMore = if (active && section.items.size > previewCount) ({
-                                    expandedSections = if (expanded) expandedSections - sectionKey else expandedSections + sectionKey
+                                onMore = if (contentActive && section.items.size > previewCount) ({
+                                    scrolls.expandedHomeSections = if (expanded)
+                                        scrolls.expandedHomeSections - sectionKey else scrolls.expandedHomeSections + sectionKey
                                 }) else null)
                         }
-                        if (index == 0 && feed.error != null) item(key = "${prefix}:error", span = { GridItemSpan(maxLineSpan) }) {
-                            AnimeDiscoveryInlineStatus(feed.error, retry = {
-                                if (active) controller.sourceBrowse.refreshHomeSource(source.id)
-                            })
-                        }
-                        if (section.items.isEmpty()) item(key = "${sectionKey}:empty", span = { GridItemSpan(maxLineSpan) }) {
-                            AnimeDiscoveryInlineStatus(if (feed.loading) "正在载入" else "暂无内容")
-                        }
-                        else items(section.items.take(if (expanded) Int.MAX_VALUE else previewCount),
+                        items(section.items.take(if (expanded) Int.MAX_VALUE else previewCount),
                             key = { sectionKey + ":" + it.sourceId + ":" + it.id }) { title ->
                             AnimeSourceDiscoveryCard(title, list = columns == 1, onOpen = {
-                                if (active) onChooseReference(title, source.videoSource)
+                                if (contentActive) onChooseReference(title, source.videoSource)
                             })
                         }
                     }
                 }
+            }
             state.discoverySections.forEach { section ->
                 val feed = state.discoveryFeeds[section.key]
                 item(key = "section:${section.key}", span = { GridItemSpan(maxLineSpan) }) {
                     AnimeDiscoverySectionHeading(section.title, animeDiscoveryProviderLabel(section.query.provider),
                         refreshing = feed?.loading == true,
-                        onMore = { controller.openDiscoverySection(section.key) })
+                        onMore = if (contentActive) ({ controller.openDiscoverySection(section.key) }) else null)
                 }
                 if (feed?.error != null) item(key = "error:${section.key}", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeDiscoveryInlineStatus(feed.error, retry = { controller.retryDiscovery(section.key) })
+                    AnimeDiscoveryInlineStatus(feed.error, retry = {
+                        if (contentActive) controller.retryDiscovery(section.key)
+                    })
                 }
                 if (feed == null || feed.items.isEmpty()) item(key = "empty:${section.key}", span = { GridItemSpan(maxLineSpan) }) {
                     AnimeDiscoveryInlineStatus(if (feed == null || feed.loading) "正在载入" else if (feed.error == null) "暂无内容" else "")
                 }
                 else items(feed.items.take(if (columns == 1) 3 else columns), key = { section.key + ":" + it.key }) { item ->
-                    AnimeDiscoveryCard(item, feed.query, list = columns == 1, onOpen = { onOpen(item) })
+                    AnimeDiscoveryCard(item, feed.query, list = columns == 1, onOpen = {
+                        if (contentActive) onOpen(item)
+                    })
                 }
+            }
+        }
+    }
+}
+
+/** Source choice discloses the existing feeds; it never enables a source or changes playback priority. */
+@Composable
+private fun AnimeHomeSourceSelector(feeds: List<AnimeSourceHomeFeed>, selected: AnimeSourceHomeFeed,
+    backdrop: HazeState, active: Boolean, onSelect: (String) -> Unit, onPresence: (Boolean) -> Unit,
+    onRefresh: () -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    var present by remember { mutableStateOf(false) }
+    var pendingSource by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(active) {
+        if (!active) { expanded = false; pendingSource = null }
+    }
+    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("来源内容", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Box(Modifier.widthIn(max = 180.dp)) {
+            MotionTextButton(onClick = { pendingSource = null; expanded = true }, enabled = active && !present,
+                modifier = Modifier.heightIn(min = 44.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Icon(if (selected.source.videoSource) Icons.Outlined.Tv else Icons.Outlined.Explore,
+                    null, Modifier.size(15.dp))
+                Spacer(Modifier.width(5.dp))
+                Text(selected.source.name, Modifier.weight(1f, fill = false),
+                    style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Icon(Icons.Outlined.ExpandMore, "切换浏览来源", Modifier.size(16.dp))
+            }
+            CompactGlassPopover(expanded, backdrop,
+                onDismiss = { expanded = false; pendingSource = null },
+                onPresenceChange = { showing ->
+                    present = showing
+                    onPresence(showing)
+                    if (!showing) {
+                        val next = pendingSource
+                        pendingSource = null
+                        if (active && next != null && feeds.any { it.source.id == next }) onSelect(next)
+                    }
+                }) {
+                AnimeQuietLabel("浏览来源", Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+                feeds.forEach { feed ->
+                    val hasContent = feed.sections.any { it.items.isNotEmpty() }
+                    val status = when {
+                        feed.error != null -> if (hasContent) "更新未完成" else "暂不可用"
+                        feed.loading || feed.fetchedAt == null -> "更新中"
+                        !hasContent -> "暂无内容"
+                        else -> null
+                    }
+                    CompactMenuAction(
+                        if (feed.source.id == selected.source.id) Icons.Outlined.Check
+                        else if (feed.error != null) Icons.Outlined.CloudOff
+                        else if (feed.loading || feed.fetchedAt == null) Icons.Outlined.Sync
+                        else if (feed.source.videoSource) Icons.Outlined.Tv else Icons.Outlined.Explore,
+                        listOfNotNull(feed.source.name, status).joinToString(" · "),
+                        onClick = { pendingSource = feed.source.id; expanded = false },
+                    )
+                }
+            }
+        }
+        Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+            if (selected.loading) MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+            else if (selected.error == null) MotionIconButton(onClick = onRefresh, enabled = active && !present,
+                modifier = Modifier.size(44.dp), tooltip = "更新${selected.source.name}") {
+                Icon(Icons.Outlined.Refresh, "更新当前来源", Modifier.size(18.dp))
             }
         }
     }
@@ -177,16 +261,22 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
 
 @Composable
 internal fun AnimeDiscoverySectionHeading(title: String, caption: String, refreshing: Boolean = false,
-    onMore: (() -> Unit)? = null, moreLabel: String = "查看全部$title") {
+    onMore: (() -> Unit)? = null, moreLabel: String = "查看全部$title", expanded: Boolean? = null) {
     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(caption, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (caption.isNotBlank()) Text(caption, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
         if (refreshing) Icon(Icons.Outlined.Sync, "正在更新$title", Modifier.size(16.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant)
         if (onMore != null) MotionIconButton(onClick = onMore, modifier = Modifier.size(44.dp), tooltip = moreLabel) {
-            Icon(Icons.Outlined.ChevronRight, moreLabel, Modifier.size(21.dp))
+            Icon(when (expanded) {
+                true -> Icons.Outlined.ExpandLess
+                false -> Icons.Outlined.ExpandMore
+                null -> Icons.Outlined.ChevronRight
+            }, moreLabel, Modifier.size(21.dp))
         }
     }
 }
@@ -194,10 +284,21 @@ internal fun AnimeDiscoverySectionHeading(title: String, caption: String, refres
 @Composable
 internal fun AnimeDiscoveryInlineStatus(text: String, retry: (() -> Unit)? = null) {
     if (text.isBlank()) return
+    var expanded by remember(text) { mutableStateOf(false) }
+    var overflow by remember(text) { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (retry != null) Icon(Icons.Outlined.CloudOff, null, Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(text, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = if (expanded) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis,
+            onTextLayout = { if (!expanded) overflow = it.hasVisualOverflow })
+        if (expanded || overflow) MotionIconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(44.dp),
+            tooltip = if (expanded) "收起详情" else "查看完整详情") {
+            Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                if (expanded) "收起详情" else "查看完整详情", Modifier.size(18.dp))
+        }
         if (retry != null) MotionIconButton(onClick = retry, modifier = Modifier.size(44.dp), tooltip = "重试此内容") {
             Icon(Icons.Outlined.Refresh, "重试此内容", Modifier.size(18.dp))
         }

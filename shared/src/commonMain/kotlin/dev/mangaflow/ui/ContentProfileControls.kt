@@ -1,5 +1,6 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -12,11 +13,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.ViewModule
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -27,7 +31,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -100,12 +107,15 @@ internal fun ContentProfileSourceSheet(
     onInspect: ((String) -> Unit)? = null,
 ) {
     val sources = remember(entries) { entries.distinctBy { it.source.id } }
+    val colors = MaterialTheme.colorScheme
     var pendingSource by remember { mutableStateOf<String?>(null) }
     var manageAfterDismiss by remember { mutableStateOf(false) }
     var accountAfterDismiss by remember { mutableStateOf(false) }
     var pendingInspect by remember { mutableStateOf<String?>(null) }
     var delivered by remember { mutableStateOf(false) }
     val choosing = pendingSource != null || pendingInspect != null || manageAfterDismiss || accountAfterDismiss
+    fun canChoose() = !delivered && pendingSource == null && pendingInspect == null &&
+        !manageAfterDismiss && !accountAfterDismiss
     MotionBottomSheet(
         backdrop = backdrop,
         onDismissRequest = {
@@ -137,10 +147,21 @@ internal fun ContentProfileSourceSheet(
                 }
             }
             if (sources.any { it.enabled && it.isInstalled && !it.removed }) item(key = "all-sources") {
-                MotionTextButton(onClick = { pendingSource = "*"; dismiss() }, enabled = !choosing,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
-                    Text("全部来源", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                    if (selectedId == "*") Icon(Icons.Outlined.Check, null, Modifier.size(16.dp))
+                MotionTextButton(onClick = {
+                    if (canChoose()) { pendingSource = "*"; dismiss() }
+                }, enabled = !choosing,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                        .semantics { selected = selectedId == "*" },
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.textButtonColors(
+                        containerColor = if (selectedId == "*") colors.onSurface.copy(alpha = .055f) else Color.Transparent,
+                        contentColor = colors.onSurface,
+                    ), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)) {
+                    Icon(Icons.Outlined.ViewModule, null, Modifier.size(24.dp), tint = colors.onSurfaceVariant)
+                    Spacer(Modifier.width(12.dp))
+                    Text("全部来源", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = if (selectedId == "*") FontWeight.Medium else FontWeight.Normal)
+                    if (selectedId == "*") Icon(Icons.Outlined.Check, null, Modifier.size(18.dp))
                 }
             }
             if (sources.isEmpty()) item(key = "profile-source-empty") {
@@ -148,86 +169,90 @@ internal fun ContentProfileSourceSheet(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            if (sources.isNotEmpty()) item(key = "profile-source-list-heading") {
+                Text("单独浏览", Modifier.padding(start = 12.dp, top = 16.dp, bottom = 4.dp),
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            }
             items(sources, key = { "profile-source:" + it.source.id }) { entry ->
                 val hasReason = entry.source.id in unavailableReasons
                 val reason = unavailableReasons[entry.source.id]?.ifBlank { "暂不可用" }
                 val available = !hasReason && entry.enabled && entry.isInstalled && !entry.removed
-                val selected = entry.source.id == selectedId
+                val isSelected = entry.source.id == selectedId
                 val status = when {
                     hasReason -> reason.orEmpty()
                     !entry.isInstalled -> "未安装"
                     entry.removed -> "已移除"
                     !entry.enabled -> "已停用"
-                    selected -> "当前"
+                    isSelected -> "当前"
                     else -> "已启用"
                 }
-                MotionTextButton(
-                    onClick = {
-                        if (pendingSource == null && !manageAfterDismiss && !accountAfterDismiss && available) {
-                            pendingSource = entry.source.id
-                            dismiss()
+                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                    .background(if (isSelected) colors.onSurface.copy(alpha = .055f) else Color.Transparent,
+                        RoundedCornerShape(14.dp)), verticalAlignment = Alignment.CenterVertically) {
+                    MotionTextButton(
+                        onClick = {
+                            if (canChoose() && available) {
+                                pendingSource = entry.source.id
+                                dismiss()
+                            }
+                        },
+                        enabled = available && !choosing,
+                        modifier = Modifier.weight(1f).heightIn(min = 56.dp)
+                            .semantics { selected = isSelected; stateDescription = status },
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface),
+                        contentPadding = PaddingValues(start = 12.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+                    ) {
+                        ChapterSourceLogo(entry.source.id, entry.source.name,
+                            Modifier.size(24.dp).clearAndSetSemantics { }, muted = !available)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(entry.source.name, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (isSelected) FontWeight.Medium else FontWeight.Normal)
+                            if (!available) Text(status, maxLines = 3, overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                         }
-                    },
-                    enabled = available && !choosing,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
-                        .semantics { stateDescription = status },
-                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp),
-                ) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text(entry.source.name, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
-                        if (hasReason) Text(status, maxLines = 3, overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    if (!hasReason) {
-                        Spacer(Modifier.width(10.dp))
-                        Text(status, style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.width(8.dp))
+                        if (isSelected) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp),
+                            tint = colors.onSurfaceVariant)
+                        else Spacer(Modifier.size(18.dp))
                     }
                     if (onInspect != null && entry.isInstalled && !entry.removed) {
-                        MotionIconButton(onClick = { pendingInspect = entry.source.id; dismiss() },
-                            enabled = !choosing, modifier = Modifier.size(40.dp), tooltip = "${entry.source.name}状态与设置") {
-                            Icon(Icons.Outlined.Tune, "来源状态与设置", Modifier.size(16.dp))
+                        MotionIconButton(onClick = {
+                            if (canChoose()) { pendingInspect = entry.source.id; dismiss() }
+                        }, enabled = !choosing, modifier = Modifier.size(48.dp), tooltip = "${entry.source.name}状态与设置") {
+                            Icon(Icons.Outlined.Tune, "${entry.source.name}状态与设置", Modifier.size(18.dp),
+                                tint = colors.onSurfaceVariant)
                         }
-                    }
-                    if (selected && available) {
-                        Spacer(Modifier.width(8.dp))
-                        Icon(Icons.Outlined.Check, null, Modifier.size(16.dp))
-                    }
-                }
-            }
-            if (onAccount != null) item(key = "profile-source-account") {
-                MotionTextButton(
-                    onClick = {
-                        if (pendingSource == null && !manageAfterDismiss && !accountAfterDismiss) {
-                            accountAfterDismiss = true
-                            dismiss()
-                        }
-                    },
-                    enabled = !choosing,
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                ) {
-                    Icon(Icons.Outlined.Lock, null, Modifier.size(17.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("账号登录", style = MaterialTheme.typography.labelLarge)
+                    } else if (onInspect != null) Spacer(Modifier.size(48.dp))
                 }
             }
             item(key = "profile-source-management") {
-                MotionTextButton(
-                    onClick = {
-                        if (pendingSource == null && !manageAfterDismiss && !accountAfterDismiss) {
-                            manageAfterDismiss = true
-                            dismiss()
-                        }
-                    },
-                    enabled = !choosing,
-                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                ) {
-                    Icon(Icons.Outlined.Tune, null, Modifier.size(17.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("管理来源", style = MaterialTheme.typography.labelLarge)
+                Row(Modifier.fillMaxWidth().padding(top = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (onAccount != null) MotionTextButton(
+                        onClick = {
+                            if (canChoose()) { accountAfterDismiss = true; dismiss() }
+                        }, enabled = !choosing, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                        colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                    ) {
+                        Icon(Icons.Outlined.Lock, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("账号登录", style = MaterialTheme.typography.labelLarge)
+                    }
+                    MotionTextButton(
+                        onClick = {
+                            if (canChoose()) { manageAfterDismiss = true; dismiss() }
+                        }, enabled = !choosing, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                        colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                    ) {
+                        Icon(Icons.Outlined.Tune, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("管理来源", style = MaterialTheme.typography.labelLarge)
+                    }
                 }
             }
         }
