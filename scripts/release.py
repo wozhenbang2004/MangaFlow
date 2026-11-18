@@ -202,7 +202,7 @@ def manifest(apk, private_key, runtime_dir):
     target = DIST / f"MangaFlow-{value['versionName']}.apk"
     if apk.resolve() != target.resolve():
         target.write_bytes(apk.read_bytes())
-    require_small_apk(target)
+    require_small_apk(target, ROOT / "app/build/outputs/inference-aars")
     packages, runtime_paths = runtime_assets(runtime_dir)
     catalog = DIST / "runtime-catalog.json"
     catalog.write_text(json.dumps(signed_envelope(runtime_payload(value, packages), private_key),
