@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.sources.BodySourceInfo
 import dev.mangaflow.data.sources.SourceAccountCleanupException
@@ -109,8 +110,10 @@ internal fun SourceAccountControls(
         running = true; currentBusy(true); message = null; messageIsSuccess = false
         val expected = ++generation
         job = scope.launch {
+            var succeeded = false
             try {
                 action()
+                succeeded = true
                 val refreshed = repository.sourceAccountState(source.id)
                 if (present && generation == expected) {
                     currentAccountChanged(refreshed); expanded = false; registerMode = false
@@ -118,7 +121,21 @@ internal fun SourceAccountControls(
                 }
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
-                val failureMessage = (failure as? SourceAccountCleanupException)?.message ?: repository.sourceHealth.value[source.id]?.message ?: "验证未完成，请稍后重试。"
+                val original = failure.message.orEmpty()
+                val knownValidation = setOf(
+                    "请输入哔咔账号和密码。", "请填写有效生日，格式 YYYY-MM-DD。",
+                    "哔咔注册要求年满18岁，请核对生日。",
+                    "昵称需要2至50个字符。", "昵称不能以哔咔站点名称开头。",
+                    "请填写有效的邮箱地址。", "密码至少9个字符，且两次输入需一致。",
+                    "请选择有效性别选项。", "请填写三组安全问题及答案。"
+                )
+                val failureMessage = when {
+                    failure is SourceAccountCleanupException -> failure.message.orEmpty()
+                    source.id == "picacg" && failure is SourceException &&
+                        (original.startsWith("哔咔注册：") || original.startsWith("哔咔登录：")) -> original
+                    source.id == "picacg" && original in knownValidation -> original
+                    else -> repository.sourceHealth.value[source.id]?.message ?: "验证未完成，请稍后重试。"
+                }
                 // An unsuccessful logout may still have cleared its local credential in finally.
                 try {
                     val refreshed = repository.sourceAccountState(source.id)
@@ -127,7 +144,19 @@ internal fun SourceAccountControls(
                 catch (_: Exception) { /* Do not invent a new account state from a failed read. */ }
                 if (present && generation == expected) { messageIsSuccess = false; message = failureMessage }
             } finally {
-                if (present && generation == expected) { clearInput(); job = null; running = false; currentBusy(false) }
+                if (present && generation == expected) {
+                    if (successNotice != null && !succeeded) {
+                        // Keep editable non-secret fields for a corrected retry without
+                        // retaining passwords or recovery answers from a failed signup.
+                        registerValues = registerValues.filterKeys { id ->
+                            capabilities.registrationFields.none { it.id == id && it.secret }
+                        }
+                        registerConsent = false
+                        registerStage = 0
+                        password = ""; values = emptyList()
+                    } else clearInput()
+                    job = null; running = false; currentBusy(false)
+                }
             }
         }
     }
@@ -214,7 +243,6 @@ internal fun SourceAccountControls(
                             }
                             MotionButton(onClick = {
                                 val captured = SourceRegistrationRequest(registerValues.toMap(), registerConsent, registerConsent)
-                                clearInput()
                                 operate("站点已接受注册请求，请使用新账号登录；如需邮箱验证，请按站点提示操作。") {
                                     repository.sourceRegister(source.id, captured)
                                 }

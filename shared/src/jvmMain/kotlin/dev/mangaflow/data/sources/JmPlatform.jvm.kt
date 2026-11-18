@@ -452,6 +452,8 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
             SearchTarget.TITLE -> SearchMainTag.WORK
             SearchTarget.AUTHOR -> SearchMainTag.AUTHOR
             SearchTarget.TAG -> SearchMainTag.TAG
+            SearchTarget.TRANSLATION_GROUP ->
+                throw SourceException("禁漫不提供汉化组原生索引，请切换作者或标签搜索。")
         }
         return clientCall { active ->
             toPage(active.search(SearchQuery.Builder().text(keyword).mainTag(category)

@@ -411,6 +411,8 @@ private fun CopyDirectoryDialog(
     MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 560.dp,
         properties = DialogProperties(usePlatformDefaultWidth = false)) {
         BoxWithConstraints(Modifier.padding(horizontal = 12.dp)) {
+            // Capture the outer BoxWithConstraints receiver before entering the glass lambda.
+            val directoryWidth = maxWidth
             LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().height(minOf(maxHeight, 650.dp)),
                 cornerRadius = 24.dp, role = GlassSurfaceRole.PANEL, softCard = true) {
                 Column(Modifier.fillMaxSize().padding(14.dp).semantics { paneTitle = "拷贝题材与展会目录" }) {
@@ -432,7 +434,7 @@ private fun CopyDirectoryDialog(
                         CopyExploreNotice("目录更新失败", message, visible && !state.directoryLoading, onRetry)
                     }
                     val grid = rememberLazyGridState()
-                    LazyVerticalGrid(columns = GridCells.Fixed(if (maxWidth >= 440.dp) 3 else 2),
+                    LazyVerticalGrid(columns = GridCells.Fixed(if (directoryWidth >= 440.dp) 3 else 2),
                         state = grid, modifier = Modifier.weight(1f).fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),

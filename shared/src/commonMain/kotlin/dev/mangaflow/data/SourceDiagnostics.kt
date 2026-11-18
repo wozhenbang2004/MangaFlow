@@ -21,6 +21,14 @@ internal data class SourceFailureSummary(val kind: SourceFailureKind, val messag
 internal fun sourceFailureSummary(stage: SourceStage, failure: Exception): SourceFailureSummary {
     if (stage == SourceStage.ACCOUNT && failure is SourceAccountCleanupException)
         return SourceFailureSummary(SourceFailureKind.CLEANUP, requireNotNull(failure.message))
+    // Native PicACG registration translates provider codes into fixed, secret-free
+    // explanations. Preserve only those explicitly authored messages in source health.
+    val safeAccount = failure as? SourceException
+    val safeMessage = safeAccount?.message.orEmpty()
+    if (stage == SourceStage.ACCOUNT && safeAccount != null &&
+        (safeMessage.startsWith("哔咔注册：") || safeMessage.startsWith("哔咔登录："))) {
+        return SourceFailureSummary(SourceFailureKind.RESPONSE, safeMessage.take(210))
+    }
     val type = when {
         (failure as? SourceException)?.httpStatus == 401 || failure.message.orEmpty().contains("登录") -> SourceFailureKind.LOGIN
         failure is TimeoutCancellationException || Regex("(?i)timeout|connect|dns|network|超时|连接|网络").containsMatchIn(failure.message.orEmpty()) -> SourceFailureKind.NETWORK

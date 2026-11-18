@@ -81,7 +81,11 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
             today.monthNumber == birthday.monthNumber && today.dayOfMonth < birthday.dayOfMonth) 1 else 0
         require(age >= 18 && age <= 120) { "哔咔注册要求年满18岁，请核对生日。" }
         require(name.length in 2..50 && !name.contains('\n') && !name.contains('\r')) { "昵称需要2至50个字符。" }
-        require(email.length in 5..160 && Regex("^[a-z0-9._+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}$").matches(email)) {
+        // The original Android registration UI excludes names that impersonate the site.
+        require(!Regex("^嗶\\s*咔.*").matches(name) && !Regex("^哔\\s*咔.*").matches(name)) {
+            "昵称不能以哔咔站点名称开头。"
+        }
+        require(email.length in 5..160 && Regex("^[a-z0-9._]+@[a-z0-9.-]+\\.[a-z]{2,}$").matches(email)) {
             "请填写有效的邮箱地址。"
         }
         require(password.length in 9..512 && password == confirm) { "密码至少9个字符，且两次输入需一致。" }
@@ -384,19 +388,24 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
             .joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
         val request = Request.Builder().url(url)
             .header("api-key", API_KEY).header("accept", "application/vnd.picacomic.com.v1+json")
-            .header("app-channel", "3").header("app-version", "2.2.1.3.3.4")
+            // The public Android client uses channel 1 for version 2.2.1.3.3.4.
+            .header("app-channel", "1").header("app-version", "2.2.1.3.3.4")
             .header("app-uuid", "defaultUuid").header("app-platform", "android")
             .header("app-build-version", "45").header("image-quality", "original")
             .header("time", timestamp).header("nonce", nonce).header("signature", signature)
             .header("User-Agent", USER_AGENT)
         if (requireLogin && requestSession.isNotBlank()) request.header("authorization", requestSession)
+        if (method == "POST") request.header("Content-Type", "application/json; charset=UTF-8")
         val built = if (method == "POST") request.post((body ?: JSONObject()).toString()
             .toRequestBody("application/json; charset=UTF-8".toMediaType())).build() else request.get().build()
         val response = network.request(built, "哔咔", HOME, readAccountErrors = true)
         val result = try { JSONObject(response.text) } catch (failure: Exception) {
-            throw SourceException("哔咔返回格式暂不兼容。", HOME, cause = failure)
+            val action = if (path == "auth/register") "注册" else if (path == "auth/sign-in") "登录" else "请求"
+            throw SourceException("哔咔$action：服务端返回了无法识别的响应（HTTP ${response.statusCode}），无法确认操作是否成功。", HOME,
+                httpStatus = response.statusCode, cause = failure)
         }
         if (response.statusCode == 401 || result.optString("code") == "401") {
+            if (!requireLogin) throw SourceException(safeAccountFailure(path, 401, result), HOME, httpStatus = 401)
             if (requireLogin && session == requestSession) {
                 session = ""
                 _signedIn.value = false
@@ -406,10 +415,38 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
             throw SourceException("哔咔会话过期，请重新登录。", HOME, httpStatus = 401)
         }
         val code = result.optInt("code", response.statusCode)
-        if (response.statusCode !in 200..299 || code !in 200..299)
-            throw SourceException("哔咔请求失败（${response.statusCode}）：${result.bodyText("message").take(180)}", HOME,
+        if (response.statusCode !in 200..299 || code !in 200..299 ||
+            result.optString("error").trim().matches(Regex("[0-9]{3,6}")))
+            throw SourceException(safeAccountFailure(path, response.statusCode, result), HOME,
                 httpStatus = response.statusCode)
         return result
+    }
+
+    /** Known error classes only. The server is untrusted and may echo user inputs. */
+    private fun safeAccountFailure(path: String, http: Int, result: JSONObject): String {
+        val code = result.optString("error").trim().takeIf { it.matches(Regex("[0-9]{1,6}")) }
+        val message = result.optString("message").lowercase().take(160)
+        val detail = result.optString("detail").lowercase().take(160)
+        val signal = "$message $detail"
+        val suffix = if (code == null) "HTTP $http" else "HTTP $http / $code"
+        if (path == "auth/register") return when {
+            code == "1008" || "email is already" in signal || "email already" in signal ->
+                "哔咔注册：邮箱已存在，请直接登录或使用找回密码。（$suffix）"
+            code == "1023" || "too many requests" in signal ->
+                "哔咔注册：来源暂时限制请求，请稍后再试；不要连续重复提交。（$suffix）"
+            code == "1002" || ("invalid" in signal && listOf(
+                "email", "password", "birthday", "question", "name").any { it in signal }) ->
+                "哔咔注册：站点拒绝了资料格式，请检查邮箱、昵称、生日、密码及密保问题。（$suffix）"
+            else -> "哔咔注册：站点未接受申请，请检查注册信息或站点限制。（$suffix）"
+        }
+        if (path == "auth/sign-in") return when {
+            http == 401 || "invalid username" in signal || "invalid password" in signal ->
+                "哔咔登录：账号或密码不正确，请核对后重试。（$suffix）"
+            code == "1023" || "too many requests" in signal ->
+                "哔咔登录：请求暂时受限，请稍后重试。（$suffix）"
+            else -> "哔咔登录：站点拒绝请求，请核对账号或网络线路。（$suffix）"
+        }
+        return "哔咔来源响应异常（$suffix），请检查来源设置。"
     }
 
     companion object {
