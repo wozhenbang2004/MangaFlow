@@ -30,6 +30,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.datetime.LocalDate
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
+import kotlin.time.Instant
 import kotlin.concurrent.Volatile
 
 /**
@@ -59,6 +63,43 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
         _signedIn.value = true
     }
 
+    /** Explicit one-shot registration, no automatic sign-in or retention of password/answers. */
+    override suspend fun register(request: SourceRegistrationRequest): Unit = accountLock.withLock {
+        require(request.confirmedAdult && request.acceptedTerms) { "需要确认年满18岁并同意站点注册条款。" }
+        val fields = request.values
+        val name = fields["name"].orEmpty().trim()
+        val email = fields["email"].orEmpty().trim()
+        val password = fields["password"].orEmpty()
+        val confirm = fields["confirm"].orEmpty()
+        val birthdayText = fields["birthday"].orEmpty().trim()
+        val birthday = runCatching { LocalDate.parse(birthdayText) }.getOrNull()
+            ?: throw SourceException("请填写有效生日，格式 YYYY-MM-DD。")
+        val today = Instant.fromEpochMilliseconds(wallTimeMillis()).toLocalDateTime(TimeZone.UTC).date
+        val age = today.year - birthday.year - if (today.monthNumber < birthday.monthNumber ||
+            today.monthNumber == birthday.monthNumber && today.dayOfMonth < birthday.dayOfMonth) 1 else 0
+        require(age >= 18 && age <= 120) { "哔咔注册要求年满18岁，请核对生日。" }
+        require(name.length in 2..50 && !name.contains('\n') && !name.contains('\r')) { "昵称需要2至50个字符。" }
+        require(email.length in 5..160 && Regex("^[a-z0-9._+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}$").matches(email)) {
+            "请填写有效的邮箱地址。"
+        }
+        require(password.length in 9..512 && password == confirm) { "密码至少9个字符，且两次输入需一致。" }
+        val gender = fields["gender"].orEmpty().ifBlank { "bot" }
+        require(gender in setOf("m", "f", "bot")) { "请选择有效性别选项。" }
+        val payload = JSONObject().put("name", name).put("email", email).put("password", password)
+            .put("birthday", birthdayText).put("gender", gender)
+        for (index in 1..3) {
+            val question = fields["question$index"].orEmpty().trim()
+            val answer = fields["answer$index"].orEmpty()
+            require(question.length in 2..160 && answer.length in 1..160) {
+                "请填写三组安全问题及答案。"
+            }
+            payload.put("question$index", question).put("answer$index", answer)
+        }
+        // The native source's authenticated client remains untouched until an explicit login.
+        call("auth/register", "POST", payload, requireLogin = false)
+        Unit
+    }
+
     override suspend fun logout() = accountLock.withLock {
         deleteSecret(context, SECRET_KEY)
         session = ""
@@ -67,7 +108,21 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
 
     override suspend fun capabilities() = SourceCapabilities(setOf(SourceFeature.DISCOVERY, SourceFeature.SEARCH,
         SourceFeature.CATEGORIES, SourceFeature.RANKING, SourceFeature.ACCOUNT, SourceFeature.FAVORITES,
-        SourceFeature.COMMENTS), loginRequired = true)
+        SourceFeature.COMMENTS), loginRequired = true, registrationFields = listOf(
+            SourceRegistrationField("name", "昵称"),
+            SourceRegistrationField("email", "邮箱"),
+            SourceRegistrationField("password", "密码", secret = true),
+            SourceRegistrationField("confirm", "确认密码", secret = true),
+            SourceRegistrationField("birthday", "生日 · YYYY-MM-DD"),
+            SourceRegistrationField("gender", "性别", choices = listOf(
+                SourceChoice("bot", "保密"), SourceChoice("m", "男"), SourceChoice("f", "女"))),
+            SourceRegistrationField("question1", "安全问题 1"),
+            SourceRegistrationField("answer1", "答案 1", secret = true),
+            SourceRegistrationField("question2", "安全问题 2"),
+            SourceRegistrationField("answer2", "答案 2", secret = true),
+            SourceRegistrationField("question3", "安全问题 3"),
+            SourceRegistrationField("answer3", "答案 3", secret = true),
+        ))
 
     override suspend fun accountState() = SourceAccountState(_signedIn.value)
 

@@ -45,6 +45,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Manga
+import dev.mangaflow.data.DiscoveryMode
+import dev.mangaflow.data.RankPeriod
 import dev.mangaflow.data.SourceHealth
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.plugins.SourcePluginStore
@@ -90,7 +92,41 @@ internal fun SourceCapabilityBrowseControls(
                 Icon(Icons.Outlined.Tune, "来源状态与设置", Modifier.size(17.dp))
             }
         }
-        if (!browse.isSearch && current.feeds.size > 1) {
+        if (!browse.isSearch && current.sources.size > 1) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                (listOf("*" to "全部") + current.sources.map { it.id to it.name }).forEach { (id, name) ->
+                    MotionTextButton(onClick = { controller.selectSource(id) },
+                        modifier = Modifier.semantics { selected = current.selectedSource == id },
+                        contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp)) {
+                        Text(name, fontSize = 12.sp,
+                            fontWeight = if (current.selectedSource == id) FontWeight.Medium else FontWeight.Normal,
+                            color = if (current.selectedSource == id) MaterialTheme.colorScheme.onSurface
+                                else MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+        if (!browse.isSearch && browse.mode == DiscoveryMode.RANKING) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                RankPeriod.entries.forEach { period ->
+                    MotionTextButton(onClick = { controller.selectDiscovery(DiscoveryMode.RANKING, period = period) },
+                        modifier = Modifier.semantics { selected = browse.period == period },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)) {
+                        Text(period.label, fontSize = 12.sp,
+                            fontWeight = if (browse.period == period) FontWeight.Medium else FontWeight.Normal,
+                            color = if (browse.period == period) MaterialTheme.colorScheme.onSurface
+                                else MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+            if (current.selectedSource == "*" && browse.period == RankPeriod.TOTAL) {
+                Text("仅展示实际提供总榜的来源", fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        if (!browse.isSearch && browse.mode == DiscoveryMode.RECOMMENDED && current.feeds.size > 1) {
             if (current.feeds.size <= 4) Row(Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 current.feeds.forEach { feed ->
@@ -110,6 +146,7 @@ internal fun SourceCapabilityBrowseControls(
         }
         if (filters.isNotEmpty()) Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             filters.forEachIndexed { index, filter ->
+                if (browse.mode == DiscoveryMode.RANKING && filter.id == "period") return@forEachIndexed
                 val choice = filter.choices.firstOrNull { it.id == current.options.getOrNull(index) }
                 MotionTextButton(onClick = { filterIndex = index }, contentPadding = PaddingValues(horizontal = 7.dp, vertical = 3.dp)) {
                     Text(if (filter.multiple) filter.title + " · " + filter.selectedIds(current.options.getOrNull(index)).size

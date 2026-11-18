@@ -1125,7 +1125,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         val chromeTopInset = screenFitContentInsets().asPaddingValues().calculateTopPadding()
                         val discoveryBackground = browseActions.browseBackground(browse)
                         val displayedDiscovery = if (!browse.isSearch) browse else discoveryBackground
-                        val discoveryModes = if (restrictedMode) listOf(DiscoveryMode.RECOMMENDED) else DiscoveryMode.entries
+                        val discoveryModes = DiscoveryMode.entries
                         val rankingExpanded = !restrictedMode && displayedDiscovery.mode == DiscoveryMode.RANKING
                         var retainedRankingState by remember { mutableStateOf(displayedDiscovery) }
                         SideEffect { if (rankingExpanded) retainedRankingState = displayedDiscovery }
@@ -1465,7 +1465,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     searching = desktopSearchContent, backdrop = searchBackdrop,
                                     onLeaveSearch = closeSearch, navigation = navigation,
                                     tabs = { tabModifier ->
-                                        BrowseTabs(discoveryModes.indexOf(displayedDiscovery.mode).coerceAtLeast(0), discoveryModes.map { if (restrictedMode) "发现" else it.label }, tabModifier) { index ->
+                                        BrowseTabs(discoveryModes.indexOf(displayedDiscovery.mode).coerceAtLeast(0), discoveryModes.map { if (restrictedMode && it == DiscoveryMode.RECOMMENDED) "发现" else if (restrictedMode && it == DiscoveryMode.RANKING) "榜单" else it.label }, tabModifier) { index ->
                                             closeSearch()
                                             browseActions.selectDiscovery(discoveryModes[index], clearQuery = true)
                                         }
@@ -1544,7 +1544,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 active = rootActive && chromeReady && rankingExpanded)
                                         }
                                     }) {
-                                    BrowseTabs(discoveryModes.indexOf(browse.mode).coerceAtLeast(0), discoveryModes.map { if (restrictedMode) "发现" else it.label },
+                                    BrowseTabs(discoveryModes.indexOf(browse.mode).coerceAtLeast(0), discoveryModes.map { if (restrictedMode && it == DiscoveryMode.RECOMMENDED) "发现" else if (restrictedMode && it == DiscoveryMode.RANKING) "榜单" else it.label },
                                         Modifier.fillMaxWidth().padding(horizontal = 4.dp)
                                             .graphicsLayer { alpha = 1f - .24f * (rankingEmphasis?.value ?: 0f) }
                                             .onGloballyPositioned { coordinates ->

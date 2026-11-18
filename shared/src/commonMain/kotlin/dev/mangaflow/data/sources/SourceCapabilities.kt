@@ -14,6 +14,7 @@ data class SourceCapabilities(
     val cookieFields: List<String> = emptyList(),
     val credentialLabel: String = "Cookie",
     val websiteLoginDeclared: Boolean = false,
+    val registrationFields: List<SourceRegistrationField> = emptyList(),
 ) {
     fun supports(feature: SourceFeature): Boolean = feature in features
 }
@@ -40,6 +41,11 @@ data class SourceFilter(val id: String, val title: String, val choices: List<Sou
     }
     fun selectedIds(value: String?): Set<String> = validSelection(normalize(value)).orEmpty().toSet()
 }
+/** A source advertises registration only when its current native request contract is implemented. */
+data class SourceRegistrationField(val id: String, val title: String, val secret: Boolean = false,
+    val choices: List<SourceChoice> = emptyList())
+data class SourceRegistrationRequest(val values: Map<String, String>, val confirmedAdult: Boolean, val acceptedTerms: Boolean)
+
 data class SourceSetting(val key: String, val title: String, val value: String,
     val type: String = "input", val choices: List<SourceChoice> = emptyList())
 data class SourceFeed(val id: String, val title: String, val kind: SourceFeedKind = SourceFeedKind.EXPLORE,

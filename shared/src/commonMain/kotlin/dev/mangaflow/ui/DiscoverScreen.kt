@@ -665,7 +665,16 @@ private fun DiscoveryPane(
     val ranking = state.mode == DiscoveryMode.RANKING
     val motion = LocalMotionEnabled.current
     val firstEntranceIndex = remember(state.cacheKey) { retainedGrid.firstVisibleItemIndex }
-    val featured = remember(state.items) { state.items.take(6) }
+    // The Copy recommendation endpoint is an editorial list, not a daily update feed.
+    // Rotate real returned entries by local date instead of freezing the first six forever.
+    // Do not change the source list order or present this rotation as new upstream content.
+    val today = localToday()
+    val rotationDay = today.year * 366 + today.dayOfYear
+    val featured = remember(state.items, rotationDay) {
+        val candidates = state.items.distinctBy(Manga::id)
+        if (candidates.size <= 6) candidates
+        else (0 until 6).map { candidates[(rotationDay % candidates.size + it) % candidates.size] }
+    }
     val desktop = platformKind == PlatformKind.DESKTOP
     val pull = rememberBottomPullLoadState(
         key = state.cacheKey,
@@ -765,14 +774,37 @@ private fun DiscoveryPane(
             }
         } else {
             if (ranking) {
-                itemsIndexed(state.items, key = { _, manga -> manga.id }, contentType = { _, _ -> "ranking-book" },
-                    span = { _, _ -> GridItemSpan(maxLineSpan) }) { index, manga ->
-                    Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
-                        placementSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap())
-                        .rankingRowEntrance(index - firstEntranceIndex)) {
-                        DesktopBrowseActions(if (desktop) desktopActions(manga) else emptyList(), active) {
-                            RankRow(manga, repository, state.period, state.cacheKey,
-                                onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
+                if (state.sourceScope.startsWith("scoped:")) {
+                    // Each native provider owns its own ordering. Never merge JM/Pica rank
+                    // values or draw Copy heat metrics over either provider's list.
+                    state.items.groupBy { it.sourceId }.forEach { (source, sourceItems) ->
+                        item(key = "rank-provider:$source", span = { GridItemSpan(maxLineSpan) }) {
+                            Row(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Text(sourceItems.firstOrNull()?.sourceName?.ifBlank { source } ?: source,
+                                    style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                                Text("本源列表顺序", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        itemsIndexed(sourceItems, key = { _, manga -> manga.id },
+                            contentType = { _, _ -> "source-ranking-book" },
+                            span = { _, _ -> GridItemSpan(maxLineSpan) }) { index, manga ->
+                            DesktopBrowseActions(if (desktop) desktopActions(manga) else emptyList(), active) {
+                                RankRow(manga.copy(rank = index + 1), repository, state.period, state.cacheKey,
+                                    onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
+                            }
+                        }
+                    }
+                } else {
+                    itemsIndexed(state.items, key = { _, manga -> manga.id }, contentType = { _, _ -> "ranking-book" },
+                        span = { _, _ -> GridItemSpan(maxLineSpan) }) { index, manga ->
+                        Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
+                            placementSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap())
+                            .rankingRowEntrance(index - firstEntranceIndex)) {
+                            DesktopBrowseActions(if (desktop) desktopActions(manga) else emptyList(), active) {
+                                RankRow(manga, repository, state.period, state.cacheKey,
+                                    onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
+                            }
                         }
                     }
                 }
@@ -1174,12 +1206,17 @@ private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPerio
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .46f), maxLines = 1,
                     overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
             }
-            RankingMetrics(manga, heatLabel = when (period) {
-                RankPeriod.DAY -> "日热"
-                RankPeriod.WEEK -> "周热"
-                RankPeriod.MONTH -> "月热"
-                RankPeriod.TOTAL -> "总热"
-            }, onExpand = onRatings)
+            if (manga.sourceId == "copy") {
+                RankingMetrics(manga, heatLabel = when (period) {
+                    RankPeriod.DAY -> "日热"
+                    RankPeriod.WEEK -> "周热"
+                    RankPeriod.MONTH -> "月热"
+                    RankPeriod.TOTAL -> "总热"
+                }, onExpand = onRatings)
+            } else {
+                Text(manga.sourceName.ifBlank { "来源榜单" }, fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }

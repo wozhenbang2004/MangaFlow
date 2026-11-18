@@ -278,6 +278,9 @@ class UnifiedMangaRepository(
     suspend fun sourceLogin(id: String, user: String, password: String) = diagnostics.track(id, SourceStage.ACCOUNT) {
         commitSourceAccountChange(id) { adapter(id).login(user, password) }
     }
+    /** Account creation does not sign in, change stored credentials or clear anonymous caches. */
+    suspend fun sourceRegister(id: String, request: dev.mangaflow.data.sources.SourceRegistrationRequest) =
+        diagnostics.track(id, SourceStage.ACCOUNT) { adapter(id).register(request) }
     suspend fun sourceLoginCookies(id: String, values: List<String>) = diagnostics.track(id, SourceStage.ACCOUNT) {
         commitSourceAccountChange(id) { adapter(id).loginWithCookies(values) }
     }

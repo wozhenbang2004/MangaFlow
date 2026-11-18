@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -26,6 +27,7 @@ import dev.mangaflow.data.sources.BodySourceInfo
 import dev.mangaflow.data.sources.SourceAccountCleanupException
 import dev.mangaflow.data.sources.SourceAccountState
 import dev.mangaflow.data.sources.SourceCapabilities
+import dev.mangaflow.data.sources.SourceRegistrationRequest
 import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import kotlinx.coroutines.CancellationException
@@ -47,15 +49,23 @@ internal fun SourceAccountControls(
     var password by remember { mutableStateOf("") }
     var values by remember { mutableStateOf<List<String>>(emptyList()) }
     var cookieMode by remember { mutableStateOf(!capabilities.passwordLogin) }
+    var registerMode by remember { mutableStateOf(false) }
+    var registerStage by remember { mutableIntStateOf(0) }
+    var registerValues by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var registerConsent by remember { mutableStateOf(false) }
     var running by remember { mutableStateOf(false) }
     var cancelling by remember { mutableStateOf(false) }
     var job by remember { mutableStateOf<Job?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
+    var messageIsSuccess by remember { mutableStateOf(false) }
     var present by remember { mutableStateOf(true) }
     var generation by remember { mutableLongStateOf(0L) }
     val currentAccountChanged by rememberUpdatedState(onAccountChanged)
     val currentBusy by rememberUpdatedState(onBusy)
-    fun clearInput() { password = ""; values = emptyList() }
+    fun clearInput() {
+        password = ""; values = emptyList()
+        registerValues = emptyMap(); registerConsent = false; registerStage = 0
+    }
     fun cancel() {
         clearInput()
         if (cancelling) return
@@ -93,16 +103,19 @@ internal fun SourceAccountControls(
             running = false; cancelling = false
         }
     }
-    LaunchedEffect(source.revision) { clearInput(); expanded = false }
-    fun operate(action: suspend () -> Unit) {
+    LaunchedEffect(source.revision) { clearInput(); expanded = false; registerMode = false }
+    fun operate(successNotice: String? = null, action: suspend () -> Unit) {
         if (running || !enabled || !present) return
-        running = true; currentBusy(true); message = null
+        running = true; currentBusy(true); message = null; messageIsSuccess = false
         val expected = ++generation
         job = scope.launch {
             try {
                 action()
                 val refreshed = repository.sourceAccountState(source.id)
-                if (present && generation == expected) { currentAccountChanged(refreshed); expanded = false }
+                if (present && generation == expected) {
+                    currentAccountChanged(refreshed); expanded = false; registerMode = false
+                    if (successNotice != null) { message = successNotice; messageIsSuccess = true }
+                }
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 val failureMessage = (failure as? SourceAccountCleanupException)?.message ?: repository.sourceHealth.value[source.id]?.message ?: "验证未完成，请稍后重试。"
@@ -112,7 +125,7 @@ internal fun SourceAccountControls(
                     if (present && generation == expected) currentAccountChanged(refreshed)
                 } catch (cancel: CancellationException) { throw cancel }
                 catch (_: Exception) { /* Do not invent a new account state from a failed read. */ }
-                if (present && generation == expected) message = failureMessage
+                if (present && generation == expected) { messageIsSuccess = false; message = failureMessage }
             } finally {
                 if (present && generation == expected) { clearInput(); job = null; running = false; currentBusy(false) }
             }
@@ -128,19 +141,89 @@ internal fun SourceAccountControls(
                     fontSize = 11.sp, color = colors.onSurfaceVariant)
             }
             if (running) MotionTextButton(onClick = ::cancel, enabled = !cancelling) { Text(if (cancelling) "正在取消…" else "取消", fontSize = 12.sp) }
-            else MotionTextButton(onClick = {
-                if (account.signedIn || account.hasCredentials) operate { repository.sourceLogout(source.id) }
-                else { expanded = !expanded; clearInput(); message = null }
-            }, enabled = enabled) { Text(if (account.signedIn) "退出" else if (account.hasCredentials) "清除凭据" else if (expanded) "收起" else "登录", fontSize = 12.sp) }
+            else {
+                MotionTextButton(onClick = {
+                    if (account.signedIn || account.hasCredentials) operate { repository.sourceLogout(source.id) }
+                    else { expanded = !expanded; registerMode = false; clearInput(); message = null }
+                }, enabled = enabled) {
+                    Text(if (account.signedIn) "退出" else if (account.hasCredentials) "清除凭据"
+                        else if (expanded && !registerMode) "收起" else "登录", fontSize = 12.sp)
+                }
+                if (!account.signedIn && !account.hasCredentials && capabilities.registrationFields.isNotEmpty()) {
+                    MotionTextButton(onClick = {
+                        registerMode = !registerMode || !expanded
+                        expanded = registerMode
+                        clearInput(); message = null
+                    }, enabled = enabled) {
+                        Text(if (registerMode && expanded) "收起注册" else "注册", fontSize = 12.sp)
+                    }
+                }
+            }
         }
         AnimatedVisibility(expanded && !account.signedIn) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (capabilities.passwordLogin && capabilities.cookieFields.isNotEmpty()) Row {
+                if (!registerMode && capabilities.passwordLogin && capabilities.cookieFields.isNotEmpty()) Row {
                     MotionTextButton(onClick = { cookieMode = false; clearInput() }, enabled = enabled && !running) { Text("账号密码", fontSize = 12.sp) }
                     MotionTextButton(onClick = { cookieMode = true; clearInput() }, enabled = enabled && !running) { Text(capabilities.credentialLabel, fontSize = 12.sp) }
                 }
                 val credentialMode = capabilities.cookieFields.isNotEmpty() && (!capabilities.passwordLogin || cookieMode)
-                if (credentialMode) {
+                if (registerMode && capabilities.registrationFields.isNotEmpty()) {
+                    val fields = capabilities.registrationFields
+                    val visible = if (registerStage == 0) fields.take(6) else fields.drop(6)
+                    Text(if (registerStage == 0) "注册 · 基本资料" else "注册 · 安全问题",
+                        fontSize = 12.sp, color = colors.onSurfaceVariant)
+                    visible.forEach { field ->
+                        val value = registerValues[field.id].orEmpty()
+                        if (field.choices.isNotEmpty()) {
+                            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text(field.title, fontSize = 11.sp, color = colors.onSurfaceVariant)
+                                Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    field.choices.forEach { choice ->
+                                        MotionTextButton(onClick = {
+                                            registerValues = registerValues + (field.id to choice.id)
+                                        }, enabled = enabled && !running) {
+                                            Text(choice.title, fontSize = 12.sp, color = if (
+                                                (value.ifBlank { "bot" }) == choice.id
+                                            ) colors.onSurface else colors.onSurfaceVariant)
+                                        }
+                                    }
+                                }
+                            }
+                        } else SourceAccountField(field.title, value, enabled && !running, field.secret) {
+                            if (it.length <= 512 && it.none { ch -> ch == '\r' || ch == '\n' })
+                                registerValues = registerValues + (field.id to it)
+                        }
+                    }
+                    if (registerStage == 0) {
+                        MotionButton(onClick = { registerStage = 1 }, enabled = enabled && !running &&
+                            fields.take(5).all { registerValues[it.id].orEmpty().isNotBlank() }) {
+                            Text("下一步", fontSize = 12.sp)
+                        }
+                    } else {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = registerConsent, onCheckedChange = { registerConsent = it },
+                                enabled = enabled && !running)
+                            Text("我确认已年满18岁，并同意向该站点提交注册资料",
+                                fontSize = 11.sp, color = colors.onSurfaceVariant,
+                                modifier = Modifier.weight(1f))
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            MotionTextButton(onClick = { registerStage = 0 }, enabled = enabled && !running) {
+                                Text("上一步", fontSize = 12.sp)
+                            }
+                            MotionButton(onClick = {
+                                val captured = SourceRegistrationRequest(registerValues.toMap(), registerConsent, registerConsent)
+                                clearInput()
+                                operate("站点已接受注册请求，请使用新账号登录；如需邮箱验证，请按站点提示操作。") {
+                                    repository.sourceRegister(source.id, captured)
+                                }
+                            }, enabled = enabled && !running && registerConsent &&
+                                fields.all { it.id == "gender" || registerValues[it.id].orEmpty().isNotBlank() }) {
+                                Text("提交注册", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                } else if (credentialMode) {
                     Text("仅向此来源验证你的 ${capabilities.credentialLabel}；通过后保存在本机安全存储，退出时移除。",
                         fontSize = 11.sp, color = colors.onSurfaceVariant)
                     capabilities.cookieFields.forEachIndexed { index, name ->
@@ -169,7 +252,8 @@ internal fun SourceAccountControls(
                 }
             }
         }
-        message?.let { Text(it, fontSize = 11.sp, color = colors.error) }
+        message?.let { Text(it, fontSize = 11.sp,
+            color = if (messageIsSuccess) colors.onSurfaceVariant else colors.error) }
     }
 }
 
