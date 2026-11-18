@@ -30,7 +30,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 enum class SiteRankingKind(val label: String) {
-    SCORE("评分"), POPULARITY("人气"), TRENDING("趋势"), FAVOURITES("最爱")
+    SCORE("评分"), POPULARITY("人气"), TRENDING("趋势"), FAVOURITES("最爱"), NEWEST("新作")
 }
 
 enum class SiteRankingScope(val label: String) {
@@ -44,9 +44,10 @@ enum class RankingSite(val id: String, val title: String, val home: String) {
     MYANIMELIST("myanimelist", "MyAnimeList", "https://myanimelist.net");
 
     val kinds: List<SiteRankingKind> get() = when (this) {
-        BANGUMI -> listOf(SiteRankingKind.SCORE)
+        BANGUMI -> listOf(SiteRankingKind.SCORE, SiteRankingKind.POPULARITY, SiteRankingKind.NEWEST)
         ANILIST -> SiteRankingKind.entries
-        MYANIMELIST -> listOf(SiteRankingKind.SCORE, SiteRankingKind.POPULARITY, SiteRankingKind.FAVOURITES)
+        MYANIMELIST -> listOf(SiteRankingKind.SCORE, SiteRankingKind.POPULARITY, SiteRankingKind.FAVOURITES,
+            SiteRankingKind.NEWEST)
     }
     val scopes: List<SiteRankingScope> get() = when (this) {
         BANGUMI -> listOf(SiteRankingScope.SERIES, SiteRankingScope.ALL, SiteRankingScope.VOLUME)
@@ -54,24 +55,128 @@ enum class RankingSite(val id: String, val title: String, val home: String) {
         MYANIMELIST -> listOf(SiteRankingScope.MANGA, SiteRankingScope.MANHWA,
             SiteRankingScope.MANHUA, SiteRankingScope.ONE_SHOT)
     }
+    val supportsMonth: Boolean get() = this == BANGUMI
+    val supportsQuery: Boolean get() = true
+    val supportsGenres: Boolean get() = true
+    val supportsStatus: Boolean get() = this != BANGUMI
+    val supportsCountry: Boolean get() = this == ANILIST
+    val supportsMinScore: Boolean get() = true
+    val supportsMinVotes: Boolean get() = this != ANILIST
+}
+
+enum class SiteRankingGenre(val id: String, val label: String, val bangumiTag: String, val malId: Int) {
+    ACTION("Action", "动作", "战斗", 1),
+    ADVENTURE("Adventure", "冒险", "冒险", 2),
+    COMEDY("Comedy", "搞笑", "搞笑", 4),
+    DRAMA("Drama", "剧情", "剧情", 8),
+    FANTASY("Fantasy", "奇幻", "奇幻", 10),
+    HORROR("Horror", "恐怖", "恐怖", 14),
+    MYSTERY("Mystery", "悬疑", "悬疑", 7),
+    ROMANCE("Romance", "恋爱", "恋爱", 22),
+    SCI_FI("Sci-Fi", "科幻", "科幻", 24),
+    SLICE_OF_LIFE("Slice of Life", "日常", "日常", 36),
+    SPORTS("Sports", "运动", "运动", 30),
+    SUPERNATURAL("Supernatural", "超自然", "超自然", 37),
+}
+
+enum class SiteRankingStatus(val label: String, val malValue: String) {
+    RELEASING("连载中", "publishing"), FINISHED("已完结", "complete"),
+    NOT_YET_RELEASED("未开始", "upcoming"), HIATUS("休刊", "hiatus"), CANCELLED("已终止", "discontinued");
+    val id: String get() = name
+}
+
+data class SiteRankingFilters(
+    val year: Int? = null,
+    val month: Int? = null,
+    val query: String = "",
+    val genres: Set<String> = emptySet(),
+    val status: String? = null,
+    val country: String? = null,
+    val minScore: Int? = null,
+    val minVotes: Int? = null,
+) {
+    internal val hasSearchConditions: Boolean get() = query.isNotBlank() || genres.isNotEmpty() ||
+        minScore != null || minVotes != null
+
+    internal fun toJson(): JSONObject = JSONObject()
+        .put("year", year).put("month", month).put("query", query)
+        .put("genres", JSONArray(genres.sorted())).put("status", status).put("country", country)
+        .put("minScore", minScore).put("minVotes", minVotes)
 }
 
 data class SiteRankingSelection(
     val site: RankingSite = RankingSite.BANGUMI,
     val kind: SiteRankingKind = SiteRankingKind.SCORE,
     val scope: SiteRankingScope = SiteRankingScope.SERIES,
+    val filters: SiteRankingFilters = SiteRankingFilters(),
 ) {
-    val key: String get() = site.id + ":" + kind.name + ":" + scope.name
-    fun valid(): Boolean = kind in site.kinds && scope in site.scopes
-    val explanation: String get() = when (kind) {
+    /** JSON escaping and ordered genre IDs preserve distinct queries without delimiter collisions. */
+    val key: String get() = normalized().let { value ->
+        "v2:" + JSONObject().put("site", value.site.id).put("kind", value.kind.name)
+            .put("scope", value.scope.name).put("filters", value.filters.toJson()).toString()
+    }
+    val supportsAdvancedFilters: Boolean get() = site != RankingSite.BANGUMI || kind != SiteRankingKind.NEWEST
+    val supportsMonth: Boolean get() = site.supportsMonth && filters.year != null
+    val supportsStatus: Boolean get() = site.supportsStatus
+    val usesBangumiSearch: Boolean get() = site == RankingSite.BANGUMI && kind != SiteRankingKind.NEWEST &&
+        (kind == SiteRankingKind.POPULARITY || filters.hasSearchConditions)
+    val availableKinds: List<SiteRankingKind> get() = site.kinds
+    val availableScopes: List<SiteRankingScope> get() =
+        if (usesBangumiSearch) listOf(SiteRankingScope.ALL) else site.scopes
+    val scopeLabel: String get() = if (usesBangumiSearch) "漫画标签" else scope.label
+
+    fun normalized(): SiteRankingSelection {
+        val actualKind = kind.takeIf { it in site.kinds } ?: site.kinds.first()
+        val advanced = site != RankingSite.BANGUMI || actualKind != SiteRankingKind.NEWEST
+        val year = filters.year?.takeIf { it in 1900..3000 }
+        val clean = filters.copy(
+            year = year,
+            month = filters.month?.takeIf { site.supportsMonth && year != null && it in 1..12 },
+            query = if (advanced && site.supportsQuery) filters.query.trim().take(300) else "",
+            genres = if (advanced && site.supportsGenres) filters.genres.intersect(
+                SiteRankingGenre.entries.map { it.id }.toSet()) else emptySet(),
+            status = filters.status?.takeIf { site.supportsStatus && SiteRankingStatus.entries.any { s -> s.id == it } },
+            country = filters.country?.trim()?.uppercase()?.takeIf {
+                site.supportsCountry && it.matches(Regex("[A-Z]{2}")) },
+            minScore = filters.minScore?.takeIf { advanced && site.supportsMinScore && it in 1..10 },
+            minVotes = filters.minVotes?.takeIf { advanced && site.supportsMinVotes && it > 0 },
+        )
+        val actualScope = if (site == RankingSite.BANGUMI && actualKind != SiteRankingKind.NEWEST &&
+            (actualKind == SiteRankingKind.POPULARITY || clean.hasSearchConditions)) SiteRankingScope.ALL
+            else scope.takeIf { it in site.scopes } ?: site.scopes.first()
+        return copy(kind = actualKind, scope = actualScope, filters = clean)
+    }
+
+    fun valid(): Boolean = this == normalized()
+    val activeFilterCount: Int get() = filters.let { f -> listOf(f.year != null, f.month != null,
+        f.query.isNotBlank(), f.genres.isNotEmpty(), f.status != null, f.country != null,
+        f.minScore != null, f.minVotes != null).count { it } }
+    val filterSummary: String get() = buildList {
+        filters.year?.let { add("${it}年") }
+        filters.month?.let { add("${it}月") }
+        if (filters.query.isNotBlank()) add("「${filters.query}」")
+        val genres = SiteRankingGenre.entries.filter { it.id in filters.genres }.map { it.label }
+        if (genres.isNotEmpty()) add(genres.joinToString(" / "))
+        SiteRankingStatus.entries.firstOrNull { it.id == filters.status }?.let { add(it.label) }
+        filters.country?.let { add(when (it) { "JP" -> "日本"; "KR" -> "韩国"; "CN" -> "中国"; "TW" -> "台湾"; else -> it }) }
+        filters.minScore?.let { add("≥${it}分") }
+        filters.minVotes?.let { add("≥${it}人评分") }
+    }.joinToString(" · ")
+    val explanation: String get() = (if (site == RankingSite.BANGUMI && filters.query.isNotBlank())
+        "关键词按 Bangumi 的匹配程度排列，保留尚未进入评分榜的作品。清空关键词后恢复所选榜单排序。"
+        else when (kind) {
         SiteRankingKind.SCORE -> if (site == RankingSite.BANGUMI)
             "保留 Bangumi 原站评分排名顺序。序号属于当前漫画范围，原始评分排名在作品资料中显示。"
             else "保留来源的评分排序。列表序号属于当前范围，作品的全站评分排名单独记录。"
         SiteRankingKind.POPULARITY -> "按加入该站书单的人数排列，不是阅读次数或评分人数。"
         SiteRankingKind.TRENDING -> "按 AniList 过去一小时的相关活跃排列，不是累计人气。"
         SiteRankingKind.FAVOURITES -> "按该站标记为最爱的人数排列，与加入书单人数分别统计。"
-    } + (if (kind == SiteRankingKind.SCORE) if (site == RankingSite.ANILIST) " 100分制。" else " 10分制。" else "") + if (site == RankingSite.MYANIMELIST)
-        " 数据由现有 Tenrai 通道提供，可能滞后于原站；本地获取时间不代表原站更新时间。" else ""
+        SiteRankingKind.NEWEST -> "按作品首发日期由近到远排列，不是最新章节更新。"
+    }) + (if (kind == SiteRankingKind.SCORE) if (site == RankingSite.ANILIST) " 100分制。" else " 10分制。" else "") +
+        (if (usesBangumiSearch) " 按 Bangumi 的漫画标签检索书籍，不使用原站漫画分类或系列筛选；题材为用户标签。" else "") +
+        (if (filters.year != null) " 年份指作品首发年，不表示当年仍在连载。" else "") +
+        (if (site == RankingSite.MYANIMELIST)
+            " 数据由现有 Tenrai 通道提供，可能滞后于原站；本地获取时间不代表原站更新时间。" else "")
 }
 
 /** Catalogue identity is deliberately separate from every readable source identity. */
@@ -86,6 +191,7 @@ data class SiteRankedWork(
     val trending: Long? = null,
     val favourites: Long? = null,
     val ratingRank: Int? = null,
+    val publishedDate: String? = null,
 ) {
     val key: String get() = site.id + ":" + subjectId
 }
@@ -172,7 +278,17 @@ class SiteRankingsRepository(context: PlatformContext) {
                 val site = RankingSite.entries.firstOrNull { it.id == record.reviewText("site") } ?: return null
                 val kind = SiteRankingKind.entries.firstOrNull { it.name == record.reviewText("kind") } ?: return null
                 val scope = SiteRankingScope.entries.firstOrNull { it.name == record.reviewText("scope") } ?: return null
-                return SiteRankingSelection(site, kind, scope).takeIf { it.valid() }
+                val f = record.optJSONObject("filters")
+                val filters = if (f == null) SiteRankingFilters() else SiteRankingFilters(
+                    year = f.opt("year")?.toString()?.toIntOrNull(),
+                    month = f.opt("month")?.toString()?.toIntOrNull(),
+                    query = f.reviewText("query"), genres = strings(f.optJSONArray("genres")).toSet(),
+                    status = f.reviewText("status").takeIf(String::isNotBlank),
+                    country = f.reviewText("country").takeIf(String::isNotBlank),
+                    minScore = f.opt("minScore")?.toString()?.toIntOrNull(),
+                    minVotes = f.opt("minVotes")?.toString()?.toIntOrNull(),
+                )
+                return SiteRankingSelection(site, kind, scope, filters).normalized()
             }
             val selected = selection(root.optJSONObject("selected")) ?: return@runCatching null
             val perSite = root.optJSONArray("perSite")?.reviewObjects().orEmpty()
@@ -185,6 +301,7 @@ class SiteRankingsRepository(context: PlatformContext) {
         linkLock.withLock {
             fun encode(value: SiteRankingSelection): JSONObject =
                 JSONObject().put("site", value.site.id).put("kind", value.kind.name).put("scope", value.scope.name)
+                    .put("filters", value.filters.toJson())
             require(state.selected.valid())
             val perSite = JSONArray()
             state.perSite.values.filter { it.valid() }.distinctBy { it.site }.forEach { perSite.put(encode(it)) }
@@ -203,12 +320,16 @@ class SiteRankingsRepository(context: PlatformContext) {
     }
 
     private suspend fun bangumi(selection: SiteRankingSelection, page: Int): SiteRankingPage {
+        if (selection.usesBangumiSearch) return bangumiSearch(selection, page)
         val url = "https://api.bgm.tv/v0/subjects".toHttpUrl().newBuilder()
             .addQueryParameter("type", "1").addQueryParameter("cat", "1001")
-            .addQueryParameter("sort", "rank").addQueryParameter("limit", "20")
+            .addQueryParameter("sort", if (selection.kind == SiteRankingKind.NEWEST) "date" else "rank")
+            .addQueryParameter("limit", "20")
             .addQueryParameter("offset", (page * 20).toString()).apply {
                 if (selection.scope != SiteRankingScope.ALL)
                     addQueryParameter("series", (selection.scope == SiteRankingScope.SERIES).toString())
+                selection.filters.year?.let { addQueryParameter("year", it.toString()) }
+                selection.filters.month?.let { addQueryParameter("month", it.toString()) }
             }.build().toString()
         val response = http.json(url, "Bangumi 榜单", selection.site.home)
         val rows = response.optJSONArray("data") ?: invalid(selection.site)
@@ -220,6 +341,44 @@ class SiteRankingsRepository(context: PlatformContext) {
         val total = response.opt("total")?.toString()?.toLongOrNull()
             ?: throw SourceException("Bangumi 未返回有效的榜单分页。", selection.site.home)
         return SiteRankingPage(entries, (page + 1L) * 20 < total)
+    }
+
+    private suspend fun bangumiSearch(selection: SiteRankingSelection, page: Int): SiteRankingPage {
+        val f = selection.filters
+        val tags = listOf("漫画") + SiteRankingGenre.entries.filter { it.id in f.genres }.map { it.bangumiTag }
+        val filter = JSONObject().put("type", JSONArray(listOf(1))).put("tag", JSONArray(tags.distinct()))
+            .put("nsfw", false)
+        f.year?.let { year ->
+            val month = f.month ?: 1
+            val start = "$year-${month.toString().padStart(2, '0')}-01"
+            val end = if (f.month == null || month == 12) "${year + 1}-01-01"
+                else "$year-${(month + 1).toString().padStart(2, '0')}-01"
+            filter.put("air_date", JSONArray(listOf(">=$start", "<$end")))
+        }
+        f.minScore?.let { filter.put("rating", JSONArray(listOf(">=$it"))) }
+        f.minVotes?.let { filter.put("rating_count", JSONArray(listOf(">=$it"))) }
+        if (selection.kind == SiteRankingKind.SCORE && f.query.isBlank())
+            filter.put("rank", JSONArray(listOf(">0")))
+        val body = JSONObject().put("keyword", f.query)
+            .put("sort", when {
+                f.query.isNotBlank() -> "match"
+                selection.kind == SiteRankingKind.POPULARITY -> "heat"
+                else -> "rank"
+            })
+            .put("filter", filter)
+        // Search currently caps pages at 20; its total is an estimate, not a precise matching-work count.
+        val response = http.json("https://api.bgm.tv/v0/search/subjects?limit=20&offset=${page * 20}",
+            "Bangumi 漫画检索", selection.site.home, body = body)
+        val rows = response.optJSONArray("data") ?: invalid(selection.site)
+        val entries = rankObjects(rows, selection.site).mapIndexedNotNull { index, row ->
+            if (row.optBoolean("nsfw", false)) return@mapIndexedNotNull null
+            SiteRankingEntry(page * 20 + index + 1, bangumiWork(row))
+        }
+        val total = response.opt("total")?.toString()?.toLongOrNull()?.takeIf { it >= 0 }
+            ?: throw SourceException("Bangumi 未返回有效的检索分页。", selection.site.home)
+        val limit = response.optInt("limit", 20)
+        if (limit != 20) throw SourceException("Bangumi 检索分页规则已变化，请重试。", selection.site.home)
+        return SiteRankingPage(entries, rows.length() > 0 && (page + 1L) * 20 < total)
     }
 
     private fun bangumiWork(row: JSONObject): SiteRankedWork {
@@ -241,9 +400,13 @@ class SiteRankingsRepository(context: PlatformContext) {
             image?.reviewText(key)?.let { reviewAvatar(it, setOf("bgm.tv", "bangumi.tv")) }?.takeIf(String::isNotBlank)
         }.orEmpty()
         val rating = row.optJSONObject("rating")
+        val collection = row.optJSONObject("collection")
+        val counts = listOf("wish", "collect", "doing", "on_hold", "dropped").map { collection?.longCount(it) }
         return work(RankingSite.BANGUMI, id, titles, authors, cover, row.reviewText("summary"),
             rating?.reviewScore("score", 10), 10, rating?.reviewCount("total"),
-            ratingRank = rating?.reviewCount("rank")?.takeIf { it > 0 })
+            popularity = counts.takeIf { values -> values.all { it != null } }?.sumOf { it ?: 0L },
+            ratingRank = rating?.reviewCount("rank")?.takeIf { it > 0 },
+            publishedDate = row.reviewText("date").takeIf(String::isNotBlank))
     }
 
     private suspend fun aniList(selection: SiteRankingSelection, page: Int): SiteRankingPage {
@@ -252,6 +415,7 @@ class SiteRankingsRepository(context: PlatformContext) {
             SiteRankingKind.POPULARITY -> "POPULARITY_DESC"
             SiteRankingKind.TRENDING -> "TRENDING_DESC"
             SiteRankingKind.FAVOURITES -> "FAVOURITES_DESC"
+            SiteRankingKind.NEWEST -> "START_DATE_DESC"
         }
         val formats = when (selection.scope) {
             SiteRankingScope.MANGA -> listOf("MANGA")
@@ -259,6 +423,17 @@ class SiteRankingsRepository(context: PlatformContext) {
             else -> listOf("MANGA", "ONE_SHOT")
         }
         val variables = JSONObject().put("page", page + 1).put("sort", sort).put("formats", JSONArray(formats))
+        val f = selection.filters
+        if (f.query.isNotBlank()) variables.put("search", f.query)
+        if (f.genres.isNotEmpty()) variables.put("genres", JSONArray(f.genres.sorted()))
+        f.status?.let { variables.put("status", it) }
+        f.country?.let { variables.put("country", it) }
+        f.year?.let {
+            // Fuzzy dates may contain a known year with unknown month/day (YYYY0000).
+            variables.put("after", it * 10_000 - 1).put("before", (it + 1) * 10_000)
+        }
+        // AniList's predicate is strictly greater; the user-facing threshold is inclusive on a 10-point scale.
+        f.minScore?.let { variables.put("minScore", it * 10 - 1) }
         val body = JSONObject().put("query", ANILIST_QUERY).put("variables", variables)
         val response = http.json("https://graphql.anilist.co", "AniList 榜单", selection.site.home,
             body = body, minIntervalMillis = 2_100L)
@@ -287,12 +462,21 @@ class SiteRankingsRepository(context: PlatformContext) {
             val item = work(selection.site, id, titles, authors, cover, row.reviewText("description"),
                 row.reviewScore("averageScore", 100), 100, votes,
                 row.longCount("popularity"), row.longCount("trending"), row.longCount("favourites"),
-                extraIds = mal?.let { mapOf("myanimelist" to it) }.orEmpty())
+                extraIds = mal?.let { mapOf("myanimelist" to it) }.orEmpty(),
+                publishedDate = aniListPublishedDate(row.optJSONObject("startDate")))
             SiteRankingEntry(page * 20 + index + 1, item)
         }
         val info = result.optJSONObject("pageInfo") ?: invalid(selection.site)
         if (!info.has("hasNextPage")) invalid(selection.site)
         return SiteRankingPage(entries, info.getBoolean("hasNextPage"))
+    }
+
+    private fun aniListPublishedDate(value: JSONObject?): String? {
+        val year = value?.reviewCount("year")?.takeIf { it in 1..9999 } ?: return null
+        val month = value.reviewCount("month")?.takeIf { it in 1..12 } ?: return year.toString()
+        val prefix = "$year-${month.toString().padStart(2, '0')}"
+        val day = value.reviewCount("day")?.takeIf { it in 1..31 } ?: return prefix
+        return "$prefix-${day.toString().padStart(2, '0')}"
     }
 
     private suspend fun myAnimeList(selection: SiteRankingSelection, page: Int): SiteRankingPage {
@@ -302,14 +486,37 @@ class SiteRankingsRepository(context: PlatformContext) {
             SiteRankingScope.ONE_SHOT -> "oneshot"
             else -> "manga"
         }
-        val url = "https://api.tenrai.org/v1/top/manga".toHttpUrl().newBuilder()
+        val f = selection.filters
+        val search = f.query.isNotBlank() || selection.kind == SiteRankingKind.NEWEST
+        val endpoint = if (search) "https://api.tenrai.org/v1/manga" else "https://api.tenrai.org/v1/top/manga"
+        val url = endpoint.toHttpUrl().newBuilder()
             .addQueryParameter("page", (page + 1).toString()).addQueryParameter("limit", "20")
             .addQueryParameter("type", type).addQueryParameter("sfw", "true").apply {
-                when (selection.kind) {
-                    SiteRankingKind.POPULARITY -> addQueryParameter("filter", "bypopularity")
-                    SiteRankingKind.FAVOURITES -> addQueryParameter("filter", "favorite")
-                    else -> Unit
+                if (search) {
+                    if (f.query.isNotBlank()) addQueryParameter("q", f.query)
+                    addQueryParameter("order_by", when (selection.kind) {
+                        SiteRankingKind.POPULARITY -> "members"
+                        SiteRankingKind.FAVOURITES -> "favorites"
+                        SiteRankingKind.NEWEST -> "start_date"
+                        else -> "score"
+                    })
+                    addQueryParameter("sort", "desc")
+                    addQueryParameter("nulls", if (selection.kind == SiteRankingKind.NEWEST) "exclude" else "last")
+                } else {
+                    // /top uses ascending native rank even for bypopularity/favorite.
+                    addQueryParameter("sort", "asc")
+                    when (selection.kind) {
+                        SiteRankingKind.POPULARITY -> addQueryParameter("filter", "bypopularity")
+                        SiteRankingKind.FAVOURITES -> addQueryParameter("filter", "favorite")
+                        else -> Unit
+                    }
                 }
+                f.year?.let { addQueryParameter("year", it.toString()) }
+                SiteRankingStatus.entries.firstOrNull { it.id == f.status }?.let { addQueryParameter("status", it.malValue) }
+                if (f.genres.isNotEmpty()) addQueryParameter("genres", SiteRankingGenre.entries
+                    .filter { it.id in f.genres }.joinToString(",") { it.malId.toString() })
+                f.minScore?.let { addQueryParameter("min_score", it.toString()) }
+                f.minVotes?.let { addQueryParameter("min_scored_by", it.toString()) }
             }.build().toString()
         val response = http.json(url, "MyAnimeList 榜单", selection.site.home, minIntervalMillis = 1_000L)
         val rows = response.optJSONArray("data") ?: invalid(selection.site)
@@ -332,7 +539,9 @@ class SiteRankingsRepository(context: PlatformContext) {
                 work(selection.site, id, titles, authors, cover, row.reviewText("synopsis"),
                     row.reviewScore("score", 10), 10, row.reviewCount("scored_by"),
                     popularity = row.longCount("members"), favourites = row.longCount("favorites"),
-                    ratingRank = row.reviewCount("rank")?.takeIf { it > 0 }))
+                    ratingRank = row.reviewCount("rank")?.takeIf { it > 0 },
+                    publishedDate = row.optJSONObject("published")?.reviewText("from")?.take(10)
+                        ?.takeIf(String::isNotBlank)))
         }
         val pagination = response.optJSONObject("pagination") ?: invalid(selection.site)
         if (!pagination.has("has_next_page")) invalid(selection.site)
@@ -428,7 +637,8 @@ class SiteRankingsRepository(context: PlatformContext) {
     private fun work(site: RankingSite, id: String, titles: List<String>, authors: List<String>,
         cover: String, description: String, score: Double?, scale: Int, count: Int?,
         popularity: Long? = null, trending: Long? = null, favourites: Long? = null,
-        ratingRank: Int? = null, extraIds: Map<String, String> = emptyMap()): SiteRankedWork {
+        ratingRank: Int? = null, extraIds: Map<String, String> = emptyMap(),
+        publishedDate: String? = null): SiteRankedWork {
         if (titles.isEmpty()) invalid(site)
         val url = when (site) {
             RankingSite.BANGUMI -> site.home + "/subject/" + id
@@ -441,7 +651,8 @@ class SiteRankingsRepository(context: PlatformContext) {
             description = reviewPlainText(description).take(12_000), sourceUrl = url,
             sourceId = "catalog", sourceName = site.title, alternativeTitles = titles.take(24),
             externalIds = extraIds + (site.id to id))
-        return SiteRankedWork(site, id, manga, score, scale, count, popularity, trending, favourites, ratingRank)
+        return SiteRankedWork(site, id, manga, score, scale, count, popularity, trending, favourites, ratingRank,
+            publishedDate?.takeIf { it.matches(Regex("[0-9]{4}(?:-[0-9]{2}){0,2}")) })
     }
 
     /** A native catalogue ID is never usable as a body route, even in a saved association. */
@@ -533,7 +744,8 @@ class SiteRankingsRepository(context: PlatformContext) {
                             item.reviewScore("score", if (selection.site == RankingSite.ANILIST) 100 else 10),
                             if (selection.site == RankingSite.ANILIST) 100 else 10,
                             item.reviewCount("ratingCount"), item.longCount("popularity"),
-                            item.longCount("trending"), item.longCount("favourites"), item.reviewCount("ratingRank")))
+                            item.longCount("trending"), item.longCount("favourites"), item.reviewCount("ratingRank"),
+                            item.reviewText("publishedDate").takeIf { it.matches(Regex("[0-9]{4}(?:-[0-9]{2}){0,2}")) }))
                 }
                 require(entries.distinctBy { it.work.key }.size == entries.size)
                 SiteRankingSnapshot(selection, entries, root.getInt("page").also { require(it in 0..199) },
@@ -554,6 +766,7 @@ class SiteRankingsRepository(context: PlatformContext) {
                 w.score?.let { value.put("score", it) }; w.ratingCount?.let { value.put("ratingCount", it) }
                 w.popularity?.let { value.put("popularity", it) }; w.trending?.let { value.put("trending", it) }
                 w.favourites?.let { value.put("favourites", it) }; w.ratingRank?.let { value.put("ratingRank", it) }
+                w.publishedDate?.let { value.put("publishedDate", it) }
                 rows.put(JSONObject().put("position", entry.position).put("work", value))
             }
             val bytes = JSONObject().put("version", 1).put("key", snapshot.selection.key)
@@ -641,11 +854,16 @@ class SiteRankingsRepository(context: PlatformContext) {
             }
         """
         const val ANILIST_QUERY = """
-            query MangaFlowRankings(${'$'}page: Int!, ${'$'}sort: MediaSort!, ${'$'}formats: [MediaFormat]!) {
+            query MangaFlowRankings(${'$'}page: Int!, ${'$'}sort: MediaSort!, ${'$'}formats: [MediaFormat]!,
+              ${'$'}search: String, ${'$'}genres: [String], ${'$'}status: MediaStatus, ${'$'}country: CountryCode,
+              ${'$'}after: FuzzyDateInt, ${'$'}before: FuzzyDateInt, ${'$'}minScore: Int) {
               Page(page: ${'$'}page, perPage: 20) {
                 pageInfo { hasNextPage }
-                media(type: MANGA, format_in: ${'$'}formats, isAdult: false, sort: [${'$'}sort, ID]) {
+                media(type: MANGA, format_in: ${'$'}formats, isAdult: false, sort: [${'$'}sort, ID],
+                  search: ${'$'}search, genre_in: ${'$'}genres, status: ${'$'}status, countryOfOrigin: ${'$'}country,
+                  startDate_greater: ${'$'}after, startDate_lesser: ${'$'}before, averageScore_greater: ${'$'}minScore) {
                   id idMal type format isAdult
+                  startDate { year month day }
                   title { native romaji english } synonyms
                   coverImage { large } description(asHtml: false)
                   averageScore popularity trending favourites

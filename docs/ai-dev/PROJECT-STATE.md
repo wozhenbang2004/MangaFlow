@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Native manga ranking filters and annual awards · source checkpoint 2026-11-18
+
+Route DELIVERY; stage SOURCE_COMPLETE, with publication and installed outcomes reported separately. Current user wording and screenshot 1000122064.jpg are recorded in DESIGN RANK-DISCOVERY-01–08. Scope is the existing three-site manga ranking page, richer provider-supported discovery filters and a separate annual award route. The initial base was main 056ca0200e3f9925a65205920d94da36e49472ce; the later 4af96624b0d51da13fe65d0a563f70395075d99e adult-source/signup/recommendation batch touches no files in this slice and must be preserved.
+
+Implemented publication-year shortcuts/custom year, source-specific combined filters, new-publication ordering, normalized per-site persistence and complete query/cache identity. Bangumi keyword mode is explicitly relevance/tag-based. The new award catalogue contains 56 verified result records with precise coverage and announcement years; manual selection of a real searched catalogue result enters the existing readable-source flow after panel exit. All new controls reuse the current Ovio/Popover/PANEL/header/cover sources. Original manga-source identities and the independent anime area remain unchanged.
+
+Root integrated separate data, filter-panel and award-page file owners. Bounded source/diff review covered parameters, enum branches, persistence, input/presence gates and stale-result cancellation. No tests, local builds/compiles, API/service probes, device operations or UI automation were performed. Current UI appearance, touch/keyboard behavior and live provider results await installed feedback; a successful build is not claimed. Static award coverage is Taisho 2008–2026 and Shogakukan/Kodansha 2022–2026, updated with the app, not a live or exhaustive awards service.
+
+Next exact action at this source checkpoint: publish the complete batch on the latest main using expected-head protection, confirm normal Android/native workflow activation, and stop without waiting for artifacts or sending a status-only push. If this source is already on main, continue only from actual CI failure evidence or user feedback; do not repeat completed research or publication. Root is the sole commit/ref/document integrator. Raw-feedback coverage reaches the current “做丰富点” message, recorded 2026-11-18 Asia/Shanghai; exact message ID/time unavailable.
+
 ## Lanerc source integration and AGE preference correction · source checkpoint 2026-11-18
 
 Route DELIVERY with bounded source diagnosis; stage SOURCE_COMPLETE, publication and installed outcomes reported separately. Integration base: main ffa8fea60c054469ed5c97d9155a32b9e98a5c2c. Root is the sole commit/ref/document integrator; isolated contributors returned reviewed blobs. Preserve all unrelated main changes.

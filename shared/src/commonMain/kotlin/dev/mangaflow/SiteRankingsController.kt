@@ -92,8 +92,9 @@ class SiteRankingsController(
         val selection = selections[site] ?: SiteRankingSelection(site, SiteRankingKind.SCORE, site.scopes.first())
         select(selection)
     }
-    fun selectKind(kind: SiteRankingKind) = select(mutable.value.selection.copy(kind = kind))
-    fun selectScope(value: SiteRankingScope) = select(mutable.value.selection.copy(scope = value))
+    fun selectKind(kind: SiteRankingKind) = select(mutable.value.selection.copy(kind = kind).normalized())
+    fun selectScope(value: SiteRankingScope) = select(mutable.value.selection.copy(scope = value).normalized())
+    fun applySelection(selection: SiteRankingSelection) = select(selection.normalized())
 
     private fun select(selection: SiteRankingSelection) {
         if (!selection.valid() || selection == mutable.value.selection) return

@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.EmojiEvents
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Link
@@ -86,8 +87,10 @@ internal fun SiteRankingsScreen(
     onInspect: (SiteRankedWork) -> Unit,
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
-    DisposableEffect(controller, active) {
-        controller.setVisible(active)
+    var awards by rememberSaveable { mutableStateOf(false) }
+    var awardsRequested by remember { mutableStateOf(false) }
+    DisposableEffect(controller, active, awards) {
+        controller.setVisible(active && !awards)
         onDispose { controller.setVisible(false) }
     }
     var siteMenu by remember { mutableStateOf(false) }
@@ -101,16 +104,29 @@ internal fun SiteRankingsScreen(
     var infoRequested by remember { mutableStateOf(false) }
     var infoVisible by remember { mutableStateOf(false) }
     var infoPresent by remember { mutableStateOf(false) }
+    var filtersRequested by remember { mutableStateOf(false) }
+    var filtersVisible by remember { mutableStateOf(false) }
+    var filtersPresent by remember { mutableStateOf(false) }
     LaunchedEffect(active) {
         if (!active) {
             siteMenu = false; filterMenu = false
             infoRequested = false; infoVisible = false; infoPresent = false
+            filtersRequested = false; filtersVisible = false; filtersPresent = false
+            awardsRequested = false
         }
     }
     val colors = MaterialTheme.colorScheme
     val positions = rememberSaveableStateHolder()
     val ready = active && !state.restoringSelection
     val menuWidth = 208.dp * LocalDensity.current.fontScale.coerceIn(1f, 1.4f)
+    if (awards) {
+        positions.SaveableStateProvider("award-catalogue") {
+            MangaAwardsScreen(controller.repository, backdrop, navigation, active,
+                onSite = { site -> controller.selectSite(site); awards = false },
+                onBack = { awards = false }, onOpen = onOpen)
+        }
+        return
+    }
     RankingPageFrame(Modifier.fillMaxSize().background(colors.background.copy(alpha = .97f))
         .semantics { paneTitle = "各站榜单" }, header = {
         Column {
@@ -133,7 +149,13 @@ internal fun SiteRankingsScreen(
                             Icon(Icons.Outlined.ExpandMore, "选择榜单站点", Modifier.padding(start = 4.dp).size(17.dp))
                         }
                         CompactGlassPopover(siteMenu && ready, backdrop, onDismiss = { siteMenu = false },
-                            onPresenceChange = { sitePresent = it }, alignToStart = true, maximumWidth = menuWidth) {
+                            onPresenceChange = { present ->
+                                sitePresent = present
+                                if (!present && awardsRequested) {
+                                    awardsRequested = false
+                                    awards = active
+                                }
+                            }, alignToStart = true, maximumWidth = menuWidth) {
                             Column(Modifier.selectableGroup()) {
                                 RankingSite.entries.forEach { site ->
                                     RankingMenuChoice(site.title, site == menuSite, ready && siteMenu,
@@ -141,6 +163,9 @@ internal fun SiteRankingsScreen(
                                         siteMenu = false; controller.selectSite(site)
                                     }
                                 }
+                            }
+                            CompactMenuAction(Icons.Outlined.EmojiEvents, "年度获奖", enabled = ready && siteMenu) {
+                                awardsRequested = true; siteMenu = false
                             }
                         }
                     }
@@ -155,8 +180,12 @@ internal fun SiteRankingsScreen(
                     }
                 })
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                val kinds = state.selection.site.kinds
-                if (kinds.size > 1) BoxWithConstraints(Modifier.weight(1f)) {
+                val kinds = state.selection.availableKinds
+                val keywordMatch = state.selection.site == RankingSite.BANGUMI &&
+                    state.selection.filters.query.isNotBlank()
+                if (keywordMatch) Text("搜索匹配", Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 12.dp),
+                    style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                else if (kinds.size > 1) BoxWithConstraints(Modifier.weight(1f)) {
                     val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                     val minimum = 48.dp * scale * kinds.size
                     val tabsWidth = maxWidth.coerceAtLeast(minimum)
@@ -180,9 +209,11 @@ internal fun SiteRankingsScreen(
                         contentPadding = PaddingValues(horizontal = 8.dp), modifier = Modifier.heightIn(min = 44.dp).semantics {
                             stateDescription = if (filterMenu) "范围菜单已展开" else "范围菜单已收起"
                         }) {
-                        Text(if (state.restoringSelection) "范围" else state.selection.scope.label,
+                        Text(if (state.restoringSelection) "筛选" else state.selection.scopeLabel,
                             style = MaterialTheme.typography.bodySmall, maxLines = 1)
-                        Icon(Icons.Outlined.FilterList, "选择漫画范围", Modifier.padding(start = 5.dp).size(17.dp))
+                        if (state.selection.activeFilterCount > 0) Text(" · " + state.selection.activeFilterCount,
+                            style = MaterialTheme.typography.labelSmall)
+                        Icon(Icons.Outlined.FilterList, "选择漫画范围和组合筛选", Modifier.padding(start = 5.dp).size(17.dp))
                     }
                     CompactGlassPopover(filterMenu && ready, backdrop, onDismiss = { filterMenu = false },
                         onPresenceChange = { present ->
@@ -191,10 +222,15 @@ internal fun SiteRankingsScreen(
                                 infoRequested = false
                                 infoVisible = active
                             }
+                            if (!present && filtersRequested) {
+                                filtersRequested = false
+                                filtersVisible = active
+                            }
                         }, maximumWidth = menuWidth) {
                         Column(Modifier.selectableGroup()) {
-                            menuSelection.site.scopes.forEach { value ->
-                                RankingMenuChoice(value.label, value == menuSelection.scope, ready && filterMenu) {
+                            menuSelection.availableScopes.forEach { value ->
+                                RankingMenuChoice(if (menuSelection.usesBangumiSearch) menuSelection.scopeLabel else value.label,
+                                    value == menuSelection.scope, ready && filterMenu) {
                                     filterMenu = false; controller.selectScope(value)
                                 }
                             }
@@ -203,10 +239,31 @@ internal fun SiteRankingsScreen(
                             fontSize = 11.sp, lineHeight = 16.sp, color = colors.error) }
                         Box(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)
                             .height(1.dp).background(colors.onSurface.copy(alpha = .07f)))
+                        CompactMenuAction(Icons.Outlined.FilterList, "组合筛选", enabled = ready && filterMenu) {
+                            filtersRequested = true; filtersPresent = true; filterMenu = false
+                        }
                         CompactMenuAction(Icons.Outlined.Info, "榜单说明", enabled = ready && filterMenu) {
                             infoRequested = true; infoPresent = true; filterMenu = false
                         }
                     }
+                }
+            }
+            if (state.selection.activeFilterCount > 0) Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically,
+            ) {
+                MotionTextButton(onClick = {
+                    menuSelection = state.selection
+                    filtersPresent = true; filtersVisible = true
+                }, enabled = ready && !sitePresent && !filterPresent && !infoPresent,
+                    modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 10.dp)) {
+                    Text(state.selection.filterSummary, Modifier.fillMaxWidth(), maxLines = 1,
+                        overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant)
+                }
+                MotionIconButton(onClick = {
+                    controller.applySelection(state.selection.copy(filters = SiteRankingFilters()))
+                }, enabled = ready && !filtersPresent, modifier = Modifier.size(44.dp), tooltip = "清除筛选") {
+                    Icon(Icons.Outlined.Close, "清除筛选", Modifier.size(16.dp))
                 }
             }
         }
@@ -216,11 +273,17 @@ internal fun SiteRankingsScreen(
             soft = true, modifier = Modifier.fillMaxSize()) { pane ->
             positions.SaveableStateProvider(pane.selection.key) {
                 RankingPane(pane, backdrop, 0.dp, active = ready && pane.selection == state.selection &&
-                    !siteMenu && !filterMenu && !sitePresent && !filterPresent && !infoPresent,
+                    !siteMenu && !filterMenu && !sitePresent && !filterPresent && !infoPresent && !filtersPresent,
                     onRetry = controller::retry, onMore = controller::more, onOpen = onOpen, onInspect = onInspect)
             }
         }
     }
+    SiteRankingFiltersDialog(visible = filtersVisible && active, selection = menuSelection,
+        active = active, backdrop = backdrop, onApply = {
+            controller.applySelection(it); filtersVisible = false
+        }, onDismiss = { filtersVisible = false }, onClosed = {
+            if (!filtersVisible) filtersPresent = false
+        })
     // A help action waits for the actual menu exit; it never stacks two active surfaces.
     MotionDialog(visible = infoVisible && active, onDismissRequest = { infoVisible = false },
         maximumWidth = 320.dp, onClosed = { if (!infoVisible) infoPresent = false }) {
@@ -232,7 +295,7 @@ internal fun SiteRankingsScreen(
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(menuSelection.site.title + " · " + menuSelection.kind.label,
                             style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
-                        Text(menuSelection.scope.label, style = MaterialTheme.typography.labelSmall,
+                        Text(menuSelection.scopeLabel, style = MaterialTheme.typography.labelSmall,
                             color = colors.onSurfaceVariant)
                     }
                     MotionIconButton(onClick = { infoVisible = false }, modifier = Modifier.size(44.dp),
@@ -252,7 +315,7 @@ internal fun SiteRankingsScreen(
 
 /** Adapt CompactMenuAction's press/material row, with actual single-choice semantics. */
 @Composable
-private fun RankingMenuChoice(
+internal fun RankingMenuChoice(
     label: String,
     selected: Boolean,
     enabled: Boolean,
@@ -283,7 +346,7 @@ private fun RankingMenuChoice(
 
 /** Adapt AccountScreen's same-pass header/content measurement, without a deferred inset update. */
 @Composable
-private fun RankingPageFrame(
+internal fun RankingPageFrame(
     modifier: Modifier = Modifier,
     header: @Composable () -> Unit,
     content: @Composable () -> Unit,
@@ -340,7 +403,7 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
                             MotionTextButton(onClick = onRetry, enabled = active) { Text("重试") }
                         }
                         state.loadingMore -> MotionBusyIndicator(Modifier.padding(16.dp).size(20.dp))
-                        state.entries.isEmpty() -> EmptyMessage("当前范围没有条目", "可以更换范围或站点。")
+                        state.entries.isEmpty() -> EmptyMessage("当前条件没有条目", "可以放宽年份、题材等筛选条件，或更换站点。")
                     }
                     if (state.entries.isEmpty() && state.hasMore && !state.loadingMore && state.error == null)
                         MotionTextButton(onClick = onMore, enabled = active) { Text("继续读取") }
@@ -387,13 +450,18 @@ private fun SiteRankingRow(entry: SiteRankingEntry, kind: SiteRankingKind, linke
                     SiteRankingKind.POPULARITY -> w.popularity?.let(::rankingCount)
                     SiteRankingKind.TRENDING -> w.trending?.let(::rankingCount)
                     SiteRankingKind.FAVOURITES -> w.favourites?.let(::rankingCount)
+                    SiteRankingKind.NEWEST -> w.publishedDate
                 }
                 if (value != null) Text(value, modifier = Modifier.alignByBaseline(), style = mangaMetricValueStyle(16.sp, 22.sp))
                 if (kind == SiteRankingKind.SCORE && w.ratingCount != null)
                     Text(rankingCount(w.ratingCount.toLong()) + "人评分", Modifier.alignByBaseline(),
                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 1)
                 else if (kind != SiteRankingKind.SCORE && value != null)
-                    Text(if (kind == SiteRankingKind.POPULARITY) "书单" else kind.label, Modifier.alignByBaseline(),
+                    Text(when (kind) {
+                        SiteRankingKind.POPULARITY -> "书单"
+                        SiteRankingKind.NEWEST -> "首发"
+                        else -> kind.label
+                    }, Modifier.alignByBaseline(),
                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 1)
             }
         }
@@ -405,7 +473,7 @@ private fun SiteRankingRow(entry: SiteRankingEntry, kind: SiteRankingKind, linke
 
 /** Same anonymous cover cache and quiet fallback as MangaCover, without readable-source headers. */
 @Composable
-private fun CatalogueCover(manga: Manga, modifier: Modifier) {
+internal fun CatalogueCover(manga: Manga, modifier: Modifier) {
     val context = LocalMangaContext.current
     val motion = LocalMotionEnabled.current
     val request = remember(context, manga.coverUrl, motion) {
