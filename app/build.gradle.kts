@@ -46,10 +46,12 @@ android {
     }
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
-        // Compress multi-ABI inference libraries in the directly distributed APK.
+        // Source scripts use the pinned QuickJS AAR in the base APK, including every supported ABI.
+        // Preserve its native bytes so release packaging can compare them with that exact AAR.
         jniLibs.useLegacyPackaging = true
+        jniLibs.keepDebugSymbols += "**/libquickjs.so"
         jniLibs.excludes += setOf("**/libtensorflowlite_jni.so", "**/libonnxruntime.so",
-            "**/libonnxruntime4j_jni.so", "**/libquickjs.so")
+            "**/libonnxruntime4j_jni.so")
     }
 }
 

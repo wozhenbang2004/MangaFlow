@@ -1,8 +1,83 @@
 # Lanerc feature transfer into MangaFlow
 
-Source implementation checkpoint: 2026-11-17. This document distinguishes implemented application paths from the complete requested inventory. It does not certify installed behavior, source availability, rendering performance or successful packaging.
+Source implementation checkpoint: 2026-11-18. This document distinguishes implemented application paths from the complete requested inventory. It does not certify installed behavior, source availability, rendering performance or successful packaging.
 
-## Real-content carousel and stream compatibility · 2026-11-18
+## Current source integration inventory · 2026-11-18
+
+This section supersedes older AGE-first, optional-only QuickJS, six-source private-key blacklist and LMM85-as-LMM22-alias statements below. DESIGN ANIME-INTEGRATION-01–09 preserves the newest user request and evidence boundary. The original 23 unique references contain **16 positively identified video scripts, 1 browse-only provider, 4 comic providers, 1 danmaku provider and 1 ENC1 encrypted package of unconfirmed capability**. They are not 23 usable video sources. The directory now also exposes five distinct native alternatives; these are equivalent integration paths, not five additional original references.
+
+### Actual video integration paths
+
+| Original reference | Application path in this batch | Remaining source-specific qualification |
+| --- | --- | --- |
+| Jinpai / 金牌 | NativeJinpaiProvider, anime-native-jinpai | Native latest/search/catalogue/resolve; keyword search follows the original first-page-only contract. |
+| yzx / Youke 3.0 | NativeYzxProvider, anime-native-yzx | Native latest/paged search/catalogue/resolve; Android/JVM GCM capability required. Saved old script bindings remain supported separately. |
+| AniCh | Existing native anime-native-ani | Keep actual anonymous API and source/episode/line identity; no synthetic episodes. |
+| AkiAnime | Existing native anime-native-akianime | Public direct paths; verification/encrypted routes are not certified. |
+| DMBus / 动漫巴士 | Existing native anime-native-dmbus | Public direct paths; dynamic encrypted routes are not certified. |
+| Lanerc | Automatically prepare pinned anime-lanerc-lanerc | Guest/account/verification-dependent capabilities remain subject to actual host support; no borrowed account credentials. |
+| Guazi / 瓜子 | Automatically prepare pinned anime-lanerc-guazi | Anonymous state survives fresh JS calls; first-page-only keyword contract retained. |
+| Shixiong / 师兄 | Automatically prepare pinned anime-lanerc-sx | Fixed AppV7 HTTP endpoint and actual search.pg; dynamic parser paths still require supported public URLs. |
+| LMM85 | Automatically prepare pinned anime-lanerc-lmm85 | Distinct from native LMM22. Direct paths only; WebView validation/sniff capability is not implemented. |
+| Gugu / 柚子 | Automatically prepare pinned anime-lanerc-gugu | Fixed AppV7 HTTP endpoint and actual search.pg. |
+| Manguo / 追剧 | Automatically prepare pinned anime-lanerc-manguo | Fixed AppV7 HTTP endpoint and actual search.pg. |
+| 23 | Automatically prepare pinned anime-lanerc-23 | Fixed HTTP protobuf API, actual binary request bytes and page field. Previously disabled choices remain disabled. |
+| Cain | Automatically prepare pinned anime-lanerc-ain | Fixed HTTP static bootstrap, actual page/size contract; returned business URLs still require HTTPS. Previously disabled choices remain disabled. |
+| Nmeng / 柠檬 | Automatically prepare pinned anime-lanerc-nmeng | Fixed AppV7 HTTP endpoint and actual search.pg. |
+| Shandian / 闪电 | Automatically prepare pinned anime-lanerc-sd | Retain prior response/pagination evidence guards. |
+| 07 / 零七 | Automatically prepare pinned anime-lanerc-07 | Fixed AppV7 HTTP endpoint and actual search.pg. |
+
+Thus **5 native alternatives + 11 automatically prepared pinned video scripts** are connected to application paths. Douban and danmaku are also prepared as their own types. Automatic preparation downloads the fixed script and validates it using the existing revision/storage owner; it does not embed every third-party script body in the APK and it does not prove a remote source plays. Existing removal tombstones and disabled settings win. Legacy source IDs/bindings are not migrated by guessing; explicit native choices win over inherited defaults.
+
+### Native protocol correspondence
+
+Jinpai independently adapts [jinpaiapp.js](https://js.z1i.cn/js/jinpaiapp.js), SHA-256 6f924a30e23fac63681e3d4d23ee5adb5ad76c10459b2e063d442a7a96286dfe. Preserve the original sorted unescaped parameter/timestamp MD5→SHA1 signing, anonymous headers, six published HTTPS hosts, anime type 4, vodId/nid and real resolution fields. Host discovery is bounded and cached per route; no total-count-derived episodes or guessed 1080P labels. Actual playback Origin/Referer/UA are retained. There is no dependency on downloading this script for the native path.
+
+yzx independently adapts [yzx.js](https://js.z1i.cn/js/yzx.js), SHA-256 6056afbb33ffbc7bbb71e2632a31c66fe6d575389983b4f2076dcae599a14e16. This pinned source is **Youke 3.0 / com.youkevideo.app**, not the older community Baiyun 2.5 protocol. Its HTTPS bootstrap is https://ss.trgfd.cn/cache/index/com.youkevideo.app.json. Preserve the 12-byte-nonce AES-GCM layout, separate content/play protocol keys, actual sid/ji/jiIndex/group meanings, local random device identity, host/version/route-scoped in-memory device response and one refresh on 10301/10303. Re-read the actual catalogue before resolving to reject reordered indices; source mode attempts 3→2→0 keep the same selected episode. Ordinary HLS/TS, HTTPS direct and image-prefixed HLS candidates retain actual source meaning; their playability remains unobserved.
+
+Both native catalogue methods may re-read an old saved revision after disable/re-enable or an application update, while checking the exact source/work/canonical URL. Returned catalogues carry the current revision; resolve requires that exact revision. This corrects the pre-integration review blocker without rewriting history or accepting stale assets.
+
+### Script host and transport corrections
+
+The public RSA constants in Guazi and five AppV7 sources are client response/parser decoding material, not a user's account private key. The earlier blanket classification blocked real integrations and is removed; digest validation, private user options and media/public-host guards remain. The host now carries the original UA alias, noCookie and binary body encoding through to the transport. HTTP Referer is validated independently of the actual HTTPS media URL; the exact pinned old yzx “never” sentinel means omit Referer.
+
+Only the following static public protocol requests gain cleartext support on Android/JVM. The source ID and reviewed script digest must match before the host creates this capability; raw JS request parameters cannot grant it.
+
+| Source | Exact endpoint | Method |
+| --- | --- | --- |
+| 师兄 | http://app2.dsx.ac/ndsx.php/v7/logs | POST |
+| 柚子 | http://91.110.236.125:38569/nxyz.php/v7/logs | POST |
+| 追剧 | http://23.224.111.70:7788/nzdr.php/v7/logs | POST |
+| 柠檬 | http://198.16.32.138:12345/nxnm.php/v7/logs | POST |
+| 零七 | http://23.224.53.35:2345/nllq.php/v7/logs | POST |
+| 23 | http://118.184.173.5:19987/app/bn/v2 | POST |
+| Cain static bootstrap | http://frontend-static.kurte.cn/server_list_v2.json | GET |
+
+No query, fragment or embedded credentials are accepted on these HTTP requests. The JVM transport snapshots the host-granted list, checks every hop, retains actual public DNS/IP and route ownership, rejects generic Cookie/Authorization on HTTP, rejects cross-origin body redirects and HTTPS→HTTP downgrade. Android network security remains closed by default with only the seven exact hosts admitted; it is not a blanket cleartext switch. Dynamic HTTP parser hosts, HTTP media and data-URL manifests are not silently admitted. iOS retains HTTPS-only transport and a truthful unsupported error for these protocols.
+
+[Guazi original](https://js.z1i.cn/js/guazi.js), digest b1de6ca1f34b47d11d351ee540445da321d547902b08502edfe062fa501e2be9, keeps device/token/node/cooldown in top-level globals. Creating a new JS context per operation previously lost that anonymous session. LanercSessionBridge saves only those validated fields through the existing private getItem/setItem owner, capped at 16 KiB and scoped to source, digest, revision and route. It skips explicit ext overrides, preserves a real recent registration failure even with an empty token, clears stale/future cooldown, and cannot save a cancelled or superseded invocation. It does not persist detail caches or copy original crypto constants.
+
+### Runtime, home and playback
+
+The existing pinned QuickJS-kt 1.0.18 API dependency already supplied the engine libraries, but packaging excluded them. Android now includes its four supported ABI libraries and loads the bundled library through the existing runtime owner; existing license notices and exact upstream bytes are retained. Runtime packaging checks those bytes/ABIs and keeps optional engine archives for compatibility with older APKs. Only QuickJS changes to bundled; inference engines/models and Steam keep their existing policies. Actual APK size and installed loading are not yet observed.
+
+AnimeSourceBrowseController removes the AGE special case. It loads source latest/homeSections independently and shares the source/revision/route-keyed first-page request with source browsing. A failed feed returns failure data without cancelling sibling feeds. The retained FeaturedCarousel interleaves real video objects from completed feeds; its first feed follows actual successful completion, not fixed AGE ordering. Bangumi can enrich discovery independently. Source title objects remain authoritative for catalogue navigation; metadata-only cards do not become playable by title resemblance.
+
+The Android player removes HLS→Progressive container fallback: opening an HLS playlist as a progressive media file is not a stream repair. Existing bounded network retries and the prior guarded image-prefix extractor remain. AGE automatic alternatives now use the selected group and strictly matching known episode/edition routes, avoiding guessed mappings across incomplete catalogues. Private playback diagnostics keep at most 12 records / 64 KiB, recording real error code/stage, source ID, generation, build and cause classes; no URLs, titles, tokens, cookies or exception bodies. The existing manual report entry can include them; nothing is automatically uploaded.
+
+### Explicitly open capability and evidence gaps
+
+- LMM85 WebView/validation/sniff branches and Jcy ENC1 unpacking are not implemented. The encrypted package is not an empty script or a proven working video adapter.
+- Conditional unreviewed dynamic HTTP parser/media or data-manifest returns may remain unsupported. Static script review cannot establish which branch a live episode returns.
+- Four Lanerc comic protocols have not been ported into the manga host. They are separate from the preceding JM bitmap-restoration fix, whose successful installed image outcome remains unknown.
+- iOS crypto/HTTP capabilities differ from Android/JVM. Registration and common source code do not establish full iOS source support.
+- All 23 original static references were fetched and matched to the recorded digests; no scripts were executed and no business/media endpoint was probed. Independent source review is not compilation or playback.
+- The latest screenshot does not identify an installed build or response bytes. Actual no-proxy reachability, first-frame time, continued playback, first-use preparation and UI/gesture quality remain pending actual CI/user evidence.
+
+Publish as one expected-head latest-main batch with ordinary CI activation only, under the project validation boundary. Do not wait for artifacts, add a status-only push or announce “all sources instantly playable”.
+
+
+## Historical carousel and stream compatibility · 2026-11-18
 
 DESIGN ANIME-REPAIR-01–06 records the current report and three before screenshots. The anime carousel adapts MangaFlow's existing FeaturedCarousel: first six already-loaded AGE updates, otherwise an already-loaded discovery section. No extra metadata request or loading gate. Original source/discovery objects remain the navigation authority. Manual paging, a visible next card, retained item identity, bounded height, cover-derived color, full poster, compact indicators and reduced-motion/input handling add hierarchy while retaining recent/today/season feeds. Installed visual/gesture behavior is not yet observed.
 

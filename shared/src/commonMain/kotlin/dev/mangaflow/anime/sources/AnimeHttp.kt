@@ -53,7 +53,16 @@ internal class AnimeHttp(
         referer: String? = null,
         allowNotFound: Boolean = false,
         sameOriginRedirects: Boolean = false,
+        headers: Map<String, String> = emptyMap(),
     ): AnimeHttpResponse {
+        // Source signatures are scoped to one origin, including every followed redirect.
+        require(headers.isEmpty() || sameOriginRedirects) { "来源协议请求头只能用于同站点接口。" }
+        require(headers.size <= 32 && headers.keys.map { it.lowercase() }.distinct().size == headers.size)
+        headers.forEach { (name, value) ->
+            require(name.isNotEmpty() && name.length <= 128 && name.all { it.isLetterOrDigit() && it.code < 128 || it in "!#$%&'*+-.^_\u0060|~" })
+            require(name.lowercase() !in RESERVED_HEADERS && value.length <= 8192 &&
+                value.none { it.code < 0x20 && it != '\t' || it.code == 0x7f }) { "来源协议请求头无效。" }
+        }
         var current = animePublicUrl(url.toString())
         val origin = "${current.scheme}://${current.host}:${current.port}"
         var remainingRedirects = 5
@@ -69,6 +78,7 @@ internal class AnimeHttp(
             referer?.let { request.header("Referer", animePublicUrl(it).toString()) }
             token?.let { request.header("Authorization", "Bearer $it") }
             if (method != "GET") request.header("Origin", "${current.scheme}://${current.host}")
+            headers.forEach { (name, value) -> request.header(name, value) }
             request.method(method, payload?.toString()?.toRequestBody("application/json".toMediaType()))
             val response = try {
                 client.execute(request.build(), maximumBytes = 8L * 1024 * 1024)
@@ -116,8 +126,11 @@ internal class AnimeHttp(
         payload: JSONObject? = null,
         token: String? = null,
         referer: String? = null,
+        sameOriginRedirects: Boolean = false,
+        headers: Map<String, String> = emptyMap(),
     ): JSONObject {
-        val response = request(url, stage, method, payload, token, referer)
+        val response = request(url, stage, method, payload, token, referer,
+            sameOriginRedirects = sameOriginRedirects, headers = headers)
         return try { withContext(Dispatchers.Default) { JSONObject(response.text) } }
         catch (cancel: CancellationException) { throw cancel }
         catch (failure: Exception) {
@@ -131,6 +144,11 @@ internal class AnimeHttp(
         const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
         const val API_USER_AGENT = "MangaFlow/1.0 (https://github.com/wozhenbang2004/MangaFlow)"
         private val pauses = ConcurrentMap<String, Long>()
+        private val RESERVED_HEADERS = setOf(
+            "host", "content-length", "transfer-encoding", "connection", "proxy-connection",
+            "keep-alive", "upgrade", "te", "trailer", "proxy-authorization", "proxy-authenticate",
+            "authorization", "cookie", "set-cookie", "origin", "referer",
+        )
     }
 }
 

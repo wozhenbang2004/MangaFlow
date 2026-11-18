@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package pinned native engines as optional, architecture-specific release assets."""
+"""Validate bundled QuickJS and package pinned runtime copies as architecture-specific release assets."""
 
 import argparse
 import hashlib
@@ -51,18 +51,45 @@ def archive_name(spec, abi):
     return f"runtime-{spec['id'].lower()}-{spec['version']}-{abi}.zip"
 
 
-def require_small_apk(apk):
-    """Inspect packaging only; never install or execute the APK."""
+def require_small_apk(apk, aar_dir):
+    """Inspect packaging only; only the exact pinned QuickJS engine belongs in the base APK."""
+    spec = next(item for item in SPECS if item["id"] == "QUICKJS")
+    expected = {f"lib/{abi}/libquickjs.so": abi for abi in ABIS}
     with ZipFile(apk) as archive:
-        bundled = [entry.filename for entry in archive.infolist()
+        entries = archive.infolist()
+        engines = [entry for entry in entries
                    if entry.filename.rsplit("/", 1)[-1] in LIBRARY_NAMES]
-        models = [entry.filename for entry in archive.infolist()
+        forbidden = [entry.filename for entry in engines if entry.filename not in expected]
+        models = [entry.filename for entry in entries
                   if entry.filename.lower().endswith((".onnx", ".tflite", ".safetensors", ".pt"))]
-    if bundled:
-        raise RuntimeError("Optional native libraries are still bundled in the APK: " + ", ".join(bundled))
-    if models:
-        raise RuntimeError("Optional model weights are still bundled in the APK: " + ", ".join(models))
-    print(f"Confirmed optional native libraries and model weights are absent from {apk.name}")
+        if forbidden:
+            raise RuntimeError("Optional native libraries are still bundled in the APK: " + ", ".join(forbidden))
+        if models:
+            raise RuntimeError("Optional model weights are still bundled in the APK: " + ", ".join(models))
+        if len(engines) != len(expected) or {entry.filename for entry in engines} != set(expected):
+            raise RuntimeError("The APK must include exactly one pinned QuickJS library for every supported ABI")
+        with ZipFile(aar_dir / spec["aar"]) as source:
+            source_entries = source.infolist()
+            for entry in engines:
+                abi = expected[entry.filename]
+                original_path = f"jni/{abi}/libquickjs.so"
+                originals = [item for item in source_entries if item.filename == original_path]
+                if len(originals) != 1 or originals[0].is_dir() or stat.S_ISLNK(originals[0].external_attr >> 16):
+                    raise RuntimeError("Missing or ambiguous QuickJS library in pinned AAR: " + original_path)
+                if (entry.is_dir() or stat.S_ISLNK(entry.external_attr >> 16) or
+                        not 20 <= entry.file_size <= MAX_LIBRARY_BYTES or
+                        not 20 <= originals[0].file_size <= MAX_LIBRARY_BYTES):
+                    raise RuntimeError("Invalid bundled QuickJS member: " + entry.filename)
+                data = archive.read(entry)
+                original = source.read(originals[0])
+                require_elf(data, abi, "libquickjs.so")
+                if data != original:
+                    raise RuntimeError("Bundled QuickJS differs from the pinned AAR: " + entry.filename)
+        for name in spec["licenses"]:
+            matches = [entry for entry in entries if entry.filename == "assets/licenses/" + name]
+            if len(matches) != 1 or archive.read(matches[0]) != (LICENSES / name).read_bytes():
+                raise RuntimeError("Bundled QuickJS license material is missing or changed: " + name)
+    print(f"Confirmed pinned QuickJS is bundled; optional inference/Steam libraries and model weights are absent from {apk.name}")
 
 
 def require_elf(data, abi, name):
@@ -82,7 +109,7 @@ def write_member(archive, name, data):
 
 def package(aar_dir, output, apks=()):
     for apk in apks:
-        require_small_apk(apk)
+        require_small_apk(apk, aar_dir)
     output.mkdir(parents=True, exist_ok=True)
     packages = []
     for spec in SPECS:

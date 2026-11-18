@@ -33,6 +33,7 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:usesCleartextTraffic="false"
+        android:networkSecurityConfig="@xml/anime_source_network_security"
         android:theme="@style/Theme.MangaFlow">
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop"
             android:supportsPictureInPicture="true"

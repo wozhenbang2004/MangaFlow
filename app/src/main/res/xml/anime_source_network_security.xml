@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <!-- The script transport separately checks the pinned source, exact URL and anonymous headers. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">app2.dsx.ac</domain>
+        <domain includeSubdomains="false">91.110.236.125</domain>
+        <domain includeSubdomains="false">23.224.111.70</domain>
+        <domain includeSubdomains="false">198.16.32.138</domain>
+        <domain includeSubdomains="false">23.224.53.35</domain>
+        <domain includeSubdomains="false">118.184.173.5</domain>
+        <domain includeSubdomains="false">frontend-static.kurte.cn</domain>
+    </domain-config>
+</network-security-config>

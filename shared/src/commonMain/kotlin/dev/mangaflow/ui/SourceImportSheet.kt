@@ -114,6 +114,7 @@ internal fun SourceImportSheet(
     val runtimes = remember(context) { PanelRuntimeStore.get(context) }
     val runtimeStates by runtimes.states.collectAsStateWithLifecycle()
     val engine = runtimeStates[PanelRuntimeId.QUICKJS] ?: PanelRuntimeState()
+    val engineBundled = runtimes.spec(PanelRuntimeId.QUICKJS).bundled
     val repositories by store.repositories.collectAsStateWithLifecycle()
     val installed by store.installed.collectAsStateWithLifecycle()
     var url by remember { mutableStateOf("") }
@@ -143,7 +144,8 @@ internal fun SourceImportSheet(
     var showEngineDetails by remember { mutableStateOf(false) }
     var showPackageDetails by remember(prepared?.digest) { mutableStateOf(false) }
     val motion = LocalMotionEnabled.current
-    val engineReady = platformKind != PlatformKind.ANDROID || engine.installed && !engine.downloading && !engine.pendingRemoval
+    val engineReady = platformKind != PlatformKind.ANDROID || engineBundled ||
+        engine.installed && !engine.downloading && !engine.pendingRemoval
     val engineReveal = animateFloatAsState(if (showEngineDetails) 1f else 0f,
         tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing), label = "source-engine-disclosure")
 
@@ -463,7 +465,7 @@ internal fun SourceImportSheet(
                             }
                         }
                     }
-                    if (platformKind == PlatformKind.ANDROID && (!engineReady || engine.error != null)) item(key = "required-engine") {
+                    if (platformKind == PlatformKind.ANDROID && (!engineReady || !engineBundled && engine.error != null)) item(key = "required-engine") {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text("导入此源需要脚本运行组件", fontSize = 11.sp, color = colors.onSurfaceVariant)
                             ScriptEngineControl(runtimes, engine, busy == null, onFailure = { failure = it })
@@ -484,12 +486,12 @@ internal fun SourceImportSheet(
                             onClick = { prepared = null; failure = null }) { Text("重新选择", fontSize = 12.sp) }
                     }
                 }
-                if (platformKind == PlatformKind.ANDROID && (bundle == null || engineReady && engine.error == null)) item(key = "engine-maintenance") {
+                if (platformKind == PlatformKind.ANDROID && (bundle == null || engineReady && (engineBundled || engine.error == null))) item(key = "engine-maintenance") {
                     Column {
                         MotionTextButton(onClick = { showEngineDetails = !showEngineDetails },
                             contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
                             Text(if (showEngineDetails) "收起运行组件" else "运行组件 · " +
-                                (if (engineReady) "已就绪" else "导入时下载"), fontSize = 11.sp,
+                                (if (engineBundled) "已内置" else if (engineReady) "已就绪" else "导入时下载"), fontSize = 11.sp,
                                 color = colors.onSurfaceVariant)
                         }
                         // Match SettingsDisclosure: hiding maintenance must not cancel its running operation.
@@ -545,11 +547,14 @@ private fun ScriptEngineControl(
         }
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        DownloadRouteControl(DownloadCategory.COMPONENTS, enabled = enabled && !busy && !state.downloading)
+        if (!spec.bundled)
+            DownloadRouteControl(DownloadCategory.COMPONENTS, enabled = enabled && !busy && !state.downloading)
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("脚本引擎 ${spec.version}", fontSize = 12.sp, fontWeight = FontWeight.Medium)
                 Text(when {
+                    spec.bundled && state.pendingRemoval -> "已内置 · 下载副本将在重启后移除"
+                    spec.bundled -> "已内置 · 无需下载，仅在使用脚本源时加载"
                     state.pendingRemoval -> "重启后完成移除"
                     state.downloading -> "下载中 · ${((state.progress ?: 0f) * 100).toInt()}%"
                     state.installed -> "已下载 · 仅在使用脚本源时加载"
@@ -561,6 +566,14 @@ private fun ScriptEngineControl(
                     Text("取消下载", fontSize = 11.sp)
                 }
                 state.pendingRemoval -> Unit
+                spec.bundled -> {
+                    if (state.installed || state.requiresUpdate || state.bytes > 0) {
+                        MotionTextButton(enabled = enabled && !busy,
+                            onClick = { change { store.remove(PanelRuntimeId.QUICKJS) } }) {
+                            Text("清理下载副本", fontSize = 11.sp)
+                        }
+                    }
+                }
                 state.installed -> MotionTextButton(enabled = enabled && !busy,
                     onClick = { change { store.remove(PanelRuntimeId.QUICKJS) } }) {
                     Text("移除", fontSize = 11.sp)

@@ -57,9 +57,9 @@ import org.json.JSONObject
 import org.tensorflow.lite.TensorFlowLite
 
 /**
- * Optional, same-signer native libraries. Neither construction nor ordinary reading downloads or
- * loads code. A signed receipt is rechecked against the installed APK and every library on startup.
- * Native libraries cannot be unloaded: a process which attempted a load must restart before removal.
+ * The APK provides QuickJS; other native engines remain optional same-signer downloads.
+ * Construction only discovers downloaded copies and rechecks their signed receipts and bytes.
+ * Loaded download copies need a restart before removal; APK code is never removed by this store.
  */
 actual class PanelRuntimeStore private constructor(context: Context) {
     private val context = context.applicationContext
@@ -152,6 +152,12 @@ actual class PanelRuntimeStore private constructor(context: Context) {
             } finally { ready.complete(Unit) }
             for (id in PanelRuntimeId.entries) runCatching {
                 val intent = AndroidTransferIntents.read(context, ApplicationTransferKind.RUNTIME, id.name) ?: return@runCatching
+                if (spec(id).bundled) {
+                    // Keep receipts, files and transfer intent for an older APK. No duplicate download
+                    // is needed while this APK supplies the same engine itself.
+                    if (intent.resumable) AndroidTransferIntents.pause(context, intent)
+                    return@runCatching
+                }
                 var schedule = false
                 AndroidTransferIntents.withCurrent(context, intent) { current ->
                     synchronized(control) {
@@ -186,6 +192,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
 
     /** The OS owns execution; closing the caller only stops observing the queued transfer. */
     actual suspend fun download(id: PanelRuntimeId): Unit = withContext(Dispatchers.IO) {
+        if (spec(id).bundled) return@withContext
         ready.await()
         queueGate.withLock {
             val allowed = synchronized(control) {
@@ -228,6 +235,10 @@ actual class PanelRuntimeStore private constructor(context: Context) {
 
     internal suspend fun runScheduledDownload(id: PanelRuntimeId, task: ApplicationTransferIntent): ApplicationTransferResult = withContext(Dispatchers.IO) {
         ready.await()
+        if (spec(id).bundled) {
+            withContext(NonCancellable) { AndroidTransferIntents.pause(context, task) }
+            return@withContext ApplicationTransferResult.OBSOLETE
+        }
         val current = AndroidTransferIntents.read(context, task.kind, task.owner)
         if (current?.workId != task.workId || !current.resumable) return@withContext ApplicationTransferResult.OBSOLETE
         val ownJob = currentCoroutineContext()[Job] ?: return@withContext ApplicationTransferResult.FAILED
@@ -243,6 +254,10 @@ actual class PanelRuntimeStore private constructor(context: Context) {
     }
 
     internal suspend fun publishScheduledWait(id: PanelRuntimeId, task: ApplicationTransferIntent, reason: String, terminal: Boolean) = withContext(Dispatchers.IO) {
+        if (spec(id).bundled) {
+            withContext(NonCancellable) { AndroidTransferIntents.pause(context, task) }
+            return@withContext
+        }
         AndroidTransferIntents.withCurrent(context, task) { owned ->
             if (owned.status !in setOf(ApplicationTransferStatus.PAUSED, ApplicationTransferStatus.COMPLETED)) synchronized(control) {
                 if (downloads[id]?.isActive == true || transferTokens[id]?.let { it != task.workId } == true) return@synchronized
@@ -277,7 +292,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
             AndroidTransferIntents.pause(context, it)
         }
         val job = synchronized(control) {
-            if (id in touched) { markPendingRemoval(id); return@withContext }
+            if (id in touched && !spec(id).bundled) { markPendingRemoval(id); return@withContext }
             if (!removing.add(id)) return@withContext
             calls[id]?.cancel()
             downloads[id]?.also { it.cancel() }
@@ -286,7 +301,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
             ready.await()
             job?.cancelAndJoin()
             loadGate.withLock {
-                if (synchronized(control) { id in touched }) {
+                if (synchronized(control) { id in touched && !spec(id).bundled }) {
                     markPendingRemoval(id)
                     return@withLock
                 }
@@ -295,7 +310,8 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                 val marker = removalMarker(id)
                 val removed = filesRemoved && (!marker.exists() || marker.delete())
                 if (removed) synchronized(control) { installed.remove(id) }
-                mutableStates.update { old -> old + (id to if (removed) PanelRuntimeState()
+                mutableStates.update { old -> old + (id to if (removed) PanelRuntimeState(
+                    loaded = spec(id).bundled && old.getValue(id).loaded)
                     else old.getValue(id).copy(pendingRemoval = marker.exists(),
                         error = "运行库暂时无法删除，请完全退出应用后重试")) }
             }
@@ -307,44 +323,57 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         ready.await()
         loadGate.withLock {
             if (states.value.getValue(id).loaded) return@withLock
+            val bundled = spec(id).bundled
             val installation = synchronized(control) {
                 loadFailures[id]?.let { throw RuntimeFailure(it) }
-                if (states.value.getValue(id).pendingRemoval) throw RuntimeFailure("运行库已安排在重启后删除")
-                if (id in removing || downloads.containsKey(id)) throw RuntimeFailure("运行库正在管理，请稍后重试")
-                installed[id] ?: throw RuntimeFailure("请先下载${spec(id).title}")
+                if (bundled) null else {
+                    if (states.value.getValue(id).pendingRemoval) throw RuntimeFailure("运行库已安排在重启后删除")
+                    if (id in removing || downloads.containsKey(id)) throw RuntimeFailure("运行库正在管理，请稍后重试")
+                    installed[id] ?: throw RuntimeFailure("请先下载${spec(id).title}")
+                }
             }
-            try {
-                verifyLibraries(installation.directory, installation.entry, seal = false)
-            } catch (cancelled: CancellationException) { throw cancelled
-            } catch (_: Exception) {
-                synchronized(control) { installed.remove(id) }
-                mutableStates.update { old -> old + (id to old.getValue(id).copy(installed = false,
-                    error = "运行库校验失败，请删除后重新下载")) }
-                throw RuntimeFailure("运行库校验失败，请删除后重新下载")
+            if (installation != null) {
+                try {
+                    verifyLibraries(installation.directory, installation.entry, seal = false)
+                } catch (cancelled: CancellationException) { throw cancelled
+                } catch (_: Exception) {
+                    synchronized(control) { installed.remove(id) }
+                    mutableStates.update { old -> old + (id to old.getValue(id).copy(installed = false,
+                        error = "运行库校验失败，请删除后重新下载")) }
+                    throw RuntimeFailure("运行库校验失败，请删除后重新下载")
+                }
             }
             currentCoroutineContext().ensureActive()
             // Once the first dlopen starts, cancellation cannot undo it. Finish or mark restart required.
             withContext(NonCancellable) {
                 synchronized(control) { touched.add(id) }
                 try {
-                    val root = installation.directory.canonicalFile
-                    when (id) {
-                        PanelRuntimeId.LITERT -> {
-                            System.load(File(root, "libtensorflowlite_jni.so").absolutePath)
-                            TensorFlowLite.init()
-                        }
-                        PanelRuntimeId.ONNX -> {
-                            // JNI_OnLoad may resolve Java bridge classes, so their trusted path exists first.
-                            System.setProperty("mangaflow.onnx.native.dir", root.absolutePath)
-                            System.load(File(root, "libonnxruntime.so").absolutePath)
-                            System.load(File(root, "libonnxruntime4j_jni.so").absolutePath)
-                        }
-                        PanelRuntimeId.STEAM -> System.load(File(root, "libmangaflow_steam.so").absolutePath)
-                        PanelRuntimeId.QUICKJS -> {
-                            // The upstream Android loader reads this trusted path before create().
-                            System.setProperty("com.dokar.quickjs.library.path", root.absolutePath)
-                            System.setProperty("com.dokar.quickjs.library.name", "libquickjs.so")
-                            System.load(File(root, "libquickjs.so").absolutePath)
+                    if (bundled) {
+                        check(id == PanelRuntimeId.QUICKJS)
+                        // The APK and JVM API come from the same pinned AAR. Keep QuickJs.create()
+                        // on the upstream default loader rather than an obsolete downloaded copy.
+                        System.clearProperty("com.dokar.quickjs.library.path")
+                        System.clearProperty("com.dokar.quickjs.library.name")
+                        System.loadLibrary("quickjs")
+                    } else {
+                        val root = checkNotNull(installation).directory.canonicalFile
+                        when (id) {
+                            PanelRuntimeId.LITERT -> {
+                                System.load(File(root, "libtensorflowlite_jni.so").absolutePath)
+                                TensorFlowLite.init()
+                            }
+                            PanelRuntimeId.ONNX -> {
+                                // JNI_OnLoad may resolve Java bridge classes, so their trusted path exists first.
+                                System.setProperty("mangaflow.onnx.native.dir", root.absolutePath)
+                                System.load(File(root, "libonnxruntime.so").absolutePath)
+                                System.load(File(root, "libonnxruntime4j_jni.so").absolutePath)
+                            }
+                            PanelRuntimeId.STEAM -> System.load(File(root, "libmangaflow_steam.so").absolutePath)
+                            PanelRuntimeId.QUICKJS -> {
+                                System.setProperty("com.dokar.quickjs.library.path", root.absolutePath)
+                                System.setProperty("com.dokar.quickjs.library.name", "libquickjs.so")
+                                System.load(File(root, "libquickjs.so").absolutePath)
+                            }
                         }
                     }
                     mutableStates.update { old -> old + (id to old.getValue(id).copy(loaded = true, error = null)) }
@@ -360,7 +389,8 @@ actual class PanelRuntimeStore private constructor(context: Context) {
     }
 
     private fun nativeLoadFailed(id: PanelRuntimeId): Nothing {
-        val message = "运行库加载失败，请完全退出应用后重试；仍失败可重新下载"
+        val message = if (spec(id).bundled) "内置脚本引擎加载失败，请完全退出应用后重试；仍失败请更新或重新安装应用"
+            else "运行库加载失败，请完全退出应用后重试；仍失败可重新下载"
         synchronized(control) { loadFailures[id] = message }
         updateError(id, message)
         throw RuntimeFailure(message)
@@ -891,8 +921,8 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                 "登录 Steam 并下载可直接使用的创意工坊壁纸，仅在启用时下载", "MPL-2.0"),
             PanelRuntimeId.LITERT to PanelRuntimeSpec(PanelRuntimeId.LITERT, "轻量 AI 运行库", "1.4.2", "运行 YOLO26 Nano，仅下载当前应用架构所需组件", "Apache-2.0"),
             PanelRuntimeId.ONNX to PanelRuntimeSpec(PanelRuntimeId.ONNX, "高精度与排序运行库", "1.31.1", "运行 Koharu 和 Inkwell，两个模型共用此运行库", "MIT"),
-            PanelRuntimeId.QUICKJS to PanelRuntimeSpec(PanelRuntimeId.QUICKJS, "漫画源脚本引擎", "1.0.18",
-                "供你导入的第三方漫画源脚本使用，仅下载当前应用架构所需组件", "Apache-2.0 / MIT"),
+            PanelRuntimeId.QUICKJS to PanelRuntimeSpec(PanelRuntimeId.QUICKJS, "来源脚本引擎", "1.0.18",
+                "供漫画和动漫来源脚本使用，已随应用提供，无需单独下载", "Apache-2.0 / MIT", bundled = true),
         )
         private fun libraryNames(id: PanelRuntimeId): Set<String> = when (id) {
             PanelRuntimeId.STEAM -> setOf("libmangaflow_steam.so")

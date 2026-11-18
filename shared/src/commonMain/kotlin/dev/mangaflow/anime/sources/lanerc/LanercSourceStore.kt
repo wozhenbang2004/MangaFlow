@@ -1,7 +1,8 @@
 package dev.mangaflow.anime.sources.lanerc
 
-import dev.mangaflow.anime.sources.BUNDLED_HTML_ANIME_IDS
-import dev.mangaflow.anime.sources.BUNDLED_HTML_ANIME_VERSION
+import dev.mangaflow.anime.sources.BUNDLED_ANIME_SOURCE_IDS
+import dev.mangaflow.anime.sources.BUNDLED_API_ANIME_IDS
+import dev.mangaflow.anime.sources.bundledAnimeSourceVersion
 import dev.mangaflow.anime.sources.animeHash
 import dev.mangaflow.data.plugins.fetchPluginText
 import dev.mangaflow.json.JSONArray
@@ -12,6 +13,7 @@ import dev.mangaflow.platform.storage.StorageAtomicFile
 import dev.mangaflow.platform.storage.StorageFile
 import dev.mangaflow.platform.storage.applicationContext
 import dev.mangaflow.platform.storage.filesDir
+import dev.mangaflow.platform.storage.preferences
 import dev.mangaflow.platform.storage.readSecret
 import dev.mangaflow.platform.storage.writeSecret
 import dev.mangaflow.platform.storage.deleteSecret
@@ -35,6 +37,7 @@ import kotlinx.coroutines.withContext
 /** One durable, application-owned package index. Browsing this directory never executes scripts. */
 class LanercSourceStore private constructor(context: PlatformContext) {
     private val application = context.applicationContext
+    private val preparationPreferences = preferences(application, "anime-source-preparation")
     private val file = StorageAtomicFile(StorageFile(application.filesDir, "anime-sources/packages.json"))
     private val writer = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -67,11 +70,11 @@ class LanercSourceStore private constructor(context: PlatformContext) {
                     val root = JSONObject(text)
                     require(root.getInt("version") in 1..3)
                     val choices = root.optJSONArray("builtIns") ?: JSONArray()
-                    require(choices.length() <= BUNDLED_HTML_ANIME_IDS.size)
+                    require(choices.length() <= BUNDLED_ANIME_SOURCE_IDS.size)
                     builtIns = (0 until choices.length()).associate { index ->
                         val item = choices.getJSONObject(index)
                         val id = item.getString("id")
-                        require(id in BUNDLED_HTML_ANIME_IDS)
+                        require(id in BUNDLED_ANIME_SOURCE_IDS)
                         val revision = item.getString("revision")
                         require(revision.matches(Regex("[A-Za-z0-9-]{1,100}")))
                         id to BuiltInChoice(item.getBoolean("enabled"), item.getBoolean("removed"), revision)
@@ -90,8 +93,8 @@ class LanercSourceStore private constructor(context: PlatformContext) {
                     }.associateBy { it.id }
                     // A later application release may add another built-in while storage is
                     // already v3. Freeze the legacy-owner preference before any removal can run.
-                    val missingLegacyChoices = BUNDLED_HTML_ANIME_IDS.any { id ->
-                        id !in builtIns && migrated[id.replace("anime-native-", "anime-lanerc-")] != null
+                    val missingLegacyChoices = BUNDLED_ANIME_SOURCE_IDS.any { id ->
+                        id !in builtIns && hasLegacyChoice(id, migrated)
                     }
                     if (root.getInt("version") < 3 || missingLegacyChoices ||
                         restored.any { it.optionsKey.isEmpty() && it.optionsJson != "{}" }) commit(migrated)
@@ -148,11 +151,11 @@ class LanercSourceStore private constructor(context: PlatformContext) {
      * A known URL is not an integrity guarantee: pin downloaded bytes before validation executes JS.
      */
     suspend fun install(id: String) = packageGate(id).withLock {
-        if (id in BUNDLED_HTML_ANIME_IDS) editBuiltIn(id, enabled = true, removed = false)
+        if (id in BUNDLED_ANIME_SOURCE_IDS) editBuiltIn(id, enabled = true, removed = false)
         else download(id, update = false)
     }
     suspend fun update(id: String) = packageGate(id).withLock {
-        check(id !in BUNDLED_HTML_ANIME_IDS) { "此来源已内置，随应用版本更新，无需下载脚本。" }
+        check(id !in BUNDLED_ANIME_SOURCE_IDS) { "此来源已内置，随应用版本更新，无需下载脚本。" }
         download(id, update = true)
     }
 
@@ -171,7 +174,6 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         ready.await()
         check(!loadFailure) { "来源存储未能读取，原文件仍保留；暂不能覆盖。" }
         val descriptor = descriptor(id)
-        require(id !in ANIME_PRIVATE_KEY_PACKAGES) { "此来源需要独立协议适配，未复制其中的第三方私钥。" }
         require(installable(descriptor)) { unsupported(descriptor) ?: "此类来源暂不支持。" }
         val expected = packages.value[id]
         if (!update && expected != null) return
@@ -223,7 +225,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
     }
 
     suspend fun setEnabled(id: String, enabled: Boolean) {
-        if (id in BUNDLED_HTML_ANIME_IDS) editBuiltIn(id, enabled, removed = false)
+        if (id in BUNDLED_ANIME_SOURCE_IDS) editBuiltIn(id, enabled, removed = false)
         else edit(id) { it.copy(enabled = enabled, revision = randomUuid()) }
     }
 
@@ -235,7 +237,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         } }
     }
     suspend fun setOptions(id: String, optionsJson: String) {
-        check(id !in BUNDLED_HTML_ANIME_IDS) { "此内建来源仅使用匿名接口，不需要私密参数。" }
+        check(id !in BUNDLED_ANIME_SOURCE_IDS) { "此内建来源仅使用匿名接口，不需要私密参数。" }
         require(optionsJson.encodeToByteArray().size <= 65_536) { "来源参数过大。" }
         val options = JSONObject(optionsJson).toString()
         ready.await()
@@ -250,7 +252,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         } }
     }
     suspend fun rollback(id: String) = edit(id) { installed ->
-        check(id !in BUNDLED_HTML_ANIME_IDS) { "此来源已内置，随应用版本更新。" }
+        check(id !in BUNDLED_ANIME_SOURCE_IDS) { "此来源已内置，随应用版本更新。" }
         val code = installed.previousCode ?: error("该来源没有可回退的版本。")
         val digest = installed.previousDigest ?: error("旧版本记录不完整。")
         check(animeHash(code) == digest) { "旧版本完整性校验失败。" }
@@ -261,7 +263,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
     suspend fun remove(id: String): Unit = actionGate(id).withLock {
         automatic.suppress(id)
         packageGate(id).withLock removePackage@ {
-            if (id in BUNDLED_HTML_ANIME_IDS) {
+            if (id in BUNDLED_ANIME_SOURCE_IDS) {
                 // A durable tombstone prevents automatic registration from undoing the user's removal.
                 editBuiltIn(id, enabled = false, removed = true)
                 return@removePackage
@@ -282,10 +284,8 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         return withContext(Dispatchers.IO) { writer.withLock {
             check(!loadFailure) { "来源存储未能读取，不能导出不完整的来源备份。" }
             val installed = packages.value
-            val choices = BUNDLED_HTML_ANIME_IDS.map { id ->
-                val choice = builtIns[id] ?: BuiltInChoice(
-                    enabled = installed[id.replace("anime-native-", "anime-lanerc-")] == null,
-                    removed = false, revision = "bundled")
+            val choices = BUNDLED_ANIME_SOURCE_IDS.map { id ->
+                val choice = builtIns[id] ?: defaultBuiltInChoice(id, installed)
                 JSONObject().put("id", id).put("builtIn", true).put("enabled", choice.enabled)
                     .put("removed", choice.removed)
             }
@@ -299,7 +299,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             val item = value.getJSONObject(index)
             require(!item.has("options") && !item.has("optionsKey")) { "来源备份不能包含私密参数。" }
             if (item.optBoolean("builtIn", false)) {
-                require(item.getString("id") in BUNDLED_HTML_ANIME_IDS && !item.has("code"))
+                require(item.getString("id") in BUNDLED_ANIME_SOURCE_IDS && !item.has("code"))
                 item.getBoolean("enabled")
                 item.getBoolean("removed")
                 item.getString("id")
@@ -332,7 +332,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
 
     private fun optionsSecret(id: String, key: String): String = "anime-lanerc-options:" + animeHash(id + "\n" + key)
 
-    internal fun snapshot(id: String): LanercInstalledPackage? = packages.value[id]?.takeIf { it.enabled && id !in BUNDLED_HTML_ANIME_IDS }
+    internal fun snapshot(id: String): LanercInstalledPackage? = packages.value[id]?.takeIf { it.enabled && id !in BUNDLED_ANIME_SOURCE_IDS }
     internal fun isCurrent(value: LanercInstalledPackage): Boolean =
         packages.value[value.id]?.let { it.enabled && it.revision == value.revision && it.digest == value.digest } == true
     internal fun descriptor(id: String): LanercSourceDescriptor =
@@ -350,9 +350,9 @@ class LanercSourceStore private constructor(context: PlatformContext) {
     private suspend fun commit(next: Map<String, LanercInstalledPackage>, choices: Map<String, BuiltInChoice> = builtIns) = withContext(NonCancellable) {
         // Persist the legacy-owner preference, so subsequently deleting that old source cannot
         // silently activate a different adapter or change playback identity.
-        val effectiveChoices = BUNDLED_HTML_ANIME_IDS.filter { id ->
-            id !in choices && next[id.replace("anime-native-", "anime-lanerc-")] != null
-        }.associateWith { BuiltInChoice(enabled = false, removed = false, revision = randomUuid()) } + choices
+        val effectiveChoices = BUNDLED_ANIME_SOURCE_IDS.filter { id ->
+            id !in choices && hasLegacyChoice(id, next)
+        }.associateWith { defaultBuiltInChoice(it, next).copy(revision = randomUuid()) } + choices
         val bytes = JSONObject().put("version", 3).put("packages", JSONArray(next.values.map(::encode)))
             .put("builtIns", JSONArray(effectiveChoices.map { (id, choice) -> JSONObject().put("id", id)
                 .put("enabled", choice.enabled).put("removed", choice.removed).put("revision", choice.revision) }))
@@ -378,7 +378,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
 
     private fun decode(value: JSONObject, loadPrivateOptions: Boolean = true): LanercInstalledPackage {
         val id = value.getString("id")
-        require(id !in BUNDLED_HTML_ANIME_IDS && installable(descriptor(id)))
+        require(id !in BUNDLED_ANIME_SOURCE_IDS && installable(descriptor(id)))
         val code = value.getString("code")
         val digest = value.getString("digest")
         require(code.encodeToByteArray().size in 1..MAX_CODE_BYTES && animeHash(code) == digest)
@@ -403,14 +403,14 @@ class LanercSourceStore private constructor(context: PlatformContext) {
 
     private fun project(packages: Map<String, LanercInstalledPackage>, loadError: String? = null) = LANERC_SOURCE_DIRECTORY.map { item ->
             val installed = packages[item.id]
-            if (item.id in BUNDLED_HTML_ANIME_IDS) {
-                val choice = builtIns[item.id]
+            if (item.id in BUNDLED_ANIME_SOURCE_IDS) {
+                val choice = builtIns[item.id] ?: defaultBuiltInChoice(item.id, packages)
+                val version = bundledAnimeSourceVersion(item.id)
                 return@map LanercSourceListing(item.id, item.name, item.kind, item.scriptUrl,
-                    installed = choice?.removed != true, enabled = loadError == null && choice?.removed != true &&
-                        (choice?.enabled ?: (packages[item.id.replace("anime-native-", "anime-lanerc-")] == null)),
-                    version = BUNDLED_HTML_ANIME_VERSION,
-                    error = loadError, aliases = item.aliases, capabilities = setOf("search", "detail", "play"),
-                    revision = BUNDLED_HTML_ANIME_VERSION + "-" + (choice?.revision ?: installed?.revision ?: "bundled"))
+                    installed = !choice.removed, enabled = loadError == null && !choice.removed && choice.enabled,
+                    version = version,
+                    error = loadError, aliases = item.aliases, capabilities = item.functions,
+                    revision = version + "-" + choice.revision)
             }
             LanercSourceListing(item.id, item.name, item.kind, item.scriptUrl,
                 installed != null, installed?.enabled == true, installed?.version.orEmpty(), installed?.digest.orEmpty(),
@@ -420,14 +420,27 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             listing.copy(
                 automaticPreparation = listing.id in AUTOMATIC_ANIME_SOURCE_IDS,
                 bundledAlternativeId = ANIME_BUNDLED_ALTERNATIVES[listing.id],
-                installable = listing.installable && listing.id !in ANIME_PRIVATE_KEY_PACKAGES,
-                preparationUnavailableReason = when {
-                    listing.id in ANIME_PRIVATE_KEY_PACKAGES -> "当前协议需独立适配，未复制第三方私钥；请使用已内置来源。"
-                    listing.id in AUTOMATIC_ANIME_INACTIVE_IDS -> "来源可自动准备；当前网络协议尚未适配，默认未启用。"
+                preparationUnavailableReason = when (listing.id) {
+                    "anime-lanerc-lmm85" -> "已接入公开直链；需要网页验证或媒体嗅探的线路仍不可用。"
                     else -> null
                 },
             )
         }
+
+    private fun hasLegacyChoice(id: String, packages: Map<String, LanercInstalledPackage>): Boolean {
+        val legacy = id.replace("anime-native-", "anime-lanerc-")
+        return packages[legacy] != null || preparationPreferences.getBoolean("removed:$legacy")
+    }
+
+    private fun defaultBuiltInChoice(id: String, packages: Map<String, LanercInstalledPackage>): BuiltInChoice {
+        val legacy = id.replace("anime-native-", "anime-lanerc-")
+        val removed = preparationPreferences.getBoolean("removed:$legacy")
+        val installed = packages[legacy]
+        // New API adapters may coexist with an enabled legacy script. Saved titles keep their
+        // old source IDs; explicit legacy disable/removal is carried forward, never undone.
+        val enabled = !removed && if (id in BUNDLED_API_ANIME_IDS) installed?.enabled != false else installed == null
+        return BuiltInChoice(enabled, removed, "bundled")
+    }
 
     private data class BuiltInChoice(val enabled: Boolean, val removed: Boolean, val revision: String)
 
@@ -438,7 +451,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             setOf(LanercSourceKind.VIDEO, LanercSourceKind.BROWSE, LanercSourceKind.DANMAKU)
         private fun unsupported(descriptor: LanercSourceDescriptor): String? = when (descriptor.kind) {
             LanercSourceKind.COMIC -> "漫画图片协议，不能作为视频播放源；漫画宿主接入待完成。"
-            LanercSourceKind.UNKNOWN -> "此脚本的导出协议尚未确认，暂不能启用。"
+            LanercSourceKind.UNKNOWN -> "此来源发布的是 ENC1 加密包，当前宿主尚未接入其解包协议。"
             else -> null
         }
 

@@ -64,8 +64,8 @@ internal class StarterSourceInstaller(private val context: PlatformContext,
                 mutableState.value = mutableState.value.copy(phase = "来源已准备", error = null)
                 return
             }
-            // Existing-source maintenance can validate an installed engine, but never restores
-            // an explicitly removed optional component without the user's retry action.
+            // Source history remains authoritative. Bundled engine availability does not restore
+            // removed sources or download an explicitly removed optional component.
             if (pending.isNotEmpty() || prepareExistingEngine) prepareEngine()
             val failed = mutableListOf<String>()
             for (source in pending) {
@@ -128,6 +128,11 @@ internal class StarterSourceInstaller(private val context: PlatformContext,
         if (platformKind != PlatformKind.ANDROID) return
         val runtimes = PanelRuntimeStore.get(context)
         val id = PanelRuntimeId.QUICKJS
+        if (runtimes.spec(id).bundled) {
+            prepareJavascriptEngine(context)
+            mutableState.value = mutableState.value.copy(preparingEngine = false, progress = null)
+            return
+        }
         check(runtimes.states.value[id]?.pendingRemoval != true) { "脚本组件等待移除，请重启后再准备。" }
         if (runtimes.states.value[id]?.installed == true && runtimes.states.value[id]?.downloading != true) return
         mutableState.value = mutableState.value.copy(phase = "正在准备漫画源脚本组件", preparingEngine = true)
@@ -145,7 +150,9 @@ internal class StarterSourceInstaller(private val context: PlatformContext,
 
     private fun engineMaintenanceIssue(): String? {
         if (platformKind != PlatformKind.ANDROID) return null
-        val engine = PanelRuntimeStore.get(context).states.value[PanelRuntimeId.QUICKJS]
+        val runtimes = PanelRuntimeStore.get(context)
+        if (runtimes.spec(PanelRuntimeId.QUICKJS).bundled) return null
+        val engine = runtimes.states.value[PanelRuntimeId.QUICKJS]
         return when {
             engine?.pendingRemoval == true -> "脚本组件等待移除，请重启后重试。"
             engine?.downloading == true -> "脚本组件正在准备，完成后可重试兼容修复。"

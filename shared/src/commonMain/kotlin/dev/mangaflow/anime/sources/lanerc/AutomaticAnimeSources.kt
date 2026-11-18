@@ -114,22 +114,21 @@ internal class AutomaticAnimeSources(
     }
 }
 
-// No third-party private keys are copied. Duplicate website scripts use the already-bundled
-// native adapters instead; unsupported comic/unknown packages do not become video providers.
+// Each pinned public script is prepared automatically with the bundled Android engine.
+// Native alternatives do not require a script download. Removed/disabled choices remain authoritative.
 internal val AUTOMATIC_ANIME_SOURCE_IDS = setOf(
-    "anime-lanerc-lanerc", "anime-lanerc-jinpai", "anime-lanerc-yzx", "anime-lanerc-23",
-    "anime-lanerc-ain", "anime-lanerc-sd", "anime-lanerc-douban", "anime-lanerc-danmu_b61mt3",
+    "anime-lanerc-lanerc", "anime-lanerc-guazi", "anime-lanerc-sx", "anime-lanerc-lmm85",
+    "anime-lanerc-gugu", "anime-lanerc-manguo", "anime-lanerc-23", "anime-lanerc-ain",
+    "anime-lanerc-nmeng", "anime-lanerc-sd", "anime-lanerc-07",
+    "anime-lanerc-douban", "anime-lanerc-danmu_b61mt3",
 )
-// Their current bootstrap endpoints require cleartext HTTP, which this host intentionally rejects.
-internal val AUTOMATIC_ANIME_INACTIVE_IDS = setOf("anime-lanerc-23", "anime-lanerc-ain")
+// Existing disabled packages are never silently re-enabled by a later compatibility change.
+internal val AUTOMATIC_ANIME_INACTIVE_IDS = emptySet<String>()
 
 internal val ANIME_BUNDLED_ALTERNATIVES = mapOf(
     "anime-lanerc-ani" to "anime-native-ani",
     "anime-lanerc-akianime" to "anime-native-akianime",
     "anime-lanerc-dmbus" to "anime-native-dmbus",
-    "anime-lanerc-lmm85" to "anime-lmm",
-)
-internal val ANIME_PRIVATE_KEY_PACKAGES = setOf(
-    "anime-lanerc-guazi", "anime-lanerc-sx", "anime-lanerc-gugu",
-    "anime-lanerc-manguo", "anime-lanerc-nmeng", "anime-lanerc-07",
+    "anime-lanerc-jinpai" to "anime-native-jinpai",
+    "anime-lanerc-yzx" to "anime-native-yzx",
 )

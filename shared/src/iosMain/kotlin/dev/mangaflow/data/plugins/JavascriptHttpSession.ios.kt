@@ -53,6 +53,7 @@ internal actual class JavascriptHttpSession actual constructor(
     private val maximumBytes: Int,
     private val allowRedirects: Boolean,
     private val observeRelayTraffic: Boolean,
+    private val cleartextEndpoints: Set<String>,
 ) {
     private val operations = atomic(0)
     private val slots = Semaphore(2)
@@ -71,7 +72,11 @@ internal actual class JavascriptHttpSession actual constructor(
         val input = JSONObject(raw)
         var method = input.getString("method")
         require(method in setOf("GET", "POST", "HEAD", "PUT", "DELETE", "PATCH")) { "漫画源 HTTP 方法暂不支持。" }
-        var url = publicPluginUrl(input.getString("url"))
+        val address = input.getString("url")
+        require(cleartextEndpoints.isEmpty() || !address.startsWith("http://", ignoreCase = true)) {
+            "此来源的公开 HTTP App 接口暂不支持 iOS，请使用其他来源。"
+        }
+        var url = publicPluginUrl(address)
         var headers = nativeScriptHeaders(input.optJSONObject("headers") ?: JSONObject())
         val bodyValue = input.opt("body")
         if (bodyValue != null && bodyValue != JSONObject.NULL && headers.keys.none { it.equals("Content-Type", true) })

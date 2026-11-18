@@ -108,8 +108,6 @@ internal class AndroidAnimePlayer(
     private var recovery: Job? = null
     private var recoveryNotice: String? = null
     private var lastPlaybackError: PlaybackException? = null
-    private var progressiveFallbackUsed = false
-    private var progressiveFallback: (() -> MediaSource)? = null
     private var preparedMedia: MediaSource? = null
     private var enhancementRevision = 0L
     private var enhancementRecoveryUsed = false
@@ -268,14 +266,6 @@ internal class AndroidAnimePlayer(
                 .setLoadOnlySelectedTracks(true)
                 .createMediaSource(MediaItem.fromUri(subtitle.url))
         }
-        progressiveFallback = if (contentType == C.CONTENT_TYPE_HLS) {
-            {
-                val progressive = ProgressiveMediaSource.Factory(cacheFactory)
-                    .createMediaSource(item.buildUpon().setMimeType(null).build())
-                if (sources.size == 1) progressive
-                else MergingMediaSource(progressive, *sources.drop(1).toTypedArray())
-            }
-        } else null
         prepareMedia(generation, if (sources.size == 1) media else MergingMediaSource(*sources.toTypedArray()), unsupportedSubtitle)
     }
 
@@ -664,6 +654,13 @@ internal class AndroidAnimePlayer(
         if (!isCurrent(generation) || engine.value !== exo || lastPlaybackError === error) return
         if (nativeVideoRecoveryPending || nativeVideoRecoveryFailed || bufferingTimedOut) return
         lastPlaybackError = error
+        val observation = state.value
+        val sourceId = request?.asset?.sourceId
+        val observedAt = System.currentTimeMillis()
+        playerScope.launch(Dispatchers.IO) {
+            AnimePlaybackDiagnostics.record(context, observedAt, sourceId,
+                observation.sessionGeneration, generation, observation.phase.name, error)
+        }
         // Until its first actual frame, this engine is still the one bounded graphics-recovery
         // attempt. An asynchronous failure here must not mark the source bad or spend its retries.
         if (nativeVideoOnly && !nativeVideoRestored) {
@@ -678,18 +675,17 @@ internal class AndroidAnimePlayer(
             PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
             PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
         ) || (error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS && responseCode != null && responseCode >= 500)
-        val tryProgressive = !progressiveFallbackUsed && progressiveFallback != null && error.errorCode in setOf(
-            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
-            PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
-        )
-        if ((!retryableNetwork && !tryProgressive) || state.value.recoveryAttempt >= options.automaticRecoveryAttempts) {
+        // A parsed HLS segment failure cannot change the entry playlist into a
+        // progressive video file. Only retry transport failures here; the controller
+        // owns recovery across confirmed alternatives for the same episode.
+        if (!retryableNetwork || state.value.recoveryAttempt >= options.automaticRecoveryAttempts) {
             publish(generation) { it.copy(notice = it.notice.takeUnless { value -> value == recoveryNotice }) }
             recoveryNotice = null
             fail(generation, playbackFailure(error))
             return
         }
         val attempt = state.value.recoveryAttempt + 1
-        recoveryNotice = if (tryProgressive) "正在按视频文件重新读取这条线路" else "连接中断，正在恢复播放（$attempt）"
+        recoveryNotice = "连接中断，正在恢复播放（$attempt）"
         publish(generation) { it.copy(
             phase = AnimePlayerPhase.OPENING, isBuffering = true, error = null, recoveryAttempt = attempt,
             notice = recoveryNotice,
@@ -697,17 +693,11 @@ internal class AndroidAnimePlayer(
         recovery?.cancel()
         recovery = playerScope.launch(Dispatchers.Main.immediate) {
             // A paused user intent is retained during the wait and read again before prepare.
-            delay(if (tryProgressive) 0L else 750L * attempt.coerceAtMost(4))
+            delay(750L * attempt.coerceAtMost(4))
             if (!isCurrent(generation) || engine.value !== exo) return@launch
             try {
                 val position = state.value.positionMs
                 val playing = state.value.playWhenReady
-                if (tryProgressive) {
-                    progressiveFallbackUsed = true
-                    val revised = requireNotNull(progressiveFallback).invoke()
-                    preparedMedia = revised
-                    exo.setMediaSource(revised)
-                }
                 exo.seekTo(position)
                 exo.playWhenReady = playing
                 exo.prepare()
@@ -859,8 +849,6 @@ internal class AndroidAnimePlayer(
         recovery = null
         recoveryNotice = null
         lastPlaybackError = null
-        progressiveFallbackUsed = false
-        progressiveFallback = null
         preparedMedia = null
         enhancementRevision++
         enhancementRecoveryUsed = false

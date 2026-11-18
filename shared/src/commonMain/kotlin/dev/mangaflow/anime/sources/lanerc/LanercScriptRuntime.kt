@@ -2,7 +2,7 @@ package dev.mangaflow.anime.sources.lanerc
 
 import com.dokar.quickjs.QuickJs
 import com.dokar.quickjs.binding.FunctionBinding
-import dev.mangaflow.anime.sources.animePublicUrl
+import dev.mangaflow.anime.sources.animeHash
 import dev.mangaflow.data.plugins.JavascriptHttpSession
 import dev.mangaflow.data.plugins.prepareJavascriptEngine
 import dev.mangaflow.json.JSONArray
@@ -68,7 +68,11 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                 operationContext.ensureActive()
                 val route = DownloadRoutingStore.get(context).sourceSnapshot(bundle.id, DownloadCategory.ANIME)
                 val js = QuickJs.create(Dispatchers.Default)
-                val network = JavascriptHttpSession(networkAllowed, route, 8 * 1024 * 1024)
+                val cleartextEndpoints = lanercCleartextEndpoints(bundle.id, bundle.digest)
+                val network = JavascriptHttpSession(networkAllowed, route, 8 * 1024 * 1024,
+                    cleartextEndpoints = cleartextEndpoints)
+                val sessionRouteKey = animeHash(route.toString())
+                var sourceLoaded = false
                 val sdEvidence = SdSearchResponseEvidence.forCall(bundle.id, bundle.digest, method, args.optString(0))
                 var hostFailure: Exception? = null
                 var responseStatus: Int? = null
@@ -101,7 +105,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                             val request = argument(values)
                             sdEvidence?.beforeRequest(request)
                             lanercBlocking(operationContext) {
-                                http(request, network, preferences, ::checkCurrent, sdEvidence).also {
+                                http(request, network, preferences, cleartextEndpoints, ::checkCurrent, sdEvidence).also {
                                     responseStatus = JSONObject(it).optInt("statusCode").takeIf { code -> code in 400..599 }
                                 }
                             }
@@ -130,6 +134,10 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                     js.evaluate<Unit>(LANERC_JAVASCRIPT_HOST, "anime-host.js")
                     js.evaluate<Unit>("globalThis.ext = ${bundle.optionsJson}; void 0;", "anime-options.js")
                     js.evaluate<Unit>(js.compile(bundle.code + "\n;void 0;\n", "anime-source.js"))
+                    sourceLoaded = true
+                    if (networkAllowed) lanercSessionRestore(bundle.id, bundle.digest, sessionRouteKey)?.let {
+                        js.evaluate<Unit>(it, "anime-session-restore.js")
+                    }
                     checkCurrent()
                     val encoded = if (method == "__validate") {
                         val config = js.evaluate<String>("__mlInvoke('config', [], ${JSONObject.quote(bundle.id)})", "anime-config.js")
@@ -178,6 +186,15 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                         "来源请求、会话或编解码未完成，请检查网络路由、来源版本及兼容能力。"
                     else "来源脚本未能完成解析，请更新来源或选择其他来源。")
                 } finally {
+                    // Persist only the audited anonymous protocol state, under the same revision/route
+                    // fence. A cancelled or superseded invocation cannot publish old credentials.
+                    if (sourceLoaded && networkAllowed && !js.isClosed) runCatching {
+                        checkCurrent()
+                        lanercSessionSave(bundle.id, bundle.digest, sessionRouteKey)?.let {
+                            js.evaluate<Unit>(it, "anime-session-save.js")
+                        }
+                        checkCurrent()
+                    }
                     if (networkAllowed) synchronized(lock) { if (running[bundle.id] === cancel) running.remove(bundle.id) }
                     network.close()
                     runCatching { if (!js.isClosed) js.interruptEvaluation() }
@@ -192,18 +209,25 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
     }
 
     private suspend fun http(raw: String, network: JavascriptHttpSession, preferences: LanercPreferences,
-        checkCurrent: () -> Unit, sdEvidence: SdSearchResponseEvidence? = null): String {
+        cleartextEndpoints: Set<String>, checkCurrent: () -> Unit, sdEvidence: SdSearchResponseEvidence? = null): String {
         val input = JSONObject(raw)
-        var url = animePublicUrl(input.getString("url"))
+        var url = lanercRequestUrl(input.getString("url"), cleartextEndpoints)
         var headers = input.optJSONObject("headers") ?: JSONObject()
         var method = input.optString("method", "GET").uppercase()
-        var body = input.opt("body")
+        var body: Any? = input.opt("body")
+        val bodyEncoding = input.optString("bodyEncoding", "utf8").lowercase()
+        if (body != null && body !== JSONObject.NULL && bodyEncoding !in setOf("utf8", "utf-8", "text")) {
+            val encodedBody = body as? String
+                ?: throw IllegalArgumentException("二进制来源请求体必须使用文本编码。")
+            body = byteArrayJson(decodeLanercBytes(encodedBody, bodyEncoding))
+        }
+        val useCookies = !input.optBoolean("noCookie", false)
         val follow = input.optBoolean("followRedirects", true)
         val timeout = input.optLong("timeout", 15_000).coerceIn(1_000, 20_000)
         repeat(4) { redirect ->
             checkCurrent()
             val sentHeaders = JSONObject(headers.toString())
-            if (sentHeaders.keys().asSequence().none { it.equals("Cookie", true) }) {
+            if (url.isHttps && useCookies && sentHeaders.keys().asSequence().none { it.equals("Cookie", true) }) {
                 preferences.header(url).takeIf(String::isNotBlank)?.let { sentHeaders.put("Cookie", it) }
             }
             val hop = JSONObject().put("url", url.toString()).put("method", method).put("headers", sentHeaders)
@@ -212,7 +236,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
             val response = JSONObject(withTimeout(timeout) { network.request(hop.toString()) })
             checkCurrent()
             val responseHeaders = response.optJSONObject("headers") ?: JSONObject()
-            responseHeaders.keys().asSequence().firstOrNull { it.equals("Set-Cookie", true) }
+            if (url.isHttps && useCookies) responseHeaders.keys().asSequence().firstOrNull { it.equals("Set-Cookie", true) }
                 ?.let { preferences.receive(url, responseHeaders.optString(it)) }
             val status = response.optInt("statusCode")
             // Only the first actual hop is eligible: redirects can change POST into GET.
@@ -222,7 +246,9 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
             require(redirect < 3) { "来源重定向次数过多。" }
             val location = responseHeaders.keys().asSequence().firstOrNull { it.equals("Location", true) }
                 ?.let(responseHeaders::optString) ?: error("来源重定向缺少目标。")
-            val target = animePublicUrl(url.resolve(location)?.toString() ?: error("来源重定向地址无效。"))
+            val target = lanercRequestUrl(url.resolve(location)?.toString() ?: error("来源重定向地址无效。"),
+                cleartextEndpoints)
+            require(!url.isHttps || target.isHttps) { "不能把 HTTPS 来源请求降级到 HTTP。" }
             if (url.host != target.host || url.port != target.port || url.scheme != target.scheme) {
                 require(body == null || body === JSONObject.NULL || body.toString().isEmpty()) { "不能跨站重放来源请求正文。" }
                 headers = JSONObject(headers.keys().asSequence().filter { !it.equals("Authorization", true) && !it.equals("Cookie", true) }

@@ -52,7 +52,6 @@ import dev.mangaflow.data.plugins.JvmScriptNetwork.isPublic
 import dev.mangaflow.data.plugins.JvmScriptNetwork.checkedHeaders
 import dev.mangaflow.data.plugins.JvmScriptNetwork.requestBody
 import dev.mangaflow.data.plugins.JvmScriptNetwork.checkUrl
-import dev.mangaflow.data.plugins.JvmScriptNetwork.publicUrl
 import dev.mangaflow.data.plugins.JvmScriptNetwork.reserveOrigin
 import dev.mangaflow.data.plugins.JvmScriptNetwork.rememberPause
 import dev.mangaflow.data.plugins.JvmScriptNetwork.retrySeconds
@@ -61,7 +60,21 @@ import dev.mangaflow.data.plugins.JvmScriptNetwork.MAX_ARGUMENT_CHARS
 import dev.mangaflow.data.plugins.JvmScriptNetwork.origin
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadCategory
-internal actual class JavascriptHttpSession actual constructor(private val enabled: Boolean, private val route: DownloadRouteSnapshot?, private val maximumBytes: Int, private val allowRedirects: Boolean, private val observeRelayTraffic: Boolean) {
+internal actual class JavascriptHttpSession actual constructor(
+    private val enabled: Boolean,
+    private val route: DownloadRouteSnapshot?,
+    private val maximumBytes: Int,
+    private val allowRedirects: Boolean,
+    private val observeRelayTraffic: Boolean,
+    cleartextEndpoints: Set<String>,
+) {
+        // Only the host can grant these reviewed anonymous App endpoints to a pinned script.
+        // Snapshot the capability; request JSON and mutable caller collections cannot enlarge it.
+        private val permittedCleartext = cleartextEndpoints.associate { address ->
+            val method = PUBLIC_APP_CLEARTEXT_METHODS[address]
+                ?: throw IllegalArgumentException("来源 HTTP 端点未获宿主授权。")
+            checkNotNull(address.toHttpUrlOrNull()) to method
+        }
         private val owned = route != null
         private val client = if (route == null) defaultClient else {
             val sockets = publicSourceSocketFactory(route, ::isPublic)
@@ -86,13 +99,23 @@ internal actual class JavascriptHttpSession actual constructor(private val enabl
             val input = JSONObject(raw)
             var method = input.getString("method")
             require(method in setOf("GET", "POST", "HEAD", "PUT", "DELETE", "PATCH")) { "漫画源 HTTP 方法暂不支持。" }
-            var url = publicUrl(input.getString("url"))
+            val address = input.getString("url")
+            checkReference(address)
+            var url = address.toHttpUrlOrNull()?.also(::checkSessionUrl)
+                ?: throw IllegalArgumentException("来源请求 URL 无效。")
             var headers = checkedHeaders(input.optJSONObject("headers") ?: JSONObject())
             var body = requestBody(input.opt("body"), headers)
             if (method in setOf("GET", "HEAD")) body = null
             return slots.withPermit {
                 repeat(4) { redirect ->
                     currentCoroutineContext().ensureActive()
+                    checkSessionUrl(url)
+                    if (!url.isHttps) {
+                        require(permittedCleartext[url] == method) { "来源 HTTP 端点不支持此请求方法。" }
+                        require(headers.keys.none { it.lowercase() in CLEARTEXT_CREDENTIAL_HEADERS }) {
+                            "公开 HTTP 来源接口不能携带 Cookie 或通用认证信息。"
+                        }
+                    }
                     checkSystemRoute(url)
                     reserveOrigin(url)
                     val builder = Request.Builder().url(url)
@@ -105,11 +128,13 @@ internal actual class JavascriptHttpSession actual constructor(private val enabl
                         require(redirect < 3) { "漫画源重定向次数过多。" }
                         val location = result.headers.entries.firstOrNull { it.key.equals("Location", true) }?.value
                             ?: throw SourceException("漫画源重定向缺少目标。", url.toString())
+                        checkReference(location)
                         val target = url.resolve(location) ?: throw SourceException("漫画源重定向地址无效。", url.toString())
-                        checkUrl(target)
+                        require(!url.isHttps || target.isHttps) { "来源请求不允许从 HTTPS 重定向降级到 HTTP。" }
+                        checkSessionUrl(target)
                         if (url.origin() != target.origin()) {
                             require(body == null) { "不允许跨站点重定向请求正文，请更新来源地址后重试。" }
-                            headers = headers.filterKeys { !it.equals("Authorization", true) && !it.equals("Cookie", true) }
+                            headers = headers.filterKeys { it.lowercase() !in CLEARTEXT_CREDENTIAL_HEADERS }
                         }
                         if (result.status == 303 || method == "POST" && result.status in setOf(301, 302)) {
                             method = "GET"; body = null
@@ -121,6 +146,27 @@ internal actual class JavascriptHttpSession actual constructor(private val enabl
                     }
                 }
                 throw SourceException("漫画源重定向次数过多。", url.toString())
+            }
+        }
+
+        private fun checkReference(value: String) {
+            val reference = try { URI(value) }
+                catch (_: Exception) { throw IllegalArgumentException("来源请求 URL 无效。") }
+            require(reference.rawUserInfo == null && reference.rawFragment == null) {
+                "来源请求 URL 不能包含内嵌凭据或片段。"
+            }
+        }
+
+        private fun checkSessionUrl(url: HttpUrl) {
+            require(url.username.isEmpty() && url.password.isEmpty() && url.fragment == null &&
+                url.toString().length <= 8192) { "来源请求 URL 无效或包含内嵌凭据、片段。" }
+            if (url.isHttps) checkUrl(url) else {
+                // Exact canonical URL equality includes scheme, host, port, encoded path and
+                // query. None of the reviewed HTTP calls uses a query or fragment.
+                require(url.scheme == "http" && url.encodedQuery == null && url in permittedCleartext) {
+                    "来源仅支持 HTTPS 或宿主为此脚本授权的精确 HTTP 接口。"
+                }
+                JvmScriptNetwork.checkPublicHost(url)
             }
         }
 
@@ -180,6 +226,18 @@ internal actual class JavascriptHttpSession actual constructor(private val enabl
     }
 
 
+// These are anonymous public App protocols, not an arbitrary cleartext host permission.
+private val PUBLIC_APP_CLEARTEXT_METHODS = mapOf(
+    "http://app2.dsx.ac/ndsx.php/v7/logs" to "POST",
+    "http://91.110.236.125:38569/nxyz.php/v7/logs" to "POST",
+    "http://23.224.111.70:7788/nzdr.php/v7/logs" to "POST",
+    "http://198.16.32.138:12345/nxnm.php/v7/logs" to "POST",
+    "http://23.224.53.35:2345/nllq.php/v7/logs" to "POST",
+    "http://118.184.173.5:19987/app/bn/v2" to "POST",
+    "http://frontend-static.kurte.cn/server_list_v2.json" to "GET",
+)
+private val CLEARTEXT_CREDENTIAL_HEADERS = setOf("cookie", "authorization", "proxy-authorization")
+
 private data class HttpResult(val status: Int, val headers: Map<String, String>, val body: String)
 
 internal object JvmScriptNetwork {
@@ -210,6 +268,10 @@ internal object JvmScriptNetwork {
             require(url.isHttps && url.username.isEmpty() && url.password.isEmpty() && url.toString().length <= 8192) {
                 "漫画源仅支持无内嵌凭据的公开 HTTPS URL。"
             }
+            checkPublicHost(url)
+        }
+
+        fun checkPublicHost(url: HttpUrl) {
             val host = url.host.lowercase()
             require(host != "localhost" && !host.endsWith(".localhost") && !host.endsWith(".local")) { "漫画源不能访问本机或局域网。" }
             if (host.contains(':') || host.all { it.isDigit() || it == '.' }) {

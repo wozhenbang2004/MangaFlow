@@ -16,6 +16,7 @@ import dev.mangaflow.anime.sources.sourceEpisodeKind
 import dev.mangaflow.anime.sources.sourceEpisodeNumber
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
+import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 
 internal class LanercProvider(private val store: LanercSourceStore, private val descriptor: LanercSourceDescriptor) : AnimeProvider {
     override val id: String = descriptor.id
@@ -23,11 +24,13 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
     override val homeUrl: String = descriptor.homeUrl
     override val revision: String get() = store.snapshot(id)?.revision
         ?: throw LanercCapabilityException("该来源未安装或已停用，请先启用来源。")
-    // A page argument in a function declaration alone is not pagination evidence.
-    // Audited scripts actually send the page: ani skip, yzx search/{key}/{page}.json,
-    // sd new_search/result_v2 pn. Other declarations alone do not imply pagination.
+    // Enable pagination only where the audited search actually sends a page or offset:
+    // ani skip, yzx path, sd pn, AppV7 pg, Cain page, 23 protobuf field 2, LMM85 page path.
+    // LMM85's bounded client fallback explicitly ends after page one.
     override val supportsSearchPagination: Boolean get() = id in setOf(
         "anime-lanerc-ani", "anime-lanerc-yzx", "anime-lanerc-sd",
+        "anime-lanerc-sx", "anime-lanerc-gugu", "anime-lanerc-manguo", "anime-lanerc-nmeng", "anime-lanerc-07",
+        "anime-lanerc-ain", "anime-lanerc-23", "anime-lanerc-lmm85",
     )
 
     override suspend fun search(query: String, page: Int): List<AnimeSourceTitle> {
@@ -80,6 +83,9 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
         if (result.optBoolean("needBind")) throw LanercCapabilityException("此来源要求先完成验证绑定；当前兼容入口尚未接入该验证流程。")
         if (result.optJSONArray("images") != null || result.optString("type").lowercase() in setOf("comic", "image", "images"))
             throw LanercCapabilityException("来源返回的是漫画图片，不能交给视频播放器。")
+        // The pinned Youke script explicitly requests no Referer with this protocol sentinel.
+        if (id == "anime-lanerc-yzx" && reply.digest == "6056afbb33ffbc7bbb71e2632a31c66fe6d575389983b4f2076dcae599a14e16" &&
+            result.optString("referer") == "never") result.remove("referer")
         val sharedHeaders = lanercHeaders(result)
         val resolutions = result.optJSONArray("resolutions")?.let { list ->
             require(list.length() <= 100) { "来源清晰度选项过多。" }
@@ -144,6 +150,30 @@ internal fun lanercCards(descriptor: LanercSourceDescriptor, value: Any?, revisi
 
 private fun checkedMedia(url: String): String = try { animePublicUrl(url).toString() }
     catch (_: Exception) { throw LanercCapabilityException("来源返回的媒体地址不受支持；需要有效的公共 HTTPS 地址。") }
+/** Referer is a header value; validating it must not rewrite its declared HTTP scheme. */
+private fun checkedReferer(value: String): String = try {
+    require(value.none { it.code < 0x20 || it.code in 0x7f..0x9f })
+    val url = value.toHttpUrlOrNull() ?: throw IllegalArgumentException()
+    require('@' !in value.substringAfter("://").substringBefore('/').substringBefore('?').substringBefore('#'))
+    // Reuse the source host/userinfo checks on a validation copy, never as a network target.
+    animePublicUrl(url.newBuilder().scheme("https").build().toString())
+    val host = url.host.removeSurrounding("[", "]").trimEnd('.')
+    require(listOf("local", "localhost", "internal", "test", "invalid", "example", "onion", "alt",
+        "arpa", "example.com", "example.net", "example.org").none { host == it || host.endsWith(".$it") })
+    val parts = host.split('.')
+    if (parts.last().all(Char::isDigit) || parts.all { it.startsWith("0x", true) }) {
+        val address = parts.map { it.toIntOrNull() }
+        require(address.size == 4 && address.all { it != null && it in 0..255 } &&
+            parts.indices.all { parts[it] == address[it].toString() })
+        val a = address[0]!!; val b = address[1]!!; val c = address[2]!!
+        require(!(a == 192 && (b == 0 && c in setOf(0, 2) || b == 88 && c == 99)) &&
+            !(a == 198 && (b in 18..19 || b == 51 && c == 100)) &&
+            !(a == 203 && b == 0 && c == 113))
+    }
+    url.newBuilder().fragment(null).build().toString()
+} catch (_: Exception) {
+    throw LanercCapabilityException("来源播放 Referer 格式不受支持；需要有效的公共 HTTP 或 HTTPS 地址。")
+}
 private fun lanercYear(value: String): Int? = Regex("(?:19|20)\\d{2}").find(value)?.value?.toIntOrNull()
 private fun lanercMediaType(type: String, url: String): String? = when (type.lowercase()) {
     "hls", "m3u8", "application/x-mpegurl", "application/vnd.apple.mpegurl" -> "application/x-mpegURL"
@@ -161,7 +191,8 @@ private fun lanercHeaders(value: JSONObject): Map<String, String> {
         else -> JSONObject()
     }
     val headers = objectValue.keys().asSequence().associateWith { objectValue.optString(it) }.toMutableMap()
-    value.optString("referer").takeIf(String::isNotBlank)?.let { headers["Referer"] = checkedMedia(it) }
+    value.optString("referer").takeIf(String::isNotBlank)?.let { headers["Referer"] = it }
+    headers.keys.filter { it.equals("Referer", true) }.forEach { name -> headers[name] = checkedReferer(headers.getValue(name)) }
     value.optString("userAgent").ifBlank { value.optString("ua") }.takeIf(String::isNotBlank)?.let { headers["User-Agent"] = it }
     require(headers.size <= 64 && headers.entries.sumOf { it.key.length + it.value.length } <= 32_768 &&
         headers.all { (name, text) -> name.matches(Regex("[A-Za-z0-9!#%&'*+.^_`|~-]{1,128}")) &&

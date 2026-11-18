@@ -74,6 +74,14 @@ data class AnimeSourceLatestState(
     val fetchedAt: Long? = null,
 )
 
+data class AnimeSourceHomeFeed(
+    val source: AnimeBrowseSource,
+    val sections: List<LanercBrowseSection> = emptyList(),
+    val loading: Boolean = false,
+    val error: String? = null,
+    val fetchedAt: Long? = null,
+)
+
 /** One application owner retains source browsing when a screen or title preview is dismissed. */
 class AnimeSourceBrowseController(
     private val context: PlatformContext,
@@ -83,8 +91,11 @@ class AnimeSourceBrowseController(
     private val routing = DownloadRoutingStore.get(context)
     private val mutableState = MutableStateFlow(initialState())
     val state: StateFlow<AnimeSourceBrowseState> = mutableState.asStateFlow()
+    // Retain the existing observation API; source-specific sections are the authoritative home state.
     private val mutableLatest = MutableStateFlow(AnimeSourceLatestState())
     val latest: StateFlow<AnimeSourceLatestState> = mutableLatest.asStateFlow()
+    private val mutableHomeFeeds = MutableStateFlow<Map<String, AnimeSourceHomeFeed>>(emptyMap())
+    val homeFeeds: StateFlow<Map<String, AnimeSourceHomeFeed>> = mutableHomeFeeds.asStateFlow()
 
     private var activated = false
     private var sourceGeneration = 0L
@@ -97,10 +108,10 @@ class AnimeSourceBrowseController(
     private var pageJob: Job? = null
     private var relatedJob: Job? = null
     private var browseRoute = mutableState.value.sourceId?.let(::routeFor)
-    private var latestRoute = routeFor(AGE_SOURCE)
-    private var latestRequested = false
-    private var latestGeneration = 0L
-    private var latestRequest: Deferred<List<AnimeSourceTitle>>? = null
+    private var homeFeedsRequested = false
+    private val feedRoutes = mutableMapOf<String, DownloadRouteSnapshot?>()
+    private val feedGenerations = mutableMapOf<String, Long>()
+    private val feedRequests = mutableMapOf<String, Deferred<Result<List<LanercBrowseSection>>>>()
 
     private data class Selection(
         val source: AnimeBrowseSource,
@@ -117,6 +128,8 @@ class AnimeSourceBrowseController(
                 val previous = before.sources.firstOrNull { it.id == before.sourceId }
                 val current = available.firstOrNull { it.id == before.sourceId }
                 mutableState.value = before.copy(sources = available)
+                val changed = reconcileHomeFeeds()
+                if (homeFeedsRequested) changed.forEach { source -> homeFeed(source) }
                 if (current == null || current != previous) {
                     switchSource(current ?: preferredSource(available))
                 }
@@ -124,15 +137,8 @@ class AnimeSourceBrowseController(
         }
         scope.launch(Dispatchers.Main.immediate) {
             routing.state.collect {
-                val route = routeFor(AGE_SOURCE)
-                if (route != latestRoute) {
-                    latestRoute = route
-                    latestGeneration++
-                    latestRequest?.cancel()
-                    latestRequest = null
-                    mutableLatest.value = AnimeSourceLatestState()
-                    if (latestRequested) latestPage(force = true)
-                }
+                val changed = reconcileHomeFeeds()
+                if (homeFeedsRequested) changed.forEach { source -> homeFeed(source) }
                 val selected = selectedSource()
                 if (selected != null && routeFor(selected.id) != browseRoute) {
                     switchSource(selected, keepQuery = true)
@@ -181,7 +187,7 @@ class AnimeSourceBrowseController(
     fun refresh() = command {
         val selection = selection() ?: return@command
         loadCategories(selection)
-        loadHome(selection)
+        loadHome(selection, force = true)
         if ("latest" in selection.source.capabilities || mutableState.value.categoryKey != null) loadPage(1, force = true)
     }
 
@@ -190,7 +196,7 @@ class AnimeSourceBrowseController(
     fun retryPage() = command {
         val selection = selection() ?: return@command
         val before = mutableState.value
-        if (before.homeError != null) loadHome(selection)
+        if (before.homeError != null) loadHome(selection, force = true)
         if (before.categoryError != null) loadCategories(selection)
         when {
             before.error != null -> loadPage(1, force = true)
@@ -215,8 +221,18 @@ class AnimeSourceBrowseController(
         loadRelated(selection, title)
     }
 
-    /** The home summary and AGE first page share this request/cache, regardless of source selection. */
-    fun refreshLatest(force: Boolean = false) = command { latestPage(force) }
+    /** Each available source publishes independently; opening Home does not choose a playback source. */
+    fun refreshLatest(force: Boolean = false) = command {
+        homeFeedsRequested = true
+        reconcileHomeFeeds()
+        homeSources().forEach { homeFeed(it, force) }
+    }
+
+    fun refreshHomeSource(id: String) = command {
+        val changed = reconcileHomeFeeds()
+        if (homeFeedsRequested) changed.filter { it.id != id }.forEach { homeFeed(it) }
+        homeSources().firstOrNull { it.id == id }?.let { homeFeed(it, force = true) }
+    }
 
     private fun command(action: () -> Unit) {
         scope.launch(Dispatchers.Main.immediate) { action() }
@@ -239,8 +255,7 @@ class AnimeSourceBrowseController(
             AnimeBrowseSource(it.id, it.name, requireNotNull(it.revision), it.kind == LanercSourceKind.VIDEO, it.capabilities)
         }
 
-    private fun preferredSource(available: List<AnimeBrowseSource>) =
-        available.firstOrNull { it.id == AGE_SOURCE } ?: available.firstOrNull()
+    private fun preferredSource(available: List<AnimeBrowseSource>) = available.firstOrNull()
 
     private fun selectedSource() = mutableState.value.let { value ->
         value.sources.firstOrNull { it.id == value.sourceId && it.revision == value.sourceRevision }
@@ -308,7 +323,7 @@ class AnimeSourceBrowseController(
             loading = false, loadingMore = false, error = null, moreError = null)
     }
 
-    private fun loadHome(selection: Selection) {
+    private fun loadHome(selection: Selection, force: Boolean = false) {
         if ("homeSections" !in selection.source.capabilities) return
         val request = ++homeGeneration
         homeJob?.cancel()
@@ -316,7 +331,7 @@ class AnimeSourceBrowseController(
         homeJob = scope.launch(Dispatchers.Main.immediate) {
             try {
                 requireRoute(selection)
-                val sections = sources.extensions.readHomeSections(selection.source.id, selection.source.revision)
+                val sections = homeFeed(selection.source, force).await().getOrThrow()
                 currentCoroutineContext().ensureActive()
                 if (current(selection) && request == homeGeneration) {
                     sections.forEach { checkCards(selection.source, it.items) }
@@ -398,7 +413,7 @@ class AnimeSourceBrowseController(
             try {
                 requireRoute(selection)
                 val cards = if (native) {
-                    if (selection.source.id == AGE_SOURCE && page == 1) latestPage(force).await()
+                    if (page == 1) homeFeed(selection.source, force).await().getOrThrow().single().items
                     else {
                         val provider = sources.provider(selection.source.id)
                             ?.takeIf { it.supportsLatest && it.revision == selection.source.revision }
@@ -463,50 +478,106 @@ class AnimeSourceBrowseController(
         }
     }
 
-    private fun latestPage(force: Boolean): Deferred<List<AnimeSourceTitle>> {
-        latestRequested = true
-        val route = routeFor(AGE_SOURCE)
-        // A route change may be observed here before the routing collector resumes.
-        if (route != latestRoute) {
-            latestRoute = route
-            latestGeneration++
-            latestRequest?.cancel()
-            latestRequest = null
-            mutableLatest.value = AnimeSourceLatestState()
+    private fun homeSources(): List<AnimeBrowseSource> = availableSources().filter {
+        "latest" in it.capabilities || "homeSections" in it.capabilities
+    }.distinctBy { it.id }
+
+    /** A changed source/revision/route invalidates only that source's observation and request. */
+    private fun reconcileHomeFeeds(): List<AnimeBrowseSource> {
+        val available = homeSources()
+        val ids = available.mapTo(mutableSetOf()) { it.id }
+        val before = mutableHomeFeeds.value
+        (before.keys + feedRequests.keys).filter { it !in ids }.forEach { id ->
+            feedGenerations[id] = (feedGenerations[id] ?: 0L) + 1L
+            feedRequests.remove(id)?.cancel()
+            feedRoutes.remove(id)
         }
-        latestRequest?.takeIf { it.isActive }?.let { return it }
-        val cached = mutableLatest.value
+        val changed = mutableListOf<AnimeBrowseSource>()
+        val next = available.associate { source ->
+            val route = routeFor(source.id)
+            val previous = before[source.id]
+            if (previous?.source != source || feedRoutes[source.id] != route) {
+                feedGenerations[source.id] = (feedGenerations[source.id] ?: 0L) + 1L
+                feedRequests.remove(source.id)?.cancel()
+                feedRoutes[source.id] = route
+                changed += source
+                source.id to AnimeSourceHomeFeed(source)
+            } else source.id to requireNotNull(previous)
+        }
+        mutableHomeFeeds.value = next
+        publishLatest()
+        return changed
+    }
+
+    private fun publishFeed(value: AnimeSourceHomeFeed) {
+        mutableHomeFeeds.value = mutableHomeFeeds.value + (value.source.id to value)
+        publishLatest()
+    }
+
+    private fun publishLatest() {
+        val feeds = mutableHomeFeeds.value.values.filter { it.source.videoSource }
+        val complete = feeds.isNotEmpty() && feeds.all { it.fetchedAt != null && !it.loading && it.error == null }
+        mutableLatest.value = AnimeSourceLatestState(
+            items = feeds.flatMap { feed -> feed.sections.flatMap { it.items } }
+                .distinctBy { it.sourceId to it.id },
+            loading = feeds.any { it.loading },
+            error = feeds.firstOrNull { it.error != null }?.let { "${it.source.name}：${it.error}" },
+            fetchedAt = if (complete) feeds.mapNotNull { it.fetchedAt }.minOrNull() else null,
+        )
+    }
+
+    /** Home and the selected source browser share the same first-page request and cache. */
+    private fun homeFeed(source: AnimeBrowseSource, force: Boolean = false): Deferred<Result<List<LanercBrowseSection>>> {
+        val id = source.id
+        val route = routeFor(id)
+        val before = mutableHomeFeeds.value[id]
+        if (before?.source != source || feedRoutes[id] != route) {
+            feedGenerations[id] = (feedGenerations[id] ?: 0L) + 1L
+            feedRequests.remove(id)?.cancel()
+            feedRoutes[id] = route
+            publishFeed(AnimeSourceHomeFeed(source))
+        }
+        feedRequests[id]?.takeIf { it.isActive }?.let { return it }
+        val cached = requireNotNull(mutableHomeFeeds.value[id])
         val policy = contentCachePreferences(context)
         val age = cached.fetchedAt?.let { wallTimeMillis() - it }
         if (!force && policy.enabled && cached.error == null && age != null && age >= 0 &&
-            age < policy.freshMillis(ContentCacheKind.DISCOVERY)) return CompletableDeferred(cached.items)
-        val request = ++latestGeneration
-        mutableLatest.value = mutableLatest.value.copy(loading = true, error = null)
+            age < policy.freshMillis(ContentCacheKind.DISCOVERY)) return CompletableDeferred(Result.success(cached.sections))
+        val request = (feedGenerations[id] ?: 0L) + 1L
+        feedGenerations[id] = request
+        publishFeed(cached.copy(loading = true, error = null))
         val deferred = scope.async(Dispatchers.Main.immediate, start = CoroutineStart.LAZY) {
-            fun ownsLatest() = request == latestGeneration && route == routeFor(AGE_SOURCE)
+            fun ownsFeed() = request == feedGenerations[id] && route == feedRoutes[id] &&
+                route == routeFor(id) && homeSources().any { it == source }
             try {
-                if (routing.sourceSnapshot(AGE_SOURCE, DownloadCategory.ANIME) != route)
-                    throw CancellationException("Anime latest source route changed")
-                val provider = sources.provider(AGE_SOURCE)?.takeIf { it.supportsLatest }
-                    ?: throw LanercCapabilityException("最近更新来源暂不可用。")
-                val revision = provider.revision
-                val cards = provider.latest(1)
+                if (routing.sourceSnapshot(id, DownloadCategory.ANIME) != route)
+                    throw CancellationException("Anime home source route changed")
+                val sections = if ("latest" in source.capabilities) {
+                    val provider = sources.provider(id)?.takeIf { it.supportsLatest && it.revision == source.revision }
+                        ?: throw LanercCapabilityException("所选来源已改变，请刷新来源内容。")
+                    listOf(LanercBrowseSection("latest", "最近更新", provider.latest(1)))
+                } else {
+                    sources.extensions.readHomeSections(id, source.revision)
+                }
                 currentCoroutineContext().ensureActive()
-                if (!ownsLatest()) throw CancellationException("Anime latest source route changed")
-                checkCards(AnimeBrowseSource(provider.id, provider.name, revision, true, setOf("latest")), cards)
-                mutableLatest.value = AnimeSourceLatestState(cards, fetchedAt = wallTimeMillis())
-                cards
+                if (!ownsFeed()) throw CancellationException("Anime home source changed")
+                sections.forEach { checkCards(source, it.items) }
+                publishFeed(AnimeSourceHomeFeed(source, sections, fetchedAt = wallTimeMillis()))
+                Result.success(sections)
             } catch (cancelled: CancellationException) {
-                if (ownsLatest()) mutableLatest.value = mutableLatest.value.copy(loading = false)
+                if (ownsFeed()) mutableHomeFeeds.value[id]?.let { publishFeed(it.copy(loading = false)) }
                 throw cancelled
             } catch (failure: Exception) {
-                if (ownsLatest()) mutableLatest.value = mutableLatest.value.copy(loading = false, error = sourceError(failure))
-                throw failure
+                if (ownsFeed()) mutableHomeFeeds.value[id]?.let {
+                    publishFeed(it.copy(loading = false, error = sourceError(failure)))
+                }
+                // A failed source is data for its observer, not cancellation of sibling feeds.
+                Result.failure(failure)
             } finally {
-                if (request == latestGeneration) latestRequest = null
+                if (request == feedGenerations[id]) feedRequests.remove(id)
             }
         }
-        latestRequest = deferred
+        feedRequests[id] = deferred
         deferred.start()
         return deferred
     }
@@ -523,7 +594,6 @@ class AnimeSourceBrowseController(
     }
 
     private companion object {
-        const val AGE_SOURCE = "anime-age"
         val BROWSE_CAPABILITIES = setOf("homeSections", "categories", "searchFiltered")
     }
 }

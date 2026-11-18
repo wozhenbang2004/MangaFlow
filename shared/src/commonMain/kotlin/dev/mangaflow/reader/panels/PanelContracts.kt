@@ -51,6 +51,8 @@ data class PanelRuntimeSpec(
     val version: String,
     val description: String,
     val license: String,
+    /** A platform capability; installed/removal state still describes the downloadable copy. */
+    val bundled: Boolean = false,
 )
 
 expect class PanelRepository(context: PlatformContext) {

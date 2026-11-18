@@ -11,8 +11,13 @@ internal val LANERC_JAVASCRIPT_HOST = """
   function text(value) { return value == null ? '' : String(value); }
   function wire(url, opts, method, body) {
     var input = options(opts), headers = options(input.headers);
+    if (!Object.keys(headers).some(function (name) { return name.toLowerCase() === 'user-agent'; })) {
+      var agent = text(input.userAgent || input.ua);
+      if (agent) headers['User-Agent'] = (g.UA && g.UA[agent.toLowerCase()]) || agent;
+    }
     var request = {url: text(url), method: method || text(input.method || 'GET').toUpperCase(),
-      headers: headers, responseEncoding: input.responseEncoding || 'utf8'};
+      headers: headers, responseEncoding: input.responseEncoding || 'utf8',
+      bodyEncoding: input.bodyEncoding || 'utf8', noCookie: input.noCookie === true};
     if (body != null) request.body = typeof body === 'object' ? JSON.stringify(body) : text(body);
     else if (input.body != null) request.body = input.body;
     if (input.timeout != null) request.timeout = Number(input.timeout);

@@ -39,9 +39,17 @@ private fun autoPlaySubjectEvidence(subject: AnimeSubject, title: AnimeSourceTit
 internal fun autoPlayGroup(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog): String? =
     autoPlayGroups(detail, requested, catalog).firstOrNull()
 
-internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog): List<String> {
+internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog,
+    selectedGroup: String? = null): List<String> {
     if (catalog.notice != null || catalog.episodes.isEmpty()) return emptyList()
     val groups = catalog.episodes.groupBy { it.group }
+    // An existing confirmed AGE line anchors this episode. An unrelated line's
+    // missing episodes must not reject another line's exact matching current episode.
+    if (selectedGroup != null && catalog.title.sourceId == "anime-age" &&
+        catalog.title.externalIds["age"] == catalog.title.id &&
+        catalog.title.id.toLongOrNull()?.let { it > 0L } == true) {
+        ageEquivalentEpisodeGroups(requested, groups, selectedGroup)?.let { return it }
+    }
     // TvTFun's typed automatic group owns a season's real episode feed. Explicit
     // stations may cover only aired episodes, so their unequal coverage must not
     // invalidate that feed. Multiple seasons/editions still require user choice.
@@ -110,4 +118,37 @@ internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalo
         "anime-native-ani" -> rows.all { it.group == "自动线路" }
         else -> false
     } }.singleOrNull()?.key)
+}
+
+/** Only a confirmed AGE line may anchor a partial set of equivalent routes. */
+private fun ageEquivalentEpisodeGroups(
+    requested: AnimeEpisode,
+    groups: Map<String, List<AnimeSourceEpisode>>,
+    selectedGroup: String,
+): List<String>? {
+    if (!requested.number.isFinite()) return null
+    val knownRoutes = setOf("xigua", "ffm3u8", "bfzym3u8", "wjm3u8", "lzm3u8")
+    fun route(group: String): String? {
+        val start = group.lastIndexOf(" [")
+        if (start <= 0 || !group.endsWith("]")) return null
+        return group.substring(start + 2, group.length - 1).takeIf { it in knownRoutes }
+    }
+    val routeCounts = groups.keys.mapNotNull(::route).groupingBy { it }.eachCount()
+    val selectedRoute = route(selectedGroup) ?: return null
+    if (routeCounts[selectedRoute] != 1) return null
+    val anchorRows = groups[selectedGroup] ?: return null
+    val anchor = anchorRows.singleOrNull {
+        it.kind == requested.kind && it.number == requested.number
+    } ?: return null
+    if (anchorRows.any { it.edition != anchor.edition }) return null
+    val label = ageEpisodeLabelKey(anchor.title).takeIf { it.isNotBlank() } ?: return null
+    return groups.entries.filter { (name, rows) ->
+        val candidateRoute = route(name)
+        if (candidateRoute == null || routeCounts[candidateRoute] != 1 ||
+            rows.any { it.edition != anchor.edition }) return@filter false
+        val candidate = rows.singleOrNull {
+            it.kind == requested.kind && it.number == requested.number
+        } ?: return@filter false
+        ageEpisodeLabelKey(candidate.title) == label
+    }.map { it.key }.sortedBy { if (route(it) == "xigua") 1 else 0 }
 }

@@ -1,5 +1,19 @@
 # MangaFlow · current work
 
+## Lanerc source integration and AGE preference correction · source checkpoint 2026-11-18
+
+Route DELIVERY with bounded source diagnosis; stage SOURCE_COMPLETE, publication and installed outcomes reported separately. Integration base: main ffa8fea60c054469ed5c97d9155a32b9e98a5c2c. Root is the sole commit/ref/document integrator; isolated contributors returned reviewed blobs. Preserve all unrelated main changes.
+
+The newest user quote and screenshot 1000122058.jpg are recorded in DESIGN ANIME-INTEGRATION-01–09, supplementing ANIME-REPAIR-01–06. Exact message ID/time and installed version are unavailable. This checkpoint supersedes the older AGE-first home choice: enabled real source feeds now load independently, and the existing carousel interleaves available video objects without a Bangumi gate.
+
+Source changes: native Jinpai and Youke 3.0/yzx catalogue/search/home/stream paths; 5 native equivalents plus 11 automatically prepared pinned video scripts; QuickJS 1.0.18 libraries in the Android APK; corrected public RSA classification, seven scoped HTTP protocol endpoints, HTTP Referer/no-Referer sentinel, binary body/noCookie/UA contracts, private revision/route-fenced Guazi anonymous state. The player no longer reopens HLS manifests as Progressive media; equivalent AGE fallback and bounded private error-code reporting retain manual authority. Existing disabled/removed choices and saved bindings survive. Native catalogue refresh accepts a saved old revision for re-reading the same work, while resolve requires the current revision.
+
+Source/interface review covered the integrated ownership and request paths. Independent review found and corrected the old yzx sentinel and both new native saved-revision refresh blockers. No tests, local builds/compiles, business/source/media probes, device operations or UI automation were performed. Static script downloads and upstream source reads are reference work, not evidence that a service or episode plays. This checkpoint claims neither successful packaging nor installed acceptance.
+
+Current open requirements: real Android first-use preparation, home/gesture composition, no-proxy access/speed and successful video/JM image display remain unobserved. LMM85 browser-validation/sniff routes, Jcy ENC1 unpacking, conditional unreviewed dynamic HTTP/media paths, iOS crypto/HTTP capabilities and the four Lanerc comic protocols remain incomplete or unsupported; exact inventory is docs/anime/lanerc-port.md. Do not announce the full Lanerc product complete. The preceding JM software-bitmap and guarded image-prefixed HLS extractor changes are already in the integration base and must not be repeated as new work.
+
+Next exact action at this source checkpoint: publish the complete reviewed batch on the latest main with expected-head protection, then confirm ordinary Android/native workflow activation only. Do not wait for artifacts or add a status-only push. After publication, act on actual CI failure evidence or installed user feedback; do not repeat static inventory research, loosen source identity/security checks, or claim “instant playback” from source review. Raw-feedback coverage reaches the newest AGE/Lanerc question, recorded 2026-11-18 16:12 Asia/Shanghai (documentation checkpoint time, not a fabricated message timestamp).
+
 ## Anime carousel and reported media failures · source checkpoint 2026-11-18
 
 Route DELIVERY with bounded source diagnosis; stage SOURCE_COMPLETE, installed outcomes pending. Current wording and three before screenshots are in DESIGN ANIME-REPAIR-01–06. Integration base: main 625a108316ada5f607a0bbed69c3148c4e6bbb61. Preserve concurrent reader-footer, settings, cache/read-count and anime work. Root is the sole commit/ref/document integrator.

@@ -61,37 +61,36 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
 private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeController,
     scrolls: AnimeDiscoveryScrolls, contentBottomPadding: Dp, onOpen: (AnimeDiscoveryItem) -> Unit,
     onChooseReference: (AnimeSourceTitle, Boolean) -> Unit, active: Boolean) {
-    val latest by controller.sourceBrowse.latest.collectAsStateWithLifecycle()
-    var expandedUpdates by remember { mutableStateOf(false) }
+    val homeFeeds by controller.sourceBrowse.homeFeeds.collectAsStateWithLifecycle()
+    var expandedSections by remember { mutableStateOf(emptySet<String>()) }
     val homeScroll = scrolls.grid("home")
-    val featured = remember(latest.items, state.discoverySections, state.discoveryFeeds) {
-        if (latest.items.isNotEmpty()) latest.items.distinctBy { it.sourceId to it.id }.take(6).map { title ->
-            AnimeFeaturedEntry(
-                key = "source:" + title.sourceId + ":" + title.id,
-                title = title.title, coverUrl = title.coverUrl, sourceId = title.sourceId,
-                sourceLabel = animeSourceName(title.sourceId),
-                caption = title.updateText.ifBlank { title.year?.toString().orEmpty() },
-                sourceTitle = title,
-            )
-        } else {
-            // Already loaded metadata can fill the gallery; no metadata request gates source browsing.
-            val section = state.discoverySections.firstOrNull {
-                state.discoveryFeeds[it.key]?.items?.isNotEmpty() == true
-            }
-            val feed = section?.let { state.discoveryFeeds[it.key] }
-            if (feed == null) emptyList() else feed.items.distinctBy { it.key }.take(6).map { item ->
+    val featured = remember(homeFeeds) {
+        val rows = homeFeeds.values.filter { it.source.videoSource }
+            .sortedBy { it.fetchedAt ?: Long.MAX_VALUE }.map { feed ->
+            feed.sections.flatMap { it.items }.distinctBy { it.sourceId to it.id }.map { title ->
                 AnimeFeaturedEntry(
-                    key = "discovery:" + item.key,
-                    title = item.title, coverUrl = item.coverUrl,
-                    sourceId = when (feed.query.provider) {
-                        AnimeDiscoveryProvider.BANGUMI -> "anime-bangumi"
-                        AnimeDiscoveryProvider.ANILIST -> "anime-anilist"
-                    },
-                    sourceLabel = animeDiscoveryProviderLabel(feed.query.provider),
-                    caption = animeDiscoveryMetric(item, feed.query)
-                        ?: item.year?.toString().orEmpty(),
-                    discoveryItem = item,
+                    key = "source:" + title.sourceId + ":" + title.id,
+                    title = title.title, coverUrl = title.coverUrl, sourceId = title.sourceId,
+                    sourceLabel = feed.source.name,
+                    caption = title.updateText.ifBlank { title.year?.toString().orEmpty() },
+                    sourceTitle = title,
                 )
+            }
+        }
+        // Keep original source objects, taking one from each available video feed per round.
+        // Browse-only metadata never acquires a playable-source shortcut.
+        buildList {
+            var index = 0
+            while (size < 6) {
+                var found = false
+                rows.forEach { row ->
+                    row.getOrNull(index)?.let { entry ->
+                        found = true
+                        if (size < 6) add(entry)
+                    }
+                }
+                if (!found) break
+                index++
             }
         }
     }
@@ -100,6 +99,7 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val columns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
+        val previewCount = if (columns == 1) 4 else columns * 2
         LazyVerticalGrid(GridCells.Fixed(columns), state = homeScroll, modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = contentBottomPadding),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -107,28 +107,53 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
                 AnimeFeaturedCarousel(featured, active = active, visible = active && galleryInView,
                     selectedKey = scrolls.featuredKey, onSelected = { scrolls.featuredKey = it },
                     onOpen = { entry ->
-                        if (active) {
-                            entry.sourceTitle?.let { onChooseReference(it, true) }
-                                ?: entry.discoveryItem?.let(onOpen)
-                        }
+                        if (active) entry.sourceTitle?.let { onChooseReference(it, true) }
                     })
             }
-            item(key = "source-update-heading", span = { GridItemSpan(maxLineSpan) }) {
-                AnimeDiscoverySectionHeading("最近更新", "AGE", refreshing = latest.loading,
-                    moreLabel = if (expandedUpdates) "收起最近更新" else "展开最近更新",
-                    onMore = if (latest.items.size > (if (columns == 1) 4 else columns * 2)) ({
-                        expandedUpdates = !expandedUpdates
-                    }) else null)
-            }
-            if (latest.error != null) item(key = "source-update-error", span = { GridItemSpan(maxLineSpan) }) {
-                AnimeDiscoveryInlineStatus(latest.error.orEmpty(), retry = { controller.sourceBrowse.refreshLatest(force = true) })
-            }
-            if (latest.items.isEmpty()) item(key = "source-update-empty", span = { GridItemSpan(maxLineSpan) }) {
-                AnimeDiscoveryInlineStatus(if (latest.loading) "正在读取更新" else if (latest.error == null) "来源暂无更新" else "")
-            }
-            else items(latest.items.take(if (expandedUpdates) Int.MAX_VALUE else if (columns == 1) 4 else columns * 2), key = { "update:" + it.sourceId + ":" + it.id }) { title ->
-                AnimeSourceDiscoveryCard(title, list = columns == 1, onOpen = { onChooseReference(title, true) })
-            }
+            // Show available content before still-loading sources; each source retains its own status.
+            homeFeeds.values.sortedBy { feed -> if (feed.sections.any { it.items.isNotEmpty() }) 0 else 1 }
+                .forEach { feed ->
+                    val source = feed.source
+                    val prefix = "source-home:" + source.id + ":" + source.revision
+                    if (feed.sections.isEmpty()) {
+                        item(key = "${prefix}:heading", span = { GridItemSpan(maxLineSpan) }) {
+                            AnimeDiscoverySectionHeading("来源内容", source.name, refreshing = feed.loading)
+                        }
+                        item(key = "${prefix}:state", span = { GridItemSpan(maxLineSpan) }) {
+                            AnimeDiscoveryInlineStatus(
+                                feed.error ?: if (feed.loading || feed.fetchedAt == null) "正在读取来源内容" else "暂无内容",
+                                retry = if (feed.error != null) ({
+                                    if (active) controller.sourceBrowse.refreshHomeSource(source.id)
+                                }) else null,
+                            )
+                        }
+                    } else feed.sections.forEachIndexed { index, section ->
+                        val sectionKey = prefix + ":" + section.key + ":" + index
+                        val expanded = sectionKey in expandedSections
+                        item(key = "${sectionKey}:heading", span = { GridItemSpan(maxLineSpan) }) {
+                            AnimeDiscoverySectionHeading(section.title, source.name,
+                                refreshing = feed.loading && index == 0,
+                                moreLabel = if (expanded) "收起" + section.title else "展开" + section.title,
+                                onMore = if (active && section.items.size > previewCount) ({
+                                    expandedSections = if (expanded) expandedSections - sectionKey else expandedSections + sectionKey
+                                }) else null)
+                        }
+                        if (index == 0 && feed.error != null) item(key = "${prefix}:error", span = { GridItemSpan(maxLineSpan) }) {
+                            AnimeDiscoveryInlineStatus(feed.error, retry = {
+                                if (active) controller.sourceBrowse.refreshHomeSource(source.id)
+                            })
+                        }
+                        if (section.items.isEmpty()) item(key = "${sectionKey}:empty", span = { GridItemSpan(maxLineSpan) }) {
+                            AnimeDiscoveryInlineStatus(if (feed.loading) "正在载入" else "暂无内容")
+                        }
+                        else items(section.items.take(if (expanded) Int.MAX_VALUE else previewCount),
+                            key = { sectionKey + ":" + it.sourceId + ":" + it.id }) { title ->
+                            AnimeSourceDiscoveryCard(title, list = columns == 1, onOpen = {
+                                if (active) onChooseReference(title, source.videoSource)
+                            })
+                        }
+                    }
+                }
             state.discoverySections.forEach { section ->
                 val feed = state.discoveryFeeds[section.key]
                 item(key = "section:${section.key}", span = { GridItemSpan(maxLineSpan) }) {

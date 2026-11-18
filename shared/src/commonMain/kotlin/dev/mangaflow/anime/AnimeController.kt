@@ -1047,7 +1047,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 val catalog = catalogs.firstOrNull {
                     it.title.sourceId == binding.catalog.sourceId && it.title.id == binding.catalog.id && it.title.url == binding.catalog.url
                 } ?: return@bindingLoop emptyList()
-                val automaticGroups = autoPlayGroups(detail, canonical, catalog)
+                val automaticGroups = autoPlayGroups(detail, canonical, catalog, binding.selectedGroup)
                 val groups = when {
                     binding.selectedGroup == null -> automaticGroups
                     !binding.automatic -> listOf(binding.selectedGroup)
@@ -1319,7 +1319,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             val catalog = snapshot.sourceCatalogs.firstOrNull {
                 it.title.sourceId == base.sourceId && it.title.id == base.catalog.id && it.title.url == base.catalog.url
             } ?: return@flatMap listOf(base)
-            val groups = autoPlayGroups(detail, episode, catalog)
+            val groups = autoPlayGroups(detail, episode, catalog, base.episode.group)
             if (groups.size < 2 || base.episode.group !in groups) return@flatMap listOf(base)
             listOf(base) + groups.filterNot { it == base.episode.group }.mapNotNull { group ->
                 catalog.episodes.singleOrNull { it.group == group && it.kind == base.episode.kind &&

@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.os.Process
+import dev.mangaflow.anime.player.AnimePlaybackDiagnostics
 import java.text.DateFormat
 import java.util.Date
 
@@ -35,6 +36,10 @@ class CrashReportActivity : Activity() {
         appendLine("应用异常记录")
         appendLine(LaunchFailure.readSavedReport(this@CrashReportActivity)
             ?: "尚无已保存的 Java 异常；以下系统退出记录可能仍有线索。")
+        appendLine()
+        appendLine("动漫播放错误（最近记录，不代表已确认根因）")
+        appendLine(AnimePlaybackDiagnostics.readSavedReport(this@CrashReportActivity)
+            ?: "尚无已保存的动漫播放错误记录。")
         appendLine()
         appendLine("系统退出记录（时间及退出原因，不代表已确认根因）")
         if (Build.VERSION.SDK_INT >= 30) {
