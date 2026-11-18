@@ -369,7 +369,8 @@ private class AgeProvider : RoutedAnimeProvider() {
             requireEpisodes(title.copy(title = video.text("name").ifBlank { title.title },
                 coverUrl = sourceCover(homeUrl, video.text("cover")).ifBlank { title.coverUrl },
                 year = video.positiveInt("year") ?: title.year,
-                externalIds = title.externalIds + ("age" to key)), episodes)
+                externalIds = title.externalIds + ("age" to key)),
+                episodes.sortedBy { animePlaybackParserPriority(id, it) })
         } finally { http.close() }
     }
 }
@@ -546,3 +547,8 @@ internal fun animeContentIdentity(raw: String): String {
     content.queryParameterNames.filter { it.lowercase() in signatures }.forEach { builder.removeAllQueryParameters(it) }
     return builder.build().toString()
 }
+
+/** This only orders known AGE parser capabilities; it never changes an explicit line choice. */
+internal fun animePlaybackParserPriority(sourceId: String, episode: AnimeSourceEpisode): Int =
+    if (sourceId == "anime-age" && episode.group.endsWith("[xigua]") &&
+        animeMediaType(episode.url) == null) 1 else 0

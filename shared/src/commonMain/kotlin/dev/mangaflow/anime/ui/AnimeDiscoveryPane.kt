@@ -38,7 +38,8 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
     MotionTabContent(state.discoveryTab, Modifier.fillMaxSize(), contentKey = { it }, order = { it.ordinal }) { tab ->
         when (tab) {
             AnimeDiscoveryTab.HOME -> AnimeDiscoveryHome(state, controller, scrolls, contentBottomPadding,
-                onOpen = ::open, onChooseReference = onChooseReference)
+                onOpen = ::open, onChooseReference = onChooseReference,
+                active = active && state.discoveryTab == tab)
             AnimeDiscoveryTab.SOURCES -> Unit
             else -> {
                 val key = animeDiscoveryFeedKey(tab)
@@ -59,14 +60,59 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
 @Composable
 private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeController,
     scrolls: AnimeDiscoveryScrolls, contentBottomPadding: Dp, onOpen: (AnimeDiscoveryItem) -> Unit,
-    onChooseReference: (AnimeSourceTitle, Boolean) -> Unit) {
+    onChooseReference: (AnimeSourceTitle, Boolean) -> Unit, active: Boolean) {
     val latest by controller.sourceBrowse.latest.collectAsStateWithLifecycle()
     var expandedUpdates by remember { mutableStateOf(false) }
+    val homeScroll = scrolls.grid("home")
+    val featured = remember(latest.items, state.discoverySections, state.discoveryFeeds) {
+        if (latest.items.isNotEmpty()) latest.items.distinctBy { it.sourceId to it.id }.take(6).map { title ->
+            AnimeFeaturedEntry(
+                key = "source:" + title.sourceId + ":" + title.id,
+                title = title.title, coverUrl = title.coverUrl, sourceId = title.sourceId,
+                sourceLabel = animeSourceName(title.sourceId),
+                caption = title.updateText.ifBlank { title.year?.toString().orEmpty() },
+                sourceTitle = title,
+            )
+        } else {
+            // Already loaded metadata can fill the gallery; no metadata request gates source browsing.
+            val section = state.discoverySections.firstOrNull {
+                state.discoveryFeeds[it.key]?.items?.isNotEmpty() == true
+            }
+            val feed = section?.let { state.discoveryFeeds[it.key] }
+            if (feed == null) emptyList() else feed.items.distinctBy { it.key }.take(6).map { item ->
+                AnimeFeaturedEntry(
+                    key = "discovery:" + item.key,
+                    title = item.title, coverUrl = item.coverUrl,
+                    sourceId = when (feed.query.provider) {
+                        AnimeDiscoveryProvider.BANGUMI -> "anime-bangumi"
+                        AnimeDiscoveryProvider.ANILIST -> "anime-anilist"
+                    },
+                    sourceLabel = animeDiscoveryProviderLabel(feed.query.provider),
+                    caption = animeDiscoveryMetric(item, feed.query)
+                        ?: item.year?.toString().orEmpty(),
+                    discoveryItem = item,
+                )
+            }
+        }
+    }
+    val galleryInView by remember(homeScroll) {
+        derivedStateOf { homeScroll.layoutInfo.visibleItemsInfo.any { it.key == "featured" } }
+    }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val columns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
-        LazyVerticalGrid(GridCells.Fixed(columns), state = scrolls.grid("home"), modifier = Modifier.fillMaxSize(),
+        LazyVerticalGrid(GridCells.Fixed(columns), state = homeScroll, modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = contentBottomPadding),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (featured.isNotEmpty()) item(key = "featured", span = { GridItemSpan(maxLineSpan) }) {
+                AnimeFeaturedCarousel(featured, active = active, visible = active && galleryInView,
+                    selectedKey = scrolls.featuredKey, onSelected = { scrolls.featuredKey = it },
+                    onOpen = { entry ->
+                        if (active) {
+                            entry.sourceTitle?.let { onChooseReference(it, true) }
+                                ?: entry.discoveryItem?.let(onOpen)
+                        }
+                    })
+            }
             item(key = "source-update-heading", span = { GridItemSpan(maxLineSpan) }) {
                 AnimeDiscoverySectionHeading("最近更新", "AGE", refreshing = latest.loading,
                     moreLabel = if (expandedUpdates) "收起最近更新" else "展开最近更新",

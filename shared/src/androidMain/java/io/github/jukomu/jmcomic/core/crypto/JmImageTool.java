@@ -24,16 +24,24 @@
  */
 /*
  * Android adaptation of JUKOMU/JMComic-Api-Java (MIT), v1.1.12 / 5a7a4bb4870edb512274dc2adeb4f7c157445321.
- * The upstream segment/format logic is retained. Only processor selection changes:
- * bind AndroidImageProcessor directly; never initialize the desktop AWT fallback.
+ * The upstream JmImageTool segment/format logic and AndroidImageProcessor strip
+ * restoration are retained. This Android-only adaptation owns Bitmap cleanup,
+ * checks encoder completion and never initializes the desktop AWT fallback.
  */
 package io.github.jukomu.jmcomic.core.crypto;
 
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Rect;
+
+import io.github.jukomu.jmcomic.api.exception.JmComicException;
 import io.github.jukomu.jmcomic.api.model.JmImage;
 import io.github.jukomu.jmcomic.core.constant.JmConstants;
-import io.github.jukomu.jmcomic.core.image.spi.ImageProcessor;
 
-import io.github.jukomu.jmcomic.android.support.AndroidImageProcessor;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.concurrent.CancellationException;
 
 /**
  * @author JUKOMU
@@ -42,8 +50,6 @@ import io.github.jukomu.jmcomic.android.support.AndroidImageProcessor;
  * @Date: 2025/10/28
  */
 public final class JmImageTool {
-    private static final ImageProcessor customProcessor = new AndroidImageProcessor();
-
     private JmImageTool() {
     }
 
@@ -56,8 +62,94 @@ public final class JmImageTool {
      * @return 解密（重组）后的图片字节数组
      */
     public static byte[] decryptImage(byte[] imageData, JmImage image) {
-        ImageProcessor processor = customProcessor;
-        return processor.decryptImage(imageData, image);
+        checkInterrupted();
+        int numSegments = calculateNumSegments(Long.parseLong(image.scrambleId()),
+                Long.parseLong(image.photoId()), image.getFilenameWithoutSuffix());
+        if (numSegments == 0) {
+            return imageData;
+        }
+
+        Bitmap originalBitmap = null;
+        Bitmap decryptedBitmap = null;
+        try {
+            // Keep the upstream software decode, without scaling or changing the source pixels.
+            originalBitmap = BitmapFactory.decodeByteArray(imageData, 0, imageData.length);
+            if (originalBitmap == null) {
+                throw new JmComicException("禁漫图片还原失败：无法解码下载的图片。");
+            }
+            checkInterrupted();
+            int width = originalBitmap.getWidth();
+            int height = originalBitmap.getHeight();
+            if (height < numSegments) {
+                return imageData;
+            }
+
+            // getConfig() can be null for an internal format, but a mutable destination
+            // requires a concrete config. BitmapFactory's default decode is software-backed.
+            Bitmap.Config config = originalBitmap.getConfig();
+            decryptedBitmap = Bitmap.createBitmap(width, height,
+                    config != null ? config : Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(decryptedBitmap);
+            int segmentHeight = height / numSegments;
+            int remainder = height % numSegments;
+            int currentY = 0;
+            for (int i = 0; i < numSegments; i++) {
+                checkInterrupted();
+                int ySrc;
+                int hSrc = segmentHeight;
+                if (i == 0) {
+                    hSrc += remainder;
+                    ySrc = height - hSrc;
+                } else {
+                    ySrc = height - (segmentHeight * (i + 1)) - remainder;
+                }
+                Rect srcRect = new Rect(0, ySrc, width, ySrc + hSrc);
+                Rect destRect = new Rect(0, currentY, width, currentY + hSrc);
+                canvas.drawBitmap(originalBitmap, srcRect, destRect, null);
+                currentY += hSrc;
+            }
+
+            checkInterrupted();
+            try (ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                Bitmap.CompressFormat format = getCompressFormat(getFormatName(image.filename()));
+                if (!decryptedBitmap.compress(format, 100, output)) {
+                    throw new JmComicException("禁漫图片还原失败：图片编码器未生成有效数据。");
+                }
+                checkInterrupted();
+                return output.toByteArray();
+            }
+        } catch (CancellationException cancelled) {
+            throw cancelled;
+        } catch (JmComicException failure) {
+            throw failure;
+        } catch (IOException failure) {
+            throw new JmComicException("禁漫图片还原失败：图片编码未能完成。", failure);
+        } catch (RuntimeException failure) {
+            throw new JmComicException("禁漫图片还原失败。", failure);
+        } finally {
+            // Both bitmaps belong only to this invocation, including a failed/cancelled one.
+            if (decryptedBitmap != null) {
+                decryptedBitmap.recycle();
+            }
+            if (originalBitmap != null) {
+                originalBitmap.recycle();
+            }
+        }
+    }
+
+    private static void checkInterrupted() {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new CancellationException("JM image restoration was cancelled.");
+        }
+    }
+
+    private static Bitmap.CompressFormat getCompressFormat(String formatName) {
+        return switch (formatName.toLowerCase()) {
+            case "jpeg", "jpg" -> Bitmap.CompressFormat.JPEG;
+            case "png" -> Bitmap.CompressFormat.PNG;
+            case "webp" -> Bitmap.CompressFormat.WEBP;
+            default -> Bitmap.CompressFormat.JPEG;
+        };
     }
 
     /**

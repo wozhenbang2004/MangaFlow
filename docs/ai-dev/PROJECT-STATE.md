@@ -1,5 +1,17 @@
 # MangaFlow · current work
 
+## Anime carousel and reported media failures · source checkpoint 2026-11-18
+
+Route DELIVERY with bounded source diagnosis; stage SOURCE_COMPLETE, installed outcomes pending. Current wording and three before screenshots are in DESIGN ANIME-REPAIR-01–06. Integration base: main 625a108316ada5f607a0bbed69c3148c4e6bbb61. Preserve concurrent reader-footer, settings, cache/read-count and anime work. Root is the sole commit/ref/document integrator.
+
+This batch adapts FeaturedCarousel for anime using already-loaded AGE content first, retains direct source opening and independent metadata feeds, and corrects cover-badge line height. Android HLS adds a guarded extractor for image-prefixed TS segments online/offline with original byte/cache/range/retry ownership. Known dynamic AGE xigua wrappers follow current-parser-compatible lines without changing original episode URLs or explicit choices. JM restoration owns software bitmap allocation, checks encoding and releases temporary images reliably; upstream strip semantics, GIF bypass and request/cache owners remain intact. See docs/anime/lanerc-port.md for exact evidence and limits.
+
+The playback screenshot maps to the existing container-parsing error, not a demonstrated Bangumi/network failure. Bangumi metadata and native video sources have separate responsibilities. JM catalogue success does not prove image retrieval/restoration. Android processor binding, image-size validation, Vurl parsing and independent source browsing already existed and must not be reported as new fixes.
+
+Relevant source and pinned API contracts were read. A narrow independent Media3 1.11.1 interface/input-lifecycle check found no concrete blocker. No tests, local builds/compiles, source probes, device operations or UI automation were run. Current layout/motion, user-network speed, video playback and successful JM page display remain unverified; no successful build is claimed here.
+
+Publish one complete latest-main batch with expected-head protection and confirm ordinary Android/native workflow activation only. Do not wait/poll for artifacts or create a status-only follow-up push. Once this source is in main, the next useful input is actual CI failure evidence or installed user feedback on the carousel and two content paths. Do not repeat completed reference research or existing fixes. Raw feedback is covered through the current media-failure/home-carousel message, recorded 2026-11-18 Asia/Shanghai; exact message ID/time unavailable.
+
 ## Reading footer status refinement · source checkpoint 2026-11-17
 
 Current request and screenshot `1000122025.jpg` are recorded in DESIGN READFOOTER-01–06. Scope is the left reading status strip, its existing detail popover and adjacent time/page alignment. Baseline is main `d28d32ed9226757394ec215cee6d6468020de38c`; preserve concurrent experience-center, cache/read-count and anime work. Root is the only implementation/integration writer for this slice; the reviewer is read-only.

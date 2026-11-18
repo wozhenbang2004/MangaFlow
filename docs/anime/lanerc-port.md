@@ -2,6 +2,33 @@
 
 Source implementation checkpoint: 2026-11-17. This document distinguishes implemented application paths from the complete requested inventory. It does not certify installed behavior, source availability, rendering performance or successful packaging.
 
+## Real-content carousel and stream compatibility · 2026-11-18
+
+DESIGN ANIME-REPAIR-01–06 records the current report and three before screenshots. The anime carousel adapts MangaFlow's existing FeaturedCarousel: first six already-loaded AGE updates, otherwise an already-loaded discovery section. No extra metadata request or loading gate. Original source/discovery objects remain the navigation authority. Manual paging, a visible next card, retained item identity, bounded height, cover-derived color, full poster, compact indicators and reduced-motion/input handling add hierarchy while retaining recent/today/season feeds. Installed visual/gesture behavior is not yet observed.
+
+### Diagnosis and reference scope
+
+The screenshot's “这条线路返回的内容无法作为视频文件读取” is emitted by AnimePlayer.android.kt for Media3 container-parsing failures. It does not identify the fetched bytes, proxy requirement or a Bangumi outage. Bangumi owns metadata/calendar identity; native/script providers resolve playback. Independent source fetching and direct native-title opening already existed at the base.
+
+Read reference: [community Windows Lanerc casting adapter](https://github.com/Asern-l/lanerc-cast-windows/blob/661bce36ab79381f0e56dff1ef8dca8369733e78/lanerc_proxy.py), specifically its PNG-boundary and MPEG-TS recognisers. This is community interoperability code, not proven official Lanerc APK source or speed evidence. It establishes a concrete compatibility candidate: an actual image prefix before transport-stream bytes. MangaFlow implements its own guarded extractor handling, without transplanting a proxy, credentials or network owner. ECxiaozong/lanerc-source exposes EasyBangumi compatibility scripts, not verified official source; embedded guest credentials are not suitable application-wide credentials and are not copied.
+
+### Pinned Android HLS contract
+
+The project uses Media3 1.11.1. Actual sources read:
+- [HlsExtractorFactory](https://github.com/androidx/media/blob/1.11.1/libraries/exoplayer_hls/src/main/java/androidx/media3/exoplayer/hls/HlsExtractorFactory.java), DefaultHlsExtractorFactory and HlsMediaChunkExtractor: preserve subtitle configuration, text output format and lifecycle delegation.
+- [HlsMediaChunk](https://github.com/androidx/media/blob/1.11.1/libraries/exoplayer_hls/src/main/java/androidx/media3/exoplayer/hls/HlsMediaChunk.java): each network open creates a fresh ExtractorInput; reusable extractors span segments. Clear retries request the consumed subrange. AES retries reopen/decrypt and skip consumed plaintext. nextLoadPosition comes from the actual input position.
+- [ExtractorInput](https://github.com/androidx/media/blob/1.11.1/libraries/extractor/src/main/java/androidx/media3/extractor/ExtractorInput.java): peek and committed read/skip positions are separate.
+
+AnimeHlsExtractorFactory first peeks eight signature bytes; ordinary media stays untouched. Only an image signature enables a bounded scan. PNG requires IHDR and a complete IEND chunk boundary; JPEG requires EOI. The following five complete 188-byte packets require MPEG-TS sync and valid basic header bits. Prefix budget: 256KiB. On confirmation, reset peek and consume exactly the prefix through the original input. Truncated, malformed and over-budget candidates consume nothing; actual I/O errors propagate to Media3.
+
+The wrapper checks each new input, including reused-extractor segments and retries, then delegates parsing. Online CacheDataSource and offline FileDataSource retain original bytes/positions, without transformed caches or artificial lengths. Both HLS paths use the factory. This is plaintext extraction: a prefix outside AES ciphertext or another encapsulation is not implemented or verified. It is not a universal media repair or browser/player emulator.
+
+Automatic AGE selection now places known dynamic-only xigua wrappers after current-parser-compatible lines. Sorting follows original road/episode URL construction, retaining direct media, manual selection, source fairness/cooldown and exact canonical/source/episode/group identity. Existing Vurl resolution and equivalent-episode fallback remain unchanged; age-player-contract.md records unsupported signed Go/WASM player cases.
+
+### Outcome boundary
+
+Source/interface inspection found no concrete API or retry-position blocker. No failing response capture, playback/source probe, local build/compile, test or UI automation was performed. This batch adds guarded compatibility and source ordering; successful playback and direct-connect latency still require actual runtime/user evidence. JM restoration is separately scoped in DESIGN ANIME-REPAIR-06; catalogue counts and source completion do not prove displayed pages.
+
 ## Independent anime entry and UI correction · 2026-11-17
 
 The user explicitly rejected the previous layered navigation and requested a direct anime sidebar entry without altering the manga experience. DESIGN ANIME-UX-01–08 records the exact correction, adopted layout and source evidence. Existing sibling root routes are retained, with adjacent 漫画/动漫 labels, no media switch inside either page and no extra manga-toolbar width reserved for anime.

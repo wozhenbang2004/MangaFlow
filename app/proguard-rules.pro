@@ -23,5 +23,5 @@
 # JNI exports bind to this exact class and method names after an explicit component load.
 -keep class dev.mangaflow.storage.SteamNative { *; }
 
-# Android's adapted JmImageTool constructs AndroidImageProcessor directly.
-# Ordinary class references retain the processor; no SPI keep or AWT suppression is needed.
+# Android's adapted JmImageTool owns the software Bitmap restoration directly.
+# It does not initialize SPI processors or the desktop AWT fallback.

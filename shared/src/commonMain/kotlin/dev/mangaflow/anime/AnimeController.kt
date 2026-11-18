@@ -1358,7 +1358,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     /** Try each source before another route from it. Recent failures go last, and retries
-     * continue with least-recently attempted sources/options instead of repeating a prefix. */
+     * continue with least-recently attempted sources/options instead of repeating a prefix.
+     * Within AGE, known dynamic-only wrappers follow routes this resolver can already read. */
     private fun fairPlaybackOptions(subjectId: String, episodeId: String,
         options: List<AnimeEpisodeOption>): List<AnimeEpisodeOption> {
         val now = wallTimeMillis()
@@ -1366,7 +1367,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         return listOf(false, true).flatMap { cooldown ->
             val buckets = options.filter { cooling(it) == cooldown }.groupBy { it.sourceId }.entries
                 .sortedBy { sourceAttemptKey(subjectId, episodeId, it.key)?.let { key -> playbackSourceAttemptOrder[key] } ?: Long.MIN_VALUE }
-                .map { (_, rows) -> rows.sortedBy { playbackHistoryKey(subjectId, episodeId, it)?.let { key -> playbackAttemptOrder[key] } ?: Long.MIN_VALUE } }
+                .map { (_, rows) -> rows.sortedWith(compareBy<AnimeEpisodeOption> {
+                    dev.mangaflow.anime.sources.animePlaybackParserPriority(it.sourceId, it.episode)
+                }.thenBy { playbackHistoryKey(subjectId, episodeId, it)?.let { key -> playbackAttemptOrder[key] } ?: Long.MIN_VALUE }) }
             val result = mutableListOf<AnimeEpisodeOption>()
             repeat(buckets.maxOfOrNull { it.size } ?: 0) { index ->
                 buckets.forEach { rows -> rows.getOrNull(index)?.let(result::add) }

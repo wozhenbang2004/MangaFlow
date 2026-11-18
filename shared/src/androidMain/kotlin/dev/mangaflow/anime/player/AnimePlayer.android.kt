@@ -241,7 +241,7 @@ internal class AndroidAnimePlayer(
                 // Mutable playlists and key material never enter the disposable media cache.
                 if (dataType == C.DATA_TYPE_MEDIA || dataType == C.DATA_TYPE_MEDIA_INITIALIZATION)
                     cacheFactory.createDataSource() else upstream().createDataSource()
-            }).createMediaSource(item)
+            }).setExtractorFactory(AnimeHlsExtractorFactory()).createMediaSource(item)
             C.CONTENT_TYPE_DASH -> DashMediaSource.Factory(
                 DefaultDashChunkSource.Factory(cacheFactory), upstream(),
             ).createMediaSource(item)
@@ -310,7 +310,8 @@ internal class AndroidAnimePlayer(
             val item = MediaItem.Builder().setMediaId(request.asset.playbackIdentity()).setUri(entry.file.toURI())
                 .setMimeType(entry.mimeType)
                 .setMediaMetadata(MediaMetadata.Builder().setTitle(request.asset.title.ifBlank { "离线动漫" }).build()).build()
-            val media = if (entry.mimeType.contains("mpegurl", true)) HlsMediaSource.Factory(factory).createMediaSource(item)
+            val media = if (entry.mimeType.contains("mpegurl", true)) HlsMediaSource.Factory(factory)
+                .setExtractorFactory(AnimeHlsExtractorFactory()).createMediaSource(item)
                 else ProgressiveMediaSource.Factory(factory).createMediaSource(item)
             receivedBytes = AtomicLong(0L)
             lastSampleBytes = 0L

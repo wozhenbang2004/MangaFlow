@@ -33,6 +33,7 @@ import kotlin.math.roundToInt
 internal class AnimeDiscoveryScrolls {
     val grids = mutableMapOf<String, LazyGridState>()
     val queries = mutableMapOf<String, AnimeDiscoveryQuery>()
+    var featuredKey: String? = null
     fun grid(key: String): LazyGridState = grids.getOrPut(key) { LazyGridState() }
 }
 
@@ -168,7 +169,8 @@ private fun AnimeDiscoveryBadge(text: String, description: String?, rating: Bool
         .semantics { contentDescription = description ?: text },
         horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
         if (rating) Icon(Icons.Outlined.Star, null, Modifier.size(11.dp), tint = MaterialTheme.colorScheme.primary)
-        Text(text, color = MaterialTheme.colorScheme.onSurface, fontSize = 10.sp,
+        Text(text, color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 13.sp),
             maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
