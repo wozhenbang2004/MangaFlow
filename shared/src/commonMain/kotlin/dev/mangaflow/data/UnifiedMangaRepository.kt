@@ -269,6 +269,11 @@ class UnifiedMangaRepository(
     suspend fun sourceFeedFilters(id: String, feedId: String): List<SourceFilter> = if (id == "copy") emptyList() else adapter(id).feedFilters(feedId)
     suspend fun sourceSearchFilters(id: String): List<SourceFilter> = if (id == "copy") emptyList() else adapter(id).searchFilters()
     suspend fun sourceHotTags(id: String): List<String> = if (id == "copy") emptyList() else adapter(id).hotTags()
+    suspend fun sourceTargetSearch(id: String, query: String, target: SearchTarget, page: Int): MangaPage =
+        diagnostics.track(id, SourceStage.SEARCH) {
+            require(id != "copy") { "请走拷贝专用检索接口。" }
+            adapter(id).searchTarget(query, target, page)
+        }
     suspend fun sourceFilteredSearch(id: String, query: String, page: Int, options: List<String>, forceRefresh: Boolean = false): MangaPage =
         if (options.isEmpty()) searchSource(id, query, page, forceRefresh) else diagnostics.track(id, SourceStage.SEARCH) {
             adapter(id).searchFiltered(query, page, options)
@@ -351,13 +356,21 @@ class UnifiedMangaRepository(
 
     /** Each callback is an immutable cumulative snapshot of this requested batch only. */
     suspend fun searchAll(query: String, pages: Map<String, Int>? = null, forceRefresh: Boolean = false,
+        target: SearchTarget = SearchTarget.TITLE, selectedTags: List<MangaTag> = emptyList(),
         onUpdate: (FederatedSearchPage) -> Unit = {}): FederatedSearchPage = withContext(Dispatchers.IO) {
         val text = query.trim()
-        require(text.length in 1..120) { "请输入 1–120 个字的漫画标题。" }
+        val tags = selectedTags.distinctBy { it.name.trim().lowercase() }.take(12)
+        require(text.length in 1..120 || text.isEmpty() && tags.isNotEmpty()) {
+            "请输入 1–120 个字的搜索内容或选择标签。"
+        }
         val eligibility = sourceEligibility
-        if (eligibility.ids.isEmpty()) throw SourceException("请先在设置中启用漫画源")
-        val requested = (pages?.toMap() ?: sources.associate { it.id to 0 }).filterKeys { it in eligibility.ids }
-        val infos = sources.associateBy(BodySourceInfo::id)
+        // This is a *query boundary*, not a UI-only hide rule. Adult sources cannot
+        // receive ordinary queries even when the user enabled both source groups.
+        val ordinary = sources.filter { !it.adult }.associateBy(BodySourceInfo::id)
+        val allowed = eligibility.ids.intersect(ordinary.keys)
+        if (allowed.isEmpty()) throw SourceException("普通漫画区没有已启用的来源")
+        val requested = (pages?.toMap() ?: ordinary.keys.associateWith { 0 }).filterKeys { it in allowed }
+        val infos = ordinary
         val states = LinkedHashMap<String, FederatedSearchSource>()
         requested.forEach { (id, _) ->
             states[id] = FederatedSearchSource(id, infos[id]?.name ?: sourceDisplayName(id), loading = true)
@@ -372,10 +385,14 @@ class UnifiedMangaRepository(
             requested.map { (sourceId, page) -> async {
                 var found: List<Manga> = emptyList()
                 val state = try {
-                    require(sourceId in infos) { "这个正文来源尚未安装。" }
+                    require(sourceId in infos && !infos.getValue(sourceId).adult) {
+                        "普通漫画检索禁止访问成人来源。"
+                    }
                     require(page >= 0) { "搜索分页无效。" }
                     ensureEligibility(eligibility, sourceId)
-                    val result = withTimeout(15_000L) { searchSourceTerms(sourceId, text, page, forceRefresh) }
+                    val result = withTimeout(15_000L) {
+                        searchSourceTerms(sourceId, text, page, forceRefresh, target, tags)
+                    }
                     found = result.items.distinctBy(::federatedMangaIdentity)
                     val next = if (result.hasMore) result.nextPage ?: (page + 1) else null
                     require(next == null || next > page) { "该来源没有返回有效的下一页。" }
@@ -402,8 +419,37 @@ class UnifiedMangaRepository(
         snapshot()
     }
 
-    private suspend fun searchSourceTerms(sourceId: String, query: String, page: Int, forceRefresh: Boolean): MangaPage {
-        val retained = if (page > 0) synchronized(unifiedMangaRepositoryStateLock) { searchTerms[query]?.get(sourceId) } else null
+    private suspend fun searchSourceTerms(sourceId: String, query: String, page: Int,
+        forceRefresh: Boolean, target: SearchTarget, selectedTags: List<MangaTag>): MangaPage {
+        if (target != SearchTarget.TITLE || selectedTags.isNotEmpty()) {
+            if (sourceId == "copy") {
+                // Tags from another source carry only a display name, never its foreign path.
+                val copyTags = selectedTags.mapNotNull { tag ->
+                    if (tag.path.startsWith("label:")) copyTagForName(tag.name)
+                    else tag.takeIf { it.path.isNotBlank() }
+                }.distinctBy(MangaTag::path)
+                if (target == SearchTarget.TAG && copyTags.isEmpty()) {
+                    val mapped = copyTagForName(query)
+                    if (mapped != null) return copy.search("", SearchTarget.TAG, listOf(mapped), page)
+                    throw SourceException("拷贝没有这个标签的有效检索编号；其他来源仍会搜索。")
+                }
+                return copy.search(query, target, copyTags, page)
+            }
+            val term = if (target == SearchTarget.TAG)
+                selectedTags.firstOrNull()?.name?.trim().orEmpty().ifBlank { query }
+            else query
+            val result = adapter(sourceId).searchTarget(term, target, page)
+            if (selectedTags.isEmpty()) return result
+            val required = selectedTags.map { normalizedBodySourceTitle(it.name) }.filter(String::isNotBlank)
+            return result.copy(items = result.items.filter { manga ->
+                val actual = (manga.tags + manga.tagPaths.keys)
+                    .map(::normalizedBodySourceTitle).toSet()
+                required.all { it in actual }
+            })
+        }
+        val retained = if (page > 0) synchronized(unifiedMangaRepositoryStateLock) {
+            searchTerms[query]?.get(sourceId)
+        } else null
         val terms = retained?.let(::listOf) ?: bodySourceSearchTerms(query)
         var result = MangaPage(emptyList(), false)
         for (term in terms) {

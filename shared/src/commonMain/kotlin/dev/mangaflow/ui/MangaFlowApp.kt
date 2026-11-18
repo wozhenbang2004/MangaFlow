@@ -307,10 +307,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val chapterPreparations by model.chapterPreparations.collectAsStateWithLifecycle()
     val account by model.account.collectAsStateWithLifecycle()
     val copyShelfSync by model.copyShelfSync.state.collectAsStateWithLifecycle()
+    val jmShelfSync by model.services.jmShelfSync.state.collectAsStateWithLifecycle()
     val copyShelfRemote by model.copyShelfRemote.collectAsStateWithLifecycle()
     val copyProgress by model.copyProgress.collectAsStateWithLifecycle()
     val adoptedResumeTargets by model.library.resumeTargets.collectAsStateWithLifecycle()
     var copySyncOpen by rememberSaveable { mutableStateOf(false) }
+    var jmSyncOpen by rememberSaveable { mutableStateOf(false) }
     var copySyncFocus by remember { mutableStateOf<String?>(null) }
     fun openCopyComparison(mangaId: String? = null) {
         copySyncFocus = mangaId
@@ -333,6 +335,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val section = Section.entries.firstOrNull {
         it.name == sectionName && (!restrictedMode || it != Section.BOARDS && it != Section.ANIME)
     } ?: Section.DISCOVER
+    LaunchedEffect(restrictedMode, section) {
+        if (restrictedMode && section == Section.LIBRARY) model.services.jmShelfSync.check()
+        if (!restrictedMode) jmSyncOpen = false
+    }
     LaunchedEffect(account.profile?.username, account.busy, reading == null, detail == null,
         restrictedMode, copySyncOpen, experienceLifecycle) {
         if (restrictedMode || account.profile == null || account.busy || reading != null || detail != null || copySyncOpen)
@@ -574,6 +580,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val desktopDestinations = remember(profileSections, restrictedMode) {
         profileSections.map { DesktopDestination(it.navigationTitle(restrictedMode), it.icon) }
     }
+    if (restrictedMode && jmSyncOpen) JmShelfSyncSheet(
+        state = jmShelfSync, backdrop = drawerBackdrop,
+        onCheck = model.services.jmShelfSync::check,
+        onApply = model.services.jmShelfSync::apply,
+        onCancel = model.services.jmShelfSync::cancel,
+        onDismiss = { jmSyncOpen = false },
+        onOpenAccount = { jmSyncOpen = false; changeSection(Section.ACCOUNT) },
+    )
     CopyShelfSyncSheet(
         visible = copySyncOpen && account.profile != null && copyShelfSync.owner == account.profile?.username && !restrictedMode,
         state = copyShelfSync, repository = model.repository, backdrop = drawerBackdrop,
@@ -641,7 +655,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         SourceCapabilityDetailsSheet(entry.source, model.repository, model.sourcePlugins, drawerBackdrop,
             manga = sourceDetailsManga?.takeIf { it.sourceId == id },
             onDismiss = { sourceDetailsId = null; sourceDetailsManga = null },
-            onSourceChanged = { scopedBrowse.invalidateSource(id) })
+            onSourceChanged = {
+                scopedBrowse.invalidateSource(id)
+                if (id == "jmcomic") model.services.jmShelfSync.accountChanged()
+            })
     } }
     val openDesktopSearch: () -> Unit = {
         if (section == Section.ANIME && reading == null && detail == null) {
@@ -1072,7 +1089,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 volumeImageHeaders = { chapter -> model.repository.imageHeaders(chapterSourceMangaId(current.state.manga.id, chapter), chapter.id) },
                                 onBack = model::closeDetail, onRetry = model::retryDetail,
                                 onToggleFavorite = { model.toggleFavorite(current.state.manga) },
-                                onRead = model::readChapter, onAuthor = if (restrictedMode) null else model::openAuthor,
+                                onRead = model::readChapter, onAuthor = { _, name ->
+                                    model.closeDetail()
+                                    changeSection(Section.DISCOVER)
+                                    browseActions.setSearchTarget(SearchTarget.AUTHOR)
+                                    browseActions.setQuery(name)
+                                    searchExpanded = true
+                                },
                                 onReadVariant = model::readChapterVariant,
                                 onSetPreferredSource = model::preferBodySource,
                                 onClearChapterSource = model::clearChapterSource,
@@ -1093,8 +1116,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 } == true,
                                 sourceError = sourceOperation.error ?: sourceCatalogErrors[current.state.manga.id]
                                     ?.values?.takeIf { it.isNotEmpty() }?.joinToString("；"),
-                                onTag = if (restrictedMode) null else { manga, tag ->
-                                    model.openTagSearch(manga, tag)
+                                onTag = { manga, tag ->
+                                    if (restrictedMode) {
+                                        browseActions.setSearchTarget(SearchTarget.TAG)
+                                        browseActions.toggleSearchTag(dev.mangaflow.data.MangaTag(
+                                            tag, "label:" + dev.mangaflow.data.normalizedBodySourceTitle(tag)))
+                                    } else model.openTagSearch(manga, tag)
                                     tagSearchVisible = true
                                 },
                                 onRestart = model::restartChapter,
@@ -1350,6 +1377,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         },
                                         onOpenAccount = if (restrictedMode) null else { { changeSection(Section.ACCOUNT) } },
                                         copyShelfAvailable = !restrictedMode,
+                                        jmSyncState = if (restrictedMode) jmShelfSync else null,
+                                        onJmSync = if (restrictedMode) {
+                                            { jmSyncOpen = true; model.services.jmShelfSync.check() }
+                                        } else null,
                                         favorites = ordinaryFavorites, history = ordinaryHistory,
                                         libraryStore = model.library, onOpenPageCollection = model::openPageCollection,
                                         repository = model.repository, opening = libraryOpening, active = rootActive,
@@ -1379,7 +1410,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         repository = model.repository,
                                         sources = profileEntries.filter { it.enabled && it.isInstalled && !it.removed }.map { it.source },
                                         active = rootActive, onSources = manageProfileSources,
-                                        onSessionChange = { profileEntries.forEach { scopedBrowse.invalidateSource(it.source.id) } }, onOpen = { model.openManga(it) },
+                                        onSessionChange = {
+                                            profileEntries.forEach { scopedBrowse.invalidateSource(it.source.id) }
+                                            model.services.jmShelfSync.accountChanged()
+                                        }, onOpen = { model.openManga(it) },
                                         isLocalFavorite = { manga -> favorites.any { it.id == manga.id } },
                                         onToggleLocalFavorite = model::toggleFavorite,
                                         onInspect = { id -> sourceDetailsManga = null; sourceDetailsId = id },
@@ -1473,10 +1507,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     input = { inputModifier ->
                                         DesktopSearchField(
                                             query = browse.query, target = browse.searchTarget,
-                                            copyOnly = browse.selectedTags.isNotEmpty(),
+                                            copyOnly = false,
                                             active = rootActive, focusRequest = desktopSearchRequest,
                                             backdrop = searchBackdrop, modifier = inputModifier,
-                                            showScopeSelector = !restrictedMode,
+                                            showScopeSelector = true,
                                             onOpen = { browseActions.resumeBrowseSearch(); searchExpanded = true },
                                             onQuery = browseActions::setQuery,
                                             onSubmit = browseActions::submitSearch,
@@ -1563,8 +1597,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             expanded = searchExpanded,
                             query = browse.query,
                             placeholder = "搜索",
-                            searchTarget = browse.searchTarget.takeUnless { restrictedMode },
-                            scopeCopyOnly = browse.selectedTags.isNotEmpty(),
+                            searchTarget = browse.searchTarget,
+                            scopeCopyOnly = false,
                             onSearchTarget = browseActions::setSearchTarget,
                             active = rootActive,
                             backdrop = searchBackdrop,

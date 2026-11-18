@@ -4,6 +4,7 @@ import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.account.CopyAccountRepository
 import dev.mangaflow.account.CopyReadingOutbox
 import dev.mangaflow.account.CopyShelfSyncController
+import dev.mangaflow.account.JmShelfSyncController
 import dev.mangaflow.background.ApplicationOperations
 import dev.mangaflow.data.CopyAnonymousIdentityStore
 import dev.mangaflow.data.CopyCommunityRepository
@@ -123,6 +124,7 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val metricsRepository = MangaMetricsRepository(application, reviews, community)
     val accountRepository = CopyAccountRepository(application)
     val copyShelfSync = CopyShelfSyncController(application, accountRepository, library, repository, scope)
+    val jmShelfSync = JmShelfSyncController(repository, library, scope)
     val readingOutbox = CopyReadingOutbox(application, accountRepository, scope)
 
     private val sourceSync = Mutex()

@@ -121,7 +121,11 @@ internal fun SearchScopeBar(
             fontSize = 11.sp, itemContent = { index, _, color ->
                 Icon(icons[index], labels[index], Modifier.size(17.dp), tint = color)
             })
-        if (target != SearchTarget.TITLE) BodySourceMark("copy", "拷贝", Modifier.size(18.dp))
+
+        }
+        if (target != SearchTarget.TITLE && showScope) {
+            Text("优先使用来源的原生检索；不支持的来源按返回的作者／标签核对，结果可能不完整。",
+                fontSize = 10.sp, color = colors.onSurfaceVariant, maxLines = 2)
         }
         if (selectedTags.isNotEmpty()) {
             Row(Modifier.fillMaxWidth().heightIn(min = 36.dp), verticalAlignment = Alignment.CenterVertically) {

@@ -156,11 +156,11 @@ data class BrowseState(
     val sourceScope: String = "",
 ) {
     val isSearch: Boolean get() = searchTarget != SearchTarget.TITLE || query.isNotBlank() || selectedTags.isNotEmpty()
-    val isFederatedSearch: Boolean get() = searchTarget == SearchTarget.TITLE && query.isNotBlank() && selectedTags.isEmpty()
+    val isFederatedSearch: Boolean get() = query.isNotBlank() || selectedTags.isNotEmpty()
     val cacheKey: String get() = when {
         isSearch -> {
             val keyword = if (searchTarget == SearchTarget.TAG) "" else query.trim()
-            "${if (isFederatedSearch) "search-v9-copy-heat:$sourceScope" else "search-v3-heat"}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
+            "${if (isFederatedSearch) "search-v10-fields:$sourceScope" else "search-v3-heat"}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
         }
         mode == DiscoveryMode.RANKING -> "ranking:${period.name}:${audience.name}"
         else -> "discover:${mode.name}"
@@ -514,11 +514,12 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             refresh()
             return
         }
-        val tag = dev.mangaflow.data.copyTagForName(previous.query, knownSearchTags)
-        if (tag == null) {
-            _browse.update { it.copy(tagsLoading = false, tagsError = "请选择一个匹配的标签后搜索作品。") }
-            return
-        }
+        // Unknown labels are still useful to native TAG endpoints such as JM.
+        // Only Copy's known paths are ever passed to its path-based tag API.
+        val label = previous.query.trim()
+        val tag = dev.mangaflow.data.copyTagForName(label, knownSearchTags)
+            ?: MangaTag(label, "label:" + dev.mangaflow.data.normalizedBodySourceTitle(label))
+        if (tag.name.isBlank() || tag.name.length > 120) return
         cancelTagLookup()
         showBrowse(previous.copy(query = "", selectedTags = (previous.selectedTags + tag).distinctBy(MangaTag::path),
             items = emptyList(), page = 0, error = null, tagsError = null, tagsLoading = false))
@@ -567,14 +568,19 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val previous = _browse.value
         if (manga.sourceId == "copy") knownSearchTags =
             (knownSearchTags + manga.tagPaths.map { MangaTag(it.key, it.value) }).distinctBy(MangaTag::path)
-        val tag = manga.tagPaths[name]?.takeIf { manga.sourceId == "copy" }?.let { MangaTag(name, it) }
-            ?: dev.mangaflow.data.copyTagForName(name, knownSearchTags)
+        val tag = if (manga.sourceId == "copy") {
+            manga.tagPaths[name]?.let { MangaTag(name, it) }
+                ?: dev.mangaflow.data.copyTagForName(name, knownSearchTags)
+        } else MangaTag(name, "label:" + dev.mangaflow.data.normalizedBodySourceTitle(name))
         val selection = BrowseState(query = if (tag == null) name else "",
             searchTarget = SearchTarget.TAG, selectedTags = listOfNotNull(tag),
             tagsLoading = tag == null,
             mode = previous.mode, period = previous.period, audience = previous.audience)
         showBrowse(selection)
-        if (tag != null) return
+        if (tag != null) {
+            knownSearchTags = (knownSearchTags + tag).distinctBy(MangaTag::path)
+            return
+        }
         pendingTagLookup = manga to name
         _browse.update { it.copy(tagsLoading = true) }
         val request = ++tagLookupRequest
@@ -799,7 +805,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             var loadedRound = 0
             for (round in 0..state.page) {
                 if (!current()) throw CancellationException("Superseded browse")
-                val result = repository.searchAll(state.query.trim(), requested, forceRefresh = forceRefresh)
+                val result = repository.searchAll(state.query.trim(), requested, forceRefresh = forceRefresh,
+                    target = state.searchTarget, selectedTags = state.selectedTags)
                 if (!current()) throw CancellationException("Superseded browse")
                 queried += result.sources.keys
                 failed += result.sources.values.filter { it.error != null }.map { it.sourceId }
@@ -860,7 +867,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         var groupedHits: List<Manga>? = null
         var groups: List<FederatedSearchGroup> = emptyList()
         try {
-            repository.searchAll(state.query.trim(), requestedPages, forceRefresh = forceRefresh) { partial ->
+            repository.searchAll(state.query.trim(), requestedPages, forceRefresh = forceRefresh,
+                target = state.searchTarget, selectedTags = state.selectedTags) { partial ->
                 if (requestId != browseRequestId || generation != browseCache.generation) return@searchAll
                 val hits = (previousHits + partial.hits).distinctBy(Manga::id)
                 // Source callbacks are serialized by the repository. Keep the mutable derivation

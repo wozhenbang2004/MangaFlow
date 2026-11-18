@@ -12,6 +12,7 @@ import dev.mangaflow.data.MangaPage
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.data.SearchTarget
 import dev.mangaflow.experience.ExperienceImageTimeouts
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.ExperienceRuntimePreferences
@@ -440,6 +441,22 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
         val time = time(request.options.getOrNull(if (rank) 0 else 1), if (rank) TimeOption.WEEK else TimeOption.ALL)
         return clientCall { active -> toPage(active.getCategories(SearchQuery.Builder()
             .category(category).orderBy(order).time(time).page(request.page + 1).build()), request.page) }
+    }
+
+    /** Native JM SearchMainTag distinguishes works, authors and tags. */
+    override suspend fun searchTarget(query: String, target: SearchTarget, page: Int): MangaPage {
+        checkPage(page)
+        val keyword = query.trim()
+        require(keyword.length in 1..120) { "请输入有效的搜索内容。" }
+        val category = when (target) {
+            SearchTarget.TITLE -> SearchMainTag.WORK
+            SearchTarget.AUTHOR -> SearchMainTag.AUTHOR
+            SearchTarget.TAG -> SearchMainTag.TAG
+        }
+        return clientCall { active ->
+            toPage(active.search(SearchQuery.Builder().text(keyword).mainTag(category)
+                .orderBy(OrderBy.LATEST).time(TimeOption.ALL).page(page + 1).build()), page)
+        }
     }
 
     override suspend fun hotTags(): List<String> = clientCall { active ->

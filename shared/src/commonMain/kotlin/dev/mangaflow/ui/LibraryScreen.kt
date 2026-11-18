@@ -115,6 +115,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import dev.mangaflow.LibraryOpenState
 import dev.mangaflow.account.CopyShelfSyncState
+import dev.mangaflow.account.JmShelfSyncState
 import dev.mangaflow.account.CopyShelfMetadata
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.Manga
@@ -140,7 +141,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private enum class LibraryToolDestination { HISTORY, COLLECTIONS, STATS, COPY_SYNC, ACCOUNT }
+private enum class LibraryToolDestination { HISTORY, COLLECTIONS, STATS, COPY_SYNC, JM_SYNC, ACCOUNT }
 private enum class UnifiedShelfScope(val title: String) { LOCAL("本机"), COPY("拷贝") }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -159,6 +160,8 @@ fun LibraryScreen(
     excludedSourceIds: Set<String> = emptySet(),
     copySyncState: CopyShelfSyncState? = null,
     onCopySync: (() -> Unit)? = null,
+    jmSyncState: JmShelfSyncState? = null,
+    onJmSync: (() -> Unit)? = null,
     onImportCopy: (() -> Unit)? = null,
     preferredResumeTargets: Map<String, SavedResumeTarget> = emptyMap(),
     cloudFavorites: List<Manga> = emptyList(),
@@ -613,6 +616,10 @@ fun LibraryScreen(
                     modifier = Modifier.size(36.dp), tooltip = "查看拷贝差异") {
                     Icon(Icons.Outlined.Sync, "查看拷贝差异", Modifier.size(19.dp))
                 }
+                if (onJmSync != null) MotionIconButton(onClick = onJmSync, enabled = active,
+                    modifier = Modifier.size(36.dp), tooltip = "查看禁漫收藏差异") {
+                    Icon(Icons.Outlined.Sync, "查看禁漫收藏差异", Modifier.size(19.dp))
+                }
                 MotionIconButton(onClick = { showCollections = true }, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Outlined.Collections, "画面收藏", Modifier.size(19.dp))
                 }
@@ -662,6 +669,7 @@ fun LibraryScreen(
                                             LibraryToolDestination.COLLECTIONS -> showCollections = true
                                             LibraryToolDestination.STATS -> showStats = true
                                             LibraryToolDestination.COPY_SYNC -> onCopySync?.invoke()
+                                             LibraryToolDestination.JM_SYNC -> onJmSync?.invoke()
                                             LibraryToolDestination.ACCOUNT -> onOpenAccount?.invoke()
                                             null -> Unit
                                         }
@@ -683,6 +691,11 @@ fun LibraryScreen(
                                 if (onCopySync != null) LibraryToolAction(Icons.Outlined.Sync, "拷贝同步",
                                     copySyncState?.differences?.size?.takeIf { it > 0 }?.toString()) {
                                     pendingLibraryTool = LibraryToolDestination.COPY_SYNC
+                                    libraryActionsOpen = false
+                                }
+                                if (onJmSync != null) LibraryToolAction(Icons.Outlined.Sync, "禁漫同步",
+                                    jmSyncState?.differences?.size?.takeIf { it > 0 }?.toString()) {
+                                    pendingLibraryTool = LibraryToolDestination.JM_SYNC
                                     libraryActionsOpen = false
                                 }
                                 if (onOpenAccount != null) LibraryToolAction(Icons.Outlined.AccountCircle, "拷贝账号") {

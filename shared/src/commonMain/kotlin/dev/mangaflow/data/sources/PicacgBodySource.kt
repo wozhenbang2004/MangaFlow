@@ -9,6 +9,8 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceHttp
 import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.data.SearchTarget
+import dev.mangaflow.data.normalizedBodySourceTitle
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrl
@@ -207,6 +209,24 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
         checkPage(page)
         val data = call("comics?page=${page + 1}&s=dd").getJSONObject("data").getJSONObject("comics")
         listing(data, page + 1)
+    }
+
+    override suspend fun searchTarget(query: String, target: SearchTarget, page: Int): MangaPage {
+        if (target != SearchTarget.TAG) return super.searchTarget(query, target, page)
+        val requested = normalizedBodySourceTitle(query)
+        require(requested.isNotBlank() && query.length in 1..120) { "请输入有效标签名称。" }
+        val categories = withContext(Dispatchers.IO) {
+            call("categories").getJSONObject("data").getJSONArray("categories")
+        }
+        val exact = (0 until minOf(categories.length(), 200)).mapNotNull { index ->
+            val entry = categories.optJSONObject(index) ?: return@mapNotNull null
+            entry.bodyText("title").takeIf { !entry.optBoolean("isWeb", false) && it.isNotBlank() &&
+                normalizedBodySourceTitle(it) == requested }
+        }.firstOrNull()
+        // A site category is a native tag index; otherwise rely only on verified
+        // metadata returned by the generic source keyword endpoint.
+        return if (exact != null) browse(SourceBrowseRequest("category:$exact", page))
+        else super.searchTarget(query, target, page)
     }
 
     override suspend fun search(query: String, page: Int): MangaPage = searchFiltered(query, page, emptyList())

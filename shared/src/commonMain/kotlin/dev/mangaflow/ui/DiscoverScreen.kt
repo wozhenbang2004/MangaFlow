@@ -328,7 +328,7 @@ internal fun DiscoverySearchResults(
     var retainedSearch by remember { mutableStateOf(state) }
     SideEffect { if (expanded) retainedSearch = state }
     val search = if (expanded) state else retainedSearch
-    val federated = search.searchTarget == SearchTarget.TITLE && search.selectedTags.isEmpty() && search.query.isNotBlank()
+    val federated = search.isFederatedSearch
     var sourceChoices by remember(search.cacheKey) { mutableStateOf<List<Manga>?>(null) }
     val transition = LocalMangaCoverTransition.current
     LaunchedEffect(active, expanded, search.cacheKey) {

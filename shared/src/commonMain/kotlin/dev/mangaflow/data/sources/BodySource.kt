@@ -1,6 +1,10 @@
 package dev.mangaflow.data.sources
 
 import dev.mangaflow.data.MangaRepository
+import dev.mangaflow.data.SearchTarget
+import dev.mangaflow.data.MangaPage
+import dev.mangaflow.data.normalizedBodySourceAuthor
+import dev.mangaflow.data.normalizedBodySourceTitle
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceHttp
 import dev.mangaflow.net.HttpUrl
@@ -36,6 +40,27 @@ interface BodySource : MangaRepository {
     suspend fun searchFiltered(query: String, page: Int, options: List<String>): dev.mangaflow.data.MangaPage {
         require(options.isEmpty()) { "来源不支持这个搜索条件。" }
         return search(query, page)
+    }
+    /**
+     * A generic keyword endpoint is not automatically an author/tag index.
+     * Fall back to verified metadata in the returned page only; retain upstream paging
+     * and never claim a complete site-wide author/tag search for this fallback.
+     */
+    suspend fun searchTarget(query: String, target: SearchTarget, page: Int): MangaPage {
+        if (target == SearchTarget.TITLE) return search(query, page)
+        val candidate = query.trim().takeIf { it.length in 1..120 }
+            ?: throw SourceException("请输入有效的作者或标签名称。")
+        val result = search(candidate, page)
+        val normalized = if (target == SearchTarget.AUTHOR)
+            normalizedBodySourceAuthor(candidate) else normalizedBodySourceTitle(candidate)
+        val matches = result.items.filter { manga ->
+            if (target == SearchTarget.AUTHOR) manga.authors.any {
+                normalizedBodySourceAuthor(it) == normalized
+            } else (manga.tags + manga.tagPaths.keys).any {
+                normalizedBodySourceTitle(it) == normalized
+            }
+        }
+        return result.copy(items = matches)
     }
     suspend fun searchFilters(): List<SourceFilter> = emptyList()
     suspend fun hotTags(): List<String> = emptyList()

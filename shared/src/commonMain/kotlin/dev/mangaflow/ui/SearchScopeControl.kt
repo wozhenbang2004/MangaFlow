@@ -143,10 +143,9 @@ internal fun SearchScopeControl(
                             SearchTarget.TITLE -> Icons.AutoMirrored.Outlined.MenuBook
                             SearchTarget.AUTHOR -> Icons.Outlined.PersonOutline
                             SearchTarget.TAG -> Icons.AutoMirrored.Outlined.Label
-                        }, labels[index] + if (copyOnly || targets[index] != SearchTarget.TITLE) "，拷贝来源" else "，全部来源",
+                        }, labels[index] + "，当前分区已启用来源",
                             Modifier.align(Alignment.Center).size(17.dp), tint = color)
-                        if (copyOnly || targets[index] != SearchTarget.TITLE)
-                            BodySourceMark("copy", "拷贝", Modifier.align(Alignment.BottomEnd).size(8.dp))
+
                     }
                 })
         }
@@ -157,7 +156,7 @@ internal fun SearchScopeControl(
             .motionPress(interaction, enabled, pressedScale = .94f)
             .semantics(mergeDescendants = true) {
                 contentDescription = "搜索范围：" + labels[selected]
-                stateDescription = if (copyOnly || target != SearchTarget.TITLE) "拷贝来源，已收起" else "全部来源，已收起"
+                stateDescription = "当前分区全部已启用来源，已收起"
             }
         else Modifier.clearAndSetSemantics { }
         Box(Modifier.align(Alignment.CenterEnd).size(36.dp).then(trigger)
@@ -169,8 +168,7 @@ internal fun SearchScopeControl(
                     SearchTarget.AUTHOR -> Icons.Outlined.PersonOutline
                     SearchTarget.TAG -> Icons.AutoMirrored.Outlined.Label
                 }, null, Modifier.align(Alignment.Center).size(17.dp))
-                if (copyOnly || target != SearchTarget.TITLE)
-                    BodySourceMark("copy", "拷贝", Modifier.align(Alignment.BottomEnd).size(8.dp))
+
             }
         }
     }
