@@ -216,6 +216,14 @@ internal class AndroidAnimePlayer(
         if (!current()) return false
         val result = try { prepareAndroidAnimeWindow(context, request) }
         catch (cancel: CancellationException) { throw cancel }
+        catch (_: LinkageError) {
+            if (current()) publish(generation) { it.copy(preparedVideoIssue = "原生推理运行库未能加载") }
+            return false
+        }
+        catch (_: OutOfMemoryError) {
+            if (current()) publish(generation) { it.copy(preparedVideoIssue = "当前内存不足以保留预处理帧") }
+            return false
+        }
         catch (failure: Exception) {
             if (current()) publish(generation) { it.copy(preparedVideoIssue = readablePlayerError(failure)) }
             return false

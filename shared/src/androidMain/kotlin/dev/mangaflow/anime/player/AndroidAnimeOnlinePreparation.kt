@@ -29,11 +29,14 @@ import androidx.media3.transformer.DefaultDecoderFactory
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExoPlayerAssetLoader
+import androidx.media3.transformer.ExperimentalAnalyzerModeFactory
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
 import dev.mangaflow.enhancement.engine.AndroidOnnxVideoProgram
 import dev.mangaflow.enhancement.engine.engineSha256
+import dev.mangaflow.reader.panels.PanelRuntimeId
+import dev.mangaflow.reader.panels.PanelRuntimeStore
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
@@ -86,6 +89,7 @@ internal suspend fun prepareAndroidAnimeWindow(
     }
     val model = File(request.model.path).canonicalFile
     check(engineSha256(model) == request.model.sha256) { "预处理模型已变化" }
+    PanelRuntimeStore.get(context).ensureLoaded(PanelRuntimeId.ONNX)
     val owner = AndroidAnimeCache.get(context)
     val release = owner.acquire()
     val client = animeMediaHttpClient(asset, forPrefetch = true)
@@ -174,7 +178,7 @@ private suspend fun exportWindow(context: Context, window: AnimePreparedVideoReq
     val thread = HandlerThread("AnimeForwardFrames").apply { start() }
     val dispatcher = Handler(thread.looper).asCoroutineDispatcher("AnimeForwardFrames")
     var exporter: Transformer? = null
-    val result = CompletableDeferred<ExportResult>()
+    val result = CompletableDeferred<Unit>()
     try {
         withContext(dispatcher) {
             val media = MediaItem.Builder().setUri(window.asset.url).setMimeType(mimeType)
@@ -184,20 +188,22 @@ private suspend fun exportWindow(context: Context, window: AnimePreparedVideoReq
                 .setEffects(Effects(emptyList(), listOf(effect))).build()
             val factory = ExoPlayerAssetLoader.Factory(context, DefaultDecoderFactory.Builder(context).build(),
                 Clock.DEFAULT, DefaultMediaSourceFactory(data))
-            exporter = Transformer.Builder(context).setLooper(thread.looper).setAssetLoaderFactory(factory)
+            val configured = Transformer.Builder(context).setLooper(thread.looper).setAssetLoaderFactory(factory)
                 .setVideoMimeType(MimeTypes.VIDEO_H264)
                 .setVideoFrameProcessorFactory(DefaultVideoFrameProcessor.Factory.Builder()
                     .setSdrWorkingColorSpace(DefaultVideoFrameProcessor.WORKING_COLOR_SPACE_ORIGINAL).build())
                 .addListener(object : Transformer.Listener {
                     override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                        result.complete(exportResult)
+                        result.complete(Unit)
                     }
                     override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
                         result.completeExceptionally(exportException)
                     }
-                }).build().also { it.start(edited, output.path) }
+                }).build()
+            // The GL effect emits the lossless cache; encoding an unused copy competes with playback.
+            exporter = ExperimentalAnalyzerModeFactory.buildAnalyzer(context, configured).also { it.start(edited, output.path) }
         }
-        check(result.await().videoFrameCount > 0) { "未取得预处理帧" }
+        result.await()
     } finally {
         try { withContext(NonCancellable + dispatcher) { exporter?.cancel() } }
         finally { thread.quitSafely() }
