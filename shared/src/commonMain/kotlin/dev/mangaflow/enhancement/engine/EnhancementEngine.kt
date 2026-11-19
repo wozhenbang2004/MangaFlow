@@ -171,6 +171,7 @@ object EnhancementEngineIds {
     const val MANGAJANAI = "mangajanai-cli"
     const val VIDEOJANAI = "videojanai-cli"
     const val ANDROID_RIFE = "android-rife"
+    const val ANDROID_RIFE_VULKAN = "android-rife-vulkan"
     const val DESKTOP_REALTIME = "animejanai-realtime"
     const val DESKTOP_REALTIME_RIFE = "animejanai-realtime-rife"
     const val DESKTOP_ARTCNN = "artcnn-glsl"

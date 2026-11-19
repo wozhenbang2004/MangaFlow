@@ -47,7 +47,7 @@ internal class DesktopAnimeJaNai(private val root: File) {
         supportsInterpolation = true, realtime = true, downloadBytes = rifePack.bytes,
     )
 
-    suspend fun install(withRife: Boolean, progress: (EngineProgress) -> Unit) = installLock.withLock {
+    suspend fun install(withRife: Boolean, progress: (EngineProgress) -> Unit): Unit = installLock.withLock {
         installPack(portable, native, runtimeFiles, "mpv-upscale-2x_animejanai-v$VERSION/", progress)
         if (withRife) installPack(rifePack, rife, mapOf(rifeWeight.path to rifeWeight.sha256), "", progress)
     }

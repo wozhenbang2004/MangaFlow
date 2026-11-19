@@ -23,6 +23,13 @@ if(NOT NCNN_VERSION STREQUAL "20261020" OR NOT NCNN_VULKAN)
     message(FATAL_ERROR "Expected the pinned ncnn 20261020 Vulkan Android runtime")
 endif()
 
-add_library(mangaflow_cugan SHARED cugan_jni.cpp)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/rife/warp.comp" rife_shader)
+string(FIND "${rife_shader}" "#version" rife_shader_start)
+string(SUBSTRING "${rife_shader}" ${rife_shader_start} -1 rife_shader)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/rife_warp_shader.h"
+    "static constexpr char kRifeWarpShader[] = R\"MF_SHADER(${rife_shader})MF_SHADER\";\n")
+
+add_library(mangaflow_cugan SHARED cugan_jni.cpp rife_jni.cpp)
+target_include_directories(mangaflow_cugan PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(mangaflow_cugan PRIVATE ncnn)
 target_link_options(mangaflow_cugan PRIVATE "-Wl,-z,max-page-size=16384")

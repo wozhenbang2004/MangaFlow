@@ -186,6 +186,16 @@ and retains full AVC decode validation. This is an offline model even when the
 frame-rate target comes from the separate RIFE stage. No measured live Vulkan
 video throughput or live RIFE claim follows from this integration.
 
+The mobile RIFE backend separately adopts the genuine ncnn RIFE v4.6
+flownet at `a7532fc3f9f8f008cd6eecd6f2ffe2a9698e0cf7`. Its verified input
+contract is two normalized RGB frames and an arbitrary timestep plane. The
+bridge keeps upstream 32-aligned zero padding and unmodified MIT Warp GLSL,
+submits actual `VkMat` flow inference, and crops and checks the three-channel
+output. Supported runtime code is an ABI-specific signed ncnn Vulkan asset
+version `1.1.0-ncnn20261020`. These downloaded weights are a separate mobile
+choice, while the newer ONNX RIFE models remain independently identified. GPU
+execution and sustainable cadence need device observation.
+
 The RIFE follow-up inspected the official vs-mlrt `external-models` archives
 `rife_v4.25_lite.7z`, `rife_v4.22.7z`, and `rife_v4.26.7z`. Each selected
 `rife_v2` ONNX file has FP32 `[N,7,H,W]` input and opset 16 with normalized RGB

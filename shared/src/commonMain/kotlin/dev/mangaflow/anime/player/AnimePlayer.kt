@@ -73,6 +73,15 @@ data class AnimePlayerTrack(
 
 data class AnimeRealtimeFrameRequest(val model: EngineModel, val targetFps: Double?)
 
+data class AnimeRealtimeMotionState(
+    val modelName: String,
+    val phase: AnimeVideoEnhancementPhase,
+    val detail: String,
+    val synthesizedFrames: Long = 0L,
+    val graphFps: Double? = null,
+    val inferenceNanos: Long? = null,
+)
+
 /** Buffer times are targets, not a claim about memory use or startup latency. */
 data class AnimePlayerOptions(
     val backgroundAudio: Boolean = false,
@@ -149,6 +158,7 @@ data class AnimePlayerState(
     val presentedFrames: Long? = null,
     val preparedVideoWindow: AnimePreparedVideoWindow? = null,
     val preparedVideoIssue: String? = null,
+    val realtimeMotion: AnimeRealtimeMotionState? = null,
 ) {
     val ended: Boolean get() = phase == AnimePlayerPhase.ENDED
     val isPlaying: Boolean get() = phase == AnimePlayerPhase.READY && playWhenReady && !isBuffering

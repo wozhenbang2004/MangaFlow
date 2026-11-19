@@ -42,6 +42,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
     private val models = ImportedEngineModels(File(root, "models"), EnhancementEngineIds.ANDROID_ONNX)
     private val videoModels = ImportedEngineModels(File(root, "video-models"), EnhancementEngineIds.ANDROID_VIDEO_ONNX)
     private val rifeModels = AndroidRifeModels(File(root, "rife-models"))
+    private val rifeVulkan = AndroidRifeVulkanModels(this.context)
     private val cugan = AndroidCuganVulkan(this.context, root)
     private val runtimes = PanelRuntimeStore.get(context)
     private val nativeGate = Mutex()
@@ -52,6 +53,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
         val installed = models.list()
         val installedVideo = videoModels.list()
         val frameModels = rifeModels.installed()
+        val liveRife = rifeVulkan.model()
         val cuganModel = cugan.model()
         val cuganVideoModel = cugan.videoModel(cuganModel)
         val runtime = runtimes.states.value[PanelRuntimeId.ONNX]
@@ -81,6 +83,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                 "https://github.com/AmusementClub/vs-mlrt/releases/tag/external-models", modelReadiness(frameModels),
                 "离线 CPU 推理。导入官方包内 rife_v2 的 4.25 Lite、4.22 或 4.26 FP32。精细、极致各对对应基座做双向两次推理。",
                 setOf(1), setOf(EngineContent.VIDEO), canInstall = canInstall, supportsInterpolation = true),
+            rifeVulkan.descriptor(liveRife),
             EngineDescriptor(EnhancementEngineIds.ANDROID_VIDEO_ONNX, "番剧 ONNX 离线增强", ANDROID_VIDEO_ENGINE_VERSION,
                 "Apache-2.0 / MIT；模型遵循各自许可", "https://github.com/androidx/media/tree/1.11.1/libraries/transformer",
                 if (frameModels.isNotEmpty()) modelReadiness(installedVideo + frameModels) else videoReadiness, when (videoReadiness) {
@@ -96,11 +99,15 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                 "Android 10+ 可尝试仅硬件执行已导入的 RGB 模型。实际图与设备支持、处理耗时和回退状态在播放中显示。",
                 setOf(1, 2, 4), setOf(EngineContent.VIDEO), realtime = true),
         ) + anime4kEngineDescriptors(), installed + installedVideo + listOfNotNull(cuganModel, cuganVideoModel),
-            (installed + installedVideo + frameModels + listOfNotNull(cuganModel)).sumOf { it.bytes },
-            (runtime?.bytes ?: 0) + (runtimes.states.value[PanelRuntimeId.CUGAN]?.bytes ?: 0), frameModels)
+            (installed + installedVideo + frameModels + listOfNotNull(cuganModel, liveRife)).sumOf { it.bytes },
+            (runtime?.bytes ?: 0) + (runtimes.states.value[PanelRuntimeId.CUGAN]?.bytes ?: 0), frameModels + listOfNotNull(liveRife))
     }
 
     override suspend fun install(engineId: String, progress: (EngineProgress) -> Unit): EngineInventory {
+        if (engineId == EnhancementEngineIds.ANDROID_RIFE_VULKAN) {
+            withContext(Dispatchers.IO) { rifeVulkan.install(progress) }
+            return inspect()
+        }
         if (engineId == EnhancementEngineIds.ANDROID_CUGAN || engineId == EnhancementEngineIds.ANDROID_CUGAN_VIDEO) {
             withContext(Dispatchers.IO) { cugan.install(progress) }
             return inspect()

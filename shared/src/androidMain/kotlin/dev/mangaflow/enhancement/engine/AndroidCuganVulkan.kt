@@ -11,15 +11,8 @@ import dev.mangaflow.enhancement.EnhancedAssetIdentity
 import dev.mangaflow.reader.panels.PanelRuntimeId
 import dev.mangaflow.reader.panels.PanelRuntimeStore
 import java.io.File
-import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption.ATOMIC_MOVE
-import java.util.UUID
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -81,62 +74,7 @@ internal class AndroidCuganVulkan(context: Context, root: File) {
 
     suspend fun install(progress: (EngineProgress) -> Unit) = installs.withLock {
         check(available) { "当前设备无法加载 Vulkan 图像增强组件" }
-        if (!runtime.installed) {
-            runtimes.download(PanelRuntimeId.CUGAN)
-            val status = runtimes.states.first { options ->
-                val current = options.getValue(PanelRuntimeId.CUGAN)
-                if (current.downloading) progress(EngineProgress(EngineStage.DOWNLOAD, current.bytes,
-                    current.totalBytes.takeIf { it > 0L }, detail = "正在下载签名 ncnn Vulkan 组件", bytes = current.bytes))
-                !current.downloading
-            }.getValue(PanelRuntimeId.CUGAN)
-            check(status.installed) { status.error ?: "ncnn Vulkan 组件未能安装" }
-        }
-        check(!runtime.pendingRemoval) { "ncnn Vulkan 组件将在重启后移除" }
-        if (model() != null) return@withLock
-        check(modelRoot.isDirectory || modelRoot.mkdirs()) { "无法创建 Real-CUGAN 目录" }
-        val temporary = File(modelRoot, "download-${UUID.randomUUID()}").also { check(it.mkdir()) }
-        try {
-            var count = 0L
-            for (part in PARTS) {
-                val output = File(temporary, part.name)
-                val connection = URL("$MODEL_URL/${part.name}").openConnection() as HttpURLConnection
-                try {
-                    connection.instanceFollowRedirects = false
-                    connection.connectTimeout = 20_000
-                    connection.readTimeout = 40_000
-                    connection.setRequestProperty("Accept-Encoding", "identity")
-                    check(connection.responseCode == 200) { "Real-CUGAN 下载 HTTP ${connection.responseCode}" }
-                    var partBytes = 0L
-                    connection.inputStream.use { input ->
-                        FileOutputStream(output).use { stream ->
-                            val buffer = ByteArray(64 * 1024)
-                            while (true) {
-                                currentCoroutineContext().ensureActive()
-                                val read = input.read(buffer)
-                                if (read < 0) break
-                                partBytes += read
-                                check(partBytes <= part.bytes) { "Real-CUGAN 文件长度异常" }
-                                stream.write(buffer, 0, read)
-                                progress(EngineProgress(EngineStage.DOWNLOAD, count + partBytes, MODEL_BYTES, bytes = count + partBytes))
-                            }
-                            stream.fd.sync()
-                        }
-                    }
-                    progress(EngineProgress(EngineStage.VERIFY, detail = "核对官方文件大小与 SHA-256"))
-                    check(part.matches(output)) { "Real-CUGAN 文件摘要不符，已拒绝安装" }
-                    count += partBytes
-                } finally {
-                    connection.disconnect()
-                }
-            }
-            currentCoroutineContext().ensureActive()
-            // Both members are checked before their version directory becomes visible.
-            if (installed.exists()) check(installed.deleteRecursively()) { "无法移除损坏的旧模型" }
-            Files.move(temporary.toPath(), installed.toPath(), ATOMIC_MOVE)
-            check(model() != null) { "Real-CUGAN 安装尚未确认" }
-        } finally {
-            temporary.deleteRecursively()
-        }
+        installAndroidVulkanModel(runtimes, installed, MODEL_URL, PARTS, progress)
     }
 
     suspend fun render(decoder: BitmapRegionDecoder, output: File, request: EngineImageRequest,
@@ -169,10 +107,6 @@ internal class AndroidCuganVulkan(context: Context, root: File) {
         }
     }
 
-    private data class ModelPart(val name: String, val bytes: Long, val sha256: String) {
-        fun matches(file: File) = file.isFile && file.length() == bytes && engineSha256(file) == sha256
-    }
-
     companion object {
         const val ENGINE_VERSION = "ncnn-20261020 / Real-CUGAN NOSE 395302c / 1"
         const val VIDEO_VERSION = "$ENGINE_VERSION / $ANDROID_VIDEO_ENGINE_VERSION"
@@ -185,8 +119,8 @@ internal class AndroidCuganVulkan(context: Context, root: File) {
         private const val MODEL_BYTES = 2_554_717L
         private val CONTENTS = setOf(EngineContent.COLOR, EngineContent.WEBTOON)
         private val PARTS = listOf(
-            ModelPart("up2x-no-denoise.param", 3_309L, "c370b70321d45301b9c682121130ad167b3dd1bc8e122c1d77c7ac44f1943708"),
-            ModelPart("up2x-no-denoise.bin", 2_551_408L, "2b6f4db8fdc04336ac68ba954b4cd3b280beb5e7b6b0bcd97f769accc512cf4a"),
+            AndroidVulkanModelPart("up2x-no-denoise.param", 3_309L, "c370b70321d45301b9c682121130ad167b3dd1bc8e122c1d77c7ac44f1943708"),
+            AndroidVulkanModelPart("up2x-no-denoise.bin", 2_551_408L, "2b6f4db8fdc04336ac68ba954b4cd3b280beb5e7b6b0bcd97f769accc512cf4a"),
         )
         private val MODEL_IDENTITY = EnhancedAssetIdentity.digest(PARTS.joinToString("|") { it.sha256 })
     }

@@ -225,6 +225,14 @@ private fun AnimeEnhancementStatus(
                     "前方增强" to animeSeconds(metrics?.preparedSeconds),
                 ))
                 effect?.filteredFps?.let { AnimeMetricRow("滤镜输出估计", formatDecimal(it, 1) + " FPS") }
+                playback?.realtimeMotion?.let { motion ->
+                    AnimeMetricRow("实时补帧 · ${motion.modelName}", motion.detail)
+                    AnimeMetricGrid(listOf(
+                        "实际生成帧" to animeCount(motion.synthesizedFrames),
+                        "处理链输出" to (motion.graphFps?.takeIf { playing }?.let { formatDecimal(it, 1) + " FPS" } ?: "—"),
+                        "单帧端到端处理" to animeMillis(motion.inferenceNanos?.div(1_000_000.0)),
+                    ))
+                }
                 if (prepared != null) {
                     AnimeMetricRow("预处理模型", prepared.modelName)
                     AnimeMetricRow("预处理耗时 / 缓存", animeMillis(prepared.processingMillis.toDouble()) +

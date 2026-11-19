@@ -70,6 +70,8 @@ int channel_byte(float value) {
 }
 }
 
+const ncnn::VulkanDevice* mangaflow_vulkan_device() { return hardware_device(); }
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_dev_mangaflow_enhancement_engine_AndroidCuganVulkanJni_open(
     JNIEnv* env, jobject, jstring param, jstring weights) {

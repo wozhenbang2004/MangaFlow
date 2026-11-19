@@ -154,7 +154,7 @@ internal fun AnimeEnhancementFrames(policy: EnhancementPolicy, inventory: Engine
         policy.frameMode == FrameMode.ORIGINAL -> "按文件原始帧率播放，不生成额外画面。"
         ready.isEmpty() -> "补帧引擎尚未就绪，已保存目标；当前仍按原始帧率播放。"
         ready.none { it.realtime } -> "当前支持离线补帧。处理完成后，从离线任务打开增强版本。"
-        policy.frameQuality != FrameQuality.BALANCED -> "当前 Windows 实时组件支持均衡档；已保存所选档位供离线处理。"
+        policy.frameQuality != FrameQuality.BALANCED -> "实时组件通过均衡档开启。已保存所选质量，供离线处理。"
         PreparationMode.IMMEDIATE !in policy.preparation -> "启用边播边增强即可试用实时补帧。"
         policy.frameMode == FrameMode.AUTO -> "自动需要显示器刷新率回执。可先选择明确目标进行试用。"
         else -> "已保存补帧目标，实际帧率以运行状态中的观测为准。"

@@ -3088,7 +3088,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             preferredRealtimeModel(policy, snapshot))
         if (policy.tier == QualityTier.AUTO && selected.mode == dev.mangaflow.anime.player.AnimeVideoEnhancementMode.FAST &&
             p95 != null) reducedAutoEnhancementSession = key
-        val prepared = preferredOnlineModel(policy, selected.mode)?.takeIf { active?.localMedia == null }
+        val realtimeFrames = preferredRealtimeFrames(policy).takeIf { active?.localMedia?.enhancedVersion != true }
+        val prepared = preferredOnlineModel(policy, selected.mode)
+            ?.takeIf { active?.localMedia == null && realtimeFrames == null }
         val realtimeEnabled = active?.localMedia?.enhancedVersion != true && prepared == null
         return AnimePlayerOptions(
         backgroundAudio = settings.backgroundAudio,
@@ -3101,7 +3103,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         enhancementScale = if (realtimeEnabled) selected.scale else 1,
         enhancementModel = selected.model.takeIf { realtimeEnabled },
         preparedVideoModel = prepared,
-        realtimeFrames = preferredRealtimeFrames(policy).takeIf { active?.localMedia?.enhancedVersion != true },
+        realtimeFrames = realtimeFrames,
         )
     }
 
@@ -3128,18 +3130,25 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     private fun preferredRealtimeFrames(policy: EnhancementPolicy): dev.mangaflow.anime.player.AnimeRealtimeFrameRequest? {
-        if (platformKind != PlatformKind.DESKTOP || PreparationMode.IMMEDIATE !in policy.preparation ||
+        if (PreparationMode.IMMEDIATE !in policy.preparation ||
             policy.frameMode == dev.mangaflow.enhancement.FrameMode.ORIGINAL ||
             policy.frameQuality != dev.mangaflow.enhancement.FrameQuality.BALANCED) return null
+        val engineId = when (platformKind) {
+            PlatformKind.DESKTOP -> EnhancementEngineIds.DESKTOP_REALTIME_RIFE
+            PlatformKind.ANDROID -> EnhancementEngineIds.ANDROID_RIFE_VULKAN
+            else -> return null
+        }
         val resources = enhancementCenter.resources.usage.value.resources
         if (resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2) return null
         val model = enhancementCenter.inventory.value.frameModels.firstOrNull {
-            it.engineId == EnhancementEngineIds.DESKTOP_REALTIME_RIFE
+            it.engineId == engineId
         } ?: return null
         val target = when (policy.frameMode) {
             dev.mangaflow.enhancement.FrameMode.FPS60 -> 60.0
             dev.mangaflow.enhancement.FrameMode.FPS120 -> 120.0
-            dev.mangaflow.enhancement.FrameMode.CUSTOM -> policy.customFps.toDouble().takeIf { it in 1.0..240.0 } ?: return null
+            dev.mangaflow.enhancement.FrameMode.CUSTOM ->
+                policy.customFps.toDouble().takeIf { it in 1.0..(if (platformKind == PlatformKind.ANDROID) 120.0 else 240.0) }
+                    ?: return null
             dev.mangaflow.enhancement.FrameMode.DOUBLE -> null
             else -> return null
         }
