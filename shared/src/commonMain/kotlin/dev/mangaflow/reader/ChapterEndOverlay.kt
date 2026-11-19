@@ -92,6 +92,8 @@ internal fun ChapterEndFooter(
                 pull.loading -> if (previous) "正在打开上一话" else "正在打开下一话"
                 pull.progress >= 1f -> if (previous) "松手返回上一话" else "松手进入下一话"
                 previous -> "下拉返回上一话"
+                !pull.loadActionAvailable -> "点按下一话继续"
+                pull.horizontal && pull.towardStart -> "右滑进入下一话"
                 pull.horizontal -> "左滑进入下一话"
                 else -> "上拉进入下一话"
             },

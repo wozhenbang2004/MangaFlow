@@ -71,7 +71,6 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FilterList
-import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Refresh
@@ -1170,7 +1169,7 @@ private fun DetailSections(
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
     val countStyle = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp)
-    val sourceLabel = (if (pendingSourceCount > 0) pendingSourceCount else sourceCount).toString()
+    val sourceLabel = if (pendingSourceCount > 0) "待确认 $pendingSourceCount" else sourceCount.toString()
     val sourceLabelWidth = with(density) {
         measurer.measure(sourceLabel, countStyle, maxLines = 1).size.width.toDp()
     }
@@ -1217,7 +1216,7 @@ private fun DetailSections(
                     horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End),
                     verticalAlignment = Alignment.CenterVertically) {
                     if (!showingComments) DetailSourceAction(
-                        sourceId, sourceName, sourceCount, pendingSourceCount,
+                        sourceId, sourceName, sourceCount, pendingSourceCount, sourceLabel,
                         sourceLoading, sourcesChecking, sourceWidth, onManageSources)
                     if (!showingComments || !sourceComments) DetailAction(
                         icon = if (showingComments) Icons.Outlined.FilterList else if (downloadMode) Icons.Outlined.Check else Icons.Outlined.Download,
@@ -1235,12 +1234,12 @@ private fun DetailSections(
 
 @Composable
 private fun DetailSourceAction(
-    sourceId: String, sourceName: String, sourceCount: Int, pendingSourceCount: Int,
+    sourceId: String, sourceName: String, sourceCount: Int, pendingSourceCount: Int, label: String,
     sourceLoading: Boolean, sourcesChecking: Boolean, width: Dp, onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pending = pendingSourceCount > 0
-    val color = if (pending) MaterialTheme.colorScheme.primary else DetailSecondary
+    val color = DetailSecondary
     Row(Modifier.width(width).height(44.dp).clip(RoundedCornerShape(10.dp))
         .clickable(interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = "管理漫画来源", onClick = onClick)
@@ -1257,15 +1256,15 @@ private fun DetailSourceAction(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         BodySourceMark(sourceId, sourceName, Modifier.size(17.dp), muted = true)
-        Text((if (pending) pendingSourceCount else sourceCount).toString(),
+        Text(label,
             Modifier.weight(1f), color = color, fontSize = 10.sp,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
         Box(Modifier.size(13.dp), contentAlignment = Alignment.Center) {
             when {
-                pending -> Icon(Icons.Outlined.Info, null, Modifier.size(13.dp), tint = color)
+                pending -> Icon(Icons.Outlined.Info, null, Modifier.size(13.dp), tint = mangaStatusColors().waiting)
                 sourceLoading || sourcesChecking -> MotionBusyIndicator(Modifier.size(11.dp),
                     color = color, strokeWidth = 1.2.dp)
-                else -> Icon(Icons.Outlined.ExpandMore, null, Modifier.size(13.dp), tint = color)
+                else -> Icon(Icons.Outlined.ChevronRight, null, Modifier.size(13.dp), tint = color)
             }
         }
     }

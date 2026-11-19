@@ -92,6 +92,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private var discoveryDate: String? = null
     private val discoveryRequests = mutableMapOf<String, Long>()
     private val discoveryJobs = mutableMapOf<String, Job>()
+    private val discoveryOptions = mutableMapOf<Pair<AnimeDiscoveryTab, AnimeDiscoveryProvider>, AnimeDiscoveryQuery>()
     private var detailGeneration = 0L
     private var retryNativeReference: AnimeSourceTitle? = null
     private var searchGeneration = 0L
@@ -364,12 +365,19 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
     }
 
+    internal fun rememberedDiscoveryOptions(tab: AnimeDiscoveryTab, provider: AnimeDiscoveryProvider): AnimeDiscoveryQuery? =
+        discoveryOptions[tab to provider]
+
     fun configureDiscovery(tab: AnimeDiscoveryTab, query: AnimeDiscoveryQuery) {
         if (tab == AnimeDiscoveryTab.HOME || tab == AnimeDiscoveryTab.SOURCES) return
         ensureDiscovery(loadHome = false)
         val key = animeDiscoveryFeedKey(tab)
         val normalized = query.copy(tag = query.tag.trim())
         val current = mutableState.value.discoveryFeeds[key]
+        if (tab != AnimeDiscoveryTab.CALENDAR) {
+            current?.query?.let { discoveryOptions[tab to it.provider] = it }
+            discoveryOptions[tab to normalized.provider] = normalized
+        }
         mutableState.update { it.copy(discoveryTab = tab, discoveryFeeds = it.discoveryFeeds +
             (key to if (current != null && current.query == normalized) current else AnimeDiscoveryFeed(normalized))) }
         if (current == null || current.query != normalized || current.page == 0 && !current.loading) loadDiscovery(key)
@@ -405,7 +413,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     fun retryDiscovery(key: String) {
         val feed = mutableState.value.discoveryFeeds[key] ?: return
         if (feed.loading || feed.loadingMore) return
-        loadDiscovery(key, append = feed.moreError != null && feed.page > 0, forceRefresh = true)
+        loadDiscovery(key, forceRefresh = true)
     }
 
     fun loadMoreDiscovery(key: String) {
@@ -446,7 +454,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     val added = if (append) result.items.filterNot { it.key in oldKeys } else result.items
                     feed.copy(items = (if (append) feed.items + added else result.items).distinctBy { it.key },
                         page = result.page, hasMore = result.hasMore,
-                        loading = false, loadingMore = false, error = null, moreError = null, fetchedAt = result.fetchedAt)
+                        loading = false, loadingMore = false, error = if (append) feed.error else null,
+                        moreError = null, fetchedAt = if (append) feed.fetchedAt else result.fetchedAt)
                 }
             } catch (cancel: CancellationException) {
                 publish { it.copy(loading = false, loadingMore = false) }
@@ -475,6 +484,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     fun open(subject: AnimeSubject) = openDetail(subject, resumeEpisodeId = null)
+
+    internal fun returnToVisitedDetail(detail: AnimeDetail, related: List<AnimeSubject>) {
+        openDetail(detail.subject, resumeEpisodeId = null, visitedDetail = detail, visitedRelated = related)
+    }
 
     /** Search grouping supplies candidates, never a persisted work/episode association. */
     fun openSearchGroup(group: AnimeSearchGroup) {
@@ -519,7 +532,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 episode.number ?: 0.0, if (episode.number == null) AnimeEpisodeKind.OTHER else episode.kind)
         })
 
-    private fun openDetail(subject: AnimeSubject, resumeEpisodeId: String?, nativeReference: AnimeSourceTitle? = null) {
+    private fun openDetail(subject: AnimeSubject, resumeEpisodeId: String?, nativeReference: AnimeSourceTitle? = null,
+        visitedDetail: AnimeDetail? = null, visitedRelated: List<AnimeSubject> = emptyList()) {
+        // A related-title back action can reuse the exact catalogue the user saw. Media
+        // bindings and source options still resolve against the current registry and library.
+        val initialDetail = visitedDetail ?: AnimeDetail(subject, emptyList())
         val nativeOpeningReference = nativeReference ?: retryNativeReference?.takeIf { sourceSubject(it).id == subject.id }
         retryNativeReference = nativeOpeningReference
         closePlayback()
@@ -539,8 +556,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         ++previewGeneration
         resumeRequest = resumeEpisodeId?.let { subject.id to it }
         mutableState.update { it.copy(
-            detail = AnimeDetail(subject, emptyList()), detailLoading = true, detailError = null,
-            detailFromCache = false, relatedSubjects = emptyList(),
+            detail = initialDetail, detailLoading = true, detailError = null,
+            detailFromCache = visitedDetail != null, relatedSubjects = visitedRelated,
             sourceCatalogs = emptyList(), sourceResults = emptyList(), episodeOptions = emptyMap(),
             sourceBindings = library.state.value.bindings.filter { binding -> binding.subjectId == subject.id },
             sourceCatalogErrors = emptyMap(),
@@ -621,7 +638,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         // Source catalogues have independent ownership and do not wait for the metadata service.
         boundCatalogJob = scope.launch {
             try { library.awaitLoaded(); sources.extensions.ready.await()
-                if (currentDetail(generation, subject.id)) startSourceAggregation(AnimeDetail(subject, emptyList()))
+                if (currentDetail(generation, subject.id)) startSourceAggregation(initialDetail)
             }
             catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) { if (currentDetail(generation, subject.id)) notice(failure.message ?: "来源目录未能读取。") }
@@ -636,7 +653,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         detailJob = scope.launch {
             try {
                 library.awaitLoaded()
-                metadata.cachedDetail(subject)?.let { cached ->
+                (if (visitedDetail == null) metadata.cachedDetail(subject) else null)?.let { cached ->
                     if (!currentDetail(generation, subject.id)) return@launch
                     mutableState.update { it.copy(detail = cached, detailFromCache = true) }
                     rebuildOptions()

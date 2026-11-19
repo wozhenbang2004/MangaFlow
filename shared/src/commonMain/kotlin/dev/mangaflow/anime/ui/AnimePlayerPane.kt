@@ -5,6 +5,7 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -30,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -98,17 +100,25 @@ internal fun AnimePlayerPane(
         else error
     }
     val focus = remember { FocusRequester() }
+    val chromeFocus = remember { FocusRequester() }
+    val touchExploration = LocalTouchExplorationEnabled.current
     var controlsVisible by remember { mutableStateOf(true) }
     var controlsHeld by remember { mutableStateOf(false) }
+    var headerFocused by remember { mutableStateOf(false) }
+    var transportFocused by remember { mutableStateOf(false) }
+    var focusChromeOnReveal by remember { mutableStateOf(false) }
     var locked by rememberSaveable { mutableStateOf(false) }
     var holdingFast by remember { mutableStateOf(false) }
     var settingsVisible by remember { mutableStateOf(false) }
     var settingsPresent by remember { mutableStateOf(false) }
     var settingsSection by remember { mutableStateOf(AnimePlayerPanel.GENERAL) }
     var interactionEpoch by remember { mutableIntStateOf(0) }
-    val forceControls = state.resolving || failure != null || playback.isBuffering ||
-        playback.phase != AnimePlayerPhase.READY || !playback.playWhenReady || obscured || settingsPresent || state.notice != null
-    val showChrome = !playback.inPictureInPicture && !locked && (!fullscreen || controlsVisible || forceControls)
+    val awaitingVideo = playback.firstFrameRendered == false && playback.hasVideoTracks != false
+    val forceControls = state.resolving || failure != null || awaitingVideo ||
+        playback.phase != AnimePlayerPhase.READY || !playback.playWhenReady || obscured || settingsPresent ||
+        state.notice != null || touchExploration || headerFocused || transportFocused
+    val showChrome = !playback.inPictureInPicture && (!locked || touchExploration) &&
+        (!fullscreen || controlsVisible || forceControls)
     val motion = LocalMotionEnabled.current
     val reveal by animateFloatAsState(if (showChrome) 1f else 0f,
         if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
@@ -144,6 +154,16 @@ internal fun AnimePlayerPane(
     }
     LaunchedEffect(Unit) { focus.requestFocus() }
     LaunchedEffect(fullscreen) { controlsVisible = true; if (!fullscreen) locked = false }
+    LaunchedEffect(touchExploration) {
+        if (touchExploration) { locked = false; controlsVisible = true }
+    }
+    LaunchedEffect(showChrome, focusChromeOnReveal) {
+        if (showChrome && focusChromeOnReveal) {
+            chromeFocus.requestFocus()
+            focusChromeOnReveal = false
+        }
+    }
+    LaunchedEffect(canControl) { if (!canControl) transportFocused = false }
     LaunchedEffect(playback.inPictureInPicture) {
         if (playback.inPictureInPicture) { settingsVisible = false; settingsPresent = false; locked = false }
     }
@@ -169,6 +189,14 @@ internal fun AnimePlayerPane(
     )
     MaterialTheme(colorScheme = if (fillVideo) videoColors else colors) {
         BoxWithConstraints(modifier.fillMaxSize().focusRequester(focus)
+            .onPreviewKeyEvent { event ->
+                if (active && fullscreen && !showChrome && !locked && !obscured && !settingsPresent &&
+                    !playback.inPictureInPicture && event.key == Key.Tab && event.type == KeyEventType.KeyDown) {
+                    focusChromeOnReveal = true
+                    interact()
+                    true
+                } else false
+            }
             .onKeyEvent { event ->
                 // Focused buttons and the native slider get first refusal.
                     if (!active || event.isCtrlPressed || event.isAltPressed || event.isMetaPressed ||
@@ -285,14 +313,16 @@ internal fun AnimePlayerPane(
             Box(Modifier.align(Alignment.TopCenter).fillMaxWidth()
                 .onSizeChanged { if (!fillVideo) headerHeight = with(density) { it.height.toDp() } }
                 .graphicsLayer { alpha = chromeReveal; translationY = (1f - chromeReveal) * -8.dp.toPx() }
-                .motionInputGate(active && showChrome && !obscured && !settingsPresent)) {
+                .motionInputGate(active && showChrome && !obscured && !settingsPresent)
+                .onFocusChanged { headerFocused = it.hasFocus }.focusGroup()) {
                 Row(Modifier.fillMaxWidth().then(if (fullscreen) Modifier.background(Brush.verticalGradient(
                     listOf(Color.Black.copy(alpha = .86f), Color.Transparent))) else Modifier)
                     .windowInsetsPadding(safeInsets.only(WindowInsetsSides.Top))
                     .heightIn(min = 56.dp).padding(horizontal = 8.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                     MotionIconButton(onClick = { if (fullscreen) onFullscreenChange(false) else onBack() },
-                        modifier = Modifier.size(44.dp), tooltip = if (fullscreen) "退出全屏" else "退出播放并保存位置") {
+                        modifier = Modifier.size(44.dp).focusRequester(chromeFocus),
+                        tooltip = if (fullscreen) "退出全屏" else "退出播放并保存位置") {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, if (fullscreen) "退出全屏" else "退出播放", Modifier.size(20.dp))
                     }
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -301,7 +331,7 @@ internal fun AnimePlayerPane(
                         if (episode != null) Text(animeEpisodeLabel(episode), style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    if (fullscreen && canControl) MotionIconButton(onClick = { locked = true }, modifier = Modifier.size(44.dp),
+                    if (fullscreen && canControl && !touchExploration) MotionIconButton(onClick = { locked = true }, modifier = Modifier.size(44.dp),
                         tooltip = "锁定触控") { Icon(Icons.Outlined.LockOpen, "锁定触控", Modifier.size(20.dp)) }
                     if (optionCount > 1 && failure == null && !state.resolving) MotionIconButton(
                         onClick = { interact(); onSources() }, modifier = Modifier.size(44.dp),
@@ -329,6 +359,7 @@ internal fun AnimePlayerPane(
                     .onSizeChanged { if (!overlayTransport) controlsHeight = with(density) { it.height.toDp() } }
                     .graphicsLayer { alpha = chromeReveal; translationY = (1f - chromeReveal) * 10.dp.toPx() }
                     .motionInputGate(active && showChrome && !obscured && !settingsPresent)
+                    .onFocusChanged { transportFocused = it.hasFocus }.focusGroup()
                     .then(panel), contentAlignment = Alignment.BottomCenter) {
                     MaterialTheme(colorScheme = videoColors) {
                         AnimePlayerControls(controller.player, playback,
@@ -373,6 +404,16 @@ private fun AnimeVideoStatus(
     onKeepPlayback: () -> Unit, canKeepPlayback: Boolean, onRestorePlayback: () -> Unit, canRestorePlayback: Boolean,
 ) {
     val shape = RoundedCornerShape(14.dp)
+    val awaitingVideo = playback.firstFrameRendered == false && playback.hasVideoTracks != false
+    val rebuffering = playback.phase == AnimePlayerPhase.READY && playback.playWhenReady &&
+        playback.isBuffering && !awaitingVideo && !resolving && failure == null
+    var showBuffering by remember(playback.sessionGeneration, rebuffering) { mutableStateOf(false) }
+    LaunchedEffect(playback.sessionGeneration, rebuffering) {
+        if (rebuffering) {
+            delay(700L)
+            showBuffering = true
+        }
+    }
     when {
         resolving -> Column(Modifier.padding(horizontal = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             PlayerStageMessage(if (autoMatching) "正在查找本集线路" else "正在打开本集", sourceName)
@@ -411,9 +452,13 @@ private fun AnimeVideoStatus(
             PlayerStageMessage(if (playback.recoveryAttempt > 0) "正在重新连接视频" else "正在打开视频", sourceName)
         playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && playback.hasVideoTracks == false ->
             PlayerStageMessage("这条线路只有音频", null)
-        playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && playback.firstFrameRendered == false ->
+        playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && awaitingVideo ->
             PlayerStageMessage(if (playback.playWhenReady) "正在等待画面" else "已暂停", null)
-        playback.isBuffering && playback.firstFrameRendered != true -> PlayerStageMessage("正在缓冲", sourceName)
+        playback.isBuffering && awaitingVideo -> PlayerStageMessage("正在缓冲首帧", sourceName)
+        showBuffering -> Text("正在缓冲", Modifier.clip(RoundedCornerShape(14.dp))
+            .background(Color.Black.copy(alpha = .72f)).padding(horizontal = 14.dp, vertical = 8.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite }, color = Color.White,
+            style = MaterialTheme.typography.labelMedium)
         playback.ended -> Column(horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(6.dp)) {
             PlayerStageMessage("本集已播完", null)

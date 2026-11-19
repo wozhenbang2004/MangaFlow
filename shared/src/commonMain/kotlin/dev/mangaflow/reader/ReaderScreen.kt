@@ -108,6 +108,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.MoreHoriz
+import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Source
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Undo
@@ -844,7 +845,7 @@ fun ReaderScreen(
     val chaptersPanel: @Composable (Boolean) -> Unit = { embedded ->
         ReaderChaptersDialog(
             visible = showChapters, chapters = chapters, currentId = chapterId,
-            manga = manga, library = libraryStore, backdrop = readerBackdrop,
+            manga = manga, library = libraryStore,
             downloadStore = downloadStore, loading = chaptersLoading, error = chaptersError, onRetry = onRetryChapters,
             embedded = embedded,
             onSelect = {
@@ -1578,6 +1579,9 @@ fun ReaderScreen(
             sessionKey = sourceIdentity, store = experience, budget = experienceBudget,
             standbys = currentSourceStandbys, alternativeCount = alternativeSources.size, backdrop = readerBackdrop,
             preparation = preparation,
+            chapterLoading = loading, chapterUnavailable = error != null,
+            imageVisible = imageVisible, localChapter = localImport,
+            downloadedChapter = activeDownload?.status == DownloadStatus.COMPLETED,
             repairedPages = repairState.replacements.size, repairBusy = repairState.busy, repairReason = repairState.reason,
             onAlignPage = alternativeSources.firstOrNull()?.takeIf { pages.isNotEmpty() }?.let { variant ->
                 { repairs.select(pageIndex, repairState.replacements[pageIndex]?.variant ?: variant) }
@@ -3955,7 +3959,6 @@ private fun ReaderChaptersDialog(
     library: LibraryStore,
     chapters: List<Chapter>,
     currentId: String,
-    backdrop: HazeState,
     downloadStore: DownloadStore,
     loading: Boolean,
     error: String?,
@@ -3968,14 +3971,14 @@ private fun ReaderChaptersDialog(
     val desktop = platformKind == PlatformKind.DESKTOP
     val groups = remember(chapters) { chapters.map(Chapter::group).distinct() }
     val positions = rememberChapterPositions(manga, library, active = visible)
-    val currentGroup = chapters.firstOrNull { it.id == currentId }?.group ?: groups.firstOrNull().orEmpty()
-    var selectedGroup by rememberSaveable { mutableStateOf(currentGroup) }
-    val group = selectedGroup.takeIf { it in groups } ?: currentGroup
-    val visibleChapters = remember(chapters, group) { chapters.filter { it.group == group }.sortedBy(Chapter::index) }
+    val currentGroup = remember(chapters, currentId) { chapters.firstOrNull { it.id == currentId }?.group }
     val catalogBusy = rememberDelayedBusy(visible && loading)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-    LaunchedEffect(visible, currentId, currentGroup) { if (visible) selectedGroup = currentGroup }
     val panel: @Composable () -> Unit = {
+        var selectedGroup by rememberSaveable(manga.id, currentId) { mutableStateOf<String?>(null) }
+        var locateCurrent by remember(manga.id, currentId) { mutableStateOf(false) }
+        val group = selectedGroup?.takeIf { it in groups } ?: currentGroup ?: groups.firstOrNull().orEmpty()
+        val visibleCount = remember(chapters, group) { chapters.count { it.group == group } }
         val downloadFlow = remember(downloadStore, manga.id) { downloadStore.observeManga(manga.id) }
         val initialDownloads = remember(downloadStore, manga.id) {
             downloadStore.entries.value.filter { it.manga.id == manga.id }
@@ -3984,22 +3987,30 @@ private fun ReaderChaptersDialog(
         val saved = remember(downloads) { downloads.associateBy { it.chapter.id } }
         val surface = if (embedded) Modifier.fillMaxSize().motionInputGate(visible)
             else Modifier.padding(horizontal = 16.dp).widthIn(max = 600.dp).fillMaxWidth()
-        ReaderDialogSurface(surface, backdrop, dialogWindow = !embedded) {
+        if (!embedded) ConfigureReaderDialogWindow(.12f)
+        ReaderSurface(surface) {
             Column((if (embedded) Modifier.fillMaxSize() else Modifier.heightIn(max = LocalMangaWindow.current.panelHeight))
                 .padding(horizontal = if (embedded) 12.dp else 16.dp, vertical = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("章节", fontSize = 17.sp, fontWeight = FontWeight.Medium)
-                    Text("${visibleChapters.size} 章", Modifier.weight(1f).padding(start = 8.dp),
+                    Text("$visibleCount 章", Modifier.weight(1f).padding(start = 8.dp),
                         color = colors.onSurfaceVariant, fontSize = 12.sp)
                     Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
                         if (catalogBusy) CircularProgressIndicator(Modifier.size(13.dp)
                             .semantics { contentDescription = "正在补全章节目录" }, color = colors.onSurfaceVariant, strokeWidth = 1.5.dp)
                     }
+                    ReaderIcon(Icons.Outlined.MyLocation, "定位当前话", enabled = currentGroup != null) {
+                        selectedGroup = currentGroup
+                        locateCurrent = true
+                    }
                     ReaderIcon(Icons.Rounded.Refresh, "刷新目录", enabled = !loading, onClick = onRetry)
                     ReaderIcon(Icons.Rounded.Close, "关闭目录", onClick = onDismiss)
                 }
                 if (groups.size > 1) MotionTabs(
-                    selected = groups.indexOf(group), labels = groups.map(::chapterGroupLabel), onSelect = { selectedGroup = groups[it] },
+                    selected = groups.indexOf(group), labels = groups.map(::chapterGroupLabel), onSelect = {
+                        locateCurrent = false
+                        selectedGroup = groups[it]
+                    },
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     compact = true, underline = true, indicator = colors.onSurface.copy(alpha = .75f), fontSize = 12.sp,
                 )
@@ -4016,12 +4027,30 @@ private fun ReaderChaptersDialog(
                     val targetChapters = remember(chapters, targetGroup) {
                         chapters.filter { it.group == targetGroup }.sortedBy(Chapter::index)
                     }
-                    val state = rememberLazyGridState()
-                    LaunchedEffect(active, currentId, targetChapters) {
-                        if (active) {
-                            val index = targetChapters.indexOfFirst { it.id == currentId }
-                            state.scrollToItem((index - 6).coerceAtLeast(0))
-                        } else state.stopScroll()
+                    val initialIndex = remember(targetChapters, currentId) { targetChapters.indexOfFirst { it.id == currentId } }
+                    val state = rememberLazyGridState(initialFirstVisibleItemIndex = (initialIndex - 6).coerceAtLeast(0))
+                    var positioned by rememberSaveable { mutableStateOf(initialIndex >= 0) }
+                    val currentIndex by rememberUpdatedState(initialIndex)
+                    LaunchedEffect(active, locateCurrent) {
+                        if (!active) {
+                            state.stopScroll()
+                        } else if (locateCurrent && currentIndex >= 0) {
+                            positioned = true
+                            state.requestScrollToItem((currentIndex - 6).coerceAtLeast(0))
+                            locateCurrent = false
+                        } else if (!positioned) {
+                            // Locate a chapter that arrives late only while the reader is still at the top.
+                            // After this first placement the keyed grid owns its scroll anchor.
+                            val (moved, index) = snapshotFlow {
+                                val moved = state.isScrollInProgress || state.firstVisibleItemIndex != 0 ||
+                                    state.firstVisibleItemScrollOffset != 0
+                                moved to currentIndex
+                            }.first { (moved, index) -> moved || index >= 0 }
+                            positioned = true
+                            if (moved) {
+                                if (selectedGroup == null) selectedGroup = targetGroup
+                            } else state.requestScrollToItem((index - 6).coerceAtLeast(0))
+                        }
                     }
                     Box(Modifier.fillMaxWidth()) {
                     LazyVerticalGrid(

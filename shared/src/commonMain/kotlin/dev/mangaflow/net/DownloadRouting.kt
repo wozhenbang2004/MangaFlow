@@ -39,7 +39,9 @@ data class DownloadRoutingSettings(
     val categoryOverrides: Map<DownloadCategory, DownloadRouteMode> = emptyMap(),
     val proxy: DownloadProxyEndpoint? = null,
     val sourceOverrides: Map<String, SourceNetworkSettings> = emptyMap(),
-    val proxyProvider: DownloadProxyProvider = if (proxy != null || sourceOverrides.values.any { it.proxy != null }) DownloadProxyProvider.CUSTOM else DownloadProxyProvider.RELAY,
+    val proxyProvider: DownloadProxyProvider =
+        if (!relayLinkAvailable || proxy != null || sourceOverrides.values.any { it.proxy != null }) DownloadProxyProvider.CUSTOM
+        else DownloadProxyProvider.RELAY,
 )
 
 /** Invalid or unsupported routes must fail before a request, without falling back to direct. */
@@ -179,6 +181,9 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
     }
 
     fun setProxyProvider(provider: DownloadProxyProvider) = synchronized(lock) {
+        if (provider == DownloadProxyProvider.RELAY && !relayLinkAvailable) {
+            throw DownloadRouteException("此平台不支持 Relay 联动。")
+        }
         val previous = disk.getString("proxy_provider")
         val saved = runCatching { disk.edit().putString("proxy_provider", provider.name).commit() }.getOrDefault(false)
         if (!saved) {
@@ -294,7 +299,8 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
             proxy = proxy,
             sourceOverrides = sources,
             proxyProvider = disk.getString("proxy_provider")?.let { saved -> DownloadProxyProvider.entries.firstOrNull { it.name == saved } }
-                ?: if (proxy != null || sources.values.any { it.proxy != null }) DownloadProxyProvider.CUSTOM else DownloadProxyProvider.RELAY,
+                ?: if (!relayLinkAvailable || proxy != null || sources.values.any { it.proxy != null }) DownloadProxyProvider.CUSTOM
+                else DownloadProxyProvider.RELAY,
         )
     }
 

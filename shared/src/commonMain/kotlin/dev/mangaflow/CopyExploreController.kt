@@ -147,8 +147,9 @@ class CopyExploreController(
     }
 
     fun selectTheme(theme: MangaTag?) = changeCatalog { it.copy(theme = theme) }
-    fun selectScope(value: MangaTag?) = changeCatalog { it.copy(scope = value) }
-    fun selectOrdering(ordering: String) = changeCatalog { it.copy(ordering = ordering) }
+    fun applyScopeAndOrdering(scope: MangaTag?, ordering: String) = changeCatalog {
+        it.copy(scope = scope, ordering = ordering)
+    }
     fun resetFilters() = changeCatalog { CopyCatalogSelection() }
 
     fun openOriginal(original: MangaTag) {

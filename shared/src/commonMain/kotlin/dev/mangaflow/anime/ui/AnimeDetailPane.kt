@@ -59,7 +59,7 @@ internal fun AnimeDetailPane(
     backdrop: HazeState,
     scroll: LazyListState,
     onPlay: (AnimeEpisode) -> Unit,
-    onOpen: (AnimeSubject) -> Unit,
+    onOpenRelated: (AnimeSubject) -> Unit,
     onSources: (AnimeEpisode?) -> Unit,
     onTracking: () -> Unit,
     modifier: Modifier = Modifier,
@@ -295,7 +295,7 @@ internal fun AnimeDetailPane(
                     AnimeSectionTitle("相关番剧", modifier = Modifier.semantics { heading() })
                 }
                 items(state.relatedSubjects, key = { "related:" + it.id }) { related ->
-                    AnimeSubjectRow(related, animeSubjectSummary(related), onOpen = { onOpen(related) })
+                    AnimeSubjectRow(related, animeSubjectSummary(related), onOpen = { onOpenRelated(related) })
                 }
             }
         }

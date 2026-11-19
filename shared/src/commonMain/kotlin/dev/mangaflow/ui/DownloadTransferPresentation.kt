@@ -37,7 +37,7 @@ internal fun downloadTransferPhaseLabel(entry: DownloadEntry, now: Long): String
     val base = when (entry.status) {
         DownloadStatus.COMPLETED -> "已保存"
         DownloadStatus.PAUSED -> "已暂停"
-        DownloadStatus.FAILED -> observed.failureReason?.label ?: "下载未完成"
+        DownloadStatus.FAILED -> observed.failureReason?.label ?: "下载失败"
         DownloadStatus.QUEUED, DownloadStatus.WAITING, DownloadStatus.RUNNING ->
             observed.waitingReason?.label ?: when {
                 observed.activePages > 1 && observed.phase == DownloadPhase.TRANSFERRING ->

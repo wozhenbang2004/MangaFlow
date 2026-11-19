@@ -91,6 +91,18 @@ data class ScopedSourceControls(
     val loading: Boolean = false, val error: String? = null,
 )
 
+private fun RankPeriod.rankChoiceAliases(): List<String> = when (this) {
+    RankPeriod.DAY -> listOf("H24", "t", "day", "d")
+    RankPeriod.WEEK -> listOf("D7", "w", "week")
+    RankPeriod.MONTH -> listOf("D30", "m", "month")
+    RankPeriod.TOTAL -> listOf("a", "all", "total")
+}
+
+internal fun SourceFeed.nativeRankPeriods(): List<RankPeriod> {
+    val filter = filters.firstOrNull { it.id == "period" && !it.multiple } ?: return emptyList()
+    return RankPeriod.entries.filter { period -> filter.choices.any { it.id in period.rankChoiceAliases() } }
+}
+
 /** One shared browse journey; every source retains its own cursor and failure. */
 internal class ScopedBrowseController(private val repository: UnifiedMangaRepository, private val scope: CoroutineScope) : BrowseUiActions {
     private val mutableState = MutableStateFlow(emptyState())
@@ -387,8 +399,10 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                 DiscoveryMode.LATEST -> SourceFeedKind.LATEST
                 else -> null
             }
-            val chosen = controls.value.feeds.firstOrNull { it.kind == wanted }
-            if (wanted != null && chosen != null) mutableControls.value = controls.value.copy(
+            val current = controls.value
+            val chosen = current.feeds.firstOrNull { it.kind == wanted && it.id == current.feedId }
+                ?: current.feeds.firstOrNull { it.kind == wanted }
+            if (chosen != null && chosen.id != current.feedId) mutableControls.value = current.copy(
                 feedId = chosen.id, options = normalizeOptions(chosen.filters,
                     optionSelections["$sourceId:${chosen.id}:false"].orEmpty()))
         }
@@ -415,35 +429,45 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         availableTags = value.availableTags, loading = false, sourceScope = scopeKey())
     private fun homeSelection(value: BrowseState) = selection(value).copy(query = "")
     private fun scopeKey() = "scoped:" + sourceId + ":" + controls.value.feedId + ":" + controls.value.options.joinToString("\u001f")
-    private fun key(value: BrowseState) = scopeKey() + ":" + sources.joinToString("|") { it.id + ":" + it.revision } + ":" + value.cacheKey
+    private fun key(value: BrowseState): String {
+        val nativeOrder = if (sourceId == ALL && !value.isSearch && value.mode == DiscoveryMode.RANKING)
+            optionSelections.entries.filter { it.key.endsWith(":false") }.sortedBy { it.key }
+                .joinToString("|") { (key, options) -> key + options.joinToString(prefix = "[", postfix = "]") }
+        else ""
+        return scopeKey() + ":" + sources.joinToString("|") { it.id + ":" + it.revision } + ":" + value.cacheKey + ":" + nativeOrder
+    }
     private fun selectedSources() = if (sourceId == ALL) sources else sources.filter { it.id == sourceId }
 
     /** Rankings are independent source-native lists. Never mix their score scales or cursors. */
     private fun nativeRankingOptions(feed: SourceFeed, period: RankPeriod, remembered: List<String>): List<String>? {
-        val aliases = when (period) {
-            RankPeriod.DAY -> listOf("H24", "t", "day", "d")
-            RankPeriod.WEEK -> listOf("D7", "w", "week")
-            RankPeriod.MONTH -> listOf("D30", "m", "month")
-            RankPeriod.TOTAL -> listOf("a", "all", "total")
-        }
+        val periods = feed.nativeRankPeriods()
+        if (periods.isNotEmpty() && period !in periods) return null
         val normalized = mutableListOf<String>()
         feed.filters.forEachIndexed { index, filter ->
-            val choice = when (filter.id) {
-                "period" -> filter.choices.firstOrNull { it.id in aliases }?.id ?: return null
-                "sort" -> filter.choices.firstOrNull { it.id == "mv" }?.id
-                    ?: remembered.getOrNull(index)
-                else -> remembered.getOrNull(index)
-            }
+            val choice = if (filter.id == "period" && periods.isNotEmpty())
+                filter.choices.firstOrNull { it.id in period.rankChoiceAliases() }?.id
+            else remembered.getOrNull(index)
             normalized += filter.normalize(choice)
         }
         return normalized
+    }
+
+    private fun supportedRankingSelection(value: BrowseState): BrowseState {
+        if (value.isSearch || value.mode != DiscoveryMode.RANKING || sourceId == ALL || !controlsReady(false)) return value
+        val current = controls.value
+        val feed = current.feeds.firstOrNull { it.id == current.feedId && it.kind == SourceFeedKind.RANKING }
+            ?: return value
+        val periods = feed.nativeRankPeriods()
+        if (periods.isEmpty() || value.period in periods) return value
+        val fallback = feed.filters.first { it.id == "period" }.normalize()
+        return value.copy(period = periods.firstOrNull { fallback in it.rankChoiceAliases() } ?: periods.first())
     }
 
     private fun show(value: BrowseState, debounce: Boolean = false, force: Boolean = false, retain: Boolean = true) {
         if (disposed) return
         if (retain) retainCurrent()
         cancelRequest()
-        val configured = selection(value)
+        val configured = selection(supportedRankingSelection(value))
         if (sources.isEmpty()) { mutableState.value = configured.copy(error = unavailableReason ?: "本分区暂无已启用的来源。"); return }
         val cached = snapshots[key(configured)]
         mutableState.value = cached?.copy(loading = false, loadingMore = false, refreshing = false, sourceScope = scopeKey()) ?: configured
@@ -465,6 +489,7 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         cancelRequest()
         val expected = generation; val owner = scopeKey(); val selectedKey = key(value)
         val selectedSource = sourceId; val selectedControls = controls.value
+        val rememberedOptions = optionSelections.toMap()
         val infos = selectedSources().associateBy { it.id }
         val requested = pages.filterKeys { it in infos }
         if (requested.isEmpty()) return
@@ -488,7 +513,11 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                 page = if (reset) 0 else value.page + 1, loading = loading && rows.isEmpty(),
                 refreshing = loading && reset && rows.isNotEmpty(), loadingMore = loading && !reset,
                 hasMore = lanes.values.any { it.error == null && it.hasMore },
-                error = if (!loading && !successes && rows.isEmpty()) "当前来源暂时无法读取，请查看来源状态并重试。" else null,
+                error = if (!loading && !successes && rows.isEmpty()) when {
+                    lanes.isNotEmpty() -> "当前来源暂时无法读取，请查看来源状态并重试。"
+                    value.mode == DiscoveryMode.RANKING && !value.isSearch -> null
+                    else -> "当前选择的来源未提供此列表。"
+                } else null,
                 failedPage = if (!loading && lanes.values.any { it.error != null }) 0 else null,
                 updatedAt = wallTimeMillis(), searchSources = lanes.toMap(),
                 sourceNextPages = lanes.mapNotNull { (id, lane) -> lane.nextPage?.let { id to it } }.toMap(),
@@ -547,7 +576,7 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                                                 } else null) ?: feeds.firstOrNull { it.kind == kind }
                                                     ?: return@withTimeout null
                                                 val remembered = if (selectedSource != ALL && selectedControls.feedId == feed.id)
-                                                    selectedControls.options else emptyList()
+                                                    selectedControls.options else rememberedOptions["$id:${feed.id}:false"].orEmpty()
                                                 val options = if (kind == SourceFeedKind.RANKING)
                                                     nativeRankingOptions(feed, value.period, remembered) ?: return@withTimeout null
                                                 else feed.filters.mapIndexed { index, filter -> filter.normalize(remembered.getOrNull(index)) }

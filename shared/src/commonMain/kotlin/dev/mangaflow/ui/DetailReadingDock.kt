@@ -48,6 +48,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -115,7 +116,8 @@ internal fun DetailReadingDock(
     val percent = detailReadingPercent(displayedResume)
     val chapterTitle = preferred?.title?.ifBlank { "拷贝章节" }
         ?: if (resume != null) resume.chapterTitle.ifBlank { "上次章节" } else firstChapter?.title.orEmpty()
-    val actionTitle = if (preferred != null || resume != null) "继续阅读" else "开始阅读"
+    val resuming = preferred != null || resume != null
+    val actionTitle = if (resuming) "继续阅读" else "开始阅读"
     val subtitle = when {
         preferred != null -> "已采用拷贝章节"
         resume != null -> percent?.let { "上次读至 $it%" } ?: "继续上次位置"
@@ -158,7 +160,7 @@ internal fun DetailReadingDock(
                     .heightIn(min = minimumHeight)
                     .padding(horizontal = lerp(16.dp, 10.dp, collapse), vertical = 4.dp)
                     .semantics(mergeDescendants = true) {
-                        contentDescription = listOf(actionTitle, chapterTitle, subtitle)
+                        contentDescription = listOf(actionTitle.takeIf { canRead }.orEmpty(), chapterTitle, subtitle)
                             .filter(String::isNotBlank).joinToString("，")
                     }, verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Start) {
@@ -173,16 +175,30 @@ internal fun DetailReadingDock(
                             modifier = Modifier.size(lerp(22.dp, 16.dp, collapse)))
                     }
                     Spacer(Modifier.width(lerp(10.dp, 6.dp, collapse)))
-                    Text(chapterTitle.ifBlank { if (loading) "正在读取章节" else "暂无可读章节" },
-                        Modifier.weight(1f), color = DetailForeground, fontSize = (15f - 3f * collapse).sp,
-                        lineHeight = (22f - 4f * collapse).sp, fontWeight = FontWeight.Medium,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Column(Modifier.weight(1f).clearAndSetSemantics {}) {
+                        Text(when {
+                            !canRead -> subtitle
+                            collapse < .6f -> actionTitle
+                            resuming -> "继续"
+                            else -> "阅读"
+                        }, color = DetailForeground, fontSize = (15f - 3f * collapse).sp,
+                            lineHeight = (21f - 4f * collapse).sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        val chapterReveal = (1f - collapse / .6f).coerceIn(0f, 1f)
+                        if (chapterTitle.isNotBlank() && chapterReveal > 0f) {
+                            Box(Modifier.height(18.dp * fontScale * chapterReveal).clipToBounds()
+                                .graphicsLayer { alpha = chapterReveal }) {
+                                Text(chapterTitle, color = DetailSecondary, fontSize = 12.sp,
+                                    lineHeight = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
                     if (percent != null && collapse < 1f) {
                         Spacer(Modifier.width(12.dp * (1f - collapse)))
                         Box(Modifier.width(42.dp * fontScale * (1f - collapse)).clipToBounds()
                             .graphicsLayer { alpha = (1f - collapse * 2f).coerceIn(0f, 1f) },
                             contentAlignment = Alignment.CenterEnd) {
-                            Text("$percent%", fontFamily = mangaFontFamily(MangaFontScene.NUMBERS), color = DetailSecondary, fontSize = 14.sp,
+                            Text("$percent%", Modifier.clearAndSetSemantics {}, fontFamily = mangaFontFamily(MangaFontScene.NUMBERS), color = DetailSecondary, fontSize = 14.sp,
                                 fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
                         }
                     }

@@ -16,6 +16,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -25,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -90,11 +92,14 @@ internal fun SourceCapabilityBrowseControls(
     var filtersVisible by remember(owner) { mutableStateOf(false) }
     var filtersPresent by remember(owner) { mutableStateOf(false) }
     var pendingFilter by remember(owner) { mutableStateOf<Int?>(null) }
+    var pendingPanel by remember(owner) { mutableStateOf<SourceBrowsePanel?>(null) }
     var hotTagsOpen by remember(owner) { mutableStateOf(false) }
     var pendingTag by remember(owner) { mutableStateOf<String?>(null) }
     val failed = if (inSearch && !browse.isSearch) emptyList()
         else browse.searchSources.values.filter { it.error != null }
     val selectedFeed = current.feeds.firstOrNull { it.id == current.feedId }
+    val nativePeriods = if (current.selectedSource == "*") RankPeriod.entries
+        else selectedFeed?.nativeRankPeriods().orEmpty()
     // Author/tag requests have their own source protocol and do not consume these options.
     val filters = when {
         !searching -> selectedFeed?.filters.orEmpty()
@@ -102,18 +107,33 @@ internal fun SourceCapabilityBrowseControls(
         else -> emptyList()
     }
     val visibleFilters = filters.withIndex().filterNot {
-        !searching && browse.mode == DiscoveryMode.RANKING && it.value.id == "period"
+        !searching && browse.mode == DiscoveryMode.RANKING && it.value.id == "period" && nativePeriods.isNotEmpty()
     }
     val modifiedFilters = visibleFilters.count { (index, filter) ->
         filter.normalize(current.options.getOrNull(index)) != filter.normalize()
     }
     val sourceName = current.sources.firstOrNull { it.id == current.selectedSource }?.name ?: "全部来源"
+    val hasFeeds = !searching && current.feeds.size > 1
+    val hasHotTags = !searching && current.selectedSource == "jmcomic"
+    val hasFilters = visibleFilters.isNotEmpty()
+    val controlsTitle = when {
+        hasFilters && (hasFeeds || hasHotTags) -> "栏目与筛选"
+        hasFilters -> "筛选"
+        hasFeeds || hasHotTags -> "来源栏目"
+        else -> null
+    }
+    val selectionSummary = listOfNotNull(
+        selectedFeed?.title?.takeIf { hasFeeds },
+        visibleFilters.firstOrNull { it.value.id == "sort" }?.let {
+            sourceFilterSummary(it.value, current.options.getOrNull(it.index))
+        },
+    ).joinToString(" · ")
     var hotTags by remember(current.selectedSource, revision) { mutableStateOf<List<String>>(emptyList()) }
     var hotTagsLoaded by remember(current.selectedSource, revision) { mutableStateOf(false) }
     var hotTagsLoading by remember(current.selectedSource, revision) { mutableStateOf(false) }
     var hotTagsError by remember(current.selectedSource, revision) { mutableStateOf<String?>(null) }
     var hotTagsRevision by remember(current.selectedSource, revision) { mutableIntStateOf(0) }
-    val present = feedPicker || filtersVisible || filtersPresent || pendingFilter != null ||
+    val present = feedPicker || filtersVisible || filtersPresent || pendingFilter != null || pendingPanel != null ||
         filterIndex != null || failuresOpen || hotTagsOpen
     val reportPresence by rememberUpdatedState(onPresenceChange)
     SideEffect { reportPresence(present) }
@@ -124,17 +144,26 @@ internal fun SourceCapabilityBrowseControls(
         (inSearch || controller.state.value.isSearch) == searching && controller.state.value.searchTarget == browse.searchTarget
     LaunchedEffect(active) {
         if (!active) {
-            pendingFeed = null; pendingOption = null; pendingFilter = null
+            pendingFeed = null; pendingOption = null; pendingFilter = null; pendingPanel = null
             pendingInspect = null; pendingTag = null
             feedPicker = false; filtersVisible = false; filterIndex = null
             failuresOpen = false; hotTagsOpen = false
         }
     }
-    LaunchedEffect(filtersVisible, filtersPresent, pendingFilter) {
+    LaunchedEffect(filtersVisible, filtersPresent, pendingFilter, pendingPanel) {
         if (!filtersVisible && !filtersPresent) {
             val chosen = pendingFilter
+            val panel = pendingPanel
             pendingFilter = null
-            if (chosen != null && currentOwner()) filterIndex = chosen
+            pendingPanel = null
+            if (currentOwner()) {
+                if (chosen != null) filterIndex = chosen
+                when (panel) {
+                    SourceBrowsePanel.FEEDS -> feedPicker = true
+                    SourceBrowsePanel.HOT_TAGS -> hotTagsOpen = true
+                    null -> Unit
+                }
+            }
         }
     }
     LaunchedEffect(hotTagsOpen, current.selectedSource, revision, hotTagsRevision, active) {
@@ -148,54 +177,56 @@ internal fun SourceCapabilityBrowseControls(
         finally { hotTagsLoading = false }
     }
     val colors = MaterialTheme.colorScheme
+    val controlColors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).horizontalScroll(rememberScrollState()),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             MotionTextButton(onClick = onSources, enabled = active && !present,
-                modifier = Modifier.heightIn(min = 44.dp),
+                modifier = Modifier.heightIn(min = 44.dp).semantics { stateDescription = "当前来源：$sourceName" },
+                colors = controlColors,
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)) {
                 if (current.selectedSource == "*") Icon(Icons.Outlined.Layers, null, Modifier.size(17.dp))
                 else ChapterSourceLogo(current.selectedSource, sourceName, Modifier.size(17.dp))
                 Text(sourceName, Modifier.widthIn(max = 122.dp).padding(start = 7.dp),
-                    style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Icon(Icons.Outlined.ExpandMore, "选择来源", Modifier.padding(start = 3.dp).size(15.dp))
+                    style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Medium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            if (!searching && current.feeds.size > 1) {
-                MotionTextButton(onClick = { feedPicker = true }, enabled = active && !present && !current.loading,
-                    modifier = Modifier.heightIn(min = 44.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)) {
-                    Text(selectedFeed?.title ?: "分类", Modifier.widthIn(max = 106.dp),
-                        style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Icon(Icons.Outlined.ExpandMore, "分类与栏目", Modifier.padding(start = 3.dp).size(15.dp))
-                }
-            }
-            if (!searching && current.selectedSource == "jmcomic") {
-                MotionIconButton(onClick = { hotTagsOpen = true }, enabled = active && !present,
-                    modifier = Modifier.size(44.dp), tooltip = "热门标签") {
-                    Icon(Icons.Outlined.Tag, "热门标签", Modifier.size(18.dp))
-                }
-            }
-            if (visibleFilters.isNotEmpty()) Box {
-                MotionIconButton(onClick = {
-                    if (visibleFilters.size == 1) filterIndex = visibleFilters.first().index
+            if (controlsTitle != null) Box {
+                MotionTextButton(onClick = {
+                    if (!hasFeeds && !hasHotTags && visibleFilters.size == 1) filterIndex = visibleFilters.first().index
                     else filtersVisible = !filtersVisible
                 }, enabled = active && !current.loading && (!present || filtersVisible),
-                    modifier = Modifier.size(44.dp).semantics {
-                        stateDescription = if (modifiedFilters == 0) "默认筛选" else "$modifiedFilters 项筛选已调整"
-                    }, tooltip = "筛选") {
-                    Icon(Icons.Outlined.Tune, "筛选", Modifier.size(18.dp),
-                        tint = if (modifiedFilters > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+                    modifier = Modifier.heightIn(min = 44.dp).semantics {
+                        stateDescription = selectionSummary.ifBlank {
+                            if (modifiedFilters == 0) "未调整筛选" else "$modifiedFilters 项筛选已调整"
+                        }
+                    }, colors = controlColors, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+                    Icon(Icons.Outlined.Tune, null, Modifier.size(16.dp))
+                    Column(Modifier.padding(start = 6.dp).widthIn(max = 152.dp)) {
+                        Text(controlsTitle, style = MaterialTheme.typography.labelMedium)
+                        if (selectionSummary.isNotBlank()) Text(selectionSummary,
+                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
                 if (modifiedFilters > 0) Box(Modifier.align(Alignment.TopEnd).padding(7.dp).size(5.dp)
                     .background(MaterialTheme.colorScheme.onSurface, CircleShape))
                 CompactGlassPopover(visible = filtersVisible, backdrop = backdrop,
                     onDismiss = { filtersVisible = false }, onPresenceChange = { filtersPresent = it }) {
-                    Text("筛选", Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    Text(controlsTitle, Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                         style = MaterialTheme.typography.titleSmall)
+                    if (hasFeeds) CompactMenuAction(Icons.Outlined.ViewList, "选择栏目", enabled = active) {
+                        pendingPanel = SourceBrowsePanel.FEEDS
+                        filtersVisible = false
+                    }
+                    if (hasHotTags) CompactMenuAction(Icons.Outlined.Tag, "热门标签", enabled = active) {
+                        pendingPanel = SourceBrowsePanel.HOT_TAGS
+                        filtersVisible = false
+                    }
                     visibleFilters.forEach { (index, filter) ->
                         MotionTextButton(onClick = { pendingFilter = index; filtersVisible = false },
                             enabled = active && pendingFilter == null,
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), colors = controlColors,
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                 Text(filter.title, style = MaterialTheme.typography.labelLarge)
@@ -226,13 +257,16 @@ internal fun SourceCapabilityBrowseControls(
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("查看", style = MaterialTheme.typography.labelMedium)
         }
-        if (!searching && browse.mode == DiscoveryMode.RANKING) {
-            MotionTabs(selected = browse.period.ordinal, labels = RankPeriod.entries.map { it.label },
-                onSelect = { if (active && !present) controller.selectDiscovery(DiscoveryMode.RANKING, period = RankPeriod.entries[it]) },
+        val selectedPeriod = nativePeriods.indexOf(browse.period)
+        if (!searching && browse.mode == DiscoveryMode.RANKING && !current.loading &&
+            nativePeriods.size > 1 && selectedPeriod >= 0) {
+            MotionTabs(selected = selectedPeriod, labels = nativePeriods.map { it.label },
+                onSelect = { if (active && !present) controller.selectDiscovery(DiscoveryMode.RANKING, period = nativePeriods[it]) },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp).motionInputGate(active && !present),
-                compact = true, controlHeight = 44.dp, fontSize = 12.sp,
-                tooltips = RankPeriod.entries.map { period ->
-                    if (period == RankPeriod.TOTAL && current.selectedSource == "*") "总榜 · 仅展示实际提供总榜的来源" else period.label
+                controlHeight = 44.dp, fontSize = 12.sp, treatment = MotionTabTreatment.Capsule,
+                role = Role.RadioButton, selectedFontWeight = FontWeight.SemiBold,
+                tooltips = nativePeriods.map { period ->
+                    if (current.selectedSource == "*") "${period.label} · 保留各站榜单口径" else period.label
                 })
         }
     }
@@ -300,7 +334,8 @@ internal fun SourceCapabilityBrowseControls(
         val chosen = pendingFeed; pendingFeed = null
         if (chosen != null && currentOwner()) controller.selectFeed(chosen)
     }) { dismiss ->
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = (LocalMangaWindow.current.height - 96.dp).coerceAtLeast(120.dp)),
+        LazyColumn(Modifier.fillMaxWidth().heightIn(max = (LocalMangaWindow.current.height - 96.dp).coerceAtLeast(120.dp))
+            .selectableGroup(),
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 20.dp)) {
             item(key = "feed-picker-header") { SourceBrowseSheetHeading("分类与栏目", dismiss, sourceName) }
             current.feeds.groupBy { it.kind }.forEach { (kind, entries) ->
@@ -311,12 +346,9 @@ internal fun SourceCapabilityBrowseControls(
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 items(entries, key = { "feed:" + it.id }) { feed ->
-                    MotionTextButton(onClick = { pendingFeed = feed.id; dismiss() }, enabled = active && pendingFeed == null,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics { selected = feed.id == current.feedId },
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)) {
-                        Text(feed.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = if (feed.id == current.feedId) FontWeight.Medium else FontWeight.Normal)
-                        if (feed.id == current.feedId) Icon(Icons.Outlined.Check, null, Modifier.size(17.dp))
+                    RankingMenuChoice(feed.title, feed.id == current.feedId, active && pendingFeed == null) {
+                        pendingFeed = feed.id
+                        dismiss()
                     }
                 }
             }
@@ -347,13 +379,18 @@ internal fun SourceCapabilityBrowseControls(
                 }
                 items(filter.choices, key = { it.id }) { choice ->
                     val chosen = choice.id in selectedIds
-                    MotionTextButton(onClick = {
-                        if (filter.multiple) selectedIds = if (choice.id in selectedIds) selectedIds - choice.id else selectedIds + choice.id
-                        else { pendingOption = index to choice.id; dismiss() }
-                    }, enabled = active && pendingOption == null, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                        .semantics { selected = chosen }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)) {
-                        Text(choice.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                        if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(17.dp))
+                    if (filter.multiple) {
+                        MotionTextButton(onClick = {
+                            selectedIds = if (chosen) selectedIds - choice.id else selectedIds + choice.id
+                        }, enabled = active && pendingOption == null, colors = controlColors,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics { selected = chosen },
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)) {
+                            Text(choice.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                            if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(17.dp))
+                        }
+                    } else RankingMenuChoice(choice.title, chosen, active && pendingOption == null) {
+                        pendingOption = index to choice.id
+                        dismiss()
                     }
                 }
             }
@@ -393,6 +430,8 @@ internal fun SourceCapabilityBrowseControls(
         }
     }
 }
+
+private enum class SourceBrowsePanel { FEEDS, HOT_TAGS }
 
 private fun sourceAccountRequired(message: String?): Boolean = message?.contains("需要登录") == true
 

@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import dev.mangaflow.data.Manga
+import dev.mangaflow.data.MangaPage
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.sources.BodySourceInfo
@@ -27,12 +28,29 @@ internal class ProfileSiteShelf(
         private set
     var busy by mutableStateOf(false)
         private set
-    var message by mutableStateOf<String?>(null)
+    var loadingMore by mutableStateOf(false)
         private set
     var nextPage by mutableStateOf<Int?>(null)
         private set
     private var owner: SiteOwner? = null
     private var loaded = false
+    private var failedRead by mutableStateOf<ReadRequest?>(null)
+    val collectionError: String?
+        get() {
+            val attempt = failedRead as? ReadRequest.Collection ?: return null
+            val otherFolder = folders.firstOrNull { it.id == attempt.folder && it.id != folderId }
+            return when {
+                otherFolder != null -> "「${otherFolder.title}」暂未读取"
+                loaded -> "站点收藏暂未更新"
+                else -> "站点收藏暂未读取"
+            }
+        }
+    val nextPageFailed: Boolean get() = failedRead is ReadRequest.More
+
+    private sealed interface ReadRequest {
+        data class Collection(val folder: String? = null, val refreshFolders: Boolean = true) : ReadRequest
+        data class More(val folder: String, val page: Int) : ReadRequest
+    }
 
     private data class SiteOwner(val displayName: String, val session: String)
 
@@ -48,46 +66,97 @@ internal class ProfileSiteShelf(
         books = emptyList()
         nextPage = null
         loaded = false
+        failedRead = null
     }
 
-    suspend fun activate() = operate("暂时无法读取站点收藏。") { current ->
-        if (!loaded) readCollection(current, folder = null, append = false, refreshFolders = true)
+    suspend fun activate() = read()
+
+    suspend fun load(folder: String? = folderId, refreshFolders: Boolean = false) =
+        read(ReadRequest.Collection(folder, refreshFolders))
+
+    suspend fun loadMore() {
+        val folder = folderId ?: return
+        val page = nextPage ?: return
+        read(ReadRequest.More(folder, page))
     }
 
-    suspend fun load(folder: String? = folderId, append: Boolean = false, refreshFolders: Boolean = false) =
-        operate("暂时无法读取站点收藏。") { current ->
-            readCollection(current, folder, append, refreshFolders)
+    suspend fun retryRead() {
+        failedRead?.let { read(it) }
+    }
+
+    private suspend fun read(request: ReadRequest? = null) {
+        var attempted = request
+        operate(onFailure = { changed ->
+            if (accountAvailable != false) {
+                failedRead = if (changed) ReadRequest.Collection() else attempted ?: failedRead ?: ReadRequest.Collection()
+            }
+        }) { current, changed ->
+            val selectedRequest = when {
+                changed -> ReadRequest.Collection()
+                request != null -> request
+                !loaded && failedRead == null -> ReadRequest.Collection()
+                else -> return@operate
+            }
+            attempted = selectedRequest
+            when (selectedRequest) {
+                is ReadRequest.Collection -> readCollection(current, selectedRequest)
+                is ReadRequest.More -> {
+                    if (selectedRequest.folder != folderId || selectedRequest.page != nextPage) return@operate
+                    loadingMore = true
+                    val result = repository.sourceFavorites(source.id, selectedRequest.folder, selectedRequest.page)
+                    requireCurrent(current)
+                    val merged = (books + validatedBooks(result)).distinctBy(Manga::id)
+                    nextPage = if (merged.size > books.size) result.validNextPage(selectedRequest.page) else null
+                    books = merged
+                }
+            }
+            failedRead = null
         }
+    }
 
-    private suspend fun readCollection(current: SiteOwner, folder: String?, append: Boolean, refreshFolders: Boolean) {
-        val selectedFolders = if (!refreshFolders && folder != null && folders.any { it.id == folder }) folders
+    private suspend fun readCollection(current: SiteOwner, request: ReadRequest.Collection) {
+        val folder = request.folder
+        val selectedFolders = if (!request.refreshFolders && folder != null && folders.any { it.id == folder }) folders
             else repository.sourceFavoriteFolders(source.id).distinctBy { it.id }
         val selected = selectedFolders.firstOrNull { it.id == folder } ?: selectedFolders.firstOrNull()
-        val page = if (append && selected?.id == folderId) nextPage ?: return else 0
-        val result = selected?.let { repository.sourceFavorites(source.id, it.id, page) }
+        val result = selected?.let { repository.sourceFavorites(source.id, it.id, 0) }
         requireCurrent(current)
-        val fetched = result?.items.orEmpty()
-        check(fetched.all { it.sourceId == source.id && SourceKeys.decodeManga(it.id).sourceId == source.id })
-        val merged = if (page == 0) fetched.distinctBy(Manga::id) else (books + fetched).distinctBy(Manga::id)
-        val more = result?.takeIf { it.hasMore && (page == 0 || merged.size > books.size) }
-            ?.let { (it.nextPage ?: (page + 1)).takeIf { next -> next in (page + 1)..100_000 } }
+        val firstPage = validatedBooks(result).distinctBy(Manga::id)
         folders = selectedFolders
         folderId = selected?.id
-        books = merged
-        nextPage = more
+        books = firstPage
+        nextPage = result?.validNextPage(0)
         loaded = true
     }
 
-    suspend fun remove(book: Manga) {
-        val selected = folderId ?: return
-        val expected = owner ?: return
-        if (book.sourceId != source.id || books.none { it.id == book.id }) return
-        operate("暂时无法移出这项站点收藏。") { current ->
-            if (current != expected || folderId != selected) return@operate
+    private fun validatedBooks(result: MangaPage?): List<Manga> {
+        val fetched = result?.items.orEmpty()
+        check(fetched.all { it.sourceId == source.id && SourceKeys.decodeManga(it.id).sourceId == source.id })
+        return fetched
+    }
+
+    private fun MangaPage.validNextPage(page: Int): Int? =
+        (nextPage ?: (page + 1)).takeIf { hasMore && it in (page + 1)..100_000 }
+
+    /** Returns an action-specific notice only when the result could not be confirmed. */
+    suspend fun remove(book: Manga): String? {
+        val selected = folderId ?: return null
+        val expected = owner ?: return null
+        if (book.sourceId != source.id || books.none { it.id == book.id }) return null
+        var notice: String? = null
+        operate(onFailure = { changed ->
+            if (changed && accountAvailable == true) failedRead = ReadRequest.Collection()
+            notice = "未能确认「${book.title}」已移出站点收藏。"
+        }) { current, changed ->
+            if (current != expected || folderId != selected) {
+                if (changed) failedRead = ReadRequest.Collection()
+                return@operate
+            }
             repository.sourceSetFavorite(source.id, book.id, selected, false)
             requireCurrent(current)
             books = books.filterNot { it.id == book.id }
         }
+        return notice
     }
 
     private suspend fun requireCurrent(expected: SiteOwner) {
@@ -96,27 +165,30 @@ internal class ProfileSiteShelf(
         currentCoroutineContext().ensureActive()
     }
 
-    private suspend fun operate(failureMessage: String, action: suspend (SiteOwner) -> Unit) {
+    private suspend fun operate(onFailure: (ownerChanged: Boolean) -> Unit, action: suspend (SiteOwner, Boolean) -> Unit) {
         if (busy) return
         busy = true
-        message = null
         try {
             val current = currentOwner()
-            if (current != owner) clearCollection()
+            val changed = current != owner
+            if (changed) clearCollection()
             owner = current
             accountAvailable = current != null
-            if (current != null) action(current)
+            if (current != null) action(current, changed)
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: Exception) {
-            val latest = try { currentOwner() }
+            val latest = try {
+                currentOwner().also { accountAvailable = it != null }
+            }
             catch (cancel: CancellationException) { throw cancel }
             catch (_: Exception) { owner }
-            if (latest != owner || latest == null) clearCollection()
+            val changed = latest != owner
+            if (changed || latest == null) clearCollection()
             owner = latest
-            if (accountAvailable != null || latest != null) accountAvailable = latest != null
-            message = failureMessage
+            onFailure(changed)
         } finally {
+            loadingMore = false
             busy = false
         }
     }

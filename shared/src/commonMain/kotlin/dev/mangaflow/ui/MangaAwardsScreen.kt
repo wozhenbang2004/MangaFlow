@@ -20,9 +20,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.EmojiEvents
-import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -39,7 +39,6 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -71,7 +70,6 @@ internal fun MangaAwardsScreen(
     backdrop: HazeState,
     navigation: @Composable () -> Unit,
     active: Boolean,
-    onSite: (RankingSite) -> Unit,
     onBack: () -> Unit,
     onOpen: (SiteRankedWork) -> Unit,
 ) {
@@ -83,9 +81,7 @@ internal fun MangaAwardsScreen(
     val positions = rememberSaveableStateHolder()
     val focus = LocalFocusManager.current
     val colors = MaterialTheme.colorScheme
-    var siteMenu by remember { mutableStateOf(false) }
-    var sitePresent by remember { mutableStateOf(false) }
-    var requestedSite by remember { mutableStateOf<RankingSite?>(null) }
+    val controlColors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)
     var yearMenu by remember { mutableStateOf(false) }
     var yearPresent by remember { mutableStateOf(false) }
     var menuYear by remember { mutableStateOf(year) }
@@ -96,14 +92,12 @@ internal fun MangaAwardsScreen(
     var lookupPresent by remember { mutableStateOf(false) }
     var requestedWork by remember { mutableStateOf<SiteRankedWork?>(null) }
     val modalPresent = infoVisible || infoPresent || lookupVisible || lookupPresent
-    val contentReady = active && !modalPresent && !siteMenu && !sitePresent && !yearMenu && !yearPresent
+    val contentReady = active && !modalPresent && !yearMenu && !yearPresent
 
     LaunchedEffect(active) {
         if (!active) {
             focus.clearFocus(force = true)
-            requestedSite = null
             requestedWork = null
-            siteMenu = false
             yearMenu = false
             infoVisible = false
             lookupVisible = false
@@ -112,9 +106,8 @@ internal fun MangaAwardsScreen(
     BackHandler(active && !modalPresent) {
         focus.clearFocus(force = true)
         when {
-            siteMenu -> siteMenu = false
             yearMenu -> yearMenu = false
-            sitePresent || yearPresent -> Unit
+            yearPresent -> Unit
             else -> onBack()
         }
     }
@@ -127,53 +120,17 @@ internal fun MangaAwardsScreen(
                 modifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
                     .padding(horizontal = 8.dp, vertical = 2.dp),
                 summary = {
-                    Box {
-                        MotionTextButton(onClick = {
-                            focus.clearFocus(force = true)
-                            siteMenu = !siteMenu
-                            yearMenu = false
-                        }, enabled = active && !modalPresent && !yearPresent && requestedSite == null,
-                            contentPadding = PaddingValues(horizontal = 4.dp), modifier = Modifier.semantics {
-                                stateDescription = if (siteMenu) "榜单菜单已展开" else "榜单菜单已收起"
-                            }) {
-                            Icon(Icons.Outlined.EmojiEvents, null, Modifier.size(17.dp))
-                            Text("年度获奖", Modifier.weight(1f, fill = false).padding(start = 6.dp),
-                                style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Icon(Icons.Outlined.ExpandMore, "选择榜单", Modifier.padding(start = 4.dp).size(17.dp))
-                        }
-                        CompactGlassPopover(siteMenu && active && !modalPresent, backdrop,
-                            onDismiss = { siteMenu = false }, alignToStart = true,
-                            maximumWidth = 208.dp * LocalDensity.current.fontScale.coerceIn(1f, 1.4f),
-                            onPresenceChange = { present ->
-                                sitePresent = present
-                                if (!present) {
-                                    val next = requestedSite
-                                    requestedSite = null
-                                    if (active && next != null) {
-                                        focus.clearFocus(force = true)
-                                        onSite(next)
-                                    }
-                                }
-                            }) {
-                            Column(Modifier.selectableGroup()) {
-                                RankingSite.entries.forEach { site ->
-                                    RankingMenuChoice(site.title, false, active && siteMenu, sourceId = site.id) {
-                                        requestedSite = site
-                                        siteMenu = false
-                                    }
-                                }
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Outlined.EmojiEvents, null,
-                                        Modifier.padding(start = 10.dp).size(18.dp), tint = colors.onSurfaceVariant)
-                                    Box(Modifier.weight(1f)) {
-                                        RankingMenuChoice("年度获奖", true, active && siteMenu) { siteMenu = false }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    Text("年度获奖", Modifier.padding(start = 4.dp),
+                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }, actions = {
+                    MotionTextButton(onClick = {
+                        focus.clearFocus(force = true)
+                        onBack()
+                    }, enabled = contentReady, contentPadding = PaddingValues(horizontal = 8.dp),
+                        colors = controlColors) {
+                        Text("各站榜单", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    }
                     MotionIconButton(onClick = {
                         focus.clearFocus(force = true)
                         infoPresent = true
@@ -205,11 +162,14 @@ internal fun MangaAwardsScreen(
                         focus.clearFocus(force = true)
                         if (!yearMenu) menuYear = year
                         yearMenu = !yearMenu
-                        siteMenu = false
-                    }, enabled = active && !modalPresent && !sitePresent,
-                        contentPadding = PaddingValues(horizontal = 8.dp), modifier = Modifier.heightIn(min = 44.dp)) {
-                        Text(year?.toString() ?: "历年", style = MaterialTheme.typography.bodySmall)
-                        Icon(Icons.Outlined.ExpandMore, "选择获奖年份", Modifier.padding(start = 3.dp).size(16.dp))
+                    }, enabled = active && !modalPresent,
+                        colors = controlColors, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.heightIn(min = 44.dp)) {
+                        Column {
+                            Text("年份", style = MaterialTheme.typography.labelMedium)
+                            Text(year?.toString() ?: "历年", style = MaterialTheme.typography.labelSmall,
+                                color = colors.onSurfaceVariant)
+                        }
                     }
                     CompactGlassPopover(yearMenu && active && !modalPresent, backdrop,
                         onDismiss = { yearMenu = false }, maximumWidth = 180.dp,

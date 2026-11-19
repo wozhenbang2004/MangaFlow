@@ -1,8 +1,12 @@
 package dev.mangaflow.net
 
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
+
+internal val relayLinkAvailable: Boolean get() = platformKind == PlatformKind.ANDROID
 
 enum class RelayLinkPhase {
     NOT_AVAILABLE, NOT_INSTALLED, INCOMPATIBLE, AUTHORIZATION_REQUIRED, AUTHORIZING,

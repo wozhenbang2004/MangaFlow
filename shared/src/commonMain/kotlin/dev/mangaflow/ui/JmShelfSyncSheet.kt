@@ -8,12 +8,17 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -26,6 +31,7 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 
 /** Single adult-profile JM comparison sheet. Read-only until an explicit per-row choice. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun JmShelfSyncSheet(
     state: JmShelfSyncState,
@@ -104,17 +110,12 @@ internal fun JmShelfSyncSheet(
                                 else JmFavoriteChoice.IMPORT_LOCAL
                             val removal = if (diff.inLocal) JmFavoriteChoice.REMOVE_LOCAL
                                 else JmFavoriteChoice.REMOVE_REMOTE
-                            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                                MotionTextButton(onClick = { select(diff.key, primary) }, enabled = live) {
-                                    if (chosen[diff.key] == primary) Icon(Icons.Outlined.Check, null,
-                                        Modifier.size(13.dp))
-                                    Text(if (diff.inLocal) "同步到 JM" else "导入本机", fontSize = 11.sp)
-                                }
-                                MotionTextButton(onClick = { select(diff.key, removal) }, enabled = live) {
-                                    if (chosen[diff.key] == removal) Icon(Icons.Outlined.Check, null,
-                                        Modifier.size(13.dp))
-                                    Text(if (diff.inLocal) "移出本机" else "从 JM 移除", fontSize = 11.sp,
-                                        color = if (chosen[diff.key] == removal) colors.error else colors.onSurfaceVariant)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                JmShelfChoice(if (diff.inLocal) "同步到 JM" else "导入本机",
+                                    diff.manga.title, chosen[diff.key] == primary, live) { select(diff.key, primary) }
+                                JmShelfChoice(if (diff.inLocal) "移出本机" else "从 JM 移除",
+                                    diff.manga.title, chosen[diff.key] == removal, live, destructive = true) {
+                                    select(diff.key, removal)
                                 }
                             }
                         }
@@ -141,5 +142,33 @@ internal fun JmShelfSyncSheet(
                 }
             }
         }
+    }
+}
+
+
+@Composable
+private fun JmShelfChoice(
+    label: String, title: String, chosen: Boolean, enabled: Boolean,
+    destructive: Boolean = false, onChoose: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    MotionTextButton(onClick = onChoose, enabled = enabled,
+        modifier = Modifier.heightIn(min = 44.dp).semantics {
+            selected = chosen
+            contentDescription = "$title，$label"
+        },
+        colors = ButtonDefaults.textButtonColors(
+            contentColor = if (chosen && destructive) colors.onErrorContainer else colors.onSurface,
+            containerColor = when {
+                !chosen -> Color.Transparent
+                destructive -> colors.errorContainer
+                else -> colors.surfaceVariant
+            }),
+        contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp)) {
+        Box(Modifier.size(14.dp), contentAlignment = Alignment.Center) {
+            if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(13.dp))
+        }
+        Spacer(Modifier.width(5.dp))
+        Text(label, style = MaterialTheme.typography.labelMedium)
     }
 }

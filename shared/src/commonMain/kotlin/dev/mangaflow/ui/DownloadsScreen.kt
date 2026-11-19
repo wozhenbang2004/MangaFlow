@@ -153,7 +153,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 
-private enum class DownloadFilter(val label: String) { ALL("全部"), ACTIVE("进行中"), SAVED("已下载") }
+private enum class DownloadFilter(val label: String) { ALL("全部"), ACTIVE("未完成"), SAVED("已下载") }
 
 // Layout depends on membership/order/completion, never on page or byte progress.
 private data class DownloadDirectoryEntry(
@@ -215,7 +215,11 @@ fun DownloadsScreen(
     var pendingNetworkSettings by remember { mutableStateOf(false) }
     var showNetworkSettings by remember { mutableStateOf(false) }
     var filterMenuExpanded by remember { mutableStateOf(false) }
-    val filterChoices = remember { listOf(GlassTabChoice("全部", Icons.Outlined.Inventory2), GlassTabChoice("进行中", Icons.Outlined.Downloading), GlassTabChoice("已下载", Icons.Outlined.CheckCircleOutline)) }
+    val filterChoices = remember { listOf(
+        GlassTabChoice(DownloadFilter.ALL.label, Icons.Outlined.Inventory2),
+        GlassTabChoice(DownloadFilter.ACTIVE.label, Icons.Outlined.Downloading),
+        GlassTabChoice(DownloadFilter.SAVED.label, Icons.Outlined.CheckCircleOutline),
+    ) }
     val preferredFilterWidth = morphGlassTabWidth(filterChoices)
     var pendingImport by remember { mutableStateOf<PendingLocalImport?>(null) }
     val importInputOpen = remember { mutableStateOf(true) }
@@ -272,9 +276,8 @@ fun DownloadsScreen(
     }
     val motion = LocalMotionEnabled.current
     val activeEntries = manageableEntries.filter { it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING) }
-    val resumableEntries = manageableEntries.filter {
-        it.status in setOf(DownloadStatus.PAUSED, DownloadStatus.FAILED) && it.manga.sourceUrl != LOCAL_SOURCE_URL
-    }
+    val pausedEntries = manageableEntries.filter { it.status == DownloadStatus.PAUSED && it.manga.sourceUrl != LOCAL_SOURCE_URL }
+    val retryableEntries = manageableEntries.filter { it.status == DownloadStatus.FAILED && it.manga.sourceUrl != LOCAL_SOURCE_URL }
     val completedEntries = manageableEntries.filter { it.status == DownloadStatus.COMPLETED }
     val usedBytes = visibleEntries.sumOf { it.downloadedBytes }
     var availableBytes by remember(store) { mutableStateOf<Long?>(null) }
@@ -436,7 +439,7 @@ fun DownloadsScreen(
                                 maximumWidth = 216.dp * LocalDensity.current.fontScale.coerceIn(1f, 1.35f)) {
                                 Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                        Text("已下载", fontSize = 11.sp, color = secondary)
+                                        Text("下载占用", fontSize = 11.sp, color = secondary)
                                         Spacer(Modifier.weight(1f))
                                         Text(downloadBytes(usedBytes), fontSize = 14.sp,
                                             fontWeight = FontWeight.Medium, color = foreground)
@@ -465,8 +468,11 @@ fun DownloadsScreen(
                                 if (activeEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.Pause, "全部暂停") {
                                     showQueueActions = false; activeEntries.forEach { store.pause(it.id) }
                                 }
-                                if (resumableEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.PlayArrow, "继续未完成") {
-                                    showQueueActions = false; resumableEntries.forEach(onRetry)
+                                if (pausedEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.PlayArrow, "继续已暂停") {
+                                    showQueueActions = false; pausedEntries.forEach(onRetry)
+                                }
+                                if (retryableEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.Refresh, "重试失败任务") {
+                                    showQueueActions = false; retryableEntries.forEach(onRetry)
                                 }
                                 if (completedEntries.isNotEmpty()) {
                                     HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
@@ -590,13 +596,13 @@ fun DownloadsScreen(
                                     DownloadFilter.ALL -> "从漫画目录下载章节，或添加本地漫画。"
                                     DownloadFilter.ACTIVE -> if (completedEntries.isNotEmpty()) "已完成的章节保存在“已下载”中。" else "从漫画目录选择章节，即可开始下载。"
                                     DownloadFilter.SAVED -> if (manageableEntries.isNotEmpty() || visiblePreparations.isNotEmpty())
-                                        "任务尚未完成，可在“进行中”查看。" else "下载完成后，就能在这里离线阅读。"
+                                        "任务尚未完成，可在“未完成”查看。" else "下载完成后，就能在这里离线阅读。"
                                 }, style = MaterialTheme.typography.bodySmall, color = secondary)
                                 if (pageFilter == DownloadFilter.ACTIVE && completedEntries.isNotEmpty()) {
                                     TextButton(onClick = { filter = DownloadFilter.SAVED }) { Text("查看已下载") }
                                 } else if (pageFilter == DownloadFilter.SAVED &&
                                     (manageableEntries.isNotEmpty() || visiblePreparations.isNotEmpty())) {
-                                    TextButton(onClick = { filter = DownloadFilter.ACTIVE }) { Text("查看进行中") }
+                                    TextButton(onClick = { filter = DownloadFilter.ACTIVE }) { Text("查看未完成") }
                                 } else if (pageFilter == DownloadFilter.ALL) {
                                     TextButton(enabled = localImportAllowed,
                                         onClick = { if (localImportAllowed) showImportSources = true }) {
@@ -607,11 +613,14 @@ fun DownloadsScreen(
                         }
                     } else {
                         if (pageFilter != DownloadFilter.SAVED && !managing &&
-                            (activeEntries.isNotEmpty() || resumableEntries.isNotEmpty())) {
+                            (activeEntries.isNotEmpty() || pausedEntries.isNotEmpty() ||
+                                manageableEntries.any { it.status == DownloadStatus.FAILED })) {
                             item(key = "queue-summary", contentType = "download-summary") {
                                 DownloadQueueSummary(manageableEntries,
                                     onPause = { activeEntries.forEach { store.pause(it.id) } },
-                                    onResume = { resumableEntries.forEach(onRetry) })
+                                    onResume = { pausedEntries.forEach(onRetry) },
+                                    onRetry = { retryableEntries.forEach(onRetry) },
+                                    hasPaused = pausedEntries.isNotEmpty(), hasRetryable = retryableEntries.isNotEmpty())
                             }
                         }
                         orderedBooks.getValue(pageFilter).forEach { (mangaId, chapterIds) ->
@@ -925,6 +934,9 @@ private fun DownloadQueueSummary(
     entries: List<DownloadEntry>,
     onPause: () -> Unit,
     onResume: () -> Unit,
+    onRetry: () -> Unit,
+    hasPaused: Boolean,
+    hasRetryable: Boolean,
 ) {
     val colors = MaterialTheme.colorScheme
     val running = entries.count { it.status == DownloadStatus.RUNNING }
@@ -935,7 +947,7 @@ private fun DownloadQueueSummary(
     val summary = buildList {
         if (running > 0) add("$running 话下载中")
         if (queued > 0) add("$queued 话等待")
-        if (failed > 0) add("$failed 话需重试")
+        if (failed > 0) add("$failed 话需处理")
         if (paused > 0) add("$paused 话暂停")
     }.joinToString(" · ")
     Row(Modifier.fillMaxWidth().padding(bottom = 6.dp).heightIn(min = 44.dp),
@@ -945,8 +957,14 @@ private fun DownloadQueueSummary(
             Modifier.size(16.dp), tint = colors.onSurfaceVariant)
         Text(mangaNumberText(summary), Modifier.weight(1f),
             style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-        TextButton(onClick = if (working) onPause else onResume) {
-            Text(if (working) "全部暂停" else "继续下载", style = MaterialTheme.typography.labelMedium)
+        val action = when {
+            working -> "全部暂停" to onPause
+            hasRetryable -> "重试失败" to onRetry
+            hasPaused -> "继续下载" to onResume
+            else -> null
+        }
+        action?.let { (label, click) ->
+            TextButton(onClick = click) { Text(label, style = MaterialTheme.typography.labelMedium) }
         }
     }
 }

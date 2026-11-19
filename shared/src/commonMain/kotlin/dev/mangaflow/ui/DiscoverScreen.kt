@@ -855,14 +855,17 @@ private fun DiscoveryPane(
                     EmptyMessage("来源尚未就绪", state.error,
                         action = onManageSources?.let { "选择来源" },
                         onAction = { onManageSources?.invoke() })
-                } else EmptyMessage("暂时没能加载", if (adultProfile) "请重试，或从上方切换来源。" else state.error,
-                    "重试", onRetry)
+                } else EmptyMessage("暂时没能加载", state.error, "重试", onRetry)
             }
         } else if (state.items.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "empty") {
                 when {
                     state.loadingMore -> QuietLoading("正在继续加载…")
                     state.hasMore -> EmptyMessage("这一页暂无内容", "来源仍有后续页面，可以继续加载。", "继续加载", onMore)
+                    adultProfile && ranking && state.searchSources.isEmpty() ->
+                        EmptyMessage("当前范围没有可用榜单", "可切换榜单时段或选择其他来源。",
+                            action = onManageSources?.let { "选择来源" }, onAction = { onManageSources?.invoke() })
+                    ranking -> EmptyMessage("当前榜单没有条目", "可以切换时段或刷新当前榜单。", "刷新", onRefresh)
                     else -> EmptyMessage("暂时没有漫画", "来源暂时没有返回内容，可以稍后刷新。", "刷新", onRefresh)
                 }
             }

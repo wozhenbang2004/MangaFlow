@@ -91,7 +91,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
     var suggestedProxy by remember { mutableStateOf<DownloadProxyEndpoint?>(null) }
     var suggestionRevision by remember { mutableIntStateOf(0) }
     val active = visible && foreground
-    LaunchedEffect(active, environmentRevision, context) { if (active) relay.refresh() }
+    LaunchedEffect(active, environmentRevision, context) { if (active && relayLinkAvailable) relay.refresh() }
     LaunchedEffect(visible) {
         resolvingOpen = visible
         if (visible && initialScene != NetworkDownloadScene.CATEGORIES && autoCheck.state.value.restoring)
@@ -266,7 +266,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                     if (scene == NetworkDownloadScene.CHECK) {
                         NetworkAutoEvidenceDetails(autoState, autoInfoRow, autoReceipt)
                     } else {
-                        RelayLinkDetails(relayState, relay, enabled = active && showInfo)
+                        if (relayLinkAvailable) RelayLinkDetails(relayState, relay, enabled = active && showInfo)
                         NetworkEnvironmentSummary(environment, environmentLoading, environmentError,
                             enabled = active && showInfo, onRefresh = { environmentRevision++ }, onUse = { endpoint ->
                                 pendingReportedProxy = endpoint
@@ -351,9 +351,13 @@ private fun RelayLinkSummary(
         }
         when {
             busy -> MotionBusyIndicator(Modifier.padding(13.dp).size(18.dp), strokeWidth = 1.5.dp)
-            !state.supported -> MotionTextButton(onClick = controller::openProvider, enabled = enabled) {
-                Text("打开", style = MaterialTheme.typography.labelMedium)
+            !state.installed -> MotionTextButton(onClick = controller::refresh, enabled = enabled) {
+                Text("重新检测", style = MaterialTheme.typography.labelMedium)
             }
+            !state.supported && state.providerPackage != null -> MotionTextButton(onClick = controller::openProvider, enabled = enabled) {
+                Text("打开 Relay", style = MaterialTheme.typography.labelMedium)
+            }
+            !state.supported -> Unit
             state.phase == RelayLinkPhase.AUTHORIZATION_REQUIRED -> MotionTextButton(onClick = controller::requestAuthorization, enabled = enabled) {
                 Text("去授权", style = MaterialTheme.typography.labelMedium)
             }
@@ -387,7 +391,7 @@ private fun RelayLinkDetails(state: RelayLinkState, controller: RelayLinkControl
                 Text(relayPhaseLabel(state), style = MaterialTheme.typography.bodySmall,
                     color = colors.onSurfaceVariant)
             }
-            MotionIconButton(onClick = controller::retry, enabled = enabled && state.supported,
+            MotionIconButton(onClick = controller::retry, enabled = enabled,
                 modifier = Modifier.size(44.dp), tooltip = "重新核对联动状态") {
                 Icon(Icons.Outlined.Refresh, "重新核对联动状态", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
             }
@@ -410,8 +414,8 @@ private fun RelayLinkDetails(state: RelayLinkState, controller: RelayLinkControl
         if (state.phase == RelayLinkPhase.WAITING_FOR_VPN) Text("在 Relay 连接 VPN 后会自动恢复。",
             style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-            MotionTextButton(onClick = controller::openProvider, enabled = enabled) {
-                Text(if (state.supported) "打开 Relay" else "更新 Relay", style = MaterialTheme.typography.labelMedium)
+            if (state.installed && state.providerPackage != null) MotionTextButton(onClick = controller::openProvider, enabled = enabled) {
+                Text("打开 Relay", style = MaterialTheme.typography.labelMedium)
             }
             if (state.phase == RelayLinkPhase.AUTHORIZATION_REQUIRED) MotionTextButton(onClick = controller::requestAuthorization, enabled = enabled) {
                 Text("授权联动", style = MaterialTheme.typography.labelMedium)

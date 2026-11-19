@@ -112,6 +112,7 @@ internal fun ExpandingSearchBar(
     onSearchTarget: (SearchTarget) -> Unit = {},
     translationGroupAvailable: Boolean = true,
     showEmptyResults: Boolean = false,
+    focusInputOnExpand: Boolean = true,
     results: @Composable (maxHeight: Dp, active: Boolean) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
@@ -207,8 +208,9 @@ internal fun ExpandingSearchBar(
         val visibleHeight = 44.dp + (height.value - 44.dp) * backRemaining
         val progress = (reveal.value * backRemaining).coerceIn(0f, 1f)
         val requiredTextWidth = minOf(96.dp, (panelWidth - inputEndInset - 16.dp).coerceAtLeast(0.dp))
-        LaunchedEffect(expanded, active, inputPlaced, windowFocused, panelWidth, scopeExpanded, searchTarget) {
-            if (expanded && active && inputPlaced && windowFocused && !scopeExpanded && searchTarget != SearchTarget.TAG) {
+        LaunchedEffect(expanded, active, inputPlaced, windowFocused, panelWidth, scopeExpanded, searchTarget, focusInputOnExpand) {
+            if (focusInputOnExpand && expanded && active && inputPlaced && windowFocused &&
+                !scopeExpanded && searchTarget != SearchTarget.TAG) {
                 snapshotFlow {
                     val remaining = 1f - back.progress.value.coerceIn(0f, 1f)
                     val liveWidth = 44.dp + (width.value - 44.dp) * remaining
@@ -264,7 +266,7 @@ internal fun ExpandingSearchBar(
             }
             .width(panelWidth).heightIn(max = 44.dp + resultsRoom)
             .onSizeChanged { foregroundHeight = with(density) { it.height.toDp() } }
-            .semantics { paneTitle = "搜索漫画" }
+            .semantics { paneTitle = placeholder }
             .pointerInput(Unit) {}
             .graphicsLayer { alpha = visibleForeground.value.coerceIn(0f, 1f) }
             .drawWithContent {
@@ -340,7 +342,7 @@ internal fun ExpandingSearchBar(
             enabled = active,
             modifier = Modifier.align(Alignment.TopEnd).padding(end = 8.dp).size(44.dp)
                 .semantics {
-                    contentDescription = if (expanded) "关闭搜索" else "搜索漫画、作者"
+                    contentDescription = if (expanded) "关闭搜索" else if (searchTarget == null) placeholder else "搜索漫画、作者"
                     stateDescription = if (expanded) "已展开" else "已收起"
                 },
         ) {

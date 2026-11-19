@@ -4,6 +4,9 @@ package dev.mangaflow.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
@@ -27,7 +30,6 @@ import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.RestartAlt
 import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material.icons.outlined.Sort
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -65,6 +67,7 @@ import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.CopyExploreController
 import dev.mangaflow.CopyExploreSection
 import dev.mangaflow.CopyExploreState
+import dev.mangaflow.data.CopyCatalogSelection
 import dev.mangaflow.data.CopyMangaRepository
 import dev.mangaflow.data.CopyTopic
 import dev.mangaflow.data.Manga
@@ -286,86 +289,53 @@ private fun CopyCatalogControls(
     active: Boolean,
     onDirectory: () -> Unit,
 ) {
-    var scopeOpen by remember { mutableStateOf(false) }
-    var orderOpen by remember { mutableStateOf(false) }
-    LaunchedEffect(active) { if (!active) { scopeOpen = false; orderOpen = false } }
-    val colors = MaterialTheme.colorScheme
+    var optionsOpen by remember { mutableStateOf(false) }
     val selection = state.selection
+    var draftScope by remember { mutableStateOf(selection.scope) }
+    var draftOrdering by remember { mutableStateOf(selection.ordering) }
+    LaunchedEffect(active) { if (!active) optionsOpen = false }
+    val colors = MaterialTheme.colorScheme
+    val controlColors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)
+    val ordering = state.directory.orderings.firstOrNull { it.path == selection.ordering }
+    val canReset = selection != CopyCatalogSelection()
     Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            MotionTextButton(onDirectory, enabled = active, modifier = Modifier.weight(1.2f),
-                contentPadding = PaddingValues(horizontal = 8.dp),
-                colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)) {
+            MotionTextButton(onDirectory, enabled = active && !optionsOpen, modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp), colors = controlColors) {
+                Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(16.dp))
+                Column(Modifier.weight(1f).padding(start = 6.dp)) {
+                    Text("题材与展会", style = MaterialTheme.typography.labelMedium)
+                    selection.theme?.name?.let { theme ->
+                        Text(theme, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                    }
+                }
+            }
+            MotionTextButton(onClick = {
+                draftScope = selection.scope
+                draftOrdering = selection.ordering
+                optionsOpen = true
+            }, enabled = active && !optionsOpen, modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp), colors = controlColors) {
                 Icon(Icons.Outlined.Tune, null, Modifier.size(16.dp))
-                Text(selection.theme?.name ?: "题材 / 展会", Modifier.weight(1f).padding(start = 6.dp),
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp)
-                Icon(Icons.Outlined.ExpandMore, null, Modifier.size(15.dp))
-            }
-            Box(Modifier.weight(1f)) {
-                MotionTextButton(onClick = { if (active) scopeOpen = !scopeOpen },
-                    enabled = active, modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 8.dp),
-                    colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant)) {
-                    Text(selection.scope?.name ?: "全部范围", Modifier.weight(1f),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp)
-                    Icon(Icons.Outlined.ExpandMore, null, Modifier.size(15.dp))
-                }
-                CompactGlassPopover(scopeOpen && active, backdrop, onDismiss = { scopeOpen = false }) {
-                    CompactMenuAction(Icons.Outlined.Check, "全部范围", enabled = active) {
-                        if (active) controller.selectScope(null)
-                        scopeOpen = false
-                    }
-                    state.directory.scopes.forEach { scope ->
-                        CompactMenuAction(if (scope.path == selection.scope?.path) Icons.Outlined.Check
-                            else Icons.Outlined.Tune, scope.name, enabled = active) {
-                            if (active) controller.selectScope(scope)
-                            scopeOpen = false
-                        }
-                    }
-                    if (state.directory.scopes.isEmpty()) Text("范围目录尚未加载",
-                        Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
+                Column(Modifier.weight(1f).padding(start = 6.dp)) {
+                    Text("筛选与排序", style = MaterialTheme.typography.labelMedium)
+                    Text(listOfNotNull(selection.scope?.name ?: "全部范围", ordering?.name).joinToString(" · "),
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant)
                 }
             }
-            Box(Modifier.weight(1f)) {
-                val ordering = state.directory.orderings.firstOrNull { it.path == selection.ordering }
-                MotionTextButton(onClick = { if (active) orderOpen = !orderOpen },
-                    enabled = active, modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 8.dp),
-                    colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant)) {
-                    Icon(Icons.Outlined.Sort, null, Modifier.size(16.dp))
-                    Text(ordering?.name ?: "排序", Modifier.weight(1f).padding(start = 5.dp),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp)
-                }
-                CompactGlassPopover(orderOpen && active, backdrop, onDismiss = { orderOpen = false }) {
-                    state.directory.orderings.forEach { option ->
-                        CompactMenuAction(if (option.path == selection.ordering) Icons.Outlined.Check
-                            else Icons.Outlined.Sort, option.name, enabled = active) {
-                            if (active) controller.selectOrdering(option.path)
-                            orderOpen = false
-                        }
-                    }
-                    if (state.directory.orderings.isEmpty()) {
-                        Text("排序目录尚未加载", Modifier.padding(12.dp),
-                            style = MaterialTheme.typography.bodySmall)
-                        CompactMenuAction(Icons.Outlined.Refresh, "重新读取目录",
-                            enabled = active && !state.directoryLoading) { if (active) controller.refreshDirectory() }
-                    }
-                }
+            if (canReset) MotionIconButton(onClick = controller::resetFilters, enabled = active && !optionsOpen,
+                modifier = Modifier.size(44.dp), tooltip = "重置全部分类筛选") {
+                Icon(Icons.Outlined.RestartAlt, "重置全部分类筛选", Modifier.size(17.dp))
             }
         }
-        if (selection.original != null || selection.theme != null || selection.scope != null) {
-            Row(Modifier.fillMaxWidth().padding(start = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(listOfNotNull(selection.original?.let { "原作 · ${it.name}" },
-                    selection.theme?.name, selection.scope?.name).joinToString(" · "),
-                    modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                MotionIconButton(onClick = { if (active) controller.resetFilters() },
-                    modifier = Modifier.size(44.dp), enabled = active, tooltip = "重置全部分类筛选") {
-                    Icon(Icons.Outlined.RestartAlt, "重置全部分类筛选", Modifier.size(17.dp))
-                }
-            }
+        selection.original?.let { original ->
+            Text("原作 · ${original.name}", Modifier.padding(start = 6.dp), maxLines = 2,
+                overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant)
         }
         if (state.directoryLoading) Row(Modifier.fillMaxWidth().heightIn(min = 28.dp).padding(start = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
@@ -377,6 +347,57 @@ private fun CopyCatalogControls(
         state.directoryError?.let { message ->
             CopyExploreNotice("分类目录未更新", message, active && !state.directoryLoading,
                 onRetry = controller::refreshDirectory)
+        }
+    }
+    MotionDialog(visible = optionsOpen && active, onDismissRequest = { optionsOpen = false },
+        maximumWidth = 420.dp) {
+        BoxWithConstraints {
+            val panelHeight = maxHeight.coerceAtMost(560.dp)
+            LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().heightIn(max = panelHeight),
+                cornerRadius = 24.dp, role = GlassSurfaceRole.PANEL, softCard = true) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("筛选与排序", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                        MotionIconButton(onClick = { optionsOpen = false }, enabled = optionsOpen && active,
+                            modifier = Modifier.size(44.dp), tooltip = "关闭筛选") {
+                            Icon(Icons.Outlined.Close, "关闭筛选", Modifier.size(18.dp))
+                        }
+                    }
+                    Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                        Text("漫画范围", Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.labelMedium)
+                        Column(Modifier.selectableGroup()) {
+                            RankingMenuChoice("全部范围", draftScope == null, optionsOpen && active) { draftScope = null }
+                            state.directory.scopes.forEach { scope ->
+                                RankingMenuChoice(scope.name, scope.path == draftScope?.path, optionsOpen && active) {
+                                    draftScope = scope
+                                }
+                            }
+                        }
+                        Text("排序", Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.labelMedium)
+                        Column(Modifier.selectableGroup()) {
+                            state.directory.orderings.forEach { option ->
+                                RankingMenuChoice(option.name, option.path == draftOrdering, optionsOpen && active) {
+                                    draftOrdering = option.path
+                                }
+                            }
+                        }
+                        if (state.directoryLoading) Text("正在读取目录", Modifier.padding(vertical = 8.dp),
+                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        else if (state.directoryError != null || state.directory.orderings.isEmpty())
+                            CopyExploreNotice("目录选项未载入", state.directoryError ?: "暂未读取到排序选项",
+                                optionsOpen && active, onRetry = controller::refreshDirectory)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        MotionTextButton(onClick = { optionsOpen = false }, enabled = optionsOpen && active,
+                            colors = controlColors) { Text("取消") }
+                        MotionTextButton(onClick = {
+                            controller.applyScopeAndOrdering(draftScope, draftOrdering)
+                            optionsOpen = false
+                        }, enabled = optionsOpen && active && (draftScope?.path != selection.scope?.path ||
+                            draftOrdering != selection.ordering), colors = controlColors) { Text("应用") }
+                    }
+                }
+            }
         }
     }
 }

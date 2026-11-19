@@ -9,6 +9,7 @@ import androidx.compose.foundation.lazy.grid.LazyGridScope
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
@@ -19,16 +20,29 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.paneTitle
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.sources.AnimeSourceHomeFeed
+import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 import dev.mangaflow.ui.platform.localToday
@@ -59,6 +73,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                     if (feed != null) {
                         AnimeDiscoveryControls(tab, feed.query, backdrop, tabActive,
                             onOverlayPresence = { overlayPresent = it },
+                            rememberedOptions = { controller.rememberedDiscoveryOptions(tab, it) },
                             onConfigure = { controller.configureDiscovery(tab, it) })
                         if (tab == AnimeDiscoveryTab.GENRES) {
                             AnimeGenreShortcuts(feed.query.provider, feed.query.tag, contentActive,
@@ -69,7 +84,8 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                     AnimeDiscoveryFeedGrid(key, feed, state.discoveryColumns, scrolls, contentBottomPadding,
                         modifier = Modifier.weight(1f).motionInputGate(contentActive), active = contentActive, onOpen = ::open,
                         onRetry = { controller.retryDiscovery(key) },
-                        onMore = { controller.loadMoreDiscovery(key) })
+                        onMore = { controller.loadMoreDiscovery(key) },
+                        onClearTag = { feed?.let { controller.configureDiscovery(tab, it.query.copy(tag = "")) } })
                 }
             }
         }
@@ -330,17 +346,22 @@ private fun AnimeHomeSourceSelector(feeds: List<AnimeSourceHomeFeed>, selected: 
         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("片源目录", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
+        val colors = MaterialTheme.colorScheme
         Box(Modifier.widthIn(max = 180.dp)) {
             MotionTextButton(onClick = { pendingSource = null; pendingRefresh = false; expanded = true },
                 enabled = active && !present,
-                modifier = Modifier.heightIn(min = 44.dp),
+                modifier = Modifier.heightIn(min = 48.dp).semantics {
+                    contentDescription = "切换片源目录，当前 ${selected.source.name}"
+                },
+                colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface,
+                    containerColor = colors.surfaceContainerLow),
                 contentPadding = PaddingValues(horizontal = 8.dp)) {
                 Icon(if (selected.source.videoSource) Icons.Outlined.Tv else Icons.Outlined.Explore,
                     null, Modifier.size(15.dp))
                 Spacer(Modifier.width(5.dp))
                 Text(selected.source.name, Modifier.weight(1f, fill = false),
-                    style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Icon(Icons.Outlined.ExpandMore, "切换浏览来源", Modifier.size(16.dp))
+                    style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             CompactGlassPopover(expanded, backdrop,
                 onDismiss = { expanded = false; pendingSource = null; pendingRefresh = false },
@@ -402,14 +423,14 @@ private fun AnimeGenreShortcuts(provider: AnimeDiscoveryProvider, selected: Stri
             MotionTextButton(onClick = { onSelect(tag) }, enabled = active,
                 modifier = Modifier.heightIn(min = 44.dp).semantics { this.selected = chosen },
                 colors = ButtonDefaults.textButtonColors(
-                    containerColor = if (chosen) palette.secondaryContainer else palette.surfaceContainerLow,
-                    contentColor = if (chosen) palette.onSecondaryContainer else palette.onSurfaceVariant),
+                    containerColor = if (chosen) palette.surfaceContainerHigh else palette.surfaceContainerLow,
+                    contentColor = if (chosen) palette.onSurface else palette.onSurfaceVariant),
                 contentPadding = PaddingValues(horizontal = 12.dp)) {
                 if (home && tag.isEmpty()) {
                     Icon(Icons.Outlined.Category, null, Modifier.size(15.dp))
                     Spacer(Modifier.width(4.dp))
                 }
-                Text(label, maxLines = 1)
+                Text(label, fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1)
             }
         }
     }
@@ -437,15 +458,16 @@ internal fun AnimeDiscoverySectionHeading(title: String, caption: String, refres
 }
 
 @Composable
-internal fun AnimeDiscoveryInlineStatus(text: String, retry: (() -> Unit)? = null) {
+internal fun AnimeDiscoveryInlineStatus(text: String, retry: (() -> Unit)? = null, retryLabel: String = "重试",
+    showIssue: Boolean = retry != null) {
     if (text.isBlank()) return
     var expanded by remember(text) { mutableStateOf(false) }
     var overflow by remember(text) { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (retry != null) Icon(Icons.Outlined.CloudOff, null, Modifier.size(16.dp),
+        if (showIssue) Icon(Icons.Outlined.CloudOff, null, Modifier.size(16.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(text, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+        Text(text, Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = if (expanded) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis,
             onTextLayout = { if (!expanded) overflow = it.hasVisualOverflow })
@@ -454,8 +476,10 @@ internal fun AnimeDiscoveryInlineStatus(text: String, retry: (() -> Unit)? = nul
             Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
                 if (expanded) "收起详情" else "查看完整详情", Modifier.size(18.dp))
         }
-        if (retry != null) MotionIconButton(onClick = retry, modifier = Modifier.size(44.dp), tooltip = "重试此内容") {
-            Icon(Icons.Outlined.Refresh, "重试此内容", Modifier.size(18.dp))
+        if (retry != null) MotionTextButton(onClick = retry, modifier = Modifier.heightIn(min = 44.dp),
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+            contentPadding = PaddingValues(horizontal = 10.dp)) {
+            Text(retryLabel)
         }
     }
 }
@@ -464,7 +488,7 @@ internal fun AnimeDiscoveryInlineStatus(text: String, retry: (() -> Unit)? = nul
 private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, preference: Int?,
     scrolls: AnimeDiscoveryScrolls, contentBottomPadding: Dp, modifier: Modifier, active: Boolean,
     onOpen: (AnimeDiscoveryItem) -> Unit,
-    onRetry: () -> Unit, onMore: () -> Unit) {
+    onRetry: () -> Unit, onMore: () -> Unit, onClearTag: () -> Unit) {
     val scroll = scrolls.grid(key)
     LaunchedEffect(key, feed?.query) {
         feed?.query?.let { query ->
@@ -487,21 +511,39 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
                 }
             }
             if (feed?.error != null) item(key = "error", span = { GridItemSpan(maxLineSpan) }) {
-                AnimeDiscoveryInlineStatus(feed.error, onRetry.takeIf { active })
+                val listName = when (key) {
+                    animeDiscoveryFeedKey(AnimeDiscoveryTab.SEASON) -> animeDiscoverySeasonTitle(feed.query) + "番单"
+                    animeDiscoveryFeedKey(AnimeDiscoveryTab.CALENDAR) -> "番表"
+                    animeDiscoveryFeedKey(AnimeDiscoveryTab.RANKING) -> "番剧榜单"
+                    else -> "分类番剧"
+                }
+                val provider = animeDiscoveryProviderLabel(feed.query.provider)
+                val timestamp = feed.fetchedAt?.let { formatInstantMillis(it, "MM-dd HH:mm") }
+                val status = if (feed.items.isNotEmpty() && timestamp != null) "$provider · 显示 $timestamp 的上次结果"
+                    else "$provider · ${listName}暂未载入"
+                Column {
+                    AnimeDiscoveryInlineStatus(status, onRetry.takeIf { active })
+                    AnimeQuietLabel(feed.error)
+                }
             }
             if (feed == null || feed.items.isEmpty()) {
                 if (feed?.error == null) item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeDiscoveryInlineStatus(if (feed == null || feed.loading || feed.page == 0) "正在载入番剧"
-                        else "没有符合条件的番剧")
+                    if (feed == null || feed.loading || feed.page == 0) AnimeDiscoveryInlineStatus("正在载入番剧")
+                    else AnimeDiscoveryInlineStatus("没有符合当前条件的番剧",
+                        onClearTag.takeIf { active && feed.query.tag.isNotBlank() }, retryLabel = "清除题材", showIssue = false)
                 }
             }
             else items(feed.items, key = { it.key }) { item ->
                 AnimeDiscoveryCard(item, feed.query, list = columns == 1, onOpen = { if (active) onOpen(item) })
             }
             if (feed?.moreError != null) item(key = "more-error", span = { GridItemSpan(maxLineSpan) }) {
-                AnimeDiscoveryInlineStatus(feed.moreError, onMore.takeIf { active })
+                Column {
+                    AnimeDiscoveryInlineStatus("第 ${feed.page.toLong() + 1} 页暂未载入",
+                        onMore.takeIf { active }, retryLabel = "重试本页")
+                    AnimeQuietLabel(feed.moreError)
+                }
             }
-            if (feed?.hasMore == true) item(key = "more", span = { GridItemSpan(maxLineSpan) }) {
+            if (feed?.hasMore == true && feed.moreError == null) item(key = "more", span = { GridItemSpan(maxLineSpan) }) {
                 MotionTextButton(onClick = onMore, enabled = active && !feed.loadingMore,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                     Text(if (feed.loadingMore) "正在加载" else "加载更多")
@@ -511,139 +553,120 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
     }
 }
 
-private enum class AnimeDiscoveryControlMenu { PROVIDER, ORDER, SEASON }
+private fun animeDiscoverySeasonTitle(query: AnimeDiscoveryQuery): String =
+    listOfNotNull(query.year?.toString(), query.season?.let(::animeSeasonLabel))
+        .joinToString(" ").ifBlank { "全部季度" }
 
+private fun animeDiscoveryConditions(query: AnimeDiscoveryQuery, includeTime: Boolean = false): String =
+    listOfNotNull(animeDiscoveryCaption(query),
+        animeDiscoverySeasonTitle(query).takeIf { includeTime && query.year != null },
+        query.tag.takeIf(String::isNotBlank)?.let { animeGenreLabels[it] ?: it }).joinToString(" · ")
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AnimeDiscoveryControls(tab: AnimeDiscoveryTab, query: AnimeDiscoveryQuery, backdrop: HazeState, active: Boolean,
-    onOverlayPresence: (Boolean) -> Unit, onConfigure: (AnimeDiscoveryQuery) -> Unit) {
-    var openMenu by remember(tab) { mutableStateOf<AnimeDiscoveryControlMenu?>(null) }
-    var presentMenu by remember(tab) { mutableStateOf<AnimeDiscoveryControlMenu?>(null) }
-    var pendingQuery by remember(tab) { mutableStateOf<AnimeDiscoveryQuery?>(null) }
-    var filters by remember(tab) { mutableStateOf(false) }
-    var filtersPresent by remember(tab) { mutableStateOf(false) }
-    var filtersAfterSeason by remember(tab) { mutableStateOf(false) }
-    fun showFilters() { filtersPresent = true; filters = true }
-    fun closeMenu(selection: AnimeDiscoveryQuery? = null) {
-        pendingQuery = selection
-        openMenu = null
-    }
-    fun showMenu(menu: AnimeDiscoveryControlMenu) {
-        presentMenu = menu
-        openMenu = menu
-    }
-    fun onMenuPresence(menu: AnimeDiscoveryControlMenu, visible: Boolean) {
-        if (visible || presentMenu != menu || openMenu == menu) return
-        presentMenu = null
-        val selection = pendingQuery
-        val showFiltersNext = filtersAfterSeason
-        filtersAfterSeason = false
-        pendingQuery = null
-        if (active) {
-            if (showFiltersNext) showFilters()
-            else selection?.let(onConfigure)
-        }
-    }
-    val overlayPresent = presentMenu != null || filtersPresent
-    val controlsActive = active && !overlayPresent
-    SideEffect { onOverlayPresence(overlayPresent) }
-    LaunchedEffect(active) {
-        if (!active) {
-            filtersAfterSeason = false
-            filters = false
-            closeMenu()
-        }
-    }
+    onOverlayPresence: (Boolean) -> Unit, rememberedOptions: (AnimeDiscoveryProvider) -> AnimeDiscoveryQuery?,
+    onConfigure: (AnimeDiscoveryQuery) -> Unit) {
     if (tab == AnimeDiscoveryTab.CALENDAR) {
         BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
             val density = LocalDensity.current
             val width = maxWidth.coerceAtLeast(44.dp * 8 * density.fontScale.coerceAtLeast(1f))
             Box(Modifier.horizontalScroll(rememberScrollState())) {
                 MotionTabs(query.weekday ?: 0, listOf("全", "一", "二", "三", "四", "五", "六", "日"),
-                    onSelect = { if (active) onConfigure(query.copy(provider = AnimeDiscoveryProvider.BANGUMI, calendar = true,
-                        weekday = it.takeIf { day -> day > 0 }, year = null, season = null, tag = "")) },
-                    modifier = Modifier.width(width), controlHeight = 44.dp, treatment = MotionTabTreatment.Underline)
+                    onSelect = { if (active) onConfigure(query.copy(weekday = it.takeIf { day -> day > 0 })) },
+                    modifier = Modifier.width(width), controlHeight = 44.dp, treatment = MotionTabTreatment.Underline,
+                    tooltips = listOf("全周", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"))
             }
         }
         return
     }
-    val filterSummary = listOfNotNull(
-        query.year?.toString().takeIf { tab != AnimeDiscoveryTab.SEASON },
-        query.season?.let(::animeSeasonLabel).takeIf { tab != AnimeDiscoveryTab.SEASON },
-        query.tag.takeIf(String::isNotBlank)?.let { animeGenreLabels[it] ?: it },
-    ).joinToString(" · ")
-    val conditionSummary = listOfNotNull(
-        animeDiscoveryOrderLabel(query.order).takeIf { tab == AnimeDiscoveryTab.SEASON },
-        filterSummary.takeIf(String::isNotBlank),
-    ).joinToString(" · ")
-    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        Box(Modifier.widthIn(max = 128.dp)) {
-            MotionTextButton(onClick = { showMenu(AnimeDiscoveryControlMenu.PROVIDER) },
-                modifier = Modifier.heightIn(min = 44.dp), enabled = controlsActive) {
-                Text(animeDiscoveryProviderLabel(query.provider), Modifier.weight(1f, fill = false),
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
-            }
-            CompactGlassPopover(openMenu == AnimeDiscoveryControlMenu.PROVIDER, backdrop, onDismiss = { closeMenu() },
-                onPresenceChange = { onMenuPresence(AnimeDiscoveryControlMenu.PROVIDER, it) }, alignToStart = true) {
-                AnimeDiscoveryProvider.entries.forEach { provider ->
-                    CompactMenuAction(if (query.provider == provider) Icons.Outlined.Check else Icons.Outlined.Public,
-                        animeDiscoveryProviderLabel(provider), onClick = {
-                            closeMenu(provider.takeIf { it != query.provider }?.let {
-                                query.copy(provider = it, order = AnimeDiscoveryOrder.POPULARITY, tag = "")
-                            })
-                        })
-                }
-                AnimeQuietLabel("切换资料源会重置排序与题材", Modifier.padding(12.dp))
-            }
-        }
-        Box(Modifier.weight(1f)) {
-            MotionTextButton(onClick = {
-                showMenu(if (tab == AnimeDiscoveryTab.SEASON) AnimeDiscoveryControlMenu.SEASON else AnimeDiscoveryControlMenu.ORDER)
-            }, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp), enabled = controlsActive) {
-                Column(Modifier.weight(1f)) {
-                    Text(if (tab == AnimeDiscoveryTab.SEASON) listOfNotNull(query.year?.toString(), query.season?.let(::animeSeasonLabel))
-                        .joinToString(" ").ifBlank { "选择季度" } else animeDiscoveryOrderLabel(query.order),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (conditionSummary.isNotBlank()) Text(conditionSummary, style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
-            }
-            CompactGlassPopover(openMenu == AnimeDiscoveryControlMenu.ORDER, backdrop, onDismiss = { closeMenu() },
-                onPresenceChange = { onMenuPresence(AnimeDiscoveryControlMenu.ORDER, it) }) {
-                animeDiscoveryOrders(query.provider).forEach { order ->
-                    CompactMenuAction(if (order == query.order) Icons.Outlined.Check else Icons.Outlined.Sort,
-                        animeDiscoveryOrderLabel(order), onClick = { closeMenu(query.copy(order = order)) })
-                }
-            }
-            CompactGlassPopover(openMenu == AnimeDiscoveryControlMenu.SEASON, backdrop,
-                onDismiss = { filtersAfterSeason = false; closeMenu() },
-                onPresenceChange = { onMenuPresence(AnimeDiscoveryControlMenu.SEASON, it) }) {
-                listOf(false to "本季新番", true to "下季期待").forEach { (next, label) ->
-                    CompactMenuAction(Icons.Outlined.CalendarMonth, label, onClick = {
-                        val today = localToday()
-                        val index = (today.monthNumber - 1) / 3 + if (next) 1 else 0
-                        closeMenu(query.copy(year = today.year + index / 4, season = AnimeSeason.entries[index % 4]))
-                    })
-                }
-                CompactMenuAction(Icons.Outlined.Tune, "年份与季度", onClick = { filtersAfterSeason = true; closeMenu() })
-            }
-        }
-        MotionIconButton(onClick = ::showFilters, modifier = Modifier.size(44.dp), enabled = controlsActive,
-            tooltip = if (filterSummary.isBlank()) "年份、季度与题材" else "筛选：$filterSummary") {
-            Icon(Icons.Outlined.FilterList, "年份、季度与题材", Modifier.size(20.dp),
-                tint = if (filterSummary.isNotBlank())
-                    MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+
+    var visible by remember { mutableStateOf(false) }
+    var present by remember { mutableStateOf(false) }
+    var revision by remember { mutableIntStateOf(0) }
+    val trigger = remember { FocusRequester() }
+    var triggerFocused by remember { mutableStateOf(false) }
+    var returnFocus by remember { mutableStateOf(false) }
+    val controlsActive = active && !present
+    val colors = MaterialTheme.colorScheme
+    val seasonal = tab == AnimeDiscoveryTab.SEASON
+    val summary = animeDiscoveryConditions(query, includeTime = !seasonal)
+    SideEffect { onOverlayPresence(present) }
+    LaunchedEffect(active, present) {
+        if (!active) {
+            visible = false
+            returnFocus = false
+        } else if (!present && returnFocus) {
+            returnFocus = false
+            trigger.requestFocus()
         }
     }
-    AnimeDiscoveryFilterPanel(filters, tab, query, backdrop, onDismiss = { filters = false },
-        onClosed = { filtersPresent = false }, onConfigure = onConfigure)
+
+    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 4.dp, bottom = 4.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                if (seasonal) Text(animeDiscoverySeasonTitle(query), Modifier.semantics { heading() },
+                    style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                AnimeQuietLabel(summary)
+            }
+            MotionTextButton(onClick = {
+                returnFocus = triggerFocused
+                revision++
+                present = true
+                visible = true
+            }, enabled = controlsActive, modifier = Modifier.heightIn(min = 48.dp)
+                .focusRequester(trigger).onFocusChanged { triggerFocused = it.isFocused },
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = colors.onSurface, containerColor = colors.surfaceContainerHigh),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
+                Icon(Icons.Outlined.Tune, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("筛选与排序")
+            }
+        }
+        if (seasonal) {
+            val today = localToday()
+            val currentQuarter = (today.monthNumber - 1) / 3
+            FlowRow(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf("本季", "下季").forEachIndexed { offset, label ->
+                    val quarter = currentQuarter + offset
+                    val year = today.year + quarter / AnimeSeason.entries.size
+                    val season = AnimeSeason.entries[quarter % AnimeSeason.entries.size]
+                    val selected = query.year == year && query.season == season
+                    AnimeDiscoveryChoice(label, selected, controlsActive) {
+                        if (!selected) onConfigure(query.copy(year = year, season = season))
+                    }
+                }
+            }
+        }
+    }
+    key(revision) {
+        AnimeDiscoveryFilterPanel(visible && active, tab, query, backdrop, rememberedOptions,
+            onDismiss = { visible = false }, onClosed = { present = false }, onConfigure = onConfigure)
+    }
 }
 
 private fun animeDiscoveryOrders(provider: AnimeDiscoveryProvider): List<AnimeDiscoveryOrder> = when (provider) {
     AnimeDiscoveryProvider.BANGUMI -> listOf(AnimeDiscoveryOrder.RANK, AnimeDiscoveryOrder.POPULARITY, AnimeDiscoveryOrder.SCORE)
     AnimeDiscoveryProvider.ANILIST -> listOf(AnimeDiscoveryOrder.TRENDING, AnimeDiscoveryOrder.POPULARITY, AnimeDiscoveryOrder.SCORE)
+}
+
+@Composable
+private fun AnimeDiscoveryChoice(label: String, selected: Boolean, enabled: Boolean, onSelect: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    MotionTextButton(onClick = onSelect, enabled = enabled,
+        modifier = Modifier.heightIn(min = 48.dp).semantics { this.selected = selected; role = Role.RadioButton },
+        colors = ButtonDefaults.textButtonColors(
+            containerColor = if (selected) colors.surfaceContainerHigh else colors.surfaceContainerLow,
+            contentColor = if (selected) colors.onSurface else colors.onSurfaceVariant),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp)) {
+        // Reserve the mark's space, so a quick selection does not move the other hit targets.
+        Box(Modifier.size(13.dp)) {
+            if (selected) Icon(Icons.Outlined.Check, null, Modifier.fillMaxSize())
+        }
+        Text(label, Modifier.padding(start = 4.dp), fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium)
+    }
 }
 
 private val animeGenreLabels = linkedMapOf("Action" to "动作", "Adventure" to "冒险", "Comedy" to "喜剧",
@@ -656,69 +679,122 @@ private val bangumiGenreShortcuts = linkedMapOf("剧场版" to "剧场版", "国
     "悬疑" to "悬疑", "运动" to "运动")
 private val anilistHomeGenres = animeGenreLabels.filterKeys { it in setOf("Action", "Fantasy", "Romance", "Sci-Fi", "Slice of Life") }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AnimeDiscoveryFilterPanel(visible: Boolean, tab: AnimeDiscoveryTab, query: AnimeDiscoveryQuery,
-    backdrop: HazeState, onDismiss: () -> Unit, onClosed: () -> Unit, onConfigure: (AnimeDiscoveryQuery) -> Unit) {
-    var year by remember { mutableStateOf("") }
-    var season by remember { mutableStateOf<AnimeSeason?>(null) }
-    var tag by remember { mutableStateOf("") }
+    backdrop: HazeState, rememberedOptions: (AnimeDiscoveryProvider) -> AnimeDiscoveryQuery?,
+    onDismiss: () -> Unit, onClosed: () -> Unit, onConfigure: (AnimeDiscoveryQuery) -> Unit) {
+    var provider by remember { mutableStateOf(query.provider) }
+    var year by remember { mutableStateOf(query.year?.toString().orEmpty()) }
+    var season by remember { mutableStateOf(query.season) }
+    var tag by remember { mutableStateOf(query.tag) }
     var order by remember { mutableStateOf(query.order) }
     var error by remember { mutableStateOf<String?>(null) }
-    var genreMenu by remember { mutableStateOf(false) }
-    LaunchedEffect(visible) {
-        if (visible) { year = query.year?.toString().orEmpty(); season = query.season; tag = query.tag; order = query.order; error = null }
+    val draftOptions = remember { mutableMapOf<AnimeDiscoveryProvider, Pair<AnimeDiscoveryOrder, String>>() }
+    val colors = MaterialTheme.colorScheme
+    val orders = animeDiscoveryOrders(provider)
+    val today = localToday()
+
+    fun selectProvider(next: AnimeDiscoveryProvider) {
+        if (next == provider) return
+        draftOptions[provider] = order to tag
+        val previous = draftOptions[next] ?: rememberedOptions(next)?.let { it.order to it.tag }
+        order = previous?.first ?: order.takeIf { it in animeDiscoveryOrders(next) } ?: AnimeDiscoveryOrder.POPULARITY
+        tag = previous?.second ?: if (next == AnimeDiscoveryProvider.BANGUMI) animeGenreLabels[tag].orEmpty()
+            else animeGenreLabels.entries.firstOrNull { it.value == tag }?.key.orEmpty()
+        provider = next
     }
-    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 480.dp,
-        onClosed = { genreMenu = false; onClosed() }) {
-        LiquidGlassSurface(backdrop, role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp) {
-            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)
-                .verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                AnimeSectionTitle("筛选番剧", animeDiscoveryProviderLabel(query.provider), action = {
-                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭筛选") {
-                        Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
-                    }
-                })
-                AnimeTextField(year, { year = it; error = null }, "年份，留空不限")
-                BoxWithConstraints(Modifier.fillMaxWidth()) {
-                    val availableWidth = maxWidth
-                    Box(Modifier.horizontalScroll(rememberScrollState())) {
-                        MotionTabs(season?.ordinal?.plus(1) ?: 0, listOf("不限", "冬季", "春季", "夏季", "秋季"),
-                            onSelect = { season = AnimeSeason.entries.getOrNull(it - 1); error = null },
-                            modifier = Modifier.width(availableWidth.coerceAtLeast(300.dp)), controlHeight = 44.dp,
-                            treatment = MotionTabTreatment.Soft)
-                    }
-                }
-                if (query.provider == AnimeDiscoveryProvider.BANGUMI) AnimeTextField(tag, { tag = it }, "题材标签，留空不限")
-                else Box {
-                    MotionTextButton(onClick = { genreMenu = true }, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
-                        Text(animeGenreLabels[tag] ?: "全部题材")
-                        Icon(Icons.Outlined.ExpandMore, null, Modifier.size(18.dp))
-                    }
-                    CompactGlassPopover(genreMenu, backdrop, onDismiss = { genreMenu = false }) {
-                        CompactMenuAction(if (tag.isBlank()) Icons.Outlined.Check else Icons.Outlined.Category, "全部题材",
-                            onClick = { tag = ""; genreMenu = false })
-                        animeGenreLabels.forEach { (value, label) ->
-                            CompactMenuAction(if (tag == value) Icons.Outlined.Check else Icons.Outlined.Category, label,
-                                onClick = { tag = value; genreMenu = false })
+
+    MotionDialog(visible, onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 500.dp, onClosed = onClosed) {
+        BoxWithConstraints(Modifier.padding(horizontal = 12.dp)) {
+            LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().height(minOf(maxHeight, 580.dp)),
+                role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp, softCard = true) {
+                Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp)
+                    .semantics { paneTitle = "动漫筛选与排序" }) {
+                    AnimeSectionTitle("筛选与排序", when (tab) {
+                        AnimeDiscoveryTab.SEASON -> "新番"
+                        AnimeDiscoveryTab.RANKING -> "榜单"
+                        else -> "分类"
+                    }, action = {
+                        MotionIconButton(onClick = onDismiss, enabled = visible, modifier = Modifier.size(48.dp),
+                            tooltip = "关闭筛选，不应用修改") {
+                            Icon(Icons.Outlined.Close, "关闭筛选，不应用修改", Modifier.size(20.dp))
+                        }
+                    })
+
+                    Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())
+                        .padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            AnimeQuietLabel("资料源")
+                            MotionTabs(provider.ordinal, AnimeDiscoveryProvider.entries.map(::animeDiscoveryProviderLabel),
+                                onSelect = { selectProvider(AnimeDiscoveryProvider.entries[it]) },
+                                modifier = Modifier.fillMaxWidth(), controlHeight = 48.dp,
+                                treatment = MotionTabTreatment.Soft, role = Role.RadioButton,
+                                selectedFontWeight = FontWeight.SemiBold)
+                        }
+                        Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            AnimeQuietLabel("排序")
+                            MotionTabs(orders.indexOf(order), orders.map(::animeDiscoveryOrderLabel),
+                                onSelect = { order = orders[it] }, modifier = Modifier.fillMaxWidth(), controlHeight = 48.dp,
+                                treatment = MotionTabTreatment.Soft, role = Role.RadioButton,
+                                selectedFontWeight = FontWeight.SemiBold)
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            AnimeQuietLabel("首播年份与季度")
+                            AnimeTextField(year, { value ->
+                                if (value.length <= 4 && value.all { it in '0'..'9' }) {
+                                    year = value
+                                    if (value.isEmpty()) season = null
+                                    error = null
+                                }
+                            }, "年份，留空为全部", enabled = visible)
+                            FlowRow(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                AnimeDiscoveryChoice("全年", season == null, visible) { season = null; error = null }
+                                AnimeSeason.entries.forEach { option ->
+                                    AnimeDiscoveryChoice(animeSeasonLabel(option), season == option, visible) {
+                                        if (year.isBlank()) year = today.year.toString()
+                                        season = option
+                                        error = null
+                                    }
+                                }
+                            }
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            AnimeQuietLabel("题材")
+                            if (provider == AnimeDiscoveryProvider.BANGUMI) {
+                                AnimeTextField(tag, { tag = it }, "题材标签，留空为全部", enabled = visible)
+                            } else FlowRow(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                AnimeDiscoveryChoice("全部", tag.isBlank(), visible) { tag = "" }
+                                animeGenreLabels.forEach { (value, label) ->
+                                    AnimeDiscoveryChoice(label, tag == value, visible) { tag = value }
+                                }
+                            }
                         }
                     }
-                }
-                if (tab == AnimeDiscoveryTab.SEASON) {
-                    val orders = animeDiscoveryOrders(query.provider)
-                    MotionTabs(orders.indexOf(order).coerceAtLeast(0), orders.map(::animeDiscoveryOrderLabel),
-                        onSelect = { order = orders[it] }, modifier = Modifier.fillMaxWidth(), controlHeight = 44.dp,
-                        treatment = MotionTabTreatment.Soft)
-                }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    MotionTextButton(onClick = { year = ""; season = null; tag = ""; error = null },
-                        modifier = Modifier.heightIn(min = 48.dp)) { Text("清空") }
-                    MotionButton(onClick = {
-                        val parsed = year.trim().takeIf(String::isNotEmpty)?.toIntOrNull()
-                        if (year.isNotBlank() && (parsed == null || parsed !in 1..9998)) error = "请输入有效年份。"
-                        else if (season != null && parsed == null) error = "选择季度时请填写年份。"
-                        else { onConfigure(query.copy(year = parsed, season = season, tag = tag.trim(), order = order)); onDismiss() }
-                    }, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("应用") }
+
+                    if (error != null) Text(error.orEmpty(), Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        color = colors.error, style = MaterialTheme.typography.bodySmall)
+                    else if (provider != query.provider) AnimeQuietLabel("将应用 · " + animeDiscoveryConditions(
+                        query.copy(provider = provider, order = order, tag = tag)))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MotionTextButton(onClick = {
+                            year = ""; season = null; tag = ""; order = AnimeDiscoveryOrder.POPULARITY; error = null
+                        }, enabled = visible, modifier = Modifier.heightIn(min = 48.dp),
+                            colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)) { Text("清除条件") }
+                        MotionButton(onClick = {
+                            val parsed = year.takeIf(String::isNotEmpty)?.toIntOrNull()
+                            if (year.isNotBlank() && (parsed == null || parsed !in 1..9998)) {
+                                error = "请输入 1 到 9998 之间的年份"
+                            } else {
+                                onConfigure(query.copy(provider = provider, year = parsed, season = season,
+                                    tag = tag.trim(), order = order))
+                                onDismiss()
+                            }
+                        }, enabled = visible, modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = colors.onSurface,
+                                contentColor = colors.surface)) { Text("应用筛选") }
+                    }
                 }
             }
         }

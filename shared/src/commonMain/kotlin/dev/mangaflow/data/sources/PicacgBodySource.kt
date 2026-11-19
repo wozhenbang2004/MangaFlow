@@ -68,37 +68,16 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
     override suspend fun register(request: SourceRegistrationRequest): Unit = accountLock.withLock {
         require(request.confirmedAdult && request.acceptedTerms) { "需要确认年满18岁并同意站点注册条款。" }
         val fields = request.values
-        val name = fields["name"].orEmpty().trim()
-        val email = fields["email"].orEmpty().trim()
-        val password = fields["password"].orEmpty()
-        val confirm = fields["confirm"].orEmpty()
-        val birthdayText = fields["birthday"].orEmpty().trim()
-        val birthday = runCatching { LocalDate.parse(birthdayText) }.getOrNull()
-            ?: throw SourceException("请填写有效生日，格式 YYYY-MM-DD。")
-        val today = Instant.fromEpochMilliseconds(wallTimeMillis()).toLocalDateTime(TimeZone.UTC).date
-        val age = today.year - birthday.year - if (today.monthNumber < birthday.monthNumber ||
-            today.monthNumber == birthday.monthNumber && today.dayOfMonth < birthday.dayOfMonth) 1 else 0
-        require(age >= 18 && age <= 120) { "哔咔注册要求年满18岁，请核对生日。" }
-        require(name.length in 2..50 && !name.contains('\n') && !name.contains('\r')) { "昵称需要2至50个字符。" }
-        // The original Android registration UI excludes names that impersonate the site.
-        require(!Regex("^嗶\\s*咔.*").matches(name) && !Regex("^哔\\s*咔.*").matches(name)) {
-            "昵称不能以哔咔站点名称开头。"
-        }
-        require(email.length in 5..160 && Regex("^[a-z0-9._]+@[a-z0-9.-]+\\.[a-z]{2,}$").matches(email)) {
-            "请填写有效的邮箱地址。"
-        }
-        require(password.length in 9..512 && password == confirm) { "密码至少9个字符，且两次输入需一致。" }
-        val gender = fields["gender"].orEmpty().ifBlank { "bot" }
-        require(gender in setOf("m", "f", "bot")) { "请选择有效性别选项。" }
-        val payload = JSONObject().put("name", name).put("email", email).put("password", password)
-            .put("birthday", birthdayText).put("gender", gender)
+        val issue = picacgRegistrationIssue(fields) ?: picacgRegistrationIssue(fields, securityQuestions = true)
+        if (issue != null) throw SourceException(issue.message)
+        val payload = JSONObject().put("name", fields["name"].orEmpty().trim())
+            .put("email", fields["email"].orEmpty().trim())
+            .put("password", fields["password"].orEmpty())
+            .put("birthday", fields["birthday"].orEmpty().trim())
+            .put("gender", fields["gender"].orEmpty().ifBlank { "bot" })
         for (index in 1..3) {
-            val question = fields["question$index"].orEmpty().trim()
-            val answer = fields["answer$index"].orEmpty()
-            require(question.length in 2..160 && answer.length in 1..160) {
-                "请填写三组安全问题及答案。"
-            }
-            payload.put("question$index", question).put("answer$index", answer)
+            payload.put("question$index", fields["question$index"].orEmpty().trim())
+                .put("answer$index", fields["answer$index"].orEmpty())
         }
         // The native source's authenticated client remains untouched until an explicit login.
         call("auth/register", "POST", payload, requireLogin = false)
@@ -447,4 +426,46 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
         private const val API_KEY = "C69BAF41DA5ABD1FFEDC6D2FEA56B"
         private const val SIGNING_KEY = "~d}\$Q7\$eIni=V)9\\RK/P.RM4;9[7|@/CA}b~OW!3?EV`:<>M7pddUBL5n|0/*Cn"
     }
+}
+
+internal data class PicacgRegistrationIssue(val fieldId: String, val message: String)
+
+internal fun picacgRegistrationIssue(
+    fields: Map<String, String>,
+    securityQuestions: Boolean = false,
+): PicacgRegistrationIssue? {
+    if (securityQuestions) {
+        for (index in 1..3) {
+            val question = "question$index"
+            val answer = "answer$index"
+            if (fields[question].orEmpty().trim().length !in 2..160)
+                return PicacgRegistrationIssue(question, "安全问题需要 2 至 160 个字符。")
+            if (fields[answer].orEmpty().length !in 1..160)
+                return PicacgRegistrationIssue(answer, "请填写安全答案，最多 160 个字符。")
+        }
+        return null
+    }
+    val name = fields["name"].orEmpty().trim()
+    if (name.length !in 2..50 || name.any { it == '\n' || it == '\r' })
+        return PicacgRegistrationIssue("name", "昵称需要 2 至 50 个字符。")
+    if (Regex("^[嗶哔]\\s*咔.*").matches(name))
+        return PicacgRegistrationIssue("name", "昵称不能以哔咔站点名称开头。")
+    val email = fields["email"].orEmpty().trim()
+    if (email.length !in 5..160 || !Regex("^[a-z0-9._]+@[a-z0-9.-]+\\.[a-z]{2,}$").matches(email))
+        return PicacgRegistrationIssue("email", "请填写有效的邮箱地址。")
+    val password = fields["password"].orEmpty()
+    if (password.length !in 9..512)
+        return PicacgRegistrationIssue("password", "密码需要 9 至 512 个字符。")
+    if (password != fields["confirm"].orEmpty())
+        return PicacgRegistrationIssue("confirm", "请再次输入相同的密码。")
+    val birthday = runCatching { LocalDate.parse(fields["birthday"].orEmpty().trim()) }.getOrNull()
+        ?: return PicacgRegistrationIssue("birthday", "请填写有效生日，格式 YYYY-MM-DD。")
+    val today = Instant.fromEpochMilliseconds(wallTimeMillis()).toLocalDateTime(TimeZone.UTC).date
+    val age = today.year - birthday.year - if (today.monthNumber < birthday.monthNumber ||
+        today.monthNumber == birthday.monthNumber && today.dayOfMonth < birthday.dayOfMonth) 1 else 0
+    if (age !in 18..120)
+        return PicacgRegistrationIssue("birthday", "哔咔注册要求年满 18 岁，请核对生日。")
+    val gender = fields["gender"].orEmpty().ifBlank { "bot" }
+    return if (gender in setOf("m", "f", "bot")) null
+        else PicacgRegistrationIssue("gender", "请选择有效性别选项。")
 }

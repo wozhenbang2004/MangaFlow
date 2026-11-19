@@ -28,13 +28,13 @@ import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ExpandMore
-import androidx.compose.material.icons.outlined.EmojiEvents
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -88,7 +88,6 @@ internal fun SiteRankingsScreen(
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
     var awards by rememberSaveable { mutableStateOf(false) }
-    var awardsRequested by remember { mutableStateOf(false) }
     DisposableEffect(controller, active, awards) {
         controller.setVisible(active && !awards)
         onDispose { controller.setVisible(false) }
@@ -112,17 +111,16 @@ internal fun SiteRankingsScreen(
             siteMenu = false; filterMenu = false
             infoRequested = false; infoVisible = false; infoPresent = false
             filtersRequested = false; filtersVisible = false; filtersPresent = false
-            awardsRequested = false
         }
     }
     val colors = MaterialTheme.colorScheme
+    val controlColors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)
     val positions = rememberSaveableStateHolder()
     val ready = active && !state.restoringSelection
     val menuWidth = 208.dp * LocalDensity.current.fontScale.coerceIn(1f, 1.4f)
     if (awards) {
         positions.SaveableStateProvider("award-catalogue") {
             MangaAwardsScreen(controller.repository, backdrop, navigation, active,
-                onSite = { site -> controller.selectSite(site); awards = false },
                 onBack = { awards = false }, onOpen = onOpen)
         }
         return
@@ -138,24 +136,19 @@ internal fun SiteRankingsScreen(
                         MotionTextButton(onClick = {
                             if (!siteMenu) menuSite = state.selection.site
                             siteMenu = !siteMenu; filterMenu = false
-                        }, enabled = ready, modifier = Modifier.semantics {
-                            stateDescription = if (siteMenu) "站点菜单已展开" else "站点菜单已收起"
-                        }, contentPadding = PaddingValues(horizontal = 4.dp)) {
+                        }, enabled = ready && !filterPresent && !filtersPresent && !infoPresent,
+                            modifier = Modifier.semantics { stateDescription = "当前站点：${state.selection.site.title}" },
+                            contentPadding = PaddingValues(horizontal = 4.dp), colors = controlColors) {
                             if (!state.restoringSelection) ReviewSourceMark(state.selection.site.id, size = 17.dp)
-                            Text(if (state.restoringSelection) "各站榜单" else state.selection.site.title,
-                                Modifier.weight(1f, fill = false).padding(start = 6.dp),
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Icon(Icons.Outlined.ExpandMore, "选择榜单站点", Modifier.padding(start = 4.dp).size(17.dp))
+                            Column(Modifier.weight(1f, fill = false).padding(start = 6.dp)) {
+                                Text("榜单站点", style = MaterialTheme.typography.labelMedium)
+                                if (!state.restoringSelection) Text(state.selection.site.title,
+                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
                         }
                         CompactGlassPopover(siteMenu && ready, backdrop, onDismiss = { siteMenu = false },
-                            onPresenceChange = { present ->
-                                sitePresent = present
-                                if (!present && awardsRequested) {
-                                    awardsRequested = false
-                                    awards = active
-                                }
-                            }, alignToStart = true, maximumWidth = menuWidth) {
+                            onPresenceChange = { sitePresent = it }, alignToStart = true, maximumWidth = menuWidth) {
                             Column(Modifier.selectableGroup()) {
                                 RankingSite.entries.forEach { site ->
                                     RankingMenuChoice(site.title, site == menuSite, ready && siteMenu,
@@ -164,12 +157,15 @@ internal fun SiteRankingsScreen(
                                     }
                                 }
                             }
-                            CompactMenuAction(Icons.Outlined.EmojiEvents, "年度获奖", enabled = ready && siteMenu) {
-                                awardsRequested = true; siteMenu = false
-                            }
                         }
                     }
                 }, actions = {
+                    MotionTextButton(onClick = { awards = true },
+                        enabled = ready && !siteMenu && !filterMenu && !sitePresent && !filterPresent &&
+                            !infoPresent && !filtersPresent,
+                        contentPadding = PaddingValues(horizontal = 8.dp), colors = controlColors) {
+                        Text("年度获奖", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    }
                     Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
                         if (state.refreshing) MotionBusyIndicator(Modifier.size(17.dp))
                         else MotionIconButton(onClick = controller::refresh,
@@ -205,15 +201,15 @@ internal fun SiteRankingsScreen(
                             menuError = state.preferenceError
                         }
                         filterMenu = !filterMenu; siteMenu = false
-                    }, enabled = ready,
-                        contentPadding = PaddingValues(horizontal = 8.dp), modifier = Modifier.heightIn(min = 44.dp).semantics {
-                            stateDescription = if (filterMenu) "范围菜单已展开" else "范围菜单已收起"
-                        }) {
-                        Text(if (state.restoringSelection) "筛选" else state.selection.scopeLabel,
-                            style = MaterialTheme.typography.bodySmall, maxLines = 1)
-                        if (state.selection.activeFilterCount > 0) Text(" · " + state.selection.activeFilterCount,
-                            style = MaterialTheme.typography.labelSmall)
-                        Icon(Icons.Outlined.FilterList, "选择漫画范围和组合筛选", Modifier.padding(start = 5.dp).size(17.dp))
+                    }, enabled = ready && !sitePresent && !filtersPresent && !infoPresent,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        colors = controlColors, modifier = Modifier.heightIn(min = 44.dp)) {
+                        Icon(Icons.Outlined.FilterList, null, Modifier.size(16.dp))
+                        Column(Modifier.padding(start = 5.dp)) {
+                            Text("范围与筛选", style = MaterialTheme.typography.labelMedium)
+                            if (!state.restoringSelection) Text(state.selection.scopeLabel,
+                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant, maxLines = 1)
+                        }
                     }
                     CompactGlassPopover(filterMenu && ready, backdrop, onDismiss = { filterMenu = false },
                         onPresenceChange = { present ->
