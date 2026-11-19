@@ -92,43 +92,73 @@ def runtime_fingerprint(root: Path) -> str:
 
 
 def previous_file_assets() -> dict[str, dict]:
-    """A prior full file manifest carries stable URLs from any older release."""
+    """Reuse immutable content-addressed assets from the newest published file inventory.
+
+    Protocol 2 covers app, runtime and launcher; protocol 1 remains for older
+    installed clients. Never reuse unverified or non-content-addressed URLs.
+    """
     prefix = f"https://github.com/{REPOSITORY}/releases/download/"
     releases = request_json(f"{API}/releases?per_page=20")
     for release in releases:
         if release.get("draft") or release.get("prerelease") or release["tag_name"] == os.environ["MANGA_TAG"]:
             continue
-        asset = next((item for item in release["assets"] if item["name"].endswith("-windows-x64.update.json")), None)
-        if asset is None or not asset.get("digest", "").startswith("sha256:") or asset["size"] > 2 * 1024 * 1024:
-            continue
-        try:
-            request = Request(asset["browser_download_url"], headers={"User-Agent": "MangaFlow-release"})
-            with urlopen(request, timeout=45) as response:
-                data = response.read(2 * 1024 * 1024 + 1)
-            if len(data) != asset["size"] or "sha256:" + hashlib.sha256(data).hexdigest() != asset["digest"]:
+        candidates = sorted(
+            (item for item in release["assets"] if item["name"].endswith(
+                ("-windows-x64.update-v2.json", "-windows-x64.update.json"))),
+            key=lambda item: not item["name"].endswith("-windows-x64.update-v2.json"),
+        )
+        for asset in candidates:
+            if not asset.get("digest", "").startswith("sha256:") or not 0 < asset["size"] <= 2 * 1024 * 1024:
                 continue
-            manifest = json.loads(data)
-            if manifest.get("protocol") != 1:
+            try:
+                request = Request(asset["browser_download_url"], headers={"User-Agent": "MangaFlow-release"})
+                with urlopen(request, timeout=45) as response:
+                    data = response.read(2 * 1024 * 1024 + 1)
+                if len(data) != asset["size"] or "sha256:" + hashlib.sha256(data).hexdigest() != asset["digest"]:
+                    continue
+                manifest = json.loads(data)
+                if manifest.get("protocol") not in (1, 2):
+                    continue
+                previous = {
+                    entry["sha256"]: entry for entry in manifest["files"]
+                    if entry.get("url", "").startswith(prefix) and
+                    entry.get("url", "").endswith(f"/MangaFlow-file-{entry['sha256']}.bin") and
+                    isinstance(entry.get("size"), int)
+                }
+                if previous:
+                    return previous
+            except (OSError, ValueError, KeyError, TypeError):
                 continue
-            return {entry["sha256"]: entry for entry in manifest["files"]
-                    if entry.get("url", "").startswith(prefix)}
-        except (OSError, ValueError, KeyError):
-            continue
     return {}
 
 
 def stage_incremental(image: Path, destination: Path, version: str) -> None:
+    """Stage a legacy app-only manifest and a complete target-state manifest.
+
+    A version 18 client can download files from version 30 directly when its
+    runtime is unchanged. Newer clients can also replace changed runtime and
+    launcher files without downloading intermediate release packages.
+    """
     app = image / "app"
     runtime = image / "runtime"
-    if not (app / "MangaFlow.cfg").is_file() or not runtime.is_dir():
-        raise RuntimeError(f"The jpackage application image is missing at {image}; "
+    launcher = image / "MangaFlow.exe"
+    if not (app / "MangaFlow.cfg").is_file() or not runtime.is_dir() or not launcher.is_file():
+        raise RuntimeError(f"The jpackage application image is incomplete at {image}; "
                            "run :desktopApp:createReleaseDistributable before staging incremental files")
+    candidates = [launcher]
+    for directory in (app, runtime):
+        for path in directory.rglob("*"):
+            if path.is_symlink():
+                raise RuntimeError(f"Incremental package contains a symbolic link: {path}")
+            if path.is_file():
+                candidates.append(path)
+    if not 3 <= len(candidates) <= 4000:
+        raise RuntimeError("Packaged file inventory exceeds the updater's supported bounds")
+
     prior = previous_file_assets()
     entries = []
     new_assets = set()
-    for path in sorted(item for item in app.rglob("*") if item.is_file()):
-        if path.is_symlink():
-            raise RuntimeError("Packaged application files must not be symbolic links")
+    for path in sorted(candidates, key=lambda item: item.relative_to(image).as_posix()):
         relative = path.relative_to(image).as_posix()
         digest = file_sha(path)
         checksum = 1
@@ -146,13 +176,22 @@ def stage_incremental(image: Path, destination: Path, version: str) -> None:
                 new_assets.add(name)
         entries.append({"path": relative, "size": path.stat().st_size, "sha256": digest,
                         "checksum": format(checksum & 0xffffffff, "x"), "url": url})
-    if not 1 <= len(entries) <= 1000:
-        raise RuntimeError("Application file inventory exceeds the updater's supported bounds")
-    manifest = {"protocol": 1, "version": version, "sourceCommit": os.environ["GITHUB_SHA"],
-                "runtimeFingerprint": runtime_fingerprint(runtime), "files": entries}
-    target = destination / f"MangaFlow-{version}-windows-x64.update.json"
-    target.write_text(json.dumps(manifest, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
-    print(f"Staged file manifest: {len(entries)} app files, {len(new_assets)} newly published file assets")
+
+    fingerprint = runtime_fingerprint(runtime)
+    common = {"version": version, "sourceCommit": os.environ["GITHUB_SHA"]}
+    legacy = {**common, "protocol": 1, "runtimeFingerprint": fingerprint,
+              "files": [entry for entry in entries if entry["path"].startswith("app/")]}
+    complete = {**common, "protocol": 2, "runtimeFingerprint": fingerprint, "files": entries}
+    for name, manifest in (
+        (f"MangaFlow-{version}-windows-x64.update.json", legacy),
+        (f"MangaFlow-{version}-windows-x64.update-v2.json", complete),
+    ):
+        (destination / name).write_text(
+            json.dumps(manifest, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    print(f"Staged legacy app inventory ({len(legacy['files'])} files) and "
+          f"cross-version v2 inventory ({len(entries)} files), "
+          f"{len(new_assets)} newly published content-addressed assets")
+
 
 def stage() -> None:
     version = os.environ["MANGA_VERSION"]

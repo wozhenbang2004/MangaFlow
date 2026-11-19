@@ -20,21 +20,26 @@ function Write-Result([bool]$success, [string]$message) {
     @{ Success = $success; Message = $message } | ConvertTo-Json -Compress |
         Set-Content -LiteralPath $resultPath -Encoding UTF8
 }
-function App-File([string]$relative) {
-    if (-not $relative.StartsWith('app/', [StringComparison]::Ordinal) -or
-        $relative.Contains('\') -or $relative.Split('/').Where({ $_ -eq '..' -or $_ -eq '.' -or $_ -eq '' }).Count -gt 0) {
-        throw 'The update contains an invalid application path.'
+function Install-File([string]$relative) {
+    $segments = $relative.Split('/')
+    if ((-not ($relative -ceq 'MangaFlow.exe' -or
+            $relative.StartsWith('app/', [StringComparison]::Ordinal) -or
+            $relative.StartsWith('runtime/', [StringComparison]::Ordinal))) -or
+        $relative.Length -gt 500 -or $relative.Contains('\\') -or
+        $segments.Where({ $_ -eq '..' -or $_ -eq '.' -or $_ -eq '' -or
+            $_.IndexOfAny([char[]]':*?"<>|') -ge 0 }).Count -gt 0) {
+        throw 'The update contains an invalid package path.'
     }
-    $appRoot = [IO.Path]::GetFullPath((Join-Path $root 'app')).TrimEnd('\') + '\'
+    $base = $root.TrimEnd('\\') + '\\'
     $resolved = [IO.Path]::GetFullPath((Join-Path $root $relative))
-    if (-not $resolved.StartsWith($appRoot, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'The update path leaves the application directory.'
+    if (-not $resolved.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The update path leaves the installed application.'
     }
-    $ancestor = Split-Path -Parent $resolved
-    while ($ancestor.Length -ge $appRoot.TrimEnd('\').Length) {
+    $ancestor = $resolved
+    while ($ancestor.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) {
         if (Test-Path -LiteralPath $ancestor) {
             if ((Get-Item -LiteralPath $ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                throw 'The application update directory contains a redirected path.'
+                throw 'The application update path contains a redirected file or directory.'
             }
         }
         $next = Split-Path -Parent $ancestor
@@ -110,17 +115,56 @@ try {
 
     $entries = @{}
     foreach ($entry in $plan.Files) {
-        $null = App-File ([string]$entry.Path)
+        $null = Install-File ([string]$entry.Path)
         if ($entries.ContainsKey([string]$entry.Path)) { throw 'Duplicate application path.' }
         $entries[[string]$entry.Path] = $entry
     }
-    $changed = @($plan.ChangedPaths | Sort-Object { if ([string]$_ -eq 'app/MangaFlow.cfg') { 1 } else { 0 } })
+    if (-not $entries.ContainsKey('app/MangaFlow.cfg')) { throw 'Missing startup configuration.' }
+    $changed = @($plan.ChangedPaths | Sort-Object {
+        if ([string]$_ -eq 'MangaFlow.exe') { 2 }
+        elseif ([string]$_ -eq 'app/MangaFlow.cfg') { 1 }
+        else { 0 }
+    })
     $payload = [IO.Path]::GetFullPath([string]$plan.PayloadRoot)
     foreach ($relative in $changed) {
         if (-not $entries.ContainsKey([string]$relative)) { throw 'An update file is not in the verified manifest.' }
         $source = [IO.Path]::GetFullPath((Join-Path $payload ([string]$relative)))
-        if (-not $source.StartsWith($payload.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid staged update path.' }
+        if (-not $source.StartsWith($payload.TrimEnd('\\') + '\\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid staged update path.' }
         Verify-File $source $entries[[string]$relative]
+    }
+
+    # The manifest describes the full new runtime. Remove obsolete packaged
+    # runtime files and app JARs transactionally, never user data outside them.
+    $obsolete = New-Object 'Collections.Generic.List[string]'
+    foreach ($jar in Get-ChildItem -LiteralPath (Join-Path $root 'app') -File -Filter '*.jar') {
+        $relative = 'app/' + $jar.Name
+        if (-not $entries.ContainsKey($relative)) { $obsolete.Add($relative) }
+    }
+    if ([int]$plan.Protocol -eq 2) {
+        if (-not $entries.ContainsKey('MangaFlow.exe') -or
+            @($entries.Keys | Where-Object { $_.StartsWith('runtime/') }).Count -eq 0) {
+            throw 'The target update is missing its launcher or runtime inventory.'
+        }
+        $queue = New-Object 'Collections.Generic.Queue[string]'
+        $queue.Enqueue((Join-Path $root 'runtime'))
+        $rootPrefix = $root.TrimEnd('\\') + '\\'
+        while ($queue.Count -gt 0) {
+            $directory = $queue.Dequeue()
+            foreach ($entry in Get-ChildItem -LiteralPath $directory -Force) {
+                if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                    throw 'A Java runtime directory contains a redirected path.'
+                }
+                if ($entry.PSIsContainer) { $queue.Enqueue($entry.FullName); continue }
+                $relative = $entry.FullName.Substring($rootPrefix.Length).Replace('\\', '/')
+                $null = Install-File $relative
+                if (-not $entries.ContainsKey($relative)) { $obsolete.Add($relative) }
+            }
+        }
+    }
+    if ($obsolete.Count -gt 4000) { throw 'Too many obsolete files in the installed runtime.' }
+    foreach ($relative in $obsolete) {
+        if ($entries.ContainsKey($relative)) { throw 'Obsolete-file inventory conflicts with target files.' }
+        $null = Install-File $relative
     }
 
     $backup = Join-Path $work ('backup-' + [Guid]::NewGuid().ToString('N'))
@@ -128,7 +172,7 @@ try {
     $applied = New-Object 'Collections.Generic.List[object]'
     try {
         foreach ($relative in $changed) {
-            $destination = App-File ([string]$relative)
+            $destination = Install-File ([string]$relative)
             $old = Join-Path $backup ([string]$relative)
             $existed = Test-Path -LiteralPath $destination -PathType Leaf
             if ($existed) {
@@ -141,7 +185,17 @@ try {
             Copy-Item -LiteralPath (Join-Path $payload ([string]$relative)) -Destination $temporary -Force
             Move-Item -LiteralPath $temporary -Destination $destination -Force
         }
-        foreach ($entry in $plan.Files) { Verify-File (App-File ([string]$entry.Path)) $entry }
+        foreach ($entry in $plan.Files) { Verify-File (Install-File ([string]$entry.Path)) $entry }
+        foreach ($relative in $obsolete) {
+            $destination = Install-File ([string]$relative)
+            if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) { continue }
+            $old = Join-Path $backup ([string]$relative)
+            [IO.Directory]::CreateDirectory((Split-Path -Parent $old)) | Out-Null
+            Copy-Item -LiteralPath $destination -Destination $old -Force
+            $applied.Add([pscustomobject]@{ Path = $destination; Backup = $old; Existed = $true })
+            Remove-Item -LiteralPath $destination -Force
+        }
+        foreach ($entry in $plan.Files) { Verify-File (Install-File ([string]$entry.Path)) $entry }
     } catch {
         $originalFailure = $_
         for ($index = $applied.Count - 1; $index -ge 0; $index--) {
@@ -152,15 +206,6 @@ try {
         throw $originalFailure
     }
 
-    # The app directory is packaged code; obsolete JARs are retained in this update's backup.
-    foreach ($jar in Get-ChildItem -LiteralPath (Join-Path $root 'app') -File -Filter '*.jar') {
-        $relative = 'app/' + $jar.Name
-        if (-not $entries.ContainsKey($relative)) {
-            $old = Join-Path $backup $relative
-            [IO.Directory]::CreateDirectory((Split-Path -Parent $old)) | Out-Null
-            Move-Item -LiteralPath $jar.FullName -Destination $old -Force -ErrorAction SilentlyContinue
-        }
-    }
     Write-Result $true ('已更新到 ' + [string]$plan.TargetVersion + '。')
     if (-not $Elevated) { Start-OldOrNew }
     exit 0

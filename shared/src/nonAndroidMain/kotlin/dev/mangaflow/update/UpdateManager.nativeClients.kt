@@ -138,7 +138,7 @@ actual class UpdateManager private constructor(private val context: PlatformCont
                     } catch (_: Exception) { null }
                     val delta = incrementalPlan
                     UpdateState(UpdatePhase.AVAILABLE, release, total = delta?.bytes ?: release.bytes,
-                        message = if (delta != null) "发现新版本 ${release.versionName} · 增量更新" else "发现新版本 ${release.versionName}", lastChecked = now)
+                        message = if (delta != null) "发现新版本 ${release.versionName} · 跨版本增量（只下载变动文件）" else "发现新版本 ${release.versionName}", lastChecked = now)
                 }
             } catch (cancelled: CancellationException) { throw cancelled
             } catch (failure: Exception) {

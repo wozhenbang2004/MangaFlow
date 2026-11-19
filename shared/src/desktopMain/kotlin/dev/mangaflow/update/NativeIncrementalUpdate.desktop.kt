@@ -36,7 +36,7 @@ object DesktopUpdateExit {
 
 private data class UpdateFile(val path: String, val bytes: Long, val sha256: String, val checksum: String, val url: String)
 private data class DesktopPlan(
-    val root: File, val work: File, val version: String,
+    val root: File, val work: File, val version: String, val protocol: Int,
     val files: List<UpdateFile>, val changed: List<UpdateFile>,
 )
 private val plans = ConcurrentHashMap<String, DesktopPlan>()
@@ -55,8 +55,10 @@ internal actual suspend fun planNativeIncrementalUpdate(
     if (!File(root, "app/MangaFlow.cfg").isFile || !File(root, "runtime").isDirectory) return@withContext null
     val metadata = JSONObject(releaseMetadata)
     val assets = metadata.optJSONArray("assets") ?: return@withContext null
-    val asset = (0 until assets.length()).mapNotNull { assets.optJSONObject(it) }
-        .firstOrNull { it.optString("name") == "MangaFlow-" + release.versionName + "-windows-x64.update.json" }
+    val available = (0 until assets.length()).mapNotNull { assets.optJSONObject(it) }
+    val prefix = "MangaFlow-" + release.versionName + "-windows-x64"
+    val asset = listOf("$"+"{prefix}.update-v2.json", "$"+"{prefix}.update.json")
+        .firstNotNullOfOrNull { name -> available.firstOrNull { it.optString("name") == name } }
         ?: return@withContext null
     val digest = asset.optString("digest").removePrefix("sha256:").lowercase()
     require(hashPattern.matches(digest)) { "增量清单缺少发布摘要" }
@@ -65,14 +67,20 @@ internal actual suspend fun planNativeIncrementalUpdate(
     val data = readOfficial(asset.optString("browser_download_url"), bytes, route.javaProxy())
     require(hash(data) == digest) { "增量清单校验失败" }
     val manifest = JSONObject(data.toString(Charsets.UTF_8))
-    if (manifest.optInt("protocol") != 1 || manifest.optString("version") != release.versionName) return@withContext null
-    if (manifest.optString("runtimeFingerprint") != runtimeFingerprint(File(root, "runtime"))) return@withContext null
+    val protocol = manifest.optInt("protocol")
+    if (protocol !in 1..2 || manifest.optString("version") != release.versionName) return@withContext null
+    if (release.sourceCommit.isNotBlank() && manifest.optString("sourceCommit") != release.sourceCommit)
+        return@withContext null
+    // Existing v1 clients remain app-only and require the identical native runtime.
+    // Protocol v2 includes runtime files and the launcher, so release gaps are safe.
+    if (protocol == 1 && manifest.optString("runtimeFingerprint") != runtimeFingerprint(File(root, "runtime")))
+        return@withContext null
     val entries = manifest.getJSONArray("files")
-    require(entries.length() in 1..1000) { "增量文件清单无效" }
+    require(entries.length() in 1..4000) { "增量文件清单无效" }
     val files = (0 until entries.length()).map { index ->
         val entry = entries.getJSONObject(index)
         val path = entry.getString("path")
-        safeAppFile(root, path)
+        safeInstallFile(root, path)
         val fileHash = entry.getString("sha256")
         val fileBytes = entry.getLong("size")
         val checksum = entry.getString("checksum")
@@ -85,16 +93,21 @@ internal actual suspend fun planNativeIncrementalUpdate(
     }
     require(files.map { it.path.lowercase() }.toSet().size == files.size) { "增量文件路径重复" }
     require(files.any { it.path == "app/MangaFlow.cfg" }) { "增量清单缺少启动配置" }
+    if (protocol == 2) {
+        require(files.any { it.path == "MangaFlow.exe" } && files.any { it.path.startsWith("runtime/") }) {
+            "完整增量清单缺少启动器或 Java 运行时"
+        }
+    }
     val changed = files.filter { entry ->
         currentCoroutineContext().ensureActive()
-        val local = safeAppFile(root, entry.path)
+        val local = safeInstallFile(root, entry.path)
         !local.isFile || local.length() != entry.bytes || hash(local) != entry.sha256
     }
     val total = changed.sumOf { it.bytes }
     if (changed.isEmpty() || total >= release.bytes) return@withContext null
     val work = File(cacheDirectory(context).path, "updates/incremental/" + digest)
     check(work.isDirectory || work.mkdirs()) { "无法创建增量更新目录" }
-    val plan = DesktopPlan(root, work, release.versionName, files, changed)
+    val plan = DesktopPlan(root, work, release.versionName, protocol, files, changed)
     plans[digest] = plan
     NativeIncrementalPlan(digest, total)
 }
@@ -118,7 +131,7 @@ internal actual suspend fun downloadNativeIncrementalUpdate(
     }
     val config = Configuration.read(StringReader(xml))
     val archive = File(state.work, "download.zip")
-    val byPath = state.changed.associateBy { safeAppFile(payload, it.path).toPath().toAbsolutePath().normalize() }
+    val byPath = state.changed.associateBy { safeInstallFile(payload, it.path).toPath().toAbsolutePath().normalize() }
     val result = config.update(UpdateOptions.archive(archive.toPath()).updateHandler(object : UpdateHandler {
         override fun openDownloadStream(file: FileMetadata): InputStream {
             cancellation.ensureActive()
@@ -150,12 +163,12 @@ internal actual suspend fun downloadNativeIncrementalUpdate(
     result.exception?.let { throw it }
     state.changed.forEach { entry ->
         cancellation.ensureActive()
-        val file = safeAppFile(payload, entry.path)
+        val file = safeInstallFile(payload, entry.path)
         require(file.isFile && file.length() == entry.bytes && hash(file) == entry.sha256) { "增量暂存不完整，请重新下载" }
     }
     // Only verified files enter the install plan. The external helper checks SHA-256 again after shutdown.
     val install = JSONObject().put("Mode", "incremental").put("InstallRoot", state.root.canonicalPath)
-        .put("TargetVersion", state.version).put("PayloadRoot", payload.canonicalPath)
+        .put("TargetVersion", state.version).put("Protocol", state.protocol).put("PayloadRoot", payload.canonicalPath)
         .put("Files", JSONArray(state.files.map { JSONObject().put("Path", it.path).put("Size", it.bytes).put("Sha256", it.sha256) }))
         .put("ChangedPaths", JSONArray(state.changed.map { it.path }))
         .put("ResultPath", File(cacheDirectory(context).path, "updates/last-result.json").canonicalPath)
@@ -208,12 +221,14 @@ internal actual fun previousNativeUpdateResult(context: PlatformContext): String
     result.optString("Message").takeIf { it.isNotBlank() }
 }.getOrNull()
 
-private fun safeAppFile(root: File, path: String): File {
-    require(path.startsWith("app/") && path.length <= 500 && '\\' !in path &&
-        path.split('/').all { it.isNotEmpty() && it != "." && it != ".." && it.none { c -> c.isISOControl() || c in ":*?\"<>|" } })
-    val base = File(root, "app").canonicalFile
+private fun safeInstallFile(root: File, path: String): File {
+    require((path == "MangaFlow.exe" || path.startsWith("app/") || path.startsWith("runtime/")) &&
+        path.length <= 500 && '\\' !in path &&
+        path.split('/').all { it.isNotEmpty() && it != "." && it != ".." &&
+            it.none { c -> c.isISOControl() || c in ":*?\\\"<>|" } }) { "增量文件路径无效" }
+    val base = root.canonicalFile.toPath()
     val file = File(root, path).canonicalFile
-    require(file.toPath().startsWith(base.toPath()) && file != base) { "增量文件越过应用目录" }
+    require(file.toPath().startsWith(base) && file.toPath() != base) { "增量文件越过安装目录" }
     return file
 }
 private fun runtimeFingerprint(root: File): String {
