@@ -28,6 +28,10 @@ data class AnimePlayerRequest(
     val bypassMediaCache: Boolean = false,
 )
 
+/** Native engine construction failed before the source could be evaluated. */
+internal class AnimePlayerInitializationException(message: String, cause: Throwable) :
+    IllegalStateException(message, cause)
+
 data class AnimeStartupCacheRequest(
     val asset: AnimePlaybackAsset,
     val positionMs: Long,
@@ -336,7 +340,8 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
                 if (isCurrent(generation)) {
                     onPlaybackEnding(null)
                     releaseNative()
-                    fail(generation, failure)
+                    fail(generation, failure,
+                        sourceRecoveryAllowed = failure !is AnimePlayerInitializationException)
                 }
             }
         }

@@ -125,6 +125,7 @@ internal class AndroidAnimePlayer(
     private var releaseCache: (() -> Unit)? = null
     private var recovery: Job? = null
     private var recoveryNotice: String? = null
+    private var cachePlaybackNotice: String? = null
     private var lastPlaybackError: PlaybackException? = null
     private var preparedMedia: MediaSource? = null
     private data class RemoteMediaPlan(
@@ -134,13 +135,14 @@ internal class AndroidAnimePlayer(
         val plan: RemoteMediaPlan,
         val client: OkHttpClient,
         val bytes: AtomicLong,
-        val releaseCache: () -> Unit,
+        val releaseCache: (() -> Unit)?,
         val unsupportedSubtitle: Boolean,
+        val cacheNotice: String?,
     ) {
         fun close() {
             client.dispatcher.cancelAll()
             client.connectionPool.evictAll()
-            releaseCache()
+            releaseCache?.invoke()
         }
     }
 
@@ -454,7 +456,7 @@ internal class AndroidAnimePlayer(
             remote.close()
             return
         }
-        adoptRemoteResources(remote)
+        adoptRemoteResources(remote, generation)
         // The active player already owns this exact asset before the speculative
         // lease is relinquished, so a cache sweep cannot break the hand-off.
         discardStartupCacheNow()
@@ -472,7 +474,7 @@ internal class AndroidAnimePlayer(
             exo.setPriority(C.PRIORITY_PLAYBACK)
             exo.setWakeMode(C.WAKE_MODE_NETWORK)
             connectEngine(generation, exo)
-            adoptRemoteResources(owner.resources)
+            adoptRemoteResources(owner.resources, generation)
             discardStartupCacheNow()
         } catch (_: Exception) {
             runCatching { owner.close() }
@@ -487,13 +489,15 @@ internal class AndroidAnimePlayer(
         return true
     }
 
-    private fun adoptRemoteResources(remote: RemoteMediaResources) {
+    private fun adoptRemoteResources(remote: RemoteMediaResources, generation: Long) {
         remoteMediaPlan = remote.plan
         http = remote.client
         releaseCache = remote.releaseCache
         receivedBytes = remote.bytes
         lastSampleBytes = remote.bytes.get()
         lastSampleAt = SystemClock.elapsedRealtime()
+        cachePlaybackNotice = remote.cacheNotice
+        remote.cacheNotice?.let { notice -> publish(generation) { it.copy(notice = notice) } }
     }
 
     private suspend fun createRemoteMedia(
@@ -505,9 +509,19 @@ internal class AndroidAnimePlayer(
         // SimpleCache opens its database/files once, off the UI thread. The process owns it.
         var pendingLease: (() -> Unit)? = null
         var pendingClient: OkHttpClient? = null
+        var cacheNotice: String? = null
         try {
-            val cacheOwner = withContext(Dispatchers.IO) {
-                AndroidAnimeCache.get(context).also { pendingLease = it.acquire(asset) }
+            val cacheOwner = if (request.bypassMediaCache) null else withContext(Dispatchers.IO) {
+                try {
+                    AndroidAnimeCache.get(context).also {
+                        it.cache.checkInitialization()
+                        pendingLease = it.acquire(asset)
+                    }
+                } catch (cancel: CancellationException) { throw cancel }
+                catch (_: Exception) {
+                    cacheNotice = "本机缓存暂不可用，已跳过缓存播放原片"
+                    null
+                }
             }
             currentCoroutineContext().ensureActive()
 
@@ -525,12 +539,12 @@ internal class AndroidAnimePlayer(
             val nativeUpstream = OkHttpDataSource.Factory(client).setTransferListener(transferObserver)
             fun gated(source: DataSource): DataSource = gate?.wrap(source) ?: source
             val upstream = DataSource.Factory { gated(nativeUpstream.createDataSource()) }
-            val cacheDataSourceFactory = animeCacheDataSource(asset, cacheOwner, nativeUpstream)
-            val cacheFactory = DataSource.Factory {
-                val source = if (!request.bypassMediaCache && cacheOwner.targetBytes > 0L)
-                    cacheDataSourceFactory.createDataSource() else nativeUpstream.createDataSource()
-                gated(source)
-            }
+            val cacheFactory = cacheOwner?.let { owner ->
+                val cached = animeCacheDataSource(asset, owner, nativeUpstream)
+                DataSource.Factory {
+                    gated(if (owner.targetBytes > 0L) cached.createDataSource() else nativeUpstream.createDataSource())
+                }
+            } ?: upstream
             val subtitleParser = DefaultSubtitleParserFactory()
             val subtitles = mutableListOf<() -> MediaSource>()
             var unsupportedSubtitle = false
@@ -553,7 +567,7 @@ internal class AndroidAnimePlayer(
                 }
             }
             val contentType = Util.inferContentTypeForUriAndMimeType(Uri.parse(asset.url), asset.mimeType)
-            val plan = RemoteMediaPlan(contentType, !request.bypassMediaCache && cacheOwner.targetBytes > 0L) { type, bypassProgressiveCache ->
+            val plan = RemoteMediaPlan(contentType, (cacheOwner?.targetBytes ?: 0L) > 0L) { type, bypassProgressiveCache ->
                 val mime = when (type) {
                     C.CONTENT_TYPE_HLS -> MimeTypes.APPLICATION_M3U8
                     C.CONTENT_TYPE_DASH -> MimeTypes.APPLICATION_MPD
@@ -577,7 +591,7 @@ internal class AndroidAnimePlayer(
                 }
                 if (subtitles.isEmpty()) media else MergingMediaSource(*(listOf(media) + subtitles.map { it() }).toTypedArray())
             }
-            val remote = RemoteMediaResources(plan, client, mediaBytes, requireNotNull(pendingLease), unsupportedSubtitle)
+            val remote = RemoteMediaResources(plan, client, mediaBytes, pendingLease, unsupportedSubtitle, cacheNotice)
             pendingLease = null
             pendingClient = null
             return remote
@@ -643,14 +657,15 @@ internal class AndroidAnimePlayer(
 
     private fun reportUnsupportedSubtitles(generation: Long, unsupported: Boolean) {
         if (unsupported) publish(generation) {
-            it.copy(notice = "部分外挂字幕格式无法由当前设备读取；可换用内嵌字幕或其他线路")
+            it.copy(notice = listOfNotNull(cachePlaybackNotice,
+                "部分外挂字幕格式无法由当前设备读取；可换用内嵌字幕或其他线路").joinToString("；"))
         }
     }
 
-    private fun createEngine(gate: AndroidAnimeStartupGate? = null): ExoPlayer {
+    private fun createEngine(gate: AndroidAnimeStartupGate? = null): ExoPlayer = try {
         val loadControl = AndroidAnimeLoadControl(options, gate, lastAcceptedForwardBytes)
         lastAcceptedForwardBytes = loadControl.effectiveForwardBytes
-        return ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true))
+        ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true))
             .setLoadControl(loadControl)
             .setAudioAttributes(AudioAttributes.Builder()
                 .setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
@@ -658,6 +673,10 @@ internal class AndroidAnimePlayer(
             .setWakeMode(if (gate == null) C.WAKE_MODE_NETWORK else C.WAKE_MODE_NONE)
             .setPriority(if (gate == null) C.PRIORITY_PLAYBACK else C.PRIORITY_PLAYBACK_PRELOAD)
             .build().also { loadControls[it] = loadControl }
+    } catch (cancel: CancellationException) { throw cancel }
+    catch (failure: Throwable) {
+        val detail = failure.message?.takeIf { it.isNotBlank() } ?: failure.javaClass.simpleName
+        throw AnimePlayerInitializationException("本机播放器初始化失败：$detail", failure)
     }
 
     private fun connectEngine(generation: Long, exo: ExoPlayer) {
@@ -1262,8 +1281,8 @@ internal class AndroidAnimePlayer(
                 isBuffering = exo.playbackState == Player.STATE_BUFFERING,
                 playbackSuppressed = exo.playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE,
                 error = null,
-                notice = if (phase == AnimePlayerPhase.READY && exo.playbackState != Player.STATE_BUFFERING &&
-                    previous.notice == recoveryNotice) null else previous.notice,
+                notice = (if (phase == AnimePlayerPhase.READY && exo.playbackState != Player.STATE_BUFFERING &&
+                    previous.notice == recoveryNotice) null else previous.notice) ?: cachePlaybackNotice,
                 downloadBytesPerSecond = if (localLease == null) speed else -1L,
                 // videoSize can describe the effect output. Source quality must come from
                 // the decoder format, never the 2x render target or a guessed fallback.
@@ -1579,6 +1598,7 @@ internal class AndroidAnimePlayer(
         recovery?.cancel()
         recovery = null
         recoveryNotice = null
+        cachePlaybackNotice = null
         lastPlaybackError = null
         preparedMedia = null
         remoteMediaPlan = null

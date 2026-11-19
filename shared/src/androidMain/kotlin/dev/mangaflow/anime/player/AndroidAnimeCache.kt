@@ -21,6 +21,7 @@ import java.io.File
 import java.util.TreeSet
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
 
 /**
  * A single SimpleCache owns all its files for the entire process. The existing
@@ -71,7 +72,8 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
     fun register(asset: AnimePlaybackAsset, key: String): String = synchronized(cache) {
         val value = AssetMetadata(asset.playbackIdentity(), asset.subjectId, asset.episodeId, asset.sourceId,
             asset.subjectTitle, asset.episodeTitle.ifBlank { asset.title })
-        if (readMetadata(key) != value) {
+        // The current asset is authoritative; disk classification is optional.
+        if (metadata[key] != value) {
             metadata[key] = value
             keyRevisions[key] = revision.incrementAndGet()
             // Classification failure must not prevent raw playback. The in-process lease remains valid.
@@ -83,6 +85,8 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
                     .set(META_SOURCE, value.sourceId)
                     .set(META_SUBJECT_TITLE, value.subjectTitle)
                     .set(META_EPISODE_TITLE, value.episodeTitle))
+            }.onFailure { failure ->
+                if (failure is CancellationException) throw failure
             }
         }
         key
@@ -140,7 +144,9 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
     private fun protected(key: String): Boolean {
         // The empty check also avoids accessing cache during its initialization callbacks.
         if (activeAssets.isEmpty()) return false
-        val identity = readMetadata(key).asset
+        val identity = try { readMetadata(key).asset }
+        catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { return true }
         return identity.isBlank() || (activeAssets[identity] ?: 0) > 0
     }
 
