@@ -1651,6 +1651,8 @@ fun ReaderScreen(
             standbys = currentSourceStandbys, alternativeCount = alternativeSources.size, backdrop = readerBackdrop,
             preparation = preparation,
             enhancement = enhancementState, enhancementPolicy = enhancementPolicy,
+            enhancementSettings = enhancementCenter.settings, enhancementContent = enhancementContent,
+            currentPage = pageIndex.takeIf { pages.isNotEmpty() && !loading && error == null },
             onOpenEnhancement = { showEnhancement = true; controlsVisible = true },
             chapterLoading = loading, chapterUnavailable = error != null,
             imageVisible = imageVisible, localChapter = localImport,

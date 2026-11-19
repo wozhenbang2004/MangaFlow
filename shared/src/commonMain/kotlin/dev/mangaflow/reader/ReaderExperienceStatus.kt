@@ -52,8 +52,12 @@ import dev.mangaflow.experience.ExperienceUsage
 import dev.mangaflow.experience.ReaderStatusPlacement
 import dev.mangaflow.experience.SourceRecoveryMode
 import dev.mangaflow.enhancement.EnhancementPolicy
+import dev.mangaflow.enhancement.EnhancementContent
+import dev.mangaflow.enhancement.EnhancementSettingsStore
 import dev.mangaflow.enhancement.QualityTier
 import dev.mangaflow.enhancement.ReaderEnhancementState
+import dev.mangaflow.enhancement.ui.EnhancementReadouts
+import dev.mangaflow.enhancement.ui.enhancementResourceReadouts
 import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.ui.BodySourceMark
 import dev.mangaflow.ui.CompactGlassPopover
@@ -110,6 +114,9 @@ internal fun ReaderExperienceStatus(
     onUndoSourceSwitch: (() -> Unit)? = null,
     enhancement: ReaderEnhancementState = ReaderEnhancementState(),
     enhancementPolicy: EnhancementPolicy = EnhancementPolicy(),
+    enhancementSettings: EnhancementSettingsStore,
+    enhancementContent: EnhancementContent,
+    currentPage: Int?,
     onOpenEnhancement: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
@@ -123,6 +130,10 @@ internal fun ReaderExperienceStatus(
     val window = LocalMangaWindow.current
     val placement = custom.readerStatusPlacement
     val shown = visible && placement != ReaderStatusPlacement.HIDDEN
+    val displayPreferences by enhancementSettings.visibleMetrics.collectAsStateWithLifecycle()
+    val visibleMetrics = displayPreferences.getValue(enhancementContent)
+    val enhancementReadings = readerEnhancementReadouts(visibleMetrics, enhancement, enhancementPolicy, currentPage) +
+        enhancementResourceReadouts(visibleMetrics, store, shown)
     var selected by remember(sessionKey) { mutableStateOf<ReaderStatusSection?>(null) }
     var retainedSection by remember(sessionKey) { mutableStateOf(ReaderStatusSection.PREPARATION) }
     val sectionHeader = remember(sessionKey) { BringIntoViewRequester() }
@@ -321,6 +332,12 @@ internal fun ReaderExperienceStatus(
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
+                    }
+                    if (enhancementReadings.isNotEmpty()) LiquidGlassSurface(backdrop,
+                        Modifier.fillMaxWidth(), cornerRadius = 12.dp, role = GlassSurfaceRole.READING_DOCK,
+                        elevation = 0.dp, softCard = false, trackPointer = false) {
+                        EnhancementReadouts(enhancementReadings, quiet = true,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp))
                     }
                     val dockSlot = if (selected == ReaderStatusSection.CACHE) ReaderStatusSlot.MEMORY else selectedSlot
                     val dockRetained = if (retainedSlot == ReaderStatusSlot.DISK) ReaderStatusSlot.MEMORY else retainedSlot

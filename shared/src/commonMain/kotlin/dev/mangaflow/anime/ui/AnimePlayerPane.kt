@@ -458,9 +458,13 @@ internal fun AnimePlayerPane(
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 AnimePlaybackStatus(playback.takeIf { target == null && it.assetKey != null &&
                                     it.episodeId == state.selectedEpisodeId }, quiet = !showChrome,
+                                    observing = active && !obscured && !settingsPresent, modifier = Modifier.weight(1f))
+                                if (showChrome) MotionIconButton(onClick = { showEnhancement(EnhancementPage.DISPLAY) },
+                                    modifier = Modifier.size(44.dp),
                                     enabled = active && !locked && !obscured && !settingsPresent,
-                                    onEnhancement = ::showEnhancement,
-                                    onBuffer = { showSettings(AnimePlayerPanel.BUFFER) }, modifier = Modifier.weight(1f))
+                                    tooltip = "选择观看读数") {
+                                    Icon(Icons.Outlined.Tune, "选择观看读数", Modifier.size(18.dp))
+                                }
                                 if (!fullscreen) MotionIconButton(onClick = ::toggleFullscreen,
                                     modifier = Modifier.size(44.dp),
                                     enabled = active && !locked && !obscured && !settingsPresent,

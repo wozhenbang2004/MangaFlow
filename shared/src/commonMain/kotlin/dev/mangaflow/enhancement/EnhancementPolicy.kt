@@ -79,6 +79,10 @@ class EnhancementSettingsStore(context: PlatformContext) {
     val state: StateFlow<Map<EnhancementContent, EnhancementPolicy>> = mutableState.asStateFlow()
     private val mutableSessions = MutableStateFlow<Map<String, EnhancementSessionPolicy>>(emptyMap())
     val sessions: StateFlow<Map<String, EnhancementSessionPolicy>> = mutableSessions.asStateFlow()
+    private val mutableVisibleMetrics = MutableStateFlow(EnhancementContent.entries.associateWith { content ->
+        decodeVisibleMetrics(content, disk.getString(displayKey(content)))
+    })
+    val visibleMetrics: StateFlow<Map<EnhancementContent, Set<EnhancementMetric>>> = mutableVisibleMetrics.asStateFlow()
 
     fun isConfigured(content: EnhancementContent): Boolean = disk.contains(content.directory)
 
@@ -100,6 +104,39 @@ class EnhancementSettingsStore(context: PlatformContext) {
             true
         }
     }
+
+    /** A display edit must not restart processing, end a trial or change offline asset identity. */
+    suspend fun updateVisibleMetrics(content: EnhancementContent, metrics: Set<EnhancementMetric>): Boolean =
+        withContext(Dispatchers.IO) {
+            require(metrics.all { it.supports(content) }) { "显示项不适用于当前内容" }
+            val selected = metrics.toSet()
+            writer.withLock {
+                val key = displayKey(content)
+                val before = disk.getString(key)
+                val value = JSONObject().put("version", 1).put("metrics", JSONArray().apply {
+                    selected.sortedBy { it.ordinal }.forEach { put(it.name) }
+                }).toString()
+                if (!runCatching { disk.edit().putString(key, value).commit() }.getOrDefault(false)) {
+                    runCatching { disk.edit().apply { if (before == null) remove(key) else putString(key, before) }.commit() }
+                    return@withLock false
+                }
+                mutableVisibleMetrics.value = mutableVisibleMetrics.value + (content to selected)
+                true
+            }
+        }
+
+    private fun displayKey(content: EnhancementContent): String = "overlay_${content.directory}"
+
+    private fun decodeVisibleMetrics(content: EnhancementContent, raw: String?): Set<EnhancementMetric> = runCatching {
+        if (raw == null) return@runCatching EnhancementMetric.defaults(content)
+        val value = JSONObject(raw)
+        require(value.optInt("version") == 1)
+        val metrics = requireNotNull(value.optJSONArray("metrics"))
+        // An explicit empty array means hide all. Unknown future names do not invalidate known choices.
+        (0 until metrics.length()).mapNotNull { index -> EnhancementMetric.entries.firstOrNull {
+            it.name == metrics.optString(index) && it.supports(content)
+        } }.toSet()
+    }.getOrElse { EnhancementMetric.defaults(content) }
 
     fun setSessionOverride(sessionKey: String, content: EnhancementContent, policy: EnhancementPolicy?) {
         require(sessionKey.isNotBlank())

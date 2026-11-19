@@ -97,6 +97,7 @@ data class EngineProgress(
     val processingFps: Double? = null,
     val detail: String? = null,
     val bytes: Long? = null,
+    val failed: Boolean = false,
 )
 
 data class EngineImageRequest(

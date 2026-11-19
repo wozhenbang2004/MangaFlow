@@ -60,14 +60,15 @@ class EnhancementCenter private constructor(context: PlatformContext) {
                                 .coerceAtLeast(0L), runtime.totalBytes.takeIf { it > 0L },
                             detail = "ONNX 运行库正在后台下载", bytes = runtime.bytes)
                         runtime.installed -> null
-                        runtime.error != null -> EngineProgress(EngineStage.INSTALL, detail = runtime.error)
+                        runtime.error != null -> EngineProgress(EngineStage.INSTALL, detail = runtime.error, failed = true)
                         else -> null
                     }
                     mutableEngineProgress.update { current ->
                         if (status == null) current - EnhancementEngineIds.ANDROID_ONNX -
-                            EnhancementEngineIds.ANDROID_VIDEO_ONNX
+                            EnhancementEngineIds.ANDROID_VIDEO_ONNX - EnhancementEngineIds.ANDROID_RIFE
                         else current + (EnhancementEngineIds.ANDROID_ONNX to status) +
-                            (EnhancementEngineIds.ANDROID_VIDEO_ONNX to status)
+                            (EnhancementEngineIds.ANDROID_VIDEO_ONNX to status) +
+                            (EnhancementEngineIds.ANDROID_RIFE to status)
                     }
                 }
             }
@@ -82,28 +83,39 @@ class EnhancementCenter private constructor(context: PlatformContext) {
             }
             catch (cancel: CancellationException) { throw cancel }
             catch (error: Exception) { mutableEngineProgress.update { it + ("inventory" to
-                EngineProgress(EngineStage.VERIFY, detail = error.message ?: "无法读取增强引擎")) } }
+                EngineProgress(EngineStage.VERIFY, detail = error.message ?: "无法读取增强引擎", failed = true)) } }
         }
     }
 
     fun installEngine(id: String): Job = synchronized(installLock) {
         installations[id]?.takeIf { it.isActive } ?: scope.launch(start = CoroutineStart.LAZY) {
+            mutableEngineProgress.update { it + (id to EngineProgress(EngineStage.INSTALL)) }
             try {
                 engine.install(id) { progress -> mutableEngineProgress.update { it + (id to progress) } }
                 val inventory = inventoryWriter.withLock {
                     engine.inspect().also { mutableInventory.value = it }
                 }
                 val readiness = inventory.engines.firstOrNull { it.id == id }?.readiness
-                mutableEngineProgress.update { current -> current + (id to
-                    if (readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.NEEDS_MODELS,
-                            EngineReadiness.READY_FOR_TRIAL))
-                        EngineProgress(EngineStage.COMPLETE,
+                mutableEngineProgress.update { current ->
+                    val backgroundOnnx = id in setOf(EnhancementEngineIds.ANDROID_ONNX,
+                        EnhancementEngineIds.ANDROID_VIDEO_ONNX, EnhancementEngineIds.ANDROID_RIFE)
+                    val runtime = if (backgroundOnnx) PanelRuntimeStore.get(app).states.value[PanelRuntimeId.ONNX] else null
+                    val installed = if (backgroundOnnx) runtime?.installed == true else readiness in setOf(
+                        EngineReadiness.BUILT_IN, EngineReadiness.NEEDS_MODELS, EngineReadiness.READY_FOR_TRIAL)
+                    val status = when {
+                        installed -> EngineProgress(EngineStage.COMPLETE,
                             detail = "运行库已准备；仍须选择模型并通过设备试用。")
-                    else EngineProgress(EngineStage.DOWNLOAD,
-                        detail = "已加入后台下载，安装与校验尚未完成。")) }
+                        runtime?.downloading == true -> EngineProgress(EngineStage.DOWNLOAD,
+                            (runtime.progress?.let { (it * runtime.totalBytes).toLong() } ?: runtime.bytes).coerceAtLeast(0L),
+                            runtime.totalBytes.takeIf { it > 0L }, detail = "正在后台下载 ONNX 运行库", bytes = runtime.bytes)
+                        else -> EngineProgress(EngineStage.INSTALL,
+                            detail = runtime?.error ?: "安装未完成，请重试或重新检查组件。", failed = true)
+                    }
+                    current + (id to status)
+                }
             } catch (cancel: CancellationException) { throw cancel }
             catch (error: Exception) { mutableEngineProgress.update { it + (id to
-                EngineProgress(EngineStage.INSTALL, detail = error.message ?: "安装未完成，请重试")) } }
+                EngineProgress(EngineStage.INSTALL, detail = error.message ?: "安装未完成，请重试", failed = true)) } }
         }.also { installations[id] = it; it.start() }
     }
 
@@ -118,6 +130,7 @@ class EnhancementCenter private constructor(context: PlatformContext) {
     fun downloadModel(offer: EnhancementModelOffer): Deferred<EngineModel> = synchronized(installLock) {
         modelDownloads[offer.id]?.takeIf { it.isActive } ?: scope.async(start = CoroutineStart.LAZY) {
             val key = "model:${offer.id}"
+            mutableEngineProgress.update { it + (key to EngineProgress(EngineStage.DOWNLOAD)) }
             try {
                 val model = engine.downloadModel(offer) { value ->
                     mutableEngineProgress.update { it + (key to value) }
@@ -129,7 +142,7 @@ class EnhancementCenter private constructor(context: PlatformContext) {
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 mutableEngineProgress.update { it + (key to EngineProgress(EngineStage.INSTALL,
-                    detail = failure.message ?: "模型下载未完成")) }
+                    detail = failure.message ?: "模型下载未完成", failed = true)) }
                 throw failure
             }
         }.also { modelDownloads[offer.id] = it; it.start() }
@@ -152,6 +165,17 @@ class EnhancementCenter private constructor(context: PlatformContext) {
                     else settings.setSessionOverrideIfCurrent(sessionKey, content, policy, checkNotNull(sessionToken))
                 receipt.complete(saved)
             } catch (error: Exception) { receipt.completeExceptionally(error) }
+        }.getOrThrow()
+        return receipt
+    }
+
+    /** Display choices share persistence ordering without changing processing or ending trials. */
+    fun saveVisibleMetrics(content: EnhancementContent, metrics: Set<EnhancementMetric>): Deferred<Boolean> {
+        val selection = metrics.toSet()
+        val receipt = CompletableDeferred<Boolean>()
+        writes.trySend {
+            try { receipt.complete(settings.updateVisibleMetrics(content, selection)) }
+            catch (error: Exception) { receipt.completeExceptionally(error) }
         }.getOrThrow()
         return receipt
     }

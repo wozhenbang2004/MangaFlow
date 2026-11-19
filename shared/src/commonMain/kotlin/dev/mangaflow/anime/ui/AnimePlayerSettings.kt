@@ -30,6 +30,7 @@ import dev.mangaflow.anime.player.*
 import dev.mangaflow.enhancement.EnhancementContent
 import dev.mangaflow.enhancement.animeEnhancementSessionKey
 import dev.mangaflow.enhancement.ui.EnhancementPage
+import dev.mangaflow.enhancement.ui.EnhancementNavigation
 import dev.mangaflow.enhancement.ui.EnhancementPanelHost
 import dev.mangaflow.enhancement.ui.EnhancementSettingsContent
 import dev.mangaflow.platform.wallTimeMillis
@@ -58,8 +59,8 @@ internal fun AnimePlayerSettings(
     initialEnhancementPage: EnhancementPage = EnhancementPage.QUALITY,
 ) {
     var section by remember { mutableStateOf(initialSection) }
-    var enhancementPage by remember { mutableStateOf(initialEnhancementPage) }
-    var detailParent by remember { mutableStateOf(initialEnhancementPage) }
+    val enhancementNavigation = remember { EnhancementNavigation(initialEnhancementPage) }
+    val enhancementPage = enhancementNavigation.page
     val enhancementTabs = listOf(EnhancementPage.QUALITY, EnhancementPage.FRAME,
         EnhancementPage.PREPARATION, EnhancementPage.STATUS)
     var speedDraft by remember { mutableStateOf("") }
@@ -78,7 +79,7 @@ internal fun AnimePlayerSettings(
     LaunchedEffect(visible, initialSection, initialEnhancementPage) {
         if (visible) {
             section = initialSection; error = null; pendingDownload = null; pendingSourceEpisode = null
-            enhancementPage = initialEnhancementPage; detailParent = initialEnhancementPage
+            enhancementNavigation.reset(initialEnhancementPage)
             speedDraft = playback.speed.toString(); holdDraft = state.settings.longPressSpeed.toString()
             openingDraft = state.settings.skipOpeningSeconds.toString(); endingDraft = state.settings.skipEndingSeconds.toString()
             minimumDraft = bufferSeconds(state.settings.bufferMinMs); maximumDraft = bufferSeconds(state.settings.bufferMaxMs)
@@ -103,15 +104,16 @@ internal fun AnimePlayerSettings(
     val sectionScroll = remember(scrollKey) { sectionScrolls.getOrPut(scrollKey) { LazyListState() } }
     fun show(next: AnimePlayerPanel) {
         if (next == AnimePlayerPanel.VIDEO && section == AnimePlayerPanel.GENERAL)
-            enhancementPage = EnhancementPage.QUALITY
+            enhancementNavigation.reset()
         section = next; error = null
     }
     fun navigateEnhancement(next: EnhancementPage) {
-        if (next !in enhancementTabs && enhancementPage in enhancementTabs)
-            detailParent = enhancementPage
-        enhancementPage = next; error = null
+        if (next in setOf(EnhancementPage.MODEL_DETAIL, EnhancementPage.ENGINE_DETAIL, EnhancementPage.IMPORT))
+            sectionScrolls["video:${next.name}"] = LazyListState()
+        enhancementNavigation.open(next)
+        error = null
     }
-    val enhancementParent = if (enhancementPage in enhancementTabs) null else detailParent
+    val enhancementParent = enhancementNavigation.parent
     val backLabel = when {
         section == AnimePlayerPanel.VIDEO_SOURCE -> "返回画质"
         section == AnimePlayerPanel.VIDEO && enhancementParent != null -> "返回${enhancementParent.title}"
@@ -122,9 +124,9 @@ internal fun AnimePlayerSettings(
     fun back() {
         when {
             section == AnimePlayerPanel.VIDEO_SOURCE -> {
-                enhancementPage = EnhancementPage.QUALITY; show(AnimePlayerPanel.VIDEO)
+                enhancementNavigation.reset(); show(AnimePlayerPanel.VIDEO)
             }
-            section == AnimePlayerPanel.VIDEO && enhancementParent != null -> navigateEnhancement(enhancementParent)
+            section == AnimePlayerPanel.VIDEO && enhancementParent != null -> { enhancementNavigation.back(); error = null }
             section in setOf(AnimePlayerPanel.DANMAKU_SEARCH, AnimePlayerPanel.DANMAKU_DISPLAY,
                 AnimePlayerPanel.DANMAKU_ACCESS) -> show(AnimePlayerPanel.DANMAKU)
             else -> show(AnimePlayerPanel.GENERAL)
