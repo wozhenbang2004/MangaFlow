@@ -9,6 +9,7 @@ import shutil
 import sys
 import time
 import zlib
+from http.client import HTTPException
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -16,6 +17,12 @@ from urllib.request import Request, urlopen
 
 REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "wozhenbang2004/MangaFlow")
 API = f"https://api.github.com/repos/{REPOSITORY}"
+
+
+class ReleaseHttpError(RuntimeError):
+    def __init__(self, code: int):
+        super().__init__(f"GitHub release operation failed (HTTP {code})")
+        self.code = code
 
 
 def request_json(url: str, *, data: bytes | None = None, content_type: str = "application/json", missing: bool = False):
@@ -27,13 +34,25 @@ def request_json(url: str, *, data: bytes | None = None, content_type: str = "ap
         "Content-Type": content_type,
         "User-Agent": "MangaFlow-release",
     })
-    try:
-        with urlopen(request, timeout=45) as response:
-            return json.load(response)
-    except HTTPError as error:
-        if missing and error.code == 404:
-            return None
-        raise RuntimeError(f"GitHub release operation failed (HTTP {error.code})") from None
+    # Reading can be retried safely. Uploads must be reconciled by asset name
+    # before retrying because GitHub may have accepted their bytes already.
+    attempts = 4 if data is None else 1
+    for attempt in range(attempts):
+        try:
+            with urlopen(request, timeout=45) as response:
+                return json.load(response)
+        except HTTPError as error:
+            if missing and error.code == 404:
+                return None
+            if data is None and error.code in {408, 429, 500, 502, 503, 504} and attempt < attempts - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise ReleaseHttpError(error.code) from None
+        except (OSError, HTTPException):
+            if data is None and attempt < attempts - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
 
 
 def plan() -> None:
@@ -170,6 +189,53 @@ def release_handoff_blocker(sha: str, number: str) -> str | None:
     return None
 
 
+def all_release_assets(release_id: int) -> dict[str, dict]:
+    """The release's embedded assets may be truncated; paginate for safe reruns."""
+    assets: dict[str, dict] = {}
+    for page in range(1, 16):
+        batch = request_json(f"{API}/releases/{release_id}/assets?per_page=100&page={page}")
+        assets.update((asset["name"], asset) for asset in batch)
+        if len(batch) < 100:
+            return assets
+    raise RuntimeError("Release asset list exceeds the supported pagination limit")
+
+
+def verify_native_asset(asset: dict, path: Path, digest: str) -> None:
+    if asset["size"] != path.stat().st_size or asset.get("digest") != digest:
+        raise RuntimeError(f"An immutable native asset exists without a matching size and SHA-256: {path.name}")
+
+
+def upload_native_asset(release_id: int, path: Path, digest: str) -> dict:
+    content = path.read_bytes()
+    url = (f"https://uploads.github.com/repos/{REPOSITORY}/releases/{release_id}/assets"
+           f"?name={quote(path.name)}")
+    content_type = "application/json" if path.suffix == ".json" else "application/octet-stream"
+    for attempt in range(5):
+        try:
+            uploaded = request_json(url, data=content, content_type=content_type)
+        except (ReleaseHttpError, OSError, HTTPException) as failure:
+            # A dropped connection may happen *after* GitHub stores an asset.
+            # Never blindly resend bytes and fail on a duplicate filename.
+            if isinstance(failure, ReleaseHttpError) and failure.code not in {
+                408, 409, 422, 429, 500, 502, 503, 504
+            }:
+                raise
+            existing = all_release_assets(release_id).get(path.name)
+            if existing is not None:
+                verify_native_asset(existing, path, digest)
+                print(f"Recovered confirmed native asset after interrupted upload: {path.name}")
+                return existing
+            if isinstance(failure, ReleaseHttpError) and failure.code in {409, 422}:
+                raise
+            if attempt == 4:
+                raise RuntimeError(f"Unable to publish {path.name} after five attempts") from failure
+            time.sleep(3 * (2 ** attempt))
+            continue
+        verify_native_asset(uploaded, path, digest)
+        return uploaded
+    raise AssertionError("Upload retry loop exhausted")
+
+
 def publish() -> None:
     tag = os.environ["MANGA_TAG"]
     sha = os.environ["GITHUB_SHA"]
@@ -201,7 +267,7 @@ def publish() -> None:
                    key=lambda path: (path.suffix == ".json", path.name))
     if not any(path.suffix in {".exe", ".msi"} for path in files):
         raise RuntimeError("No Windows installers were downloaded from this workflow")
-    existing = {asset["name"]: asset for asset in release["assets"]}
+    existing = all_release_assets(release["id"])
     for path in files:
         if path.suffix == ".bin":
             if path.name != f"MangaFlow-file-{file_sha(path)}.bin":
@@ -210,17 +276,11 @@ def publish() -> None:
             raise RuntimeError("Native asset name does not match this release version")
         digest = "sha256:" + file_sha(path)
         if path.name in existing:
-            asset = existing[path.name]
-            if asset["size"] != path.stat().st_size or (asset.get("digest") and asset["digest"] != digest):
-                raise RuntimeError("An immutable native asset already exists with different bytes")
+            verify_native_asset(existing[path.name], path, digest)
             print(f"Preserved immutable existing asset: {path.name}")
             continue
-        upload_url = f"https://uploads.github.com/repos/{REPOSITORY}/releases/{release['id']}/assets?name={quote(path.name)}"
-        content = path.read_bytes()
-        uploaded = request_json(upload_url, data=content,
-                                content_type="application/json" if path.suffix == ".json" else "application/octet-stream")
-        if uploaded.get("size") != len(content) or uploaded.get("digest") != digest:
-            raise RuntimeError("Uploaded native asset size or SHA-256 does not match the staged file")
+        uploaded = upload_native_asset(release["id"], path, digest)
+        existing[path.name] = uploaded
         print(f"Published {uploaded['browser_download_url']}")
 
 
