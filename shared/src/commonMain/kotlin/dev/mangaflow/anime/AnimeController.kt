@@ -153,10 +153,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private data class PlaybackHistoryKey(val subjectId: String, val episodeId: String,
         val candidate: String, val route: DownloadRouteSnapshot)
     private data class PlaybackFailureReceipt(val failure: AnimePlaybackFailure, val observedAt: Long)
+    private data class PlaybackMeasurementReceipt(val option: AnimeEpisodeOption, val measurements: AnimePlaybackMeasurements)
     private class PlaybackResolutionException(val failure: AnimePlaybackFailure, cause: Exception) :
         IllegalStateException(failure.description, cause)
     private val playbackFailures = mutableMapOf<PlaybackHistoryKey, PlaybackFailureReceipt>()
-    private val playbackMeasurements = mutableMapOf<PlaybackHistoryKey, AnimePlaybackMeasurements>()
+    private val playbackMeasurements = mutableMapOf<PlaybackHistoryKey, PlaybackMeasurementReceipt>()
     private var sourceMeasurementsJob: Job? = null
     private var sourceMeasurementsGeneration = 0L
     private val playbackAttemptOrder = mutableMapOf<PlaybackHistoryKey, Long>()
@@ -1459,10 +1460,36 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     internal fun playbackMeasurements(episodeId: String, option: AnimeEpisodeOption): AnimePlaybackMeasurements? =
         mutableState.value.detail?.subject?.id?.let { playbackHistoryKey(it, episodeId, option) }
-            ?.let(::currentPlaybackMeasurements)
+            ?.let { currentPlaybackMeasurements(it, option) }
 
-    private fun currentPlaybackMeasurements(key: PlaybackHistoryKey): AnimePlaybackMeasurements? {
-        val data = playbackMeasurements[key] ?: return null
+    /** A recent confirmed line for each source on this work. All fields come from that line. */
+    internal fun workPlaybackMeasurements(snapshot: AnimeScreenState = state.value): Map<String, AnimeWorkPlaybackMeasurements> {
+        val detail = snapshot.detail ?: return emptyMap()
+        if (detail.subject.id != mutableState.value.detail?.subject?.id || playbackMeasurements.isEmpty()) return emptyMap()
+        val episodes = detail.episodes.associateBy { it.id }
+        val confirmedByEpisode = mutableMapOf<String, List<AnimeEpisodeOption>>()
+        val samples = mutableMapOf<String, AnimeWorkPlaybackMeasurements>()
+        val order = compareBy<AnimePlaybackMeasurements> { it.playbackObservedAt ?: 0L }.thenBy { it.updatedAt }
+        for ((key, receipt) in playbackMeasurements) {
+            if (key.subjectId != detail.subject.id) continue
+            val episode = episodes[key.episodeId] ?: continue
+            val measurements = currentPlaybackMeasurements(key) ?: continue
+            val sourceId = receipt.option.sourceId
+            val selected = samples[sourceId]
+            if (selected != null && order.compare(measurements, selected.measurements) <= 0) continue
+            val option = confirmedByEpisode.getOrPut(episode.id) { confirmedPlaybackLines(episode.id, snapshot) }
+                .singleOrNull { samePlaybackLine(it, receipt.option) } ?: continue
+            if (playbackHistoryKey(detail.subject.id, episode.id, option) != key) continue
+            samples[sourceId] = AnimeWorkPlaybackMeasurements(episode, option, measurements)
+        }
+        return samples
+    }
+
+    private fun currentPlaybackMeasurements(key: PlaybackHistoryKey,
+        option: AnimeEpisodeOption? = null): AnimePlaybackMeasurements? {
+        val receipt = playbackMeasurements[key] ?: return null
+        if (option != null && !samePlaybackLine(receipt.option, option)) return null
+        val data = receipt.measurements
         val now = wallTimeMillis()
         val played = data.playbackObservedAt?.takeIf { now - it in 0L until 30 * 60_000L }
         val resolved = data.addressObservedAt?.takeIf { now - it in 0L until 5 * 60_000L }
@@ -1475,12 +1502,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             playbackObservedAt = played, addressObservedAt = resolved)
     }
 
-    private fun storePlaybackMeasurements(key: PlaybackHistoryKey,
+    private fun storePlaybackMeasurements(key: PlaybackHistoryKey, option: AnimeEpisodeOption,
         update: (AnimePlaybackMeasurements) -> AnimePlaybackMeasurements) {
         val now = wallTimeMillis()
-        val measurements = update(currentPlaybackMeasurements(key) ?: AnimePlaybackMeasurements(updatedAt = now))
+        val previous = currentPlaybackMeasurements(key, option)
+        val measurements = update(previous ?: AnimePlaybackMeasurements(updatedAt = now))
         playbackMeasurements.remove(key)
-        playbackMeasurements[key] = measurements.copy(updatedAt = now)
+        playbackMeasurements[key] = PlaybackMeasurementReceipt(option, measurements.copy(updatedAt = now))
         while (playbackMeasurements.size > 256) playbackMeasurements.remove(playbackMeasurements.keys.first())
         mutableState.update { it.copy(playbackMeasurementsRevision = it.playbackMeasurementsRevision + 1) }
     }
@@ -1530,7 +1558,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                     asset.sourceRevision != revision || asset.route != key.route || asset.expiresAt?.let { it <= wallTimeMillis() } == true))
                                 return@withPermit
                             val elapsed = (monotonicTimeMillis() - startedAt).coerceAtLeast(0L)
-                            storePlaybackMeasurements(key) { it.copy(addressMs = elapsed.takeIf { asset != null },
+                            storePlaybackMeasurements(key, line) { it.copy(addressMs = elapsed.takeIf { asset != null },
                                 declaredQuality = asset?.let(::declaredPlaybackQuality), addressObservedAt = wallTimeMillis()) }
                         }
                     } }
@@ -1610,7 +1638,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val width = snapshot.videoWidth?.takeIf { snapshot.firstFrameRendered == true }
         val height = snapshot.videoHeight?.takeIf { snapshot.firstFrameRendered == true }
         val firstFrame = mutableState.value.playbackFirstFrameMs.takeIf { snapshot.firstFrameRendered == true }
-        storePlaybackMeasurements(key) { it.copy(width = width, height = height, firstFrameMs = firstFrame,
+        storePlaybackMeasurements(key, owner.option) { it.copy(width = width, height = height, firstFrameMs = firstFrame,
             measuredBytesPerSecond = owner.measuredDownloadSpeed, playbackObservedAt = wallTimeMillis()) }
     }
 
@@ -1638,7 +1666,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         fun cooling(option: AnimeEpisodeOption) = playbackHistoryKey(subjectId, episodeId, option)
             ?.let(::currentPlaybackFailure) != null
         val samples = options.associateWith { option ->
-            playbackHistoryKey(subjectId, episodeId, option)?.let(::currentPlaybackMeasurements)
+            playbackHistoryKey(subjectId, episodeId, option)?.let { currentPlaybackMeasurements(it, option) }
         }
         val order = compareByDescending<AnimeEpisodeOption> { it.sourceId == explicit }.thenBy { option ->
             val sample = samples[option]
@@ -1844,7 +1872,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         }
                         if (preparedAsset == null) {
                             val elapsed = (monotonicTimeMillis() - addressStarted).coerceAtLeast(0L)
-                            storePlaybackMeasurements(historyKey) { it.copy(addressMs = elapsed,
+                            storePlaybackMeasurements(historyKey, confirmed) { it.copy(addressMs = elapsed,
                                 declaredQuality = declaredPlaybackQuality(resolved), addressObservedAt = wallTimeMillis()) }
                         }
                         return ResolvedPlaybackOption(confirmed, asset, revision)

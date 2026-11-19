@@ -232,6 +232,12 @@ internal data class AnimePlaybackMeasurements(
     val addressObservedAt: Long? = null,
 )
 
+internal data class AnimeWorkPlaybackMeasurements(
+    val episode: AnimeEpisode,
+    val option: AnimeEpisodeOption,
+    val measurements: AnimePlaybackMeasurements,
+)
+
 enum class AnimeBrowseMode { POPULAR, NEWEST, CALENDAR }
 
 data class AnimePlaybackSettings(
