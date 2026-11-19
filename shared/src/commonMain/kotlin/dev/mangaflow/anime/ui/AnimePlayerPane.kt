@@ -202,6 +202,7 @@ internal fun AnimePlayerPane(
             controlsVisible = false
         }
     }
+    AnimePlayerOrientation(fullscreen, active = active && !playback.inPictureInPicture)
     // This shared window policy restores the previous flags on UI disposal without stopping playback.
     if (active) ReaderWindow(
         keepScreenOn = state.resolving || playback.playWhenReady &&
@@ -415,10 +416,9 @@ internal fun AnimePlayerPane(
                         tooltip = "播放设置") {
                         Icon(Icons.Outlined.Settings, "播放设置", Modifier.size(20.dp))
                     }
-                    if (canControl || fullscreen) MotionIconButton(onClick = ::toggleFullscreen, modifier = Modifier.size(44.dp),
-                        tooltip = if (fullscreen) "退出全屏 · F" else "全屏 · F") {
-                        Icon(if (fullscreen) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen,
-                            if (fullscreen) "退出全屏" else "全屏", Modifier.size(21.dp))
+                    if (fullscreen) MotionIconButton(onClick = ::toggleFullscreen, modifier = Modifier.size(44.dp),
+                        tooltip = "退出全屏 · F") {
+                        Icon(Icons.Outlined.FullscreenExit, "退出全屏", Modifier.size(21.dp))
                     }
                 }
             }
@@ -455,11 +455,19 @@ internal fun AnimePlayerPane(
                                     centralTransport = centralTransport,
                                     modifier = Modifier.fillMaxWidth().motionInputGate(active && showChrome && !obscured && !settingsPresent))
                             }
-                            AnimePlaybackStatus(playback.takeIf { target == null && it.assetKey != null &&
-                                it.episodeId == state.selectedEpisodeId }, quiet = !showChrome,
-                                enabled = active && !locked && !obscured && !settingsPresent,
-                                onEnhancement = ::showEnhancement,
-                                onBuffer = { showSettings(AnimePlayerPanel.BUFFER) }, modifier = Modifier.fillMaxWidth())
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                AnimePlaybackStatus(playback.takeIf { target == null && it.assetKey != null &&
+                                    it.episodeId == state.selectedEpisodeId }, quiet = !showChrome,
+                                    enabled = active && !locked && !obscured && !settingsPresent,
+                                    onEnhancement = ::showEnhancement,
+                                    onBuffer = { showSettings(AnimePlayerPanel.BUFFER) }, modifier = Modifier.weight(1f))
+                                if (!fullscreen) MotionIconButton(onClick = ::toggleFullscreen,
+                                    modifier = Modifier.size(44.dp),
+                                    enabled = active && !locked && !obscured && !settingsPresent,
+                                    tooltip = "全屏播放 · F") {
+                                    Icon(Icons.Outlined.Fullscreen, "全屏播放", Modifier.size(23.dp))
+                                }
+                            }
                         }
                       }
                     }
