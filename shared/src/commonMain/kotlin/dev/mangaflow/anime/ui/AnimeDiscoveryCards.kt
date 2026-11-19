@@ -26,6 +26,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.anime.*
+import dev.mangaflow.anime.sources.ANILIST_PROVIDER
+import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.MangaLayout
@@ -38,6 +40,8 @@ internal class AnimeDiscoveryScrolls(homeSourceState: MutableState<String?>) {
     val queries = mutableMapOf<String, AnimeDiscoveryQuery>()
     var featuredKey: String? = null
     var homeSourceId by homeSourceState
+    var expandedUpdates by mutableStateOf(false)
+    var placedHomeFeature = false
     var expandedHomeSections by mutableStateOf(emptySet<String>())
     fun grid(key: String): LazyGridState = grids.getOrPut(key) { LazyGridState() }
 }
@@ -65,6 +69,11 @@ internal fun animeDiscoveryColumns(width: Dp, preferred: Int?): Int {
 internal fun animeDiscoveryProviderLabel(provider: AnimeDiscoveryProvider): String = when (provider) {
     AnimeDiscoveryProvider.BANGUMI -> "Bangumi"
     AnimeDiscoveryProvider.ANILIST -> "AniList"
+}
+
+internal fun animeDiscoverySourceId(provider: AnimeDiscoveryProvider): String = when (provider) {
+    AnimeDiscoveryProvider.BANGUMI -> BANGUMI_PROVIDER
+    AnimeDiscoveryProvider.ANILIST -> ANILIST_PROVIDER
 }
 
 internal fun animeDiscoveryOrderLabel(order: AnimeDiscoveryOrder): String = when (order) {
@@ -113,7 +122,7 @@ internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQ
         ?.let { animeDecimal(it) + if (item.ratingScale == 10) "" else "/${item.ratingScale}" }
     val caption = listOfNotNull(animeDiscoveryMetric(item, query), item.year?.toString(),
         item.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).take(2).joinToString(" · ")
-    AnimeCompactCoverCard(item.key, item.title, item.coverUrl, caption,
+    AnimeCompactCoverCard(item.key, item.title, item.coverUrl, caption, animeDiscoverySourceId(query.provider),
         badge = rating, badgeDescription = rating?.let { "评分 $it，满分 ${item.ratingScale}" },
         description = listOfNotNull(item.title, animeDiscoveryProviderLabel(query.provider),
             rating?.let { "评分 $it，满分 ${item.ratingScale}" }, caption.takeIf(String::isNotBlank)).joinToString("，"),
@@ -122,21 +131,21 @@ internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQ
 
 @Composable
 internal fun AnimeSourceDiscoveryCard(title: AnimeSourceTitle, modifier: Modifier = Modifier,
-    list: Boolean = false, onOpen: () -> Unit) {
+    list: Boolean = false, sourceLabel: String? = null, onOpen: () -> Unit) {
     val metadata = listOfNotNull(title.year?.toString(), title.ratingText.takeIf(String::isNotBlank),
         title.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).take(2).joinToString(" · ")
     val update = title.updateText.takeIf(String::isNotBlank)
-    val caption = if (list) listOfNotNull(update, metadata.takeIf(String::isNotBlank)).joinToString(" · ")
-        else update ?: metadata
-    AnimeCompactCoverCard(title.sourceId + ":" + title.id, title.title, title.coverUrl, caption,
+    val extra = metadata.takeIf { it.isNotBlank() && (list || update == null) }
+    val caption = listOfNotNull(sourceLabel, update, extra).joinToString(" · ")
+    AnimeCompactCoverCard(title.sourceId + ":" + title.id, title.title, title.coverUrl, caption, title.sourceId,
         badge = null, badgeDescription = null,
-        description = listOfNotNull(title.title, update?.let { "来源标注：$it" },
+        description = listOfNotNull(title.title, sourceLabel, update?.let { "来源标注：$it" },
             metadata.takeIf(String::isNotBlank)).joinToString("，"),
         modifier = modifier, list = list, onOpen = onOpen)
 }
 
 @Composable
-private fun AnimeCompactCoverCard(key: String, title: String, cover: String, caption: String,
+private fun AnimeCompactCoverCard(key: String, title: String, cover: String, caption: String, sourceId: String,
     badge: String?, badgeDescription: String?, description: String, modifier: Modifier,
     list: Boolean, onOpen: () -> Unit) {
     val interaction = remember(key) { MutableInteractionSource() }
@@ -147,7 +156,7 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
     if (list) {
         Row(click.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            AnimePoster(cover, Modifier.width(52.dp).height(74.dp))
+            AnimePoster(cover, Modifier.width(52.dp).height(74.dp), sourceId = sourceId)
             Column(Modifier.weight(1f).clearAndSetSemantics { }, verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 2,
                     overflow = TextOverflow.Ellipsis)
@@ -161,7 +170,7 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
     } else {
         Column(click, verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(Modifier.fillMaxWidth().aspectRatio(.7f).clearAndSetSemantics { }) {
-                AnimePoster(cover, Modifier.fillMaxSize())
+                AnimePoster(cover, Modifier.fillMaxSize(), sourceId = sourceId)
                 if (!badge.isNullOrBlank()) Box(Modifier.align(Alignment.TopEnd).padding(5.dp)) {
                     AnimeDiscoveryBadge(badge, badgeDescription)
                 }

@@ -31,7 +31,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
 import dev.mangaflow.anime.*
+import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
+import dev.mangaflow.experience.sourceNetwork
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.ui.TextSourceWordmark
 import dev.mangaflow.ui.mangaCoverCard
 import dev.mangaflow.ui.motion.MotionTextButton
@@ -100,16 +106,24 @@ internal fun animeTime(milliseconds: Long): String {
 
 @Composable
 internal fun AnimePoster(subject: AnimeSubject, modifier: Modifier = Modifier) =
-    AnimePoster(subject.coverUrl, modifier)
+    AnimePoster(subject.coverUrl, modifier, subject.externalIds["native-source"]
+        ?: BANGUMI_PROVIDER.takeIf { "bangumi" in subject.externalIds })
 
 @Composable
-internal fun AnimePoster(url: String, modifier: Modifier = Modifier) {
+internal fun AnimePoster(url: String, modifier: Modifier = Modifier, sourceId: String? = null) {
     Box(modifier.mangaCoverCard(10.dp).background(MaterialTheme.colorScheme.surfaceContainerLow),
         contentAlignment = Alignment.Center) {
         Icon(Icons.Outlined.Tv, null, Modifier.size(24.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .3f))
-        if (url.isNotBlank()) AsyncImage(model = url, contentDescription = null,
-            contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        if (url.isNotBlank()) {
+            val context = LocalMangaContext.current
+            val request = remember(context, url, sourceId) {
+                sourceId?.let { ImageRequest.Builder(imagePlatformContext(context)).data(url)
+                    .sourceNetwork(it, DownloadCategory.ANIME).build() } ?: url
+            }
+            AsyncImage(model = request, contentDescription = null,
+                contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        }
     }
 }
 

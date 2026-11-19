@@ -1,5 +1,19 @@
 # Lanerc feature transfer into MangaFlow
 
+## Anime discovery and playback redesign · 2026-11-19
+
+Lanerc's [resource FAQ](https://app.lanerc.com/newsinfo/1070035.html) describes ingesting, encoding and publishing episodes ahead of playback. Its [release notes](https://app.lanerc.com/newsinfo/1070160.html) describe offline caching and super-resolution separately. A [LINUX DO report](https://linux.do/t/topic/1064787) covers one older client and connection; national routing and present startup timings remain unmeasured. The visual reference uses an artwork-led home with direct paths to updates, rankings and categories. [Animeko](https://github.com/open-ani/animeko/blob/main/docs/contributing/code/media-framework.md) documents independent source results and preference-based playback. [Kazumi](https://github.com/Predidit/Kazumi) demonstrates native source-rule discovery, and [Mihon](https://github.com/mihonapp/mihon) demonstrates useful local history, library and offline behavior.
+
+| Scope | Implementation contract |
+| --- | --- |
+| Workspace | Keep the independent Anime sidebar entry, one anime navigation row and existing cover density controls. Discovery shows real featured content, source updates, the broadcast calendar and season highlights. Categories own independent filters. The source directory is reachable from discovery and the menu, retains source-scoped positions, and exposes actual source categories, filters and pagination. Video cards can open their native catalogue directly. |
+| Catalogue identity | Distinguish a broadcast date, a source upload, a ranking metric, and a verified playable episode. Keep source work, canonical work, season, edition, line and episode identifiers throughout discovery, search, resume and downloads. |
+| Cold return | Use the existing anime cache owner to restore individual source feeds with source/revision/route identity. Refresh independently, retain usable content and allow scoped retry. Defer the native player until entering playback, with position updates observed in the player pane. |
+| Search | Start Bangumi and eligible native sources independently. Bound concurrent requests, publish arrivals progressively, and retry the failed provider and cursor while preserving successful hits. Group suggestions retain exact source references and require the existing association checks. |
+| Detail | Place the poster, title, primary playback action and exact resume progress together. Keep episode-group selection, play state, source selection and search accessible in the episode area. Disclose description and secondary controls on demand. |
+| Playback | Use confirmed episode options and honor explicit choices. Prefer a known stable exact route for automatic playback and preserve the fallback path. Prepare only the actual next episode's short-lived resolved address during stable foreground playback. Keep the existing native player, download owner, format support and 4K enhancement distinction. |
+| Verification | Review source and publish one guarded latest-main batch. CI status, native media availability and domestic telco playback are independent observations. For device evaluation, measure app-entry-to-content and playback-intent-to-first-rendered-frame separately, across cold/warm starts and the user's Wi-Fi/mobile routes. |
+
 Source implementation checkpoint: 2026-11-18. This document distinguishes implemented application paths from the complete requested inventory. It does not certify installed behavior, source availability, rendering performance or successful packaging.
 
 ## Current source integration inventory · 2026-11-18

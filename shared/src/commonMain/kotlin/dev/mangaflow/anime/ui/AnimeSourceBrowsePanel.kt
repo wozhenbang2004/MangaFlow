@@ -8,7 +8,6 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -40,17 +39,14 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
     var categoryMenu by remember { mutableStateOf(false) }
     var filtersVisible by remember { mutableStateOf(false) }
     val category = state.categories.firstOrNull { it.key == state.categoryKey }
+    val defaultSection = if (source?.capabilities?.contains("latest") == true) "更新" else "推荐"
     LaunchedEffect(active, state.sourceId, state.sourceRevision) {
         if (!active) { sourceMenu = false; categoryMenu = false; filtersVisible = false }
     }
     LaunchedEffect(state.sourceId, state.sourceRevision, state.categoryKey) { filtersVisible = false }
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().motionInputGate(active)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            if (state.selectedTitle != null) MotionIconButton(onClick = owner::closeTitle,
-                modifier = Modifier.size(44.dp), tooltip = "返回来源列表") {
-                Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回来源列表", Modifier.size(20.dp))
-            }
             Box(Modifier.weight(1f)) {
                 MotionTextButton(onClick = { sourceMenu = true }, modifier = Modifier.heightIn(min = 44.dp)) {
                     Text(source?.name ?: "选择来源", Modifier.weight(1f, fill = false),
@@ -66,13 +62,13 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
             }
             if (state.selectedTitle == null && state.categories.isNotEmpty()) Box(Modifier.widthIn(max = 120.dp)) {
                 MotionTextButton(onClick = { categoryMenu = true }, modifier = Modifier.heightIn(min = 44.dp)) {
-                    Text(category?.title ?: "推荐", Modifier.weight(1f, fill = false),
+                    Text(category?.title ?: defaultSection, Modifier.weight(1f, fill = false),
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
                 }
                 CompactGlassPopover(categoryMenu, backdrop, onDismiss = { categoryMenu = false }) {
-                    if (source?.capabilities?.contains("homeSections") == true) CompactMenuAction(
-                        if (state.categoryKey == null) Icons.Outlined.Check else Icons.Outlined.Explore, "推荐",
+                    if (source?.capabilities?.any { it == "homeSections" || it == "latest" } == true) CompactMenuAction(
+                        if (state.categoryKey == null) Icons.Outlined.Check else Icons.Outlined.Explore, defaultSection,
                         onClick = { owner.selectCategory(null); categoryMenu = false })
                     state.categories.forEach { item ->
                         CompactMenuAction(if (state.categoryKey == item.key) Icons.Outlined.Check else Icons.Outlined.Category,
@@ -91,6 +87,10 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
                 modifier = Modifier.size(44.dp), tooltip = "刷新当前来源") {
                 Icon(Icons.Outlined.Refresh, "刷新当前来源", Modifier.size(20.dp))
             }
+            if (source != null && state.selectedTitle == null) MotionIconButton(onClick = onManageSources,
+                modifier = Modifier.size(44.dp), tooltip = "管理动漫来源") {
+                Icon(Icons.Outlined.Settings, "管理动漫来源", Modifier.size(20.dp))
+            }
         }
         if (source == null) AnimeMessage("还没有可浏览的来源", action = "管理来源", onAction = onManageSources)
         else MotionTabContent(source to state,
@@ -99,7 +99,10 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
             val title = snapshot.selectedTitle
             if (title != null) AnimeSourcePreview(title, shownSource.name, shownSource.videoSource, snapshot,
                 columns, scrolls, contentBottomPadding, onChooseTitle, onOpen = owner::openTitle, onRetry = owner::retryRelated)
-            else AnimeSourceCatalogue(snapshot, columns, scrolls, contentBottomPadding, onOpen = owner::openTitle,
+            else AnimeSourceCatalogue(snapshot, columns, scrolls, contentBottomPadding, onOpen = { title ->
+                if (shownSource.videoSource && "related" !in shownSource.capabilities) onChooseTitle(title, true)
+                else owner.openTitle(title)
+            },
                 onRetry = owner::retryPage, onMore = owner::loadMore)
         }
     }
@@ -123,9 +126,6 @@ private fun AnimeSourceCatalogue(state: AnimeSourceBrowseState, preferred: Int?,
                 AnimeDiscoveryInlineStatus(state.categoryError, onRetry)
             }
             if (latest || state.categoryKey != null) {
-                if (latest) item(key = "caption", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeQuietLabel("最近更新 · 来源标注", Modifier.padding(vertical = 6.dp))
-                }
                 if (state.error != null) item(key = "error", span = { GridItemSpan(maxLineSpan) }) {
                     AnimeDiscoveryInlineStatus(state.error, onRetry)
                 }
@@ -142,7 +142,7 @@ private fun AnimeSourceCatalogue(state: AnimeSourceBrowseState, preferred: Int?,
                     AnimeDiscoveryInlineStatus(state.moreError, onRetry)
                 }
                 if (state.hasMore) item(key = "more", span = { GridItemSpan(maxLineSpan) }) {
-                    MotionTextButton(onClick = onMore, enabled = !state.loadingMore,
+                    MotionTextButton(onClick = onMore, enabled = !state.loading && !state.loadingMore,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (state.loadingMore) "正在加载" else "加载更多") }
                 }
             } else {
@@ -180,7 +180,7 @@ private fun AnimeSourcePreview(title: AnimeSourceTitle, sourceName: String, vide
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item(key = "subject", span = { GridItemSpan(maxLineSpan) }) {
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    AnimePoster(title.coverUrl, Modifier.width(80.dp).height(114.dp))
+                    AnimePoster(title.coverUrl, Modifier.width(80.dp).height(114.dp), title.sourceId)
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                         Text(title.title, style = MaterialTheme.typography.titleMedium)
                         AnimeQuietLabel(sourceName)
@@ -193,11 +193,10 @@ private fun AnimeSourcePreview(title: AnimeSourceTitle, sourceName: String, vide
             item(key = "open", span = { GridItemSpan(maxLineSpan) }) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     MotionButton(onClick = { onChooseTitle(title, videoSource) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                        Icon(Icons.Outlined.Search, null, Modifier.size(18.dp))
+                        Icon(if (videoSource) Icons.Outlined.PlayArrow else Icons.Outlined.Search, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("选择对应番剧")
+                        Text(if (videoSource) "打开番剧" else "选择对应番剧")
                     }
-                    AnimeQuietLabel(if (videoSource) "核对作品与季度后，再确认来源关联。" else "核对作品与季度后，打开番剧详情。")
                 }
             }
             if (state.related.isNotEmpty() || state.relatedLoading || state.relatedError != null) {

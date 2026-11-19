@@ -37,10 +37,12 @@ private data class AnimeRoute(val key: String, val depth: Int, val detail: Anime
 private data class AnimePlaybackIntent(val episode: AnimeEpisode, val option: AnimeEpisodeOption? = null)
 private data class AnimeSourceAssociation(val title: AnimeSourceTitle, val subjectId: String)
 private enum class AnimeWorkspacePage(val label: String, val discovery: AnimeDiscoveryTab? = null) {
-    HOME("首页", AnimeDiscoveryTab.HOME), LIBRARY("追番"), RANKING("榜单", AnimeDiscoveryTab.RANKING),
-    SEASON("新番", AnimeDiscoveryTab.SEASON), CALENDAR("番表", AnimeDiscoveryTab.CALENDAR),
+    HOME("发现", AnimeDiscoveryTab.HOME), SEASON("新番", AnimeDiscoveryTab.SEASON),
+    CALENDAR("番表", AnimeDiscoveryTab.CALENDAR), RANKING("榜单", AnimeDiscoveryTab.RANKING),
+    GENRES("分类", AnimeDiscoveryTab.GENRES), LIBRARY("追番"),
 }
-private enum class AnimeWorkspaceTool { TRACKING, DOWNLOADS }
+private enum class AnimeWorkspaceTool { TRACKING, DOWNLOADS, DIRECTORY }
+private enum class AnimeWorkspacePane { DISCOVERY, DIRECTORY, LIBRARY }
 
 /** The root owns one controller/player. Pane identity never follows the player's ticking position. */
 @Composable
@@ -58,17 +60,23 @@ internal fun AnimeWorkspace(
     onPlaybackVisibility: (Boolean) -> Unit = {},
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
-    val playback by controller.player.state.collectAsStateWithLifecycle()
+    val playbackPhase by controller.playbackPhase.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    var directoryOpen by rememberSaveable { mutableStateOf(false) }
     val page = if (tab == 1) AnimeWorkspacePage.LIBRARY else
         AnimeWorkspacePage.entries.firstOrNull { it.discovery == state.discoveryTab } ?: AnimeWorkspacePage.HOME
+    val pane = when {
+        directoryOpen -> AnimeWorkspacePane.DIRECTORY
+        tab == 1 -> AnimeWorkspacePane.LIBRARY
+        else -> AnimeWorkspacePane.DISCOVERY
+    }
     val homeSource = rememberSaveable { mutableStateOf<String?>(null) }
     val discoveryScrolls = remember(homeSource) { AnimeDiscoveryScrolls(homeSource) }
     val libraryScroll = rememberLazyListState()
     val libraryViewState = rememberAnimeLibraryViewState()
     val detailState = rememberSaveableStateHolder()
     val detailScrolls = remember { mutableMapOf<String, LazyListState>() }
-    var query by rememberSaveable { mutableStateOf(state.query) }
+    var query by rememberSaveable { mutableStateOf(controller.searchState.value.query) }
     var consumedSearchRequest by remember { mutableIntStateOf(searchRequest) }
     var consumedBackRequest by remember { mutableIntStateOf(backRequest) }
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
@@ -79,9 +87,9 @@ internal fun AnimeWorkspace(
     var layoutPresent by remember { mutableStateOf(false) }
     var pendingTool by remember { mutableStateOf<AnimeWorkspaceTool?>(null) }
     var sourcesVisible by remember { mutableStateOf(false) }
+    var sourceManagerVisible by remember { mutableStateOf(false) }
     var downloadsVisible by remember { mutableStateOf(false) }
     var browseCandidate by remember { mutableStateOf<AnimeSourceTitle?>(null) }
-    var browseCandidateVideo by remember { mutableStateOf(false) }
     var pendingAssociation by remember { mutableStateOf<AnimeSourceAssociation?>(null) }
     var sourceEpisode by remember { mutableStateOf<AnimeEpisode?>(null) }
     var pendingManualPlaybackId by remember { mutableStateOf<String?>(null) }
@@ -98,18 +106,19 @@ internal fun AnimeWorkspace(
     var playbackFailure by remember { mutableStateOf<String?>(null) }
     var awaitingResolve by remember { mutableStateOf(false) }
     var recheckRequest by remember { mutableStateOf<AnimeTrackingReview?>(null) }
-    val playing = playbackIntent != null || state.resolving || playback.phase !in listOf(AnimePlayerPhase.IDLE, AnimePlayerPhase.RELEASED)
+    val playing = playbackIntent != null || state.resolving ||
+        playbackPhase != AnimePlayerPhase.IDLE && playbackPhase != AnimePlayerPhase.RELEASED
     val route = when {
         playing -> AnimeRoute("player", 2, state.detail)
         state.detail != null || state.detailLoading || state.detailError != null ->
             AnimeRoute("detail:" + (state.detail?.subject?.id ?: openingSubject?.id.orEmpty()), 1, state.detail)
         else -> AnimeRoute("home", 0, null)
     }
-    val resumeDockVisible = !playing && route.depth == 0 && !searchPresent && state.resumeEntry?.resume != null
+    val resumeDockVisible = !playing && route.depth == 0 && !directoryOpen && !searchPresent && state.resumeEntry?.resume != null
     val contentBottomPadding = if (resumeDockVisible) 108.dp else 24.dp
-    val overlayVisible = downloadsVisible || sourcesVisible || trackingVisible || reviewsVisible
+    val overlayVisible = downloadsVisible || sourcesVisible || sourceManagerVisible || trackingVisible || reviewsVisible
     val rootActive = active && route.depth == 0 && !searchPresent && !toolsPresent && !layoutPresent && !overlayVisible
-    LaunchedEffect(active, route.key, page) {
+    LaunchedEffect(active, route.key, page, directoryOpen) {
         toolsVisible = false
         pendingTool = null
     }
@@ -121,6 +130,9 @@ internal fun AnimeWorkspace(
     LaunchedEffect(controller) {
         controller.ensureDiscovery()
     }
+    LaunchedEffect(controller, directoryOpen) {
+        if (directoryOpen) controller.sourceBrowse.activate()
+    }
     LaunchedEffect(browseRequest) {
         if (browseRequest != 0) {
             pendingManualPlaybackId = null
@@ -131,12 +143,13 @@ internal fun AnimeWorkspace(
             awaitingResolve = false
             pendingAssociation = null
             browseCandidate = null
-            browseCandidateVideo = false
             tab = 0
+            directoryOpen = false
             searchExpanded = false
             toolsVisible = false
             pendingTool = null
             sourcesVisible = false
+            sourceManagerVisible = false
             downloadsVisible = false
             trackingVisible = false
             reviewsVisible = false
@@ -158,12 +171,13 @@ internal fun AnimeWorkspace(
             toolsVisible = false
             pendingTool = null
             sourcesVisible = false
+            sourceManagerVisible = false
             downloadsVisible = false
             browseCandidate = null
-            browseCandidateVideo = false
             pendingAssociation = null
             trackingVisible = false
             reviewsVisible = false
+            directoryOpen = false
             searchExpanded = true
         }
     }
@@ -194,7 +208,6 @@ internal fun AnimeWorkspace(
     fun resume(entry: AnimeLibraryEntry) {
         pendingAssociation = null
         browseCandidate = null
-        browseCandidateVideo = false
         playerFullscreen = false
         playbackIntent = null
         playbackFailure = null
@@ -211,15 +224,14 @@ internal fun AnimeWorkspace(
         awaitingResolve = false
         pendingAssociation = null
         browseCandidate = null
-        browseCandidateVideo = false
         openingSubject = controller.downloads.state.value.entries.firstOrNull { it.id == id }?.subject
         controller.playDownload(id)
     }
     fun chooseReference(title: AnimeSourceTitle, videoSource: Boolean) {
         controller.knownDiscoverySubject(title)?.let { known ->
             browseCandidate = null
-            browseCandidateVideo = false
-            pendingAssociation = if (videoSource && known.externalIds["native-source"] == null)
+            pendingAssociation = if (videoSource && known.externalIds["native-source"] == null &&
+                !controller.stillBound(known.id, title))
                 AnimeSourceAssociation(title, known.id) else null
             open(known)
             return
@@ -227,7 +239,6 @@ internal fun AnimeWorkspace(
         if (videoSource) {
             pendingAssociation = null
             browseCandidate = null
-            browseCandidateVideo = false
             playerFullscreen = false
             playbackIntent = null
             playbackFailure = null
@@ -238,18 +249,16 @@ internal fun AnimeWorkspace(
             return
         }
         browseCandidate = title
-        browseCandidateVideo = false
         query = title.title
-        controller.search(title.title)
+        controller.search(title.title, indexOnly = true)
         searchExpanded = true
     }
     fun openSearchResult(subject: AnimeSubject) {
         val candidates = if (browseCandidate == null)
-            state.unifiedSearch.firstOrNull { it.subject?.id == subject.id }?.sources.orEmpty()
+            controller.searchState.value.groups.firstOrNull { it.subject?.id == subject.id }?.sources.orEmpty()
         else emptyList()
-        pendingAssociation = browseCandidate?.takeIf { browseCandidateVideo }?.let { AnimeSourceAssociation(it, subject.id) }
+        pendingAssociation = null
         browseCandidate = null
-        browseCandidateVideo = false
         open(subject)
         if (candidates.isNotEmpty()) controller.stageSearchCandidates(subject.id, candidates)
     }
@@ -279,17 +288,27 @@ internal fun AnimeWorkspace(
     fun play(episode: AnimeEpisode) {
         requestPlayback(episode, null)
     }
+    fun openDirectory(sourceId: String? = null) {
+        controller.sourceBrowse.activate(sourceId)
+        directoryOpen = true
+    }
+    fun returnFromDirectory() {
+        if (controller.sourceBrowse.state.value.selectedTitle != null) controller.sourceBrowse.closeTitle()
+        else directoryOpen = false
+    }
     fun back() {
         when {
             toolsVisible -> { toolsVisible = false; pendingTool = null }
             downloadsVisible -> downloadsVisible = false
             sourcesVisible -> dismissSources()
+            sourceManagerVisible -> sourceManagerVisible = false
             trackingVisible -> trackingVisible = false
             reviewsVisible -> reviewsVisible = false
-            searchExpanded -> { searchExpanded = false; browseCandidate = null; browseCandidateVideo = false }
+            searchExpanded -> { searchExpanded = false; browseCandidate = null }
             playing && playerFullscreen -> playerFullscreen = false
             playing -> closePlayback()
             route.depth == 1 -> { pendingAssociation = null; controller.closeDetail() }
+            directoryOpen -> returnFromDirectory()
         }
     }
 
@@ -307,6 +326,7 @@ internal fun AnimeWorkspace(
         when (next) {
             AnimeWorkspaceTool.TRACKING -> trackingVisible = true
             AnimeWorkspaceTool.DOWNLOADS -> downloadsVisible = true
+            AnimeWorkspaceTool.DIRECTORY -> openDirectory()
             null -> Unit
         }
     }
@@ -314,12 +334,12 @@ internal fun AnimeWorkspace(
     LaunchedEffect(backRequest) {
         if (backRequest != consumedBackRequest) { consumedBackRequest = backRequest; back() }
     }
-    LaunchedEffect(state.resolving, state.sourceError, state.pendingPlayback, playback.phase) {
+    LaunchedEffect(state.resolving, state.sourceError, state.pendingPlayback, playbackPhase) {
         if (awaitingResolve && !state.resolving) {
             if (state.sourceError != null) {
                 playbackFailure = state.sourceError
                 awaitingResolve = false
-            } else if (state.pendingPlayback != null || playback.phase != AnimePlayerPhase.IDLE) awaitingResolve = false
+            } else if (state.pendingPlayback != null || playbackPhase != AnimePlayerPhase.IDLE) awaitingResolve = false
         }
     }
     // Automatic matching only discloses manual association when the controller cannot prove it.
@@ -369,7 +389,7 @@ internal fun AnimeWorkspace(
         }
     }
 
-    val canGoBack = route.depth > 0
+    val canGoBack = route.depth > 0 || directoryOpen
     MotionBackHandler(active && canGoBack && !overlayVisible && !searchPresent && !toolsPresent && !layoutPresent,
         state = null, onBack = ::back)
 
@@ -378,6 +398,7 @@ internal fun AnimeWorkspace(
             MotionTabContent(selected = route, contentKey = { it.key }, order = { it.depth },
                 modifier = Modifier.fillMaxSize()) { shown ->
                 if (shown.depth == 2) {
+                    val playback by controller.player.state.collectAsStateWithLifecycle()
                     AnimePlayerPane(controller, state, playback, backdrop,
                         requestedEpisode = playbackIntent?.episode, resolutionError = playbackFailure,
                         active = active, fullscreen = playerFullscreen, onFullscreenChange = { playerFullscreen = it },
@@ -413,18 +434,21 @@ internal fun AnimeWorkspace(
                         BoxWithConstraints(Modifier.fillMaxWidth()) {
                             val preferred = animePreferredColumns(maxWidth, state.discoveryColumns)
                             val actualColumns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
-                            AnimeWorkspaceHeader(root = shown.depth == 0,
-                                title = if (shown.depth == 0) "动漫" else
+                            AnimeWorkspaceHeader(root = shown.depth == 0 && !directoryOpen,
+                                title = if (shown.depth == 0) (if (directoryOpen) "来源目录" else "动漫") else
                                     shown.detail?.subject?.title ?: openingSubject?.title ?: "动漫详情",
                                 backdrop = backdrop, navigationVisible = navigationVisible,
                                 navigation = {
-                                    if (shown.depth == 0) navigation()
-                                    else MotionIconButton(onClick = { pendingAssociation = null; controller.closeDetail() },
+                                    if (shown.depth == 0 && !directoryOpen) navigation()
+                                    else MotionIconButton(onClick = {
+                                        if (shown.depth == 0) returnFromDirectory()
+                                        else { pendingAssociation = null; controller.closeDetail() }
+                                    },
                                         modifier = Modifier.size(44.dp), tooltip = "返回动漫") {
                                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
                                     }
                                 },
-                                actions = if (shown.depth != 0) null else ({
+                                actions = if (shown.depth != 0 || directoryOpen) null else ({
                                     Row(Modifier.heightIn(min = 44.dp)
                                         .graphicsLayer { alpha = if (searchExpanded) 0f else
                                             1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f) }
@@ -447,6 +471,8 @@ internal fun AnimeWorkspace(
                                                     CompactMenuAction(Icons.Outlined.Refresh, "刷新当前栏目",
                                                         enabled = state.discoveryFeeds[animeDiscoveryFeedKey(state.discoveryTab)]?.loading != true,
                                                         onClick = { pendingTool = null; toolsVisible = false; controller.refreshDiscovery() })
+                                                CompactMenuAction(Icons.Outlined.Public, "来源目录",
+                                                    onClick = { queueTool(AnimeWorkspaceTool.DIRECTORY) })
                                                 CompactMenuAction(Icons.Outlined.DownloadForOffline, "离线下载",
                                                     onClick = { queueTool(AnimeWorkspaceTool.DOWNLOADS) })
                                                 CompactMenuAction(Icons.Outlined.AccountCircle, "追番账号",
@@ -458,18 +484,27 @@ internal fun AnimeWorkspace(
                                 }))
                         }
                         if (shown.depth == 0) {
-                            AnimeWorkspaceNavigation(page, active = rootActive, onSelect = { selected ->
+                            if (!directoryOpen) AnimeWorkspaceNavigation(page, active = rootActive, onSelect = { selected ->
                                 tab = if (selected == AnimeWorkspacePage.LIBRARY) 1 else 0
                                 selected.discovery?.let(controller::selectDiscoveryTab)
                             })
-                            MotionTabContent(tab, Modifier.weight(1f).mangaHazeSource(backdrop).motionInputGate(rootActive)) { pane ->
-                                if (pane == 0) AnimeDiscovery(state, controller, backdrop, discoveryScrolls, onOpen = ::open,
-                                    onChooseReference = ::chooseReference,
-                                    active = rootActive && tab == 0, contentBottomPadding = contentBottomPadding)
-                                else AnimeLibrary(state, libraryScroll, controller, backdrop, onOpen = ::open, onResume = ::resume,
-                                    onDiscover = { tab = 0; controller.selectDiscoveryTab(AnimeDiscoveryTab.HOME) },
-                                    onReview = { reviewsVisible = true }, viewState = libraryViewState,
-                                    active = rootActive && tab == 1, contentBottomPadding = contentBottomPadding)
+                            MotionTabContent(pane, Modifier.weight(1f).mangaHazeSource(backdrop).motionInputGate(rootActive),
+                                contentKey = { it }, order = { it.ordinal }) { shownPane ->
+                                val paneActive = rootActive && shownPane == pane
+                                when (shownPane) {
+                                    AnimeWorkspacePane.DISCOVERY -> AnimeDiscovery(state, controller, backdrop, discoveryScrolls,
+                                        onOpen = ::open, onChooseReference = ::chooseReference, onBrowseSource = ::openDirectory,
+                                        active = paneActive, contentBottomPadding = contentBottomPadding)
+                                    AnimeWorkspacePane.DIRECTORY -> AnimeSourceBrowsePane(controller, backdrop, discoveryScrolls,
+                                        columns = state.discoveryColumns, active = paneActive,
+                                        onManageSources = { sourceManagerVisible = true },
+                                        onChooseTitle = ::chooseReference, contentBottomPadding = contentBottomPadding)
+                                    AnimeWorkspacePane.LIBRARY -> AnimeLibrary(state, libraryScroll, controller, backdrop,
+                                        onOpen = ::open, onResume = ::resume,
+                                        onDiscover = { tab = 0; controller.selectDiscoveryTab(AnimeDiscoveryTab.HOME) },
+                                        onReview = { reviewsVisible = true }, viewState = libraryViewState,
+                                        active = paneActive, contentBottomPadding = contentBottomPadding)
+                                }
                             }
                         } else if (shown.detail != null) {
                             Box(Modifier.weight(1f).mangaHazeSource(backdrop)) {
@@ -490,25 +525,32 @@ internal fun AnimeWorkspace(
                     }
                 }
             }
-            if (!playing && (route.depth == 0 || searchPresent)) ExpandingSearchBar(expanded = searchExpanded, query = query,
-                active = active && route.depth == 0 && !overlayVisible && !toolsPresent && !layoutPresent, backdrop = backdrop,
-                onExpandedChange = { searchExpanded = it; if (!it) { browseCandidate = null; browseCandidateVideo = false } },
+            if (!playing && (route.depth == 0 && !directoryOpen || searchExpanded || searchPresent)) ExpandingSearchBar(expanded = searchExpanded, query = query,
+                active = active && route.depth == 0 && (!directoryOpen || searchExpanded || searchPresent) &&
+                    !overlayVisible && !toolsPresent && !layoutPresent, backdrop = backdrop,
+                onExpandedChange = { searchExpanded = it; if (!it) { browseCandidate = null } },
                 onPresenceChange = { searchPresent = it },
                 onForegroundState = { searchForeground = it }, onQuery = { query = it },
-                onSearch = { controller.search(query.trim()) }, placeholder = "搜索番剧",
+                onSearch = { controller.search(query.trim(), indexOnly = browseCandidate != null) }, placeholder = "搜索番剧",
                 modifier = Modifier.fillMaxSize()
                     .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
                     .padding(horizontal = 8.dp, vertical = 2.dp)) { height, inputActive ->
-                // A foreign-source choice asks for a canonical counterpart, not the same source again.
-                val searchResults = if (browseCandidate == null) state.unifiedSearch
-                    else state.unifiedSearch.filter { it.subject != null }
+                val search by controller.searchState.collectAsStateWithLifecycle()
+                val indexOnly = browseCandidate != null
+                LaunchedEffect(searchExpanded, indexOnly, search.query, search.indexOnly) {
+                    if (searchExpanded && search.query.isNotBlank() && search.query == query.trim() && search.indexOnly != indexOnly) {
+                        controller.search(search.query, indexOnly = indexOnly)
+                    }
+                }
+                var showSearchIssues by remember(search.query, indexOnly) { mutableStateOf(false) }
+                var expandedSearchGroup by remember(search.query, indexOnly) { mutableStateOf<String?>(null) }
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = height).motionInputGate(inputActive),
                     contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
                     browseCandidate?.let { candidate -> item(key = "source-association") {
                         AnimeSectionTitle("选择对应番剧", candidate.title + " · " +
                             if (candidate.sourceId in setOf("anime-anilist", "anime-bangumi")) animeProviderName(candidate.sourceId)
                             else animeSourceName(candidate.sourceId, state), action = {
-                            MotionIconButton(onClick = { browseCandidate = null; browseCandidateVideo = false }, modifier = Modifier.size(44.dp),
+                            MotionIconButton(onClick = { browseCandidate = null }, modifier = Modifier.size(44.dp),
                                 tooltip = "取消来源关联") { Icon(Icons.Outlined.Close, "取消来源关联", Modifier.size(18.dp)) }
                         })
                     } }
@@ -520,54 +562,22 @@ internal fun AnimeWorkspace(
                             })
                         }
                         items(state.searchHistory, key = { "search-history:$it" }) { keyword ->
-                            AnimeSelection(keyword, selected = false, onClick = { query = keyword; controller.search(keyword) })
+                            AnimeSelection(keyword, selected = false, onClick = {
+                                query = keyword
+                                controller.search(keyword, indexOnly = indexOnly)
+                            })
                         }
                     }
                     when {
                         query.isBlank() -> item { AnimeQuietLabel("输入名称、原名或别名", Modifier.padding(16.dp)) }
-                        query.trim() != state.query -> item {
+                        query.trim() != search.query -> item {
                             AnimeMessage("搜索番剧名称", null, action = "搜索",
-                                onAction = { controller.search(query.trim()) })
+                                onAction = { controller.search(query.trim(), indexOnly = indexOnly) })
                         }
-                        (state.catalogLoading || state.searchProviders.any { it.loading }) && searchResults.isEmpty() -> item { AnimeMessage("正在搜索", query) }
-                        state.catalogError != null && searchResults.isEmpty() -> item { AnimeMessage("搜索未完成", state.catalogError,
-                            action = "重试", onAction = { controller.search(query.trim()) }) }
-                        searchResults.isEmpty() && state.searchProviders.any { it.error != null } -> item {
-                            AnimeMessage("部分搜索未完成", "已有来源暂未返回结果。", action = "重试",
-                                onAction = { controller.search(query.trim()) })
-                        }
-                        searchResults.isEmpty() -> item {
-                            AnimeMessage(if (browseCandidate == null) "没有找到番剧" else "未找到对应的作品资料",
-                                if (browseCandidate == null) "试试原名、别名或更短的关键词。"
-                                else "已保留所选来源。换用原名或别名搜索，选定对应作品后继续。")
-                        }
-                        else -> {
-                            if (state.catalogLoading) item { AnimeQuietLabel("正在补全结果", Modifier.padding(12.dp)) }
-                            if (state.catalogError != null) item { AnimeMessage("部分结果未能更新", state.catalogError,
-                                action = "重新搜索", onAction = { controller.search(query.trim()) }) }
-                            items(searchResults, key = { it.key }) { group ->
-                                val subject = group.subject
-                                if (subject != null) AnimeSubjectRow(subject, animeSubjectSummary(subject),
-                                    onOpen = { openSearchResult(subject) }, trailing = {
-                                        if (group.sources.isNotEmpty()) AnimeQuietLabel("${group.sources.size} 个来源", Modifier.semantics {
-                                            contentDescription = "搜索命中 ${group.sources.size} 个来源，播放尚未确认"
-                                        })
-                                    })
-                                else group.sources.firstOrNull()?.let { title ->
-                                    AnimeSourceDiscoveryCard(title, list = true,
-                                        onOpen = { chooseReference(title, true) })
-                                }
-                            }
-                            if (state.catalogMoreError != null) item(key = "search-more-error") {
-                                AnimeDiscoveryInlineStatus(state.catalogMoreError.orEmpty(), retry = controller::loadMoreCatalog)
-                            }
-                            if (state.catalogHasMore) item(key = "search-more") {
-                                MotionTextButton(onClick = controller::loadMoreCatalog,
-                                    enabled = !state.catalogLoadingMore, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                                    Text(if (state.catalogLoadingMore) "正在加载" else "更多结果")
-                                }
-                            }
-                        }
+                        else -> animeSearchResults(search, indexOnly, controller, showSearchIssues,
+                            onToggleIssues = { showSearchIssues = !showSearchIssues }, expandedGroup = expandedSearchGroup,
+                            onToggleSources = { key -> expandedSearchGroup = key.takeUnless { it == expandedSearchGroup } },
+                            onOpenSubject = ::openSearchResult, onOpenSource = { chooseReference(it, true) })
                     }
                 }
             }
@@ -584,6 +594,14 @@ internal fun AnimeWorkspace(
 
     AnimeDownloadsPanel(downloadsVisible, controller, state, backdrop,
         onDismiss = { downloadsVisible = false }, onPlay = ::playDownload)
+    AnimeSourceManager(sourceManagerVisible && active, state, controller, backdrop,
+        onDismiss = { sourceManagerVisible = false }, onBrowse = { provider ->
+            if (active) {
+                directoryOpen = false
+                tab = 0
+                controller.configureDiscovery(AnimeDiscoveryTab.GENRES, AnimeDiscoveryQuery(provider = provider))
+            }
+        })
     AnimeSourcesPanel(sourcesVisible, state, controller, backdrop, sourceEpisode,
         onDismiss = ::dismissSources, onAutomaticPlay = { episode ->
             sourcesVisible = false
@@ -614,7 +632,7 @@ internal fun AnimeWorkspace(
             controller.dismissPlaybackChoice()
             playbackFailure = null
             awaitingResolve = false
-            playbackIntent = if (playback.phase == AnimePlayerPhase.IDLE || playback.phase == AnimePlayerPhase.RELEASED) null
+            playbackIntent = if (playbackPhase == AnimePlayerPhase.IDLE || playbackPhase == AnimePlayerPhase.RELEASED) null
                 else state.detail?.episodes?.firstOrNull { it.id == state.selectedEpisodeId }?.let { AnimePlaybackIntent(it) }
         })
 }

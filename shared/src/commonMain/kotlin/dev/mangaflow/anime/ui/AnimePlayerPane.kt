@@ -439,7 +439,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState, bl
                     if (state.ended) "重播" else if (state.playWhenReady) "暂停" else "播放", Modifier.size(26.dp))
             }
             MotionIconButton(onClick = { onInteraction(); next?.let(onEpisode) }, enabled = next != null,
-                modifier = Modifier.size(44.dp), tooltip = if (nextPrepared) "下一集 · 已准备" else "下一集") {
+                modifier = Modifier.size(44.dp), tooltip = if (nextPrepared) "下一集 · 播放地址已准备" else "下一集") {
                 Icon(Icons.Outlined.SkipNext, "下一集", Modifier.size(22.dp))
             }
             Spacer(Modifier.weight(1f))

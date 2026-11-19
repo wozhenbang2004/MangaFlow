@@ -1,7 +1,14 @@
 package dev.mangaflow.anime.ui
 
-import androidx.compose.foundation.background
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -11,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -19,273 +27,634 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.semantics.*
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
-import dev.mangaflow.anime.*
-import dev.mangaflow.ui.*
+import dev.mangaflow.anime.AnimeController
+import dev.mangaflow.anime.AnimeDetail
+import dev.mangaflow.anime.AnimeEpisode
+import dev.mangaflow.anime.AnimeEpisodeKind
+import dev.mangaflow.anime.AnimeLibraryEntry
+import dev.mangaflow.anime.AnimeScreenState
+import dev.mangaflow.anime.AnimeSubject
+import dev.mangaflow.anime.AnimeWatchProgress
+import dev.mangaflow.anime.AnimeWatchStatus
+import dev.mangaflow.ui.CompactGlassPopover
+import dev.mangaflow.ui.CompactMenuAction
+import dev.mangaflow.ui.FeaturedCoverColors
+import dev.mangaflow.ui.GlassSurfaceRole
+import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.motion.*
 
 @Composable
-internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, controller: AnimeController, backdrop: HazeState,
+internal fun AnimeDetailPane(
+    detail: AnimeDetail,
+    state: AnimeScreenState,
+    controller: AnimeController,
+    backdrop: HazeState,
     scroll: LazyListState,
-    onPlay: (AnimeEpisode) -> Unit, onOpen: (AnimeSubject) -> Unit,
-    onSources: (AnimeEpisode?) -> Unit, onTracking: () -> Unit,
-    modifier: Modifier = Modifier, active: Boolean = true) {
+    onPlay: (AnimeEpisode) -> Unit,
+    onOpen: (AnimeSubject) -> Unit,
+    onSources: (AnimeEpisode?) -> Unit,
+    onTracking: () -> Unit,
+    modifier: Modifier = Modifier,
+    active: Boolean = true,
+) {
     val subject = detail.subject
-    val native = subject.externalIds["native-source"] != null
+    val nativeSource = subject.externalIds["native-source"]
+    val native = nativeSource != null
+    val bindings = remember(state.sourceBindings, subject.id) {
+        state.sourceBindings.filter { it.subjectId == subject.id }
+    }
     val pendingNativeCatalog = state.sourceCatalogs.firstOrNull { catalog ->
-        catalog.title.sourceId == subject.externalIds["native-source"] &&
+        catalog.title.sourceId == nativeSource &&
             !catalog.notice.isNullOrBlank() && detail.episodes.isEmpty()
     }
     val missingSelectedGroup = pendingNativeCatalog?.let { catalog ->
-        val selectedGroup = state.sourceBindings.firstOrNull { binding ->
-            binding.catalog.sourceId == catalog.title.sourceId && binding.catalog.id == catalog.title.id
+        val selectedGroup = bindings.firstOrNull { binding ->
+            binding.catalog.sourceId == catalog.title.sourceId && binding.catalog.id == catalog.title.id &&
+                binding.catalog.url == catalog.title.url
         }?.selectedGroup
         selectedGroup != null && catalog.episodes.none { it.group == selectedGroup }
     } == true
     val entry = state.library.firstOrNull { it.subject.id == subject.id }
+    val completed = entry?.completedEpisodeIds.orEmpty()
     var episodeTab by rememberSaveable(subject.id) { mutableIntStateOf(0) }
-    var descriptionExpanded by rememberSaveable(subject.id) { mutableStateOf(false) }
     var episodeReversed by rememberSaveable(subject.id) { mutableStateOf(false) }
     var episodeQuery by rememberSaveable(subject.id) { mutableStateOf("") }
     var episodeSearch by rememberSaveable(subject.id) { mutableStateOf(false) }
-    var statusOpen by remember { mutableStateOf(false) }
-    var statusPresent by remember { mutableStateOf(false) }
-    var episodeMenuOwner by remember { mutableStateOf<String?>(null) }
-    var trackingAfterStatus by remember { mutableStateOf(false) }
-    LaunchedEffect(active) { if (!active) { statusOpen = false; trackingAfterStatus = false } }
-    // Native catalog order is authoritative; an unknown number is not a special episode.
-    val main = if (native) detail.episodes else detail.episodes.filter { it.kind == AnimeEpisodeKind.MAIN }
-    val extra = if (native) emptyList() else detail.episodes.filter { it.kind != AnimeEpisodeKind.MAIN }
-    LaunchedEffect(main.isEmpty(), extra.isNotEmpty()) {
-        if (main.isEmpty() && extra.isNotEmpty()) episodeTab = 1
+    var statusPresent by remember(subject.id) { mutableStateOf(false) }
+    var episodeMenuOwner by remember(subject.id) { mutableStateOf<String?>(null) }
+
+    // Native catalogue order and IDs are authoritative for the selected line.
+    val (main, extra) = remember(detail.episodes, native) {
+        if (native) detail.episodes to emptyList() else detail.episodes.partition { it.kind == AnimeEpisodeKind.MAIN }
     }
-    val episodes = (if (episodeTab == 0 || extra.isEmpty()) main else extra)
-        .let { if (episodeReversed) it.asReversed() else it }
-        .filter { episodeQuery.isBlank() || (!native && animeEpisodeNumber(it.number).contains(episodeQuery.trim())) ||
-            it.title.contains(episodeQuery.trim(), ignoreCase = true) }
-    val resume = entry?.resume?.takeUnless { it.completed }?.let { progress -> detail.episodes.firstOrNull { it.id == progress.episodeId } }
-    val first = resume ?: main.firstOrNull { it.id !in entry?.completedEpisodeIds.orEmpty() } ?: main.firstOrNull() ?: extra.firstOrNull()
-    val sourceNames = state.sourceBindings.map { binding ->
-        binding.catalog.sourceId to (state.sourceResults.firstOrNull { it.providerId == binding.catalog.sourceId }?.name ?:
-            animeSourceName(binding.catalog.sourceId, state))
+    val selectedTab = if (main.isEmpty() && extra.isNotEmpty()) 1 else if (extra.isEmpty()) 0 else episodeTab
+    val selectedEpisodes = if (selectedTab == 0) main else extra
+    val search = episodeQuery.trim()
+    val episodes = remember(selectedEpisodes, episodeReversed, search) {
+        val ordered = if (episodeReversed) selectedEpisodes.asReversed() else selectedEpisodes
+        if (search.isEmpty()) ordered else ordered.filter { episode ->
+            animeEpisodeLabel(episode).contains(search, ignoreCase = true) ||
+                episode.title.contains(search, ignoreCase = true)
+        }
     }
-    BoxWithConstraints(modifier.fillMaxSize()) {
+    val savedProgress = entry?.resume?.takeUnless { it.completed }
+    val resume = detail.episodes.firstOrNull { it.id == savedProgress?.episodeId }
+    val first = resume ?: main.firstOrNull { it.id !in completed }
+        ?: main.firstOrNull() ?: extra.firstOrNull { it.id !in completed } ?: extra.firstOrNull()
+    val sourceNames = bindings.sortedBy { it.catalog.sourceId != state.preferredSourceId }.map { binding ->
+        binding.catalog.sourceId to animeSourceName(binding.catalog.sourceId, state)
+    }
+
+    BoxWithConstraints(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-        val columns = ((maxWidth - 40.dp).value / (76f * fontScale)).toInt().coerceIn(1, 8)
-        LazyColumn(Modifier.fillMaxSize().motionInputGate(active && !statusPresent && episodeMenuOwner == null), state = scroll,
-            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        val horizontal = if (maxWidth >= 720.dp) 28.dp else 16.dp
+        val contentWidth = minOf(maxWidth, 1080.dp)
+        val columns = ((contentWidth - horizontal * 2).value / (78f * fontScale)).toInt().coerceIn(1, 8)
+        val episodeRows = remember(episodes, columns) { episodes.chunked(columns) }
+        val wideHero = contentWidth >= 620.dp && fontScale <= 1.3f
+        val stackHeroActions = contentWidth < 340.dp || fontScale > 1.3f
+        val motion = LocalMotionEnabled.current
+        LazyColumn(
+            Modifier.widthIn(max = 1080.dp).fillMaxSize()
+                .motionInputGate(active && !statusPresent && episodeMenuOwner == null),
+            state = scroll,
+            contentPadding = PaddingValues(start = horizontal, end = horizontal, top = 10.dp, bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             item(key = "identity") {
-                Row(horizontalArrangement = Arrangement.spacedBy(18.dp), verticalAlignment = Alignment.Top) {
-                    AnimePoster(subject, Modifier.width(96.dp).height(138.dp))
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                        Text(subject.title, style = MaterialTheme.typography.titleLarge)
-                        if (subject.originalTitle.isNotBlank() && subject.originalTitle != subject.title)
-                            Text(subject.originalTitle, style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        AnimeQuietLabel(animeSubjectSummary(subject))
-                        if (subject.rating != null || subject.rank != null) AnimeQuietLabel(listOfNotNull(
-                            subject.rating?.takeIf { it > 0 }?.let { it.toString() + " 分" },
-                            subject.rank?.takeIf { it > 0 }?.let { "排名 #" + it }).joinToString(" · "))
-                        if (state.detailFromCache) AnimeQuietLabel(if (state.detailLoading) "已保存的资料 · 正在更新" else "已保存的资料")
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            MotionTextButton(onClick = { controller.setFollowed(subject, entry?.followed != true) },
-                                modifier = Modifier.heightIn(min = 44.dp), enabled = !state.libraryReadUnavailable) {
-                                Icon(if (entry?.followed == true) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder,
-                                    null, Modifier.size(17.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text(if (entry?.followed == true) "已追番" else "追番")
-                            }
-                        }
-                    }
-                }
-            }
-            item(key = "continue") {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    MotionButton(onClick = { first?.let(onPlay) }, enabled = first != null,
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.onSurface,
-                            contentColor = MaterialTheme.colorScheme.surface)) {
-                        Icon(Icons.Outlined.PlayArrow, null, Modifier.size(20.dp))
-                        Spacer(Modifier.width(7.dp))
-                        Text(if (resume != null) "继续 " + animeEpisodeLabel(resume) + " · " + animeTime(entry?.resume?.positionMs ?: 0L)
-                            else first?.let { "播放 " + animeEpisodeLabel(it) } ?: if (state.detailLoading) "正在载入集数"
-                            else if (state.detailError != null) "暂无可选集数"
-                            else if (pendingNativeCatalog != null) "等待原线路集数" else "暂无集数",
-                            maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    }
-                    Box {
-                        MotionTextButton(onClick = { statusOpen = true }, modifier = Modifier.heightIn(min = 44.dp),
-                            enabled = !state.libraryReadUnavailable) {
-                            Text(if (state.libraryReadUnavailable) "记录未读取" else animeStatusLabel(entry?.status))
-                            Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
-                        }
-                        CompactGlassPopover(statusOpen, backdrop = backdrop,
-                            onDismiss = { statusOpen = false; trackingAfterStatus = false },
-                            onPresenceChange = { present ->
-                                statusPresent = present
-                                if (!present && trackingAfterStatus) {
-                                    trackingAfterStatus = false
-                                    if (active) onTracking()
-                                }
-                            }) {
-                            AnimeWatchStatus.entries.forEach { status ->
-                                CompactMenuAction(Icons.Outlined.Check, animeStatusLabel(status),
-                                    onClick = { statusOpen = false; controller.setWatchStatus(subject.id, status) })
-                            }
-                            if (!native) CompactMenuAction(Icons.Outlined.Sync, "核对追番进度",
-                                onClick = { trackingAfterStatus = true; statusOpen = false })
-                        }
-                    }
-                }
+                AnimeDetailHero(
+                    subject = subject,
+                    episode = first,
+                    progress = savedProgress.takeIf { resume != null },
+                    entry = entry,
+                    libraryAvailable = !state.libraryReadUnavailable,
+                    active = active,
+                    wide = wideHero,
+                    stackActions = stackHeroActions,
+                    backdrop = backdrop,
+                    native = native,
+                    onPlay = onPlay,
+                    onFollow = { controller.setFollowed(subject, entry?.followed != true) },
+                    onStatus = { controller.setWatchStatus(subject.id, it) },
+                    onTracking = onTracking,
+                    onStatusPresence = { statusPresent = it },
+                )
             }
             if (state.libraryReadUnavailable) item(key = "library-read-warning") {
-                AnimeMessage("临时浏览 · 不保存进度",
-                    "本地追番记录未能读取，原文件已保留。旧收藏、续看和来源选择暂不可用；本次自动匹配仅在当前会话生效，不覆盖旧记录。可继续浏览和播放；请检查存储空间或通过备份恢复。")
+                AnimeDetailStatus(
+                    "临时浏览 · 不保存进度", Icons.Outlined.Info,
+                    detail = "本地追番记录未能读取。可以继续播放，旧收藏与观看记录已保留。",
+                )
             }
-            if (state.detailLoading) item(key = "episode-loading") {
-                AnimeMessage("正在载入集数", "已保存的作品与续看记录会保留。")
-            }
-            if (state.detailError != null) item(key = "episode-error") {
-                AnimeMessage(if (detail.episodes.isEmpty()) "番剧资料未完整取得" else "部分资料未更新",
-                    state.detailError, action = "重试",
-                    onAction = { controller.open(subject) })
-            }
-            if (state.sourceError != null) item(key = "source-error") {
-                AnimeSelection("来源暂未就绪", state.sourceError, false, onClick = { onSources(null) })
-            }
-            state.sourceCatalogs.filter { !it.notice.isNullOrBlank() && it != pendingNativeCatalog }.forEach { catalog ->
-                item(key = "partial-catalog:${catalog.title.sourceId}:${catalog.title.id}") {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        if (state.sourceCatalogs.size > 1) AnimeQuietLabel(animeSourceName(catalog.title.sourceId, state))
-                        if (state.sourceCatalogErrors[catalog.title.sourceId] == null)
-                            AnimeCatalogNotice(catalog, onRetry = { controller.refreshSource(catalog.title.sourceId) })
-                        else AnimeDiscoveryInlineStatus("目录更新未完成，仍可选择已加载集数",
-                            retry = { controller.refreshSource(catalog.title.sourceId) })
+            item(key = "episodes-heading") {
+                Column(Modifier.fillMaxWidth().padding(top = 5.dp)) {
+                    AnimeSectionTitle(
+                        "选集",
+                        when {
+                            search.isNotEmpty() -> "${episodes.size} / ${selectedEpisodes.size} 集"
+                            selectedEpisodes.isNotEmpty() -> "${selectedEpisodes.size} 集"
+                            else -> null
+                        },
+                        modifier = Modifier.semantics { heading() },
+                        action = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (episodeSearch || detail.episodes.size > 1) {
+                                    MotionIconButton(
+                                        onClick = {
+                                            episodeSearch = !episodeSearch
+                                            if (!episodeSearch) episodeQuery = ""
+                                        },
+                                        modifier = Modifier.size(44.dp),
+                                        tooltip = if (episodeSearch) "关闭选集搜索" else "查找集数",
+                                    ) {
+                                        Icon(
+                                            if (episodeSearch) Icons.Outlined.Close else Icons.Outlined.Search,
+                                            if (episodeSearch) "关闭选集搜索" else "查找集数", Modifier.size(18.dp),
+                                        )
+                                    }
+                                    val sortLabel = if (episodeReversed) "改为正序" else "改为倒序"
+                                    MotionIconButton(
+                                        onClick = { episodeReversed = !episodeReversed },
+                                        modifier = Modifier.size(44.dp), tooltip = sortLabel,
+                                    ) {
+                                        Icon(Icons.Outlined.SwapVert, sortLabel, Modifier.size(18.dp))
+                                    }
+                                }
+                                AnimeSourceStack(sourceNames, onClick = { onSources(null) })
+                            }
+                        },
+                    )
+                    AnimatedVisibility(
+                        visible = episodeSearch,
+                        enter = expandVertically(tween(if (motion) MangaMotion.Content else 0)) +
+                            fadeIn(tween(if (motion) MangaMotion.Quick else 0)),
+                        exit = shrinkVertically(tween(if (motion) MangaMotion.Content else 0)) +
+                            fadeOut(tween(if (motion) MangaMotion.Quick else 0)),
+                    ) {
+                        AnimeTextField(
+                            episodeQuery, { episodeQuery = it }, "集号或标题",
+                            Modifier.motionInputGate(episodeSearch).padding(bottom = 6.dp),
+                        )
+                    }
+                    if (main.isNotEmpty() && extra.isNotEmpty()) {
+                        MotionTabs(
+                            selectedTab, listOf("正片", "特别篇等"),
+                            onSelect = { episodeTab = it },
+                            modifier = Modifier.widthIn(max = 280.dp).fillMaxWidth(),
+                            controlHeight = 44.dp, treatment = MotionTabTreatment.Underline,
+                        )
                     }
                 }
             }
-            if (state.sourceAggregationRunning) item(key = "source-aggregation-progress") {
-                AnimeQuietLabel("后台补全来源 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal} · 可先选集播放")
+            if (episodes.isEmpty() || state.detailLoading || state.detailError != null) item(key = "episode-status") {
+                when {
+                    state.detailLoading -> AnimeDetailStatus(
+                        when {
+                            detail.episodes.isEmpty() -> "正在加载集数"
+                            state.detailFromCache -> "显示上次集数 · 正在更新"
+                            else -> "正在更新集数"
+                        },
+                        Icons.Outlined.Info, loading = true,
+                    )
+                    state.detailError != null -> AnimeDetailStatus(
+                        if (detail.episodes.isEmpty()) "集数暂不可用" else "集数更新未完成",
+                        Icons.Outlined.CloudOff, detail = state.detailError,
+                        actionLabel = "重试加载集数", actionIcon = Icons.Outlined.Refresh,
+                        onAction = { controller.open(subject) },
+                    )
+                    pendingNativeCatalog != null -> AnimeDetailStatus(
+                        if (missingSelectedGroup) "原线路暂不可用" else "原线路尚未加载完整",
+                        Icons.Outlined.Info, detail = pendingNativeCatalog.notice,
+                        actionLabel = if (missingSelectedGroup) null else "继续加载原线路",
+                        onAction = { controller.refreshSource(pendingNativeCatalog.title.sourceId) },
+                    )
+                    search.isNotEmpty() -> AnimeDetailStatus(
+                        "没有匹配的集数", Icons.Outlined.Search,
+                        actionLabel = "清除集数搜索", actionIcon = Icons.Outlined.Close, onAction = { episodeQuery = "" },
+                    )
+                    else -> AnimeDetailStatus("暂无集数", Icons.Outlined.Info)
+                }
             }
-            item(key = "episodes-heading") {
-                AnimeSectionTitle("选集 · ${episodes.size}", action = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        AnimeSourceStack(sourceNames, onClick = { onSources(null) })
-                        MotionIconButton(onClick = { episodeSearch = !episodeSearch; if (!episodeSearch) episodeQuery = "" },
-                            modifier = Modifier.size(44.dp), tooltip = "查找集数") {
-                            Icon(Icons.Outlined.Search, "查找集数", Modifier.size(19.dp))
-                        }
-                        MotionIconButton(onClick = { episodeReversed = !episodeReversed }, modifier = Modifier.size(44.dp),
-                            tooltip = if (episodeReversed) "改为正序" else "改为倒序") {
-                            Icon(Icons.Outlined.SwapVert, if (episodeReversed) "倒序，点按切换" else "正序，点按切换", Modifier.size(19.dp))
-                        }
-                    }
-                })
-                if (episodeSearch) AnimeTextField(episodeQuery, { episodeQuery = it }, "集号或标题",
-                    Modifier.padding(bottom = 6.dp))
-                if (extra.isNotEmpty()) MotionTabs(episodeTab, listOf("正片 " + main.size, "特别篇等 " + extra.size),
-                    onSelect = { episodeTab = it }, modifier = Modifier.widthIn(max = 280.dp).fillMaxWidth(),
-                    controlHeight = 44.dp, treatment = MotionTabTreatment.Underline)
-            }
-            if (episodes.isEmpty() && !state.detailLoading && state.detailError == null) item(key = "empty-episodes") {
-                if (pendingNativeCatalog != null) {
-                    AnimeMessage(if (missingSelectedGroup) "需要重新选择线路" else "所选线路尚未加载完整", pendingNativeCatalog.notice,
-                        action = if (missingSelectedGroup) "选择新线路" else "继续加载原线路",
-                        onAction = { if (missingSelectedGroup) onSources(null)
-                            else controller.refreshSource(pendingNativeCatalog.title.sourceId) })
-                } else AnimeMessage(if (episodeQuery.isNotBlank()) "没有匹配的集数" else "这组还没有集数",
-                    if (episodeQuery.isNotBlank()) "试试其他集号或标题。"
-                    else "资料收录不代表已经开播或片源已更新；目录未列出集数时，不按其他季度或列表位置猜配播放资源。",
-                    action = if (episodeQuery.isNotBlank()) "清除查找" else "查看来源",
-                    onAction = { if (episodeQuery.isNotBlank()) episodeQuery = "" else onSources(null) })
-            }
-            items(episodes.chunked(columns), key = { row -> row.first().id }) { row ->
+            items(episodeRows, key = { row -> row.first().id }) { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     row.forEach { episode ->
-                        AnimeEpisodeCell(episode, completed = episode.id in entry?.completedEpisodeIds.orEmpty(),
-                            resume = episode.id == resume?.id,
-                            matched = state.episodeOptions[episode.id].orEmpty().count { it.confirmed },
-                            backdrop = backdrop, active = active,
-                            onMenuPresenceChange = { present ->
-                                if (present) episodeMenuOwner = episode.id
-                                else if (episodeMenuOwner == episode.id) episodeMenuOwner = null
-                            },
-                            onPlay = { onPlay(episode) }, onSources = { onSources(episode) },
-                            onCompleted = { controller.setEpisodeCompleted(episode.id, episode.id !in entry?.completedEpisodeIds.orEmpty()) },
-                            modifier = Modifier.weight(1f))
+                        key(episode.id) {
+                            AnimeEpisodeCell(
+                                episode = episode,
+                                completed = episode.id in completed,
+                                resume = episode.id == resume?.id,
+                                matched = state.episodeOptions[episode.id].orEmpty().count { it.confirmed },
+                                backdrop = backdrop,
+                                active = active,
+                                libraryAvailable = !state.libraryReadUnavailable,
+                                onMenuPresenceChange = { present ->
+                                    if (present) episodeMenuOwner = episode.id
+                                    else if (episodeMenuOwner == episode.id) episodeMenuOwner = null
+                                },
+                                onPlay = { onPlay(episode) },
+                                onSources = { onSources(episode) },
+                                onCompleted = { controller.setEpisodeCompleted(episode.id, episode.id !in completed) },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
                     }
                     repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
-            if (subject.description.isNotBlank()) item(key = "description") {
-                Column {
-                    AnimeSectionTitle("简介", action = {
-                        MotionIconButton(onClick = { descriptionExpanded = !descriptionExpanded },
-                            modifier = Modifier.size(44.dp), tooltip = if (descriptionExpanded) "收起简介" else "展开简介") {
-                            Icon(if (descriptionExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                                if (descriptionExpanded) "收起简介" else "展开简介", Modifier.size(20.dp))
-                        }
-                    })
-                    Text(subject.description, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = if (descriptionExpanded) Int.MAX_VALUE else 3, overflow = TextOverflow.Ellipsis)
+            if (state.sourceError != null || state.sourceAggregationRunning) item(key = "source-status") {
+                if (state.sourceError != null) {
+                    AnimeDetailStatus("部分来源不可用", Icons.Outlined.CloudOff, detail = state.sourceError)
+                } else {
+                    AnimeDetailStatus(
+                        "正在补全来源 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal}",
+                        Icons.Outlined.Info, loading = true,
+                    )
                 }
             }
+            state.sourceCatalogs.filter {
+                (!it.notice.isNullOrBlank() || state.sourceCatalogErrors[it.title.sourceId] != null) &&
+                    it != pendingNativeCatalog
+            }.forEach { catalog ->
+                item(key = "partial-catalog:${catalog.title.sourceId}:${catalog.title.id}") {
+                    AnimeDetailStatus(
+                        "${animeSourceName(catalog.title.sourceId, state)} · 目录未更新完整",
+                        Icons.Outlined.Info,
+                        detail = state.sourceCatalogErrors[catalog.title.sourceId] ?: catalog.notice,
+                        actionLabel = "重试此来源目录", actionIcon = Icons.Outlined.Refresh,
+                        onAction = { controller.refreshSource(catalog.title.sourceId) },
+                    )
+                }
+            }
+            if (subject.description.isNotBlank() || subject.tags.isNotEmpty()) item(key = "description") {
+                AnimeDetailDescription(subject)
+            }
             if (state.relatedSubjects.isNotEmpty()) {
-                item(key = "related-heading") { AnimeSectionTitle("相关番剧") }
+                item(key = "related-heading") {
+                    AnimeSectionTitle("相关番剧", modifier = Modifier.semantics { heading() })
+                }
                 items(state.relatedSubjects, key = { "related:" + it.id }) { related ->
                     AnimeSubjectRow(related, animeSubjectSummary(related), onOpen = { onOpen(related) })
                 }
             }
-            item(key = "bottom") { Spacer(Modifier.height(20.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun AnimeDetailHero(
+    subject: AnimeSubject,
+    episode: AnimeEpisode?,
+    progress: AnimeWatchProgress?,
+    entry: AnimeLibraryEntry?,
+    libraryAvailable: Boolean,
+    active: Boolean,
+    wide: Boolean,
+    stackActions: Boolean,
+    backdrop: HazeState,
+    native: Boolean,
+    onPlay: (AnimeEpisode) -> Unit,
+    onFollow: () -> Unit,
+    onStatus: (AnimeWatchStatus) -> Unit,
+    onTracking: () -> Unit,
+    onStatusPresence: (Boolean) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val atmosphere = FeaturedCoverColors.get(subject.coverUrl) ?: colors.primary
+    val shape = RoundedCornerShape(22.dp)
+    val metadata = listOfNotNull(
+        subject.year?.toString(),
+        subject.episodeCount?.takeIf { it > 0 }?.let { "$it 集" },
+        subject.rating?.takeIf { it > 0 }?.let { "$it 分" },
+        subject.rank?.takeIf { it > 0 }?.let { "#$it" },
+    ).joinToString(" · ")
+    val actions: @Composable () -> Unit = {
+        AnimeDetailActions(
+            episode, progress, entry, libraryAvailable, active, stackActions, backdrop, native,
+            onPlay, onFollow, onStatus, onTracking, onStatusPresence,
+        )
+    }
+    Column(
+        Modifier.fillMaxWidth().clip(shape)
+            .background(
+                Brush.horizontalGradient(listOf(atmosphere.copy(alpha = .17f), colors.surfaceContainerLow)),
+            )
+            .padding(if (wide) 23.dp else 14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(if (wide) 25.dp else 14.dp),
+        ) {
+            AnimePoster(subject, Modifier.width(if (wide) 142.dp else 96.dp).aspectRatio(2f / 3f))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (wide) 8.dp else 5.dp)) {
+                Text(subject.title, Modifier.semantics { heading() },
+                    style = if (wide) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleLarge,
+                    maxLines = 3, overflow = TextOverflow.Ellipsis)
+                if (subject.originalTitle.isNotBlank() && subject.originalTitle != subject.title) {
+                    Text(subject.originalTitle, style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                if (metadata.isNotBlank()) {
+                    Text(metadata, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                }
+                if (wide) {
+                    Spacer(Modifier.height(4.dp))
+                    actions()
+                }
+            }
+        }
+        if (!wide) actions()
+    }
+}
+
+@Composable
+private fun AnimeDetailActions(
+    episode: AnimeEpisode?,
+    progress: AnimeWatchProgress?,
+    entry: AnimeLibraryEntry?,
+    libraryAvailable: Boolean,
+    active: Boolean,
+    stackActions: Boolean,
+    backdrop: HazeState,
+    native: Boolean,
+    onPlay: (AnimeEpisode) -> Unit,
+    onFollow: () -> Unit,
+    onStatus: (AnimeWatchStatus) -> Unit,
+    onTracking: () -> Unit,
+    onStatusPresence: (Boolean) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val play: @Composable (Modifier) -> Unit = { modifier ->
+        MotionButton(
+            onClick = { episode?.let(onPlay) },
+            enabled = episode != null && active,
+            modifier = modifier.heightIn(min = 48.dp),
+            shape = RoundedCornerShape(18.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = colors.onSurface, contentColor = colors.surface,
+            ),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+        ) {
+            Icon(Icons.Outlined.PlayArrow, null, Modifier.size(21.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(
+                if (episode == null) "播放" else
+                    (if (progress != null) "继续 · " else "播放 · ") + animeEpisodeLabel(episode),
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+    val follow: @Composable () -> Unit = {
+        AnimeDetailFollow(entry, backdrop, libraryAvailable, active, native, onFollow, onStatus, onTracking, onStatusPresence)
+    }
+    Column(Modifier.widthIn(max = 520.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        if (stackActions) {
+            play(Modifier.fillMaxWidth())
+            follow()
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                play(Modifier.weight(1f))
+                follow()
+            }
+        }
+        if (progress != null) {
+            val position = animeTime(progress.positionMs)
+            val duration = progress.durationMs.takeIf { it > 0 }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (duration != null) {
+                    val fraction = (progress.positionMs.toDouble() / duration).coerceIn(0.0, 1.0).toFloat()
+                    Box(Modifier.weight(1f).height(3.dp).clip(RoundedCornerShape(2.dp))
+                        .background(colors.outlineVariant)) {
+                        Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(colors.primary))
+                    }
+                }
+                Text(if (duration == null) position else "$position / ${animeTime(duration)}",
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                    modifier = Modifier.semantics { contentDescription = "已观看 $position" })
+            }
+        }
+    }
+}
+
+@Composable
+private fun AnimeDetailFollow(
+    entry: AnimeLibraryEntry?,
+    backdrop: HazeState,
+    libraryAvailable: Boolean,
+    active: Boolean,
+    native: Boolean,
+    onFollow: () -> Unit,
+    onStatus: (AnimeWatchStatus) -> Unit,
+    onTracking: () -> Unit,
+    onPresence: (Boolean) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    var trackingAfterStatus by remember { mutableStateOf(false) }
+    LaunchedEffect(active) {
+        if (!active) {
+            open = false
+            trackingAfterStatus = false
+        }
+    }
+    val followed = entry?.followed == true
+    val status = entry?.takeIf { it.followed }?.status
+    Box {
+        LiquidGlassSurface(backdrop, cornerRadius = 22.dp, role = GlassSurfaceRole.CONTROL) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val followLabel = if (followed) "取消追番" else "加入追番"
+                MotionIconButton(onClick = onFollow, enabled = libraryAvailable && active,
+                    modifier = Modifier.size(44.dp), tooltip = followLabel) {
+                    Icon(if (followed) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder,
+                        followLabel, Modifier.size(19.dp),
+                        tint = if (followed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                }
+                MotionIconButton(
+                    onClick = { open = true }, enabled = libraryAvailable && active,
+                    modifier = Modifier.size(44.dp),
+                    tooltip = status?.let { "追番状态 · " + animeStatusLabel(it) } ?: "追番状态",
+                ) {
+                    Icon(Icons.Outlined.ExpandMore, status?.let { "追番状态 · " + animeStatusLabel(it) } ?: "追番状态",
+                        Modifier.size(18.dp))
+                }
+            }
+        }
+        CompactGlassPopover(
+            open, backdrop,
+            onDismiss = { open = false; trackingAfterStatus = false },
+            onPresenceChange = { present ->
+                onPresence(present)
+                if (!present && trackingAfterStatus) {
+                    trackingAfterStatus = false
+                    if (active) onTracking()
+                }
+            },
+        ) {
+            AnimeWatchStatus.entries.forEach { option ->
+                CompactMenuAction(
+                    if (option == status) Icons.Outlined.Check else Icons.Outlined.RadioButtonUnchecked,
+                    animeStatusLabel(option), onClick = { open = false; onStatus(option) },
+                )
+            }
+            if (!native) CompactMenuAction(Icons.Outlined.Sync, "核对追番进度", onClick = {
+                trackingAfterStatus = true
+                open = false
+            })
+        }
+    }
+}
+
+@Composable
+private fun AnimeDetailDescription(subject: AnimeSubject) {
+    var expanded by rememberSaveable(subject.id) { mutableStateOf(false) }
+    var canExpand by remember(subject.description) { mutableStateOf(false) }
+    val motion = LocalMotionEnabled.current
+    val colors = MaterialTheme.colorScheme
+    Column(
+        Modifier.fillMaxWidth()
+            .then(if (motion) Modifier.animateContentSize(
+                tween(MangaMotion.Content, easing = MangaMotion.EnterEasing),
+            ) else Modifier),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        AnimeSectionTitle(
+            "简介", modifier = Modifier.semantics { heading() },
+            action = {
+                if (canExpand || expanded || subject.tags.size > 3) {
+                    val label = if (expanded) "收起简介" else "展开简介"
+                    MotionIconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(44.dp), tooltip = label) {
+                        Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, label, Modifier.size(20.dp))
+                    }
+                }
+            },
+        )
+        if (subject.description.isNotBlank()) {
+            Text(
+                subject.description, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant,
+                maxLines = if (expanded) Int.MAX_VALUE else 3, overflow = TextOverflow.Ellipsis,
+                onTextLayout = { if (!expanded) canExpand = it.hasVisualOverflow },
+            )
+        }
+        val tags = if (expanded || subject.description.isBlank()) subject.tags else subject.tags.take(3)
+        if (tags.isNotEmpty()) {
+            Text(tags.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                maxLines = if (expanded) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun AnimeDetailStatus(
+    title: String,
+    icon: ImageVector,
+    detail: String? = null,
+    loading: Boolean = false,
+    actionLabel: String? = null,
+    actionIcon: ImageVector = Icons.Outlined.Refresh,
+    onAction: () -> Unit = {},
+) {
+    val colors = MaterialTheme.colorScheme
+    var expanded by remember(detail) { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 44.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite },
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (loading) MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+        else Icon(icon, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+        Column(Modifier.weight(1f).padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(title, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+            if (expanded && !detail.isNullOrBlank()) {
+                Text(detail, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            }
+        }
+        if (!detail.isNullOrBlank()) {
+            val label = if (expanded) "收起原因" else "查看原因"
+            MotionIconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(44.dp), tooltip = label) {
+                Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, label, Modifier.size(18.dp))
+            }
+        }
+        if (actionLabel != null) {
+            MotionIconButton(onClick = onAction, modifier = Modifier.size(44.dp), tooltip = actionLabel) {
+                Icon(actionIcon, actionLabel, Modifier.size(18.dp))
+            }
         }
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun AnimeEpisodeCell(episode: AnimeEpisode, completed: Boolean, resume: Boolean, matched: Int,
-    backdrop: HazeState, active: Boolean, onPlay: () -> Unit, onSources: () -> Unit, onCompleted: () -> Unit,
-    onMenuPresenceChange: (Boolean) -> Unit, modifier: Modifier = Modifier) {
+private fun AnimeEpisodeCell(
+    episode: AnimeEpisode,
+    completed: Boolean,
+    resume: Boolean,
+    matched: Int,
+    backdrop: HazeState,
+    active: Boolean,
+    libraryAvailable: Boolean,
+    onPlay: () -> Unit,
+    onSources: () -> Unit,
+    onCompleted: () -> Unit,
+    onMenuPresenceChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val native = episode.subjectId.startsWith("native:")
+    val label = animeEpisodeLabel(episode)
+    val subtitle = animeEpisodeSubtitle(episode)
     val interaction = remember(episode.id) { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
     var menuVisible by remember(episode.id) { mutableStateOf(false) }
     var sourcesAfterMenu by remember(episode.id) { mutableStateOf(false) }
-    LaunchedEffect(active) { if (!active) { menuVisible = false; sourcesAfterMenu = false } }
-    Box(modifier) {
-        Column(Modifier.fillMaxWidth().heightIn(min = 64.dp).clip(RoundedCornerShape(12.dp))
-            .background(if (resume) colors.primary.copy(alpha = .12f) else colors.surfaceContainerLow)
-            .motionPress(interaction, pressedScale = .97f)
-            .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
-                onClickLabel = "播放" + animeEpisodeLabel(episode), onClick = onPlay,
-                onLongClickLabel = "本集操作", onLongClick = { menuVisible = true })
-            .semantics(mergeDescendants = true) {
-                contentDescription = listOfNotNull(animeEpisodeLabel(episode), animeEpisodeSubtitle(episode)).joinToString(" ")
-                stateDescription = when { resume -> "续看"; completed -> "已看"; else -> "未看" }
-                customActions = listOf(CustomAccessibilityAction("本集操作") { menuVisible = true; true })
-            }.padding(horizontal = 6.dp, vertical = 9.dp),
-            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            Text(if (native) episode.title.ifBlank { "来源剧集" } else animeEpisodeLabel(episode),
-                minLines = if (native) 2 else 1, maxLines = if (native) 2 else 1,
-                textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.labelLarge, color = if (resume) colors.primary else colors.onSurface)
-            if (!native) Text(episode.title, minLines = 1, maxLines = 1,
-                textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+    LaunchedEffect(active) {
+        if (!active) {
+            menuVisible = false
+            sourcesAfterMenu = false
         }
-        if (resume || completed) Icon(if (resume) Icons.Outlined.PlayArrow else Icons.Outlined.Check,
-            null, Modifier.align(Alignment.TopEnd).padding(3.dp).size(12.dp),
-            tint = if (resume) colors.primary else colors.onSurfaceVariant)
-        CompactGlassPopover(menuVisible, backdrop,
+    }
+    Box(modifier) {
+        Column(
+            Modifier.fillMaxWidth().heightIn(min = 64.dp).clip(RoundedCornerShape(13.dp))
+                .background(if (resume) colors.primaryContainer else colors.surfaceContainerLow)
+                .motionPress(interaction, pressedScale = .97f)
+                .combinedClickable(
+                    interactionSource = interaction, indication = null, role = Role.Button,
+                    onClickLabel = "播放 $label", onClick = onPlay,
+                    onLongClickLabel = "本集操作", onLongClick = { menuVisible = true },
+                )
+                .semantics(mergeDescendants = true) {
+                    contentDescription = listOfNotNull(label, subtitle).joinToString(" ")
+                    stateDescription = when { resume -> "续看"; completed -> "已看"; else -> "未看" }
+                    customActions = listOf(CustomAccessibilityAction("本集操作") { menuVisible = true; true })
+                }.padding(horizontal = 7.dp, vertical = 9.dp),
+            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
+        ) {
+            Text(label, minLines = if (native) 2 else 1, maxLines = if (native) 2 else 1,
+                textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelLarge,
+                color = if (resume) colors.onPrimaryContainer else colors.onSurface)
+            if (!native) Text(subtitle.orEmpty(), minLines = 1, maxLines = 1,
+                textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (resume) colors.onPrimaryContainer else colors.onSurfaceVariant)
+        }
+        if (resume || completed) {
+            Icon(
+                if (resume) Icons.Outlined.PlayArrow else Icons.Outlined.Check, null,
+                Modifier.align(Alignment.TopEnd).padding(4.dp).size(12.dp),
+                tint = if (resume) colors.onPrimaryContainer else colors.onSurfaceVariant,
+            )
+        }
+        CompactGlassPopover(
+            menuVisible, backdrop,
             onDismiss = { menuVisible = false; sourcesAfterMenu = false },
             onPresenceChange = { present ->
                 onMenuPresenceChange(present)
@@ -293,11 +662,15 @@ private fun AnimeEpisodeCell(episode: AnimeEpisode, completed: Boolean, resume: 
                     sourcesAfterMenu = false
                     if (active) onSources()
                 }
-            }) {
-            AnimeQuietLabel(if (matched == 0) "尚未匹配播放来源" else "已匹配 " + matched + " 个来源",
+            },
+        ) {
+            AnimeQuietLabel(if (matched == 0) "尚未匹配播放来源" else "已匹配 $matched 个来源",
                 Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
-            CompactMenuAction(if (completed) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-                if (completed) "取消已看" else "标记已看", onClick = { menuVisible = false; onCompleted() })
+            CompactMenuAction(
+                if (completed) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                if (completed) "取消已看" else "标记已看", enabled = libraryAvailable,
+                onClick = { menuVisible = false; onCompleted() },
+            )
             CompactMenuAction(Icons.Outlined.SwapHoriz, "本集来源与映射",
                 onClick = { sourcesAfterMenu = true; menuVisible = false })
         }

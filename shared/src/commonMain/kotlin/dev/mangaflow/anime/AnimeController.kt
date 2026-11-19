@@ -23,6 +23,7 @@ import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.platform.monotonicTimeMillis
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
@@ -33,8 +34,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -47,6 +50,8 @@ import kotlin.time.Instant
 class AnimeController(private val context: PlatformContext, private val scope: CoroutineScope) {
     private val metadata = AnimeMetadataRepository(context)
     private val sources = AnimeSourceRepository(context)
+    private val unifiedSearch = AnimeUnifiedSearch(scope, metadata, sources)
+    internal val searchState = unifiedSearch.state
     private val discovery = AnimeDiscoveryRepository(context)
     val sourceBrowse = AnimeSourceBrowseController(context, scope, sources)
     private val tracking = AnimeTrackingRepository(context)
@@ -58,6 +63,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     val danmaku by lazy { dev.mangaflow.anime.danmaku.AnimeDanmakuController(context, scope, sources.extensions) }
     private val downloadsOwner = lazy { dev.mangaflow.anime.downloads.AnimeDownloadStore(context, scope).also {
         it.setForeground(foreground)
+        it.setPlaybackBusy(playbackBusy())
     } }
     val downloads get() = downloadsOwner.value
     val sourceHomes: Map<String, String> get() = sources.providers.associate { it.id to it.homeUrl } +
@@ -67,6 +73,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         "anime-bangumi" to "https://api.bgm.tv/", "anime-anilist" to "https://graphql.anilist.co/",
         "anime-danmaku-dandanplay" to "https://api.dandanplay.net/")
     private var playerInstance: AnimePlayer? = null
+    private val mutablePlaybackPhase = MutableStateFlow(AnimePlayerPhase.IDLE)
+    internal val playbackPhase = mutablePlaybackPhase.asStateFlow()
     val player: AnimePlayer
         get() = playerInstance ?: createAnimePlayer(context, scope).also {
             playerInstance = it
@@ -75,8 +83,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             observePlayer(it)
         }
 
-    private var searchMetadataHasMore = false
-    private var browseGeneration = 0L
     private var discoverySequence = 0L
     private var discoveryDate: String? = null
     private val discoveryRequests = mutableMapOf<String, Long>()
@@ -88,7 +94,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private var resolveGeneration = 0L
     private var catalogGeneration = 0L
     private val catalogRequests = mutableMapOf<String, Long>()
-    private var browseJob: Job? = null
     private var detailJob: Job? = null
     private var sourceJob: Job? = null
     private var previewJob: Job? = null
@@ -115,7 +120,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private var sourceQuery = ""
     private var foreground = true
     private var resolvingSourceId: String? = null
-    private var prepared: PendingPlayback? = null
+    private var preparationTarget: PreparationTarget? = null
+    private var prepared: PreparedPlayback? = null
     private var rollback: PlaybackReceipt? = null
     private var resumeRequest: Pair<String, String>? = null
     private var restoreEpoch = 0L
@@ -126,6 +132,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private val playbackAttemptOrder = mutableMapOf<PlaybackHistoryKey, Long>()
     private val playbackSourceAttemptOrder = mutableMapOf<PlaybackHistoryKey, Long>()
     private var playbackAttemptSequence = 0L
+    private val recentPlaybackSources = mutableMapOf<String, PlaybackSourceReceipt>()
     private var sourceRecoveryWindowStarted = false
     private val playbackEpochs = mutableMapOf<String, Long>()
     private var active: ActivePlayback? = null
@@ -149,10 +156,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         var endActionHandled: Boolean = false,
         var openingSkipped: Boolean = false,
         var endingSkipped: Boolean = false,
-        var preparationAttempted: Boolean = false,
+        var nextPreparationNotBefore: Long = 0L,
         var recoveryHandled: Boolean = false,
         var stablePlaybackSince: Long? = null,
         var stableRecoveryReset: Boolean = false,
+        var sourceReceiptSaved: Boolean = false,
         val automaticIntent: Boolean = false,
     )
     private data class PendingPlayback(
@@ -164,6 +172,15 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val useSourceStart: Boolean = true,
         val automaticIntent: Boolean = false,
     )
+    private data class PlaybackSourceReceipt(
+        val sourceId: String, val revision: String, val route: DownloadRouteSnapshot, val observedAt: Long,
+    )
+    private data class PreparationTarget(
+        val subjectId: String, val episodeId: String, val option: AnimeEpisodeOption,
+        val revision: String, val route: DownloadRouteSnapshot,
+    )
+    private data class PreparedPlayback(val target: PreparationTarget, val asset: AnimePlaybackAsset, val validUntil: Long)
+
     private data class PlaybackReceipt(val playback: ActivePlayback, val positionMs: Long, val playWhenReady: Boolean)
     private data class ReviewContext(val detail: AnimeDetail, val remote: AnimeTrackingSnapshot)
 
@@ -183,6 +200,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         boundCatalogJob?.cancel()
                         retryNativeReference = null
                         stopPlayback(discardCheckpoint = true)
+                        recentPlaybackSources.clear()
                         reviewSnapshots.clear()
                         mutableState.update { it.copy(reviews = emptyList(), detailLoading = false,
                             detailError = if (it.detail != null) "本机记录已恢复，请重新打开番剧以读取恢复后的关联。" else null) }
@@ -234,12 +252,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     }
                     if (previewSourceId in changed) dismissSourcePreview()
                     if (resolvingSourceId in changed || pending?.option?.sourceId in changed) cancelPlaybackResolution()
-                    if (prepared?.option?.sourceId in changed) clearPreparation()
+                    if (preparationTarget?.option?.sourceId in changed) clearPreparation()
                     rebuildOptions()
                     changed.forEach(::refreshSource)
-                    // A query owns an enabled-source/revision snapshot, not just its text.
-                    mutableState.value.query.takeIf { it.isNotBlank() }?.let { browseSearch(it) }
                 }
+                unifiedSearch.reconcile()
                 mutableState.value.detail?.let { startSourceAggregation(it) }
                 projectRoutes()
             }
@@ -247,10 +264,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         scope.launch {
             routing.state.collect {
                 projectRoutes()
-                prepared?.takeIf { it.asset.route != playbackHistoryRoute(it.option.sourceId) }?.let {
-                    clearPreparation()
-                    active?.preparationAttempted = false
-                }
+                unifiedSearch.reconcile()
+                invalidatePreparation()
             }
         }
         scope.launch {
@@ -258,124 +273,27 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             catch (cancel: CancellationException) { throw cancel }
             catch (_: Exception) { notice("追番账号未能读取，番剧浏览仍可使用。请重新连接账号。") }
         }
+        scope.launch {
+            state.map { it.resolving }.distinctUntilChanged().collect {
+                if (downloadsOwner.isInitialized()) downloads.setPlaybackBusy(playbackBusy())
+            }
+        }
     }
 
     /** Search never borrows the current discovery feed, filters or cancellation generation. */
-    fun search(query: String) {
+    fun search(query: String, indexOnly: Boolean = false) {
         val keyword = query.trim()
         if (keyword.isNotEmpty()) mutate { library.rememberSearch(keyword) }
-        browseSearch(keyword)
+        unifiedSearch.search(keyword, indexOnly)
     }
 
     fun clearSearchHistory() = mutate { library.clearSearchHistory() }
     fun dismissResume(subjectId: String) = mutate { library.dismissResume(subjectId) }
     fun setDiscoveryColumns(columns: Int) = mutate { library.setDiscoveryColumns(columns) }
 
-    fun loadMoreCatalog() {
-        val current = mutableState.value
-        if (!current.catalogHasMore || current.catalogLoading || current.catalogLoadingMore || current.query.isBlank()) return
-        browseSearch(current.query, append = true)
-    }
-
-    private fun browseSearch(query: String, append: Boolean = false) {
-        val generation = ++browseGeneration
-        browseJob?.cancel()
-        val before = mutableState.value
-        if (!append) searchMetadataHasMore = false
-        if (query.isBlank()) {
-            mutableState.update { it.copy(query = "", catalog = emptyList(), unifiedSearch = emptyList(),
-                searchProviders = emptyList(), catalogPage = 0, catalogHasMore = false, catalogLoading = false,
-                catalogLoadingMore = false, catalogError = null, catalogMoreError = null) }
-            return
-        }
-        mutableState.update { it.copy(query = query, catalogLoading = !append, catalogLoadingMore = append,
-            catalogError = if (append) it.catalogError else null, catalogMoreError = null,
-            catalog = if (append) it.catalog else emptyList(),
-            unifiedSearch = if (append) it.unifiedSearch else emptyList(),
-            searchProviders = if (append) it.searchProviders else emptyList(),
-            catalogPage = if (append) it.catalogPage else 0, catalogHasMore = false) }
-        browseJob = scope.launch {
-            sources.extensions.ready.await()
-            if (generation != browseGeneration) return@launch
-            val providers = sources.providers
-            val previousResults = before.searchProviders.associateBy { it.providerId }
-            val requests = providers.filter { !append || previousResults[it.id]?.let { result ->
-                result.hasMore || result.error != null || result.page == 0
-            } != false }
-            var metadataHasMore = false
-            // Metadata retains its own page cursor; a failed source retries its failed page, not the next one.
-            val metadataRequested = !append || before.catalogMoreError != null || before.catalogError != null ||
-                before.catalogPage == 0 || searchMetadataHasMore
-            mutableState.update { state -> state.copy(searchProviders = providers.map { provider ->
-                val old = if (append) previousResults[provider.id] else null
-                (old ?: AnimeSourceResult(provider.id, provider.name)).copy(
-                    loading = provider in requests && !append, loadingMore = provider in requests && append, error = null)
-            }) }
-            fun publish() {
-                if (generation != browseGeneration) return
-                mutableState.update { it.copy(unifiedSearch = groupAnimeSearch(it.catalog, it.searchProviders)) }
-            }
-            coroutineScope {
-                if (metadataRequested) launch {
-                    val page = if (append) before.catalogPage.toLong() + 1 else 1L
-                    try {
-                        require(page in 1..Int.MAX_VALUE.toLong()) { "分页位置已超出来源支持范围。" }
-                        if (!append) metadata.cachedBrowse(AnimeBrowseMode.POPULAR, query, 1, null, "", null)?.let { cached ->
-                            if (generation == browseGeneration) {
-                                mutableState.update { it.copy(catalog = cached.items) }
-                                publish()
-                            }
-                        }
-                        val result = metadata.browse(AnimeBrowseMode.POPULAR, query, page.toInt(), null, "", null,
-                            forceRefresh = !append)
-                        check(result.page == page.toInt()) { "来源返回的页码与请求不一致。" }
-                        if (generation != browseGeneration) return@launch
-                        metadataHasMore = result.hasMore
-                        searchMetadataHasMore = result.hasMore
-                        mutableState.update { it.copy(catalog = ((if (append) it.catalog else emptyList()) + result.items)
-                            .distinctBy(AnimeSubject::id), catalogPage = result.page, catalogError = null, catalogMoreError = null) }
-                    } catch (cancel: CancellationException) { throw cancel }
-                    catch (failure: Exception) {
-                        if (generation == browseGeneration) mutableState.update { it.copy(
-                            catalogError = if (append) it.catalogError else failure.message ?: "番剧索引暂未响应。",
-                            catalogMoreError = if (append) failure.message ?: "番剧索引这一页未能加载。" else null) }
-                    }
-                    publish()
-                }
-                requests.forEach { provider -> launch {
-                    val previous = if (append) previousResults[provider.id] else null
-                    val page = (previous?.page?.toLong() ?: 0L) + 1L
-                    val revision = sourceRevision(provider.id)
-                    try {
-                        require(page in 1..Int.MAX_VALUE.toLong()) { "分页位置已超出来源支持范围。" }
-                        val found = provider.search(query, page.toInt()).distinctBy { it.id to it.url }
-                        check(found.all { it.sourceId == provider.id }) { "来源返回了不同来源的条目。" }
-                        check(sources.provider(provider.id) != null && sourceRevision(provider.id) == revision) {
-                            "来源已更新或停用，请重新搜索。"
-                        }
-                        val oldItems = previous?.items.orEmpty()
-                        val added = found.filter { item -> oldItems.none { it.id == item.id && it.url == item.url } }
-                            .map { it.copy(sourceRevision = discoverySourceRevision(provider.id)) }
-                        if (generation == browseGeneration) mutableState.update { state -> state.copy(
-                            searchProviders = state.searchProviders.map { if (it.providerId != provider.id) it else
-                                AnimeSourceResult(provider.id, provider.name, oldItems + added, page = page.toInt(),
-                                    hasMore = provider.supportsSearchPagination && added.isNotEmpty()) }) }
-                    } catch (cancel: CancellationException) { throw cancel }
-                    catch (failure: Exception) {
-                        if (generation == browseGeneration) mutableState.update { state -> state.copy(
-                            searchProviders = state.searchProviders.map { if (it.providerId != provider.id) it else
-                                (previous ?: AnimeSourceResult(provider.id, provider.name)).copy(loading = false,
-                                    loadingMore = false, error = failure.message ?: "这个来源暂未响应。") }) }
-                    }
-                    publish()
-                } }
-            }
-            if (generation == browseGeneration) mutableState.update { it.copy(catalogLoading = false,
-                catalogLoadingMore = false, catalogHasMore = metadataHasMore || it.searchProviders.any { result ->
-                    result.hasMore || result.error != null
-                } || it.catalogMoreError != null || it.catalogError != null) }
-        }
-    }
+    internal fun loadMoreCatalog() = unifiedSearch.loadMore()
+    internal fun retrySearchIndex() = unifiedSearch.retryIndex()
+    internal fun retrySearchProvider(sourceId: String) = unifiedSearch.retrySource(sourceId)
 
     /** Fixed home slots keep independent results; changing a day or quarter only invalidates affected slots. */
     fun ensureDiscovery(loadHome: Boolean = true) {
@@ -405,7 +323,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 }
             }
             mapOf(AnimeDiscoveryTab.RANKING to AnimeDiscoveryQuery(), AnimeDiscoveryTab.SEASON to seasonal,
-                AnimeDiscoveryTab.CALENDAR to calendar).forEach { (tab, query) ->
+                AnimeDiscoveryTab.CALENDAR to calendar, AnimeDiscoveryTab.GENRES to AnimeDiscoveryQuery()).forEach { (tab, query) ->
                 val key = animeDiscoveryFeedKey(tab)
                 if (key !in feeds) feeds[key] = AnimeDiscoveryFeed(query)
             }
@@ -1080,12 +998,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             sourceGroups = bindings.mapNotNull { binding ->
                 binding.selectedGroup?.let { group -> binding.catalog.sourceId to group }
             }.toMap()) }
-        prepared?.let { candidate ->
-            if (!validCandidate(candidate) || options[candidate.episode.id].orEmpty().firstOrNull { it.confirmed } != candidate.option) {
-                clearPreparation()
-                active?.preparationAttempted = false
-            }
-        }
+        invalidatePreparation()
         resumeRequest?.takeIf { it.first == detail.subject.id }?.let { request ->
             if (options[request.second].orEmpty().any { it.confirmed }) {
                 resumeRequest = null
@@ -1106,7 +1019,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         resetPlaybackRecoveryWindow()
         autoPlayJob?.cancel()
         mutableState.update { it.copy(autoPlaySelectionEpisodeId = null, autoMatching = false) }
-        if (option == null) mutableState.value.detail?.let { startSourceAggregation(it, retryFailed = true) }
         if (option == null && mutableState.value.episodeOptions[episodeId].orEmpty().none { it.confirmed }) {
             autoAssociateAndPlay(episodeId)
         } else resolveAndPlay(episodeId, option)
@@ -1357,16 +1269,43 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         while (playbackSourceAttemptOrder.size > 256) playbackSourceAttemptOrder.remove(playbackSourceAttemptOrder.keys.first())
     }
 
+    private fun rememberWorkingSource(owner: ActivePlayback, observedAt: Long) {
+        val sourceId = owner.option.sourceId
+        val revision = discoverySourceRevision(sourceId) ?: return
+        if (owner.localMedia != null || owner.asset.sourceRevision != revision ||
+            owner.asset.route != playbackHistoryRoute(sourceId)) return
+        owner.sourceReceiptSaved = true
+        val subjectId = owner.detail.subject.id
+        recentPlaybackSources.remove(subjectId)
+        recentPlaybackSources[subjectId] = PlaybackSourceReceipt(sourceId, revision, owner.asset.route, observedAt)
+        if (recentPlaybackSources.size > 128) recentPlaybackSources.remove(recentPlaybackSources.keys.first())
+    }
+
     /** Try each source before another route from it. Recent failures go last, and retries
      * continue with least-recently attempted sources/options instead of repeating a prefix.
      * Within AGE, known dynamic-only wrappers follow routes this resolver can already read. */
     private fun fairPlaybackOptions(subjectId: String, episodeId: String,
-        options: List<AnimeEpisodeOption>): List<AnimeEpisodeOption> {
+        options: List<AnimeEpisodeOption>, preferContinuity: Boolean = true): List<AnimeEpisodeOption> {
         val now = wallTimeMillis()
+        val preferred = mutableState.value.preferredSourceId.takeIf { preferContinuity }
+        val recent = recentPlaybackSources[subjectId]?.takeIf { preferContinuity &&
+            monotonicTimeMillis() - it.observedAt in 0L until 30 * 60_000L &&
+            it.route == playbackHistoryRoute(it.sourceId) && it.revision == discoverySourceRevision(it.sourceId) }?.sourceId
+        val resumed = if (preferContinuity) library.progressFor(subjectId, episodeId)?.takeIf {
+            !it.completed && it.localDownloadId == null
+        }?.sourceId else null
+        fun priority(sourceId: String) = when (sourceId) {
+            preferred -> 0
+            recent -> 1
+            resumed -> 2
+            else -> 3
+        }
         fun cooling(option: AnimeEpisodeOption) = playbackHistoryKey(subjectId, episodeId, option)?.let { playbackFailures[it] }?.let { now - it in 0L until 60_000L } == true
         return listOf(false, true).flatMap { cooldown ->
             val buckets = options.filter { cooling(it) == cooldown }.groupBy { it.sourceId }.entries
-                .sortedBy { sourceAttemptKey(subjectId, episodeId, it.key)?.let { key -> playbackSourceAttemptOrder[key] } ?: Long.MIN_VALUE }
+                .sortedWith(compareBy<Map.Entry<String, List<AnimeEpisodeOption>>> { priority(it.key) }.thenBy {
+                    sourceAttemptKey(subjectId, episodeId, it.key)?.let { key -> playbackSourceAttemptOrder[key] } ?: Long.MIN_VALUE
+                })
                 .map { (_, rows) -> rows.sortedWith(compareBy<AnimeEpisodeOption> {
                     dev.mangaflow.anime.sources.animePlaybackParserPriority(it.sourceId, it.episode)
                 }.thenBy { playbackHistoryKey(subjectId, episodeId, it)?.let { key -> playbackAttemptOrder[key] } ?: Long.MIN_VALUE }) }
@@ -1382,6 +1321,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private fun autoAssociateAndPlay(episodeId: String, attempted: Set<String> = emptySet()) {
         val detail = mutableState.value.detail ?: return
         if (detail.episodes.none { it.id == episodeId }) return
+        clearPreparation()
         val owner = detailGeneration
         val generation = autoPlayGeneration
         ++resolveGeneration
@@ -1394,7 +1334,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             try {
                 library.awaitLoaded(); sources.extensions.ready.await()
                 if (generation != autoPlayGeneration || !currentDetail(owner, detail.subject.id)) return@launch
-                startSourceAggregation(detail)
+                startSourceAggregation(detail, retryFailed = true)
                 val remaining = autoPlaybackDeadline - monotonicTimeMillis()
                 val ready = if (remaining <= 0L) null else withTimeoutOrNull(remaining) {
                     state.first { state ->
@@ -1425,7 +1365,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val detail = mutableState.value.detail ?: return
         val episode = detail.episodes.firstOrNull { it.id == episodeId } ?: return
         val offered = playbackOptions(episodeId, automatic = option == null).filterNot { optionKey(it) in attempted }
-        val options = if (option == null) fairPlaybackOptions(detail.subject.id, episodeId, offered) else offered
+        val options = if (option == null) fairPlaybackOptions(detail.subject.id, episodeId, offered,
+            preferContinuity = attempted.isEmpty()) else offered
         val selected = option?.takeIf { offered -> options.any { it == offered && it.confirmed } }
             ?: if (option == null) options.firstOrNull { it.confirmed } else null
         if (selected == null) {
@@ -1435,7 +1376,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             return
         }
         resumeRequest = null
-        val available = prepared?.takeIf { it.episode.id == episodeId && it.option == selected && validCandidate(it) }
+        val available = prepared?.takeIf { it.target.subjectId == detail.subject.id &&
+            it.target.episodeId == episodeId && it.target.option == selected && freshPreparation(it) }
         clearPreparation()
         val owner = detailGeneration
         val generation = ++resolveGeneration
@@ -1461,7 +1403,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         it.title.sourceId == candidate.sourceId && it.title.id == candidate.catalog.id && it.title.url == candidate.catalog.url
                     } ?: error("来源目录已变化，请重新选集。")
                     val provider = sources.provider(candidate.sourceId) ?: error("这个来源当前不可用。")
-                    val preparedAsset = available?.takeIf { it.option == candidate && validCandidate(it) }?.asset
+                    val preparedAsset = available?.takeIf { it.target.option == candidate && freshPreparation(it) }?.asset
                     check(option != null || monotonicTimeMillis() < autoPlaybackDeadline) { "本轮播放准备已到时限，请重试。" }
                     // Only admitted attempts count; exhausted-budget candidates remain untried.
                     val historyKey = playbackHistoryKey(detail.subject.id, episodeId, candidate)
@@ -1702,7 +1644,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (!value) flushPlayback()
         playerInstance?.setForeground(value)
         if (downloadsOwner.isInitialized()) downloads.setForeground(value)
-        if (!value && !mutableState.value.settings.backgroundAudio) clearPreparation()
+        if (!value && (!mutableState.value.settings.backgroundAudio || prepared == null)) clearPreparation()
         if (value && discoveryDate != null) ensureDiscovery()
     }
 
@@ -1745,14 +1687,18 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         owner.episode.id, owner.asset.id, owner.asset.sourceId, snapshot.positionMs.coerceAtLeast(0L),
         snapshot.durationMs.coerceAtLeast(0L), wallTimeMillis(), snapshot.ended, owner.detail.subject.id, owner.localMedia?.downloadId)
 
+    private fun playbackBusy(snapshot: AnimePlayerState? = playerInstance?.state?.value): Boolean =
+        mutableState.value.resolving || snapshot?.isBuffering == true || snapshot?.phase == AnimePlayerPhase.OPENING ||
+            active?.let { snapshot != null && snapshot.sessionGeneration < it.playerGeneration } == true
+
     private fun observePlayer(engine: AnimePlayer) {
         scope.launch {
             engine.state.collect { snapshot ->
+                mutablePlaybackPhase.value = snapshot.phase
                 val owner = active ?: return@collect
                 if (!belongsTo(owner, snapshot)) return@collect
                 danmaku.updatePosition(playbackKey(owner), snapshot.positionMs, snapshot.isPlaying)
-                if (downloadsOwner.isInitialized()) downloads.setPlaybackBusy(snapshot.isBuffering ||
-                    snapshot.phase == AnimePlayerPhase.OPENING || mutableState.value.resolving)
+                if (downloadsOwner.isInitialized()) downloads.setPlaybackBusy(playbackBusy(snapshot))
                 checkpoint(owner, snapshot, force = snapshot.phase != lastSavedPhase || snapshot.ended || !snapshot.playWhenReady)
                 if (snapshot.phase == AnimePlayerPhase.ERROR) {
                     val historyKey = playbackHistoryKey(owner.detail.subject.id, owner.episode.id, owner.option)
@@ -1763,16 +1709,23 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     mutableState.update { it.copy(canRestorePlayback = rollback != null) }
                     if (!owner.recoveryHandled) { owner.recoveryHandled = true; recoverPlayback(owner) }
                 }
-                if (!owner.stableRecoveryReset) {
-                    if (snapshot.isPlaying && !snapshot.playbackSuppressed && !snapshot.isBuffering && snapshot.phase == AnimePlayerPhase.READY &&
-                        (snapshot.firstFrameRendered != false || snapshot.hasVideoTracks == false)) {
-                        val since = owner.stablePlaybackSince ?: monotonicTimeMillis().also { owner.stablePlaybackSince = it }
-                        if (monotonicTimeMillis() - since >= 30_000L) {
-                            owner.stableRecoveryReset = true
-                            sourceRecoveryWindowStarted = false
-                            recoveryOptions.clear()
-                        }
-                    } else owner.stablePlaybackSince = null
+                val playingSteadily = snapshot.isPlaying && !snapshot.playbackSuppressed && !snapshot.isBuffering &&
+                    snapshot.phase == AnimePlayerPhase.READY &&
+                    (snapshot.firstFrameRendered != false || snapshot.hasVideoTracks == false)
+                val now = monotonicTimeMillis()
+                val stableSince = if (playingSteadily) owner.stablePlaybackSince ?: now else null
+                owner.stablePlaybackSince = stableSince
+                val stableFor = stableSince?.let { now - it } ?: 0L
+                if (!owner.sourceReceiptSaved && owner.localMedia == null && stableFor >= 2_000L) {
+                    rememberWorkingSource(owner, now)
+                }
+                if (!owner.stableRecoveryReset && stableFor >= 30_000L) {
+                    owner.stableRecoveryReset = true
+                    sourceRecoveryWindowStarted = false
+                    recoveryOptions.clear()
+                }
+                if ((snapshot.isBuffering || !snapshot.playWhenReady) && preparationTarget != null && prepared == null) {
+                    clearPreparation()
                 }
                 if (snapshot.isPlaying) {
                     val settings = mutableState.value.settings
@@ -1781,15 +1734,17 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         val target = settings.skipOpeningSeconds * 1_000L
                         if (target < snapshot.durationMs && snapshot.positionMs < target) engine.seekTo(target)
                     }
-                    if (!owner.endingSkipped && settings.skipEndingSeconds > 0 && snapshot.durationMs > 0 &&
-                        snapshot.positionMs >= (snapshot.durationMs - settings.skipEndingSeconds * 1_000L).coerceAtLeast(0) &&
-                        settings.skipEndingSeconds * 1_000L < snapshot.durationMs) {
+                    val endingSkip = (settings.skipEndingSeconds * 1_000L).takeIf { it in 1L until snapshot.durationMs } ?: 0L
+                    val remaining = snapshot.durationMs - endingSkip - snapshot.positionMs
+                    if (!owner.endingSkipped && endingSkip > 0L && remaining <= 0L) {
                         owner.endingSkipped = true
                         engine.seekTo(snapshot.durationMs)
                     }
-                    if (owner.localMedia == null && settings.prepareNextEpisode && !owner.preparationAttempted && !mutableState.value.resolving) prepareNext(owner)
-                } else if (snapshot.isBuffering || !snapshot.playWhenReady) {
-                    if (prepareJob?.isActive == true) { clearPreparation(); owner.preparationAttempted = false }
+                    if (stableFor >= 2_000L && foreground && owner.localMedia == null && settings.prepareNextEpisode &&
+                        preparationTarget == null && now >= owner.nextPreparationNotBefore && !mutableState.value.resolving &&
+                        !mutableState.value.sleepAtEpisodeEnd && (snapshot.durationMs <= 0 || remaining <= 45_000L)) {
+                        prepareNext(owner)
+                    }
                 }
                 if (snapshot.ended && !owner.endActionHandled) {
                     owner.endActionHandled = true
@@ -1831,7 +1786,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     private fun nextEpisode(owner: ActivePlayback): AnimeEpisode? {
-        val episodes = owner.detail.episodes.filter { it.kind == owner.episode.kind }.sortedBy { it.number }
+        val detail = mutableState.value.detail?.takeIf { it.subject.id == owner.detail.subject.id } ?: return null
+        val episodes = detail.episodes.filter { it.kind == owner.episode.kind }
         val index = episodes.indexOfFirst { it.id == owner.episode.id }
         return episodes.getOrNull(index + 1)?.takeIf { next -> index >= 0 &&
             mutableState.value.episodeOptions[next.id].orEmpty().any { it.confirmed } }
@@ -1839,33 +1795,73 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     private fun prepareNext(owner: ActivePlayback) {
         val next = nextEpisode(owner) ?: return
-        val option = mutableState.value.episodeOptions[next.id].orEmpty().firstOrNull { it.confirmed } ?: return
+        val subjectId = owner.detail.subject.id
+        val option = defaultPreparationOption(subjectId, next.id) ?: return
         val catalog = mutableState.value.sourceCatalogs.firstOrNull { it.title.sourceId == option.catalog.sourceId &&
             it.title.id == option.catalog.id && it.title.url == option.catalog.url } ?: return
         val provider = sources.provider(option.sourceId) ?: return
-        owner.preparationAttempted = true
-        val revision = sourceRevision(option.sourceId)
+        val revision = discoverySourceRevision(option.sourceId) ?: return
+        val route = playbackHistoryRoute(option.sourceId) ?: return
+        val target = PreparationTarget(subjectId, next.id, option, revision, route)
         val generation = resolveGeneration
-        prepareJob = scope.launch {
+        preparationTarget = target
+        prepareJob = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                val asset = provider.resolve(catalog, option.episode).copy(episodeId = next.id,
-                    title = owner.detail.subject.title + " · " + next.title)
-                val choice = PendingPlayback(owner.detail, next, option, asset, 0L, generation, revision, automaticIntent = owner.automaticIntent)
-                if (active === owner && generation == resolveGeneration && mutableState.value.settings.prepareNextEpisode &&
-                    asset.sourceId == option.sourceId && asset.sourceEpisodeId == option.episode.id && validCandidate(choice)) {
-                    prepared = choice
-                    mutableState.update { it.copy(nextEpisodeReady = true) }
-                }
+                val asset = withTimeoutOrNull(8_000L) { provider.resolve(catalog, option.episode) }
+                    ?: error("下一集来源解析超时。")
+                if (preparationTarget !== target || active !== owner || generation != resolveGeneration ||
+                    !preparationStillCurrent(target)) return@launch
+                check(asset.sourceId == option.sourceId && asset.sourceEpisodeId == option.episode.id &&
+                    asset.sourceRevision == revision && asset.route == route)
+                val lifetime = asset.expiresAt?.let { expiry ->
+                    val now = wallTimeMillis()
+                    check(expiry > now)
+                    minOf(60_000L, expiry - now - 2_000L)
+                } ?: 60_000L
+                check(lifetime > 0L)
+                prepared = PreparedPlayback(target, asset, monotonicTimeMillis() + lifetime)
+                mutableState.update { it.copy(nextEpisodeReady = true) }
+                delay(lifetime)
             } catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { /* Foreground playback remains authoritative; preparation is optional. */ }
+            catch (_: Exception) {
+                if (preparationTarget === target) owner.nextPreparationNotBefore = monotonicTimeMillis() + 30_000L
+            } finally {
+                if (preparationTarget === target) releasePreparation()
+            }
         }
+        prepareJob?.start()
     }
 
-    private fun clearPreparation() {
-        prepareJob?.cancel()
+    private fun defaultPreparationOption(subjectId: String, episodeId: String): AnimeEpisodeOption? =
+        fairPlaybackOptions(subjectId, episodeId, playbackOptions(episodeId, automatic = true).filter { it.confirmed })
+            .firstOrNull()
+
+    private fun preparationStillCurrent(target: PreparationTarget): Boolean =
+        mutableState.value.detail?.subject?.id == target.subjectId && mutableState.value.settings.prepareNextEpisode &&
+            active?.let(::nextEpisode)?.id == target.episodeId &&
+            target.route == playbackHistoryRoute(target.option.sourceId) &&
+            target.revision == discoverySourceRevision(target.option.sourceId) &&
+            defaultPreparationOption(target.subjectId, target.episodeId) == target.option
+
+    private fun freshPreparation(value: PreparedPlayback): Boolean =
+        monotonicTimeMillis() < value.validUntil && (value.asset.expiresAt?.let { it > wallTimeMillis() } != false) &&
+            preparationStillCurrent(value.target)
+
+    private fun invalidatePreparation() {
+        if (preparationTarget?.let(::preparationStillCurrent) == false) clearPreparation()
+    }
+
+    private fun releasePreparation() {
+        preparationTarget = null
         prepareJob = null
         prepared = null
         mutableState.update { it.copy(nextEpisodeReady = false) }
+    }
+
+    private fun clearPreparation() {
+        val job = prepareJob ?: return
+        releasePreparation()
+        job.cancel()
     }
 
     private fun recoverPlayback(owner: ActivePlayback) {
@@ -1903,7 +1899,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         library.setSettings(settings.validate())
         playerInstance?.configure(playerOptions(settings))
         if (!settings.prepareNextEpisode) clearPreparation()
-        else active?.preparationAttempted = false
+        else active?.nextPreparationNotBefore = 0L
     }
 
     private fun playerOptions(settings: AnimePlaybackSettings) = AnimePlayerOptions(
@@ -1921,6 +1917,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         sleepJob?.cancel()
         val deadline = minutes?.let { wallTimeMillis() + it * 60_000L }
         mutableState.update { it.copy(sleepDeadlineMs = deadline, sleepAtEpisodeEnd = atEpisodeEnd && deadline == null) }
+        if (atEpisodeEnd && deadline == null) clearPreparation()
         if (deadline != null) sleepJob = scope.launch {
             delay((deadline - wallTimeMillis()).coerceAtLeast(0))
             if (mutableState.value.sleepDeadlineMs == deadline) {
@@ -1938,8 +1935,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val owner = active ?: run { notice("请先打开要保存的剧集。"); return }
         if (owner.localMedia != null) { notice("当前播放来自已保存的离线剧集。"); return }
         mutate {
-            val snapshot = playerInstance?.state?.value
-            downloads.setPlaybackBusy(snapshot?.isBuffering == true || snapshot?.phase == AnimePlayerPhase.OPENING || mutableState.value.resolving)
+            downloads.setPlaybackBusy(playbackBusy())
             downloads.enqueue(owner.detail.subject, owner.episode, owner.asset)
             notice("已加入离线下载，可在下载列表查看进度。")
         }
@@ -2264,7 +2260,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private fun subject(id: String): AnimeSubject? = mutableState.value.detail?.subject?.takeIf { it.id == id }
         ?: library.state.value.entries[id]?.subject
 
-    private fun stillBound(subjectId: String, title: AnimeSourceTitle): Boolean =
+    internal fun stillBound(subjectId: String, title: AnimeSourceTitle): Boolean =
         library.state.value.bindings.any { it.subjectId == subjectId && it.catalog.sourceId == title.sourceId && it.catalog.id == title.id && it.catalog.url == title.url }
 
     private fun currentDetail(generation: Long, subjectId: String) =

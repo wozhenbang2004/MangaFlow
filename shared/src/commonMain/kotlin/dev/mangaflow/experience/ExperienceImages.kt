@@ -27,6 +27,7 @@ import coil3.request.Options
 import coil3.size.Scale
 import coil3.size.Size
 import dev.mangaflow.data.Page
+import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.net.DownloadRouteSnapshot
@@ -60,6 +61,7 @@ internal enum class ExperienceImageWork { VISIBLE, READER, PREFETCH }
 private val workKey = Extras.Key(ExperienceImageWork.VISIBLE)
 private val bytesKey = Extras.Key<PrefetchByteBudget?>(null)
 private val sourceKey = Extras.Key<String?>(null)
+private val sourceCategoryKey = Extras.Key<DownloadCategory?>(null)
 private val workTokenKey = Extras.Key<PrefetchWork?>(null)
 private val readerTransferKey = Extras.Key<ReaderTransferObserver?>(null)
 private val cacheOnlyKey = Extras.Key(false)
@@ -169,7 +171,10 @@ internal class PrefetchWork(private val promoted: () -> Unit = {},
 internal class PrefetchPromoted : RuntimeException()
 
 /** Explicit source identity, never inferred from a shared CDN host. */
-internal fun ImageRequest.Builder.sourceNetwork(source: String) = apply { extras[sourceKey] = source }
+internal fun ImageRequest.Builder.sourceNetwork(source: String, category: DownloadCategory? = null) = apply {
+    extras[sourceKey] = source
+    extras[sourceCategoryKey] = category
+}
 
 internal fun ImageRequest.Builder.readerPriority(source: String? = null) = apply {
     extras[workKey] = ExperienceImageWork.READER
@@ -716,7 +721,9 @@ private class ExperienceImageNetworkClient(
         var retry: String? = null
         var failed = false
         var interrupted = false
-        val selectedRoute = request.extras[sourceKey]?.let { DownloadRoutingStore.activeSourceSnapshot(it) }
+        val selectedRoute = request.extras[sourceKey]?.let {
+            DownloadRoutingStore.activeSourceSnapshot(it, request.extras[sourceCategoryKey])
+        }
             ?: DownloadRoutingStore.activeDefaultSnapshot()
         val timeouts = policy.state.value.imageTimeouts()
         val owned = selectedRoute.takeIf { it.mode != DownloadRouteMode.SYSTEM }?.let { createExperienceNetworkClient(it, timeouts) }

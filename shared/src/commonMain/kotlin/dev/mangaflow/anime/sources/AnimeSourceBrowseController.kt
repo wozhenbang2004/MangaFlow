@@ -26,6 +26,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -89,6 +90,7 @@ class AnimeSourceBrowseController(
     private val sources: AnimeSourceRepository,
 ) {
     private val routing = DownloadRoutingStore.get(context)
+    private val homeCache = AnimeSourceHomeCache(context)
     private val mutableState = MutableStateFlow(initialState())
     val state: StateFlow<AnimeSourceBrowseState> = mutableState.asStateFlow()
     // Retain the existing observation API; source-specific sections are the authoritative home state.
@@ -331,7 +333,11 @@ class AnimeSourceBrowseController(
         homeJob = scope.launch(Dispatchers.Main.immediate) {
             try {
                 requireRoute(selection)
-                val sections = homeFeed(selection.source, force).await().getOrThrow()
+                val sections = awaitHomeFeed(selection.source, force) { cached ->
+                    if (current(selection) && request == homeGeneration) {
+                        mutableState.value = mutableState.value.copy(home = cached)
+                    }
+                }
                 currentCoroutineContext().ensureActive()
                 if (current(selection) && request == homeGeneration) {
                     sections.forEach { checkCards(selection.source, it.items) }
@@ -413,8 +419,15 @@ class AnimeSourceBrowseController(
             try {
                 requireRoute(selection)
                 val cards = if (native) {
-                    if (page == 1) homeFeed(selection.source, force).await().getOrThrow().single().items
-                    else {
+                    if (page == 1) {
+                        awaitHomeFeed(selection.source, force) { cached ->
+                            if (ownsPage() && before.page <= 1) {
+                                val initial = cached.single().items
+                                mutableState.value = mutableState.value.copy(
+                                    items = initial, page = 1, hasMore = initial.isNotEmpty())
+                            }
+                        }.single().items
+                    } else {
                         val provider = sources.provider(selection.source.id)
                             ?.takeIf { it.supportsLatest && it.revision == selection.source.revision }
                             ?: throw LanercCapabilityException("所选来源已改变，请重新选择来源。")
@@ -526,6 +539,30 @@ class AnimeSourceBrowseController(
         )
     }
 
+    private fun isFresh(feed: AnimeSourceHomeFeed): Boolean {
+        val age = feed.fetchedAt?.let { wallTimeMillis() - it } ?: return false
+        return feed.error == null && age in 0 until contentCachePreferences(context).freshMillis(ContentCacheKind.DISCOVERY)
+    }
+
+    private suspend fun awaitHomeFeed(
+        source: AnimeBrowseSource,
+        force: Boolean,
+        onSnapshot: (List<LanercBrowseSection>) -> Unit,
+    ): List<LanercBrowseSection> = coroutineScope {
+        val request = homeFeed(source, force)
+        val observer = launch(start = CoroutineStart.UNDISPATCHED) {
+            homeFeeds.collect { feeds ->
+                val feed = feeds[source.id]
+                if (feed != null && feed.source == source && feed.fetchedAt != null) onSnapshot(feed.sections)
+            }
+        }
+        try {
+            request.await().getOrThrow()
+        } finally {
+            observer.cancel()
+        }
+    }
+
     /** Home and the selected source browser share the same first-page request and cache. */
     private fun homeFeed(source: AnimeBrowseSource, force: Boolean = false): Deferred<Result<List<LanercBrowseSection>>> {
         val id = source.id
@@ -539,19 +576,28 @@ class AnimeSourceBrowseController(
         }
         feedRequests[id]?.takeIf { it.isActive }?.let { return it }
         val cached = requireNotNull(mutableHomeFeeds.value[id])
-        val policy = contentCachePreferences(context)
-        val age = cached.fetchedAt?.let { wallTimeMillis() - it }
-        if (!force && policy.enabled && cached.error == null && age != null && age >= 0 &&
-            age < policy.freshMillis(ContentCacheKind.DISCOVERY)) return CompletableDeferred(Result.success(cached.sections))
+        if (!force && isFresh(cached)) return CompletableDeferred(Result.success(cached.sections))
         val request = (feedGenerations[id] ?: 0L) + 1L
         feedGenerations[id] = request
+        val cacheGeneration = homeCache.generation
         publishFeed(cached.copy(loading = true, error = null))
         val deferred = scope.async(Dispatchers.Main.immediate, start = CoroutineStart.LAZY) {
             fun ownsFeed() = request == feedGenerations[id] && route == feedRoutes[id] &&
                 route == routeFor(id) && homeSources().any { it == source }
             try {
-                if (routing.sourceSnapshot(id, DownloadCategory.ANIME) != route)
+                val currentRoute = routing.sourceSnapshot(id, DownloadCategory.ANIME)
+                if (currentRoute != route)
                     throw CancellationException("Anime home source route changed")
+                if (cached.fetchedAt == null) {
+                    val stored = homeCache.read(source, currentRoute)
+                    currentCoroutineContext().ensureActive()
+                    if (!ownsFeed()) throw CancellationException("Anime home source changed")
+                    if (stored != null && cacheGeneration == homeCache.generation) {
+                        val refresh = force || !isFresh(stored)
+                        publishFeed(stored.copy(loading = refresh))
+                        if (!refresh) return@async Result.success(stored.sections)
+                    }
+                }
                 val sections = if ("latest" in source.capabilities) {
                     val provider = sources.provider(id)?.takeIf { it.supportsLatest && it.revision == source.revision }
                         ?: throw LanercCapabilityException("所选来源已改变，请刷新来源内容。")
@@ -562,7 +608,9 @@ class AnimeSourceBrowseController(
                 currentCoroutineContext().ensureActive()
                 if (!ownsFeed()) throw CancellationException("Anime home source changed")
                 sections.forEach { checkCards(source, it.items) }
-                publishFeed(AnimeSourceHomeFeed(source, sections, fetchedAt = wallTimeMillis()))
+                val observed = AnimeSourceHomeFeed(source, sections, fetchedAt = wallTimeMillis())
+                publishFeed(observed)
+                homeCache.write(observed, currentRoute, cacheGeneration)
                 Result.success(sections)
             } catch (cancelled: CancellationException) {
                 if (ownsFeed()) mutableHomeFeeds.value[id]?.let { publishFeed(it.copy(loading = false)) }

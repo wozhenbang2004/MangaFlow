@@ -1,6 +1,6 @@
 package dev.mangaflow.anime
 
-enum class AnimeDiscoveryTab { HOME, RANKING, SEASON, CALENDAR, SOURCES }
+enum class AnimeDiscoveryTab { HOME, SEASON, CALENDAR, RANKING, GENRES, SOURCES }
 enum class AnimeDiscoveryProvider { BANGUMI, ANILIST }
 enum class AnimeDiscoveryOrder { RANK, POPULARITY, SCORE, TRENDING }
 enum class AnimeSeason(val startMonth: Int) { WINTER(1), SPRING(4), SUMMER(7), FALL(10) }

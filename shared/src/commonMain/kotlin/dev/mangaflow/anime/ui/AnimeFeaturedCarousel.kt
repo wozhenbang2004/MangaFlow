@@ -73,6 +73,7 @@ import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.anime.AnimeDiscoveryItem
 import dev.mangaflow.anime.AnimeSourceTitle
 import dev.mangaflow.experience.sourceNetwork
+import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.platform.*
 import dev.mangaflow.ui.FeaturedCoverColors
 import dev.mangaflow.ui.GlassSurfaceRole
@@ -140,17 +141,15 @@ internal fun AnimeFeaturedCarousel(
             (8f + (20f * titleLines + 15f) * fontScale).dp.coerceAtMost(itemHeight - 36.dp)
         val artworkHeight = (itemHeight - captionHeight).coerceAtLeast(1.dp)
         val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
-        val keys = entries.map { it.key }
         val state = rememberPagerState(
             initialPage = entries.indexOfFirst { it.key == selectedKey }.coerceAtLeast(0),
         ) { entries.size }
         val latestOnSelected by rememberUpdatedState(onSelected)
-        LaunchedEffect(state, keys) {
-            val restored = keys.indexOf(selectedKey).takeIf { it >= 0 } ?: 0
-            if (state.currentPage != restored) state.scrollToPage(restored)
-            snapshotFlow { state.settledPage }.collect { page ->
-                keys.getOrNull(page)?.let(latestOnSelected)
-            }
+        LaunchedEffect(state) {
+            snapshotFlow {
+                if (state.isScrollInProgress) null else state.layoutInfo.visiblePagesInfo
+                    .firstOrNull { it.index == state.settledPage }?.key as? String
+            }.collect { key -> key?.let(latestOnSelected) }
         }
         val scope = rememberCoroutineScope()
         fun selectPage(index: Int) {
@@ -302,7 +301,7 @@ private fun AnimeFeaturedCard(
     }
     val request = remember(context, entry.coverUrl, entry.sourceId, imageWidthPx, imageHeightPx, motion) {
         ImageRequest.Builder(imagePlatformContext(context)).data(entry.coverUrl)
-            .sourceNetwork(entry.sourceId).softwareBitmap().size(imageWidthPx, imageHeightPx)
+            .sourceNetwork(entry.sourceId, DownloadCategory.ANIME).softwareBitmap().size(imageWidthPx, imageHeightPx)
             .crossfade(if (motion) MangaMotion.Quick else 0).build()
     }
     // The sharp poster and blurred field share the same bounded decode.
