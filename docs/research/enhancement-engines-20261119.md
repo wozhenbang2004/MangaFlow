@@ -6,6 +6,32 @@ device qualification or a claim that the complete V1.0 acceptance has passed**.
 No local build, benchmark, test, executable installation, media conversion or
 device probe was run during this work, following the current project workflow.
 
+## Reader model guidance and prepared presentation · 2026-11-20 Asia/Shanghai
+
+ENH-WINDOW-01–06 uses the existing reader, original cache, scheduler and region decoder.
+Source review found that completed enhanced files were drawn after each individual tile
+decode. The presentation now publishes a complete requested visible batch, retaining the
+original or preceding complete layer during preparation. This is a source-level behavior
+change, not observed phone performance or visual acceptance.
+
+The author [MangaJaNai releases](https://github.com/the-database/MangaJaNai/releases)
+describe black-and-white model suffixes such as 1200p/1600p/2048p as the preferred
+input page height. They are not output height, tile height or a universal quality rank.
+The same source distinguishes IllustrationJaNai V3detail (retain texture, potentially
+too much) from V3denoise (remove halftone noise, potentially lose detail). Its desktop
+hardware timings are not MangaFlow phone measurements and are not shown as such.
+
+The [AnimeSharp V2 author card](https://huggingface.co/Kim2091/AnimeSharpV2) identifies
+the current MoSR Soft model as native 2×; Soft targets cleaner inputs and retains depth
+of field, while Sharp is intended for more degraded inputs. The official
+[Real-ESRGAN model zoo](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/model_zoo.md)
+identifies Anime 6B as native 4× with six RRDB blocks, not six billion parameters.
+[ONNX Runtime precision documentation](https://onnxruntime.ai/docs/performance/model-optimizations/float16.html)
+describes FP16/FP32 numeric precision and compatibility/accuracy tradeoffs, not visual
+quality grades. File bytes, runtime memory, output pixels and image fidelity remain
+separate quantities. Model guidance is contextual author information and a same-page
+comparison suggestion; it does not establish a device-tested winner or change selection.
+
 ## Manga image budgets, model sizes and comparison · 2026-11-20 Asia/Shanghai
 
 ENH-QUALITY-01–04 follows the user's Anime 6B / 4× failure on a 1426×2048 page.

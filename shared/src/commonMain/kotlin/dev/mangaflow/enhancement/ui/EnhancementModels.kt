@@ -131,6 +131,8 @@ internal fun EnhancementModelList(
         selectedModel == null, true, onClick = onUsePresets)
     ModelListTools("可选模型", onImport, onRefresh)
     EnhancementQuiet("选用后由这个模型决定画质，预设档位不再参与。")
+    if (content != EnhancementContent.ANIME)
+        EnhancementQuiet("先按黑白／彩色与原图尺寸选。MB、MiB 是文件体积，不是画质排名；放大更多也不代表细节一定更准。")
     if (content == EnhancementContent.ANIME && choices.any { it.profile != null })
         EnhancementQuiet("Anime4K 的 S、M、L、VL、UL 表示逐渐增大的模型规模，通常也需要更多计算；不保证每段画面都更好。其他系列不按列表顺序排名。")
     if (choices.isEmpty()) EnhancementQuiet("还没有可选模型，可先准备运行组件或导入模型。")
@@ -148,7 +150,8 @@ internal fun EnhancementModelList(
                     onClick = { if (selection != null) onSelectModel(selection) else onOpenModel(choice.key) },
                     modifier = Modifier.weight(1f), failed = pending?.failed == true && selectionId == null,
                     actionLabel = selection?.scale?.takeIf { it != policy.scale }?.let { "选用并改为 ${it}×" },
-                    detailsOnly = selectionId != null && selection == null)
+                    detailsOnly = selectionId != null && selection == null,
+                    guidance = if (content != EnhancementContent.ANIME) mangaModelGuidance(choice)?.summary else null)
                 MotionIconButton(onClick = { onOpenModel(choice.key) }, modifier = Modifier.size(44.dp),
                     tooltip = "${choice.title} · 详情") {
                     Icon(Icons.Outlined.Info, "${choice.title} · 详情", Modifier.size(19.dp),
@@ -171,6 +174,52 @@ private fun anime4kSizeLabel(engineId: String): String? = when (engineId) {
     "anime4k-optional-vl" -> "更大型模型"
     "anime4k-optional-ul" -> "本系列最大模型"
     else -> null
+}
+
+private data class MangaModelGuidance(val summary: String, val detail: String, val sourceUrl: String)
+
+/** Describes published families; it never ranks weights or changes the selected model. */
+private fun mangaModelGuidance(choice: ModelChoice): MangaModelGuidance? {
+    val title = choice.title
+    val mangaSource = "https://github.com/the-database/MangaJaNai"
+    return when {
+        choice.offer?.id == "animesharp-v2-mosr-soft-fp32" -> MangaModelGuidance(
+            "较干净的彩页／插画 · 柔和修复",
+            "Soft 适合较干净的图，偏向保留原有虚化和柔和层次；严重压缩痕迹不一定能清干净。" +
+                "当前是 MoSR 2× 版本，同系列还有其他网络与 Sharp 版本，不能按文件大小混排画质。黑白页先比较文字和网点是否保真。",
+            "https://huggingface.co/Kim2091/AnimeSharpV2"),
+        choice.offer?.id == "realesrgan-anime-6b-fp32" -> MangaModelGuidance(
+            "动漫／插画 · 需要更大输出时比较",
+            "这是原生 4× 动漫插画模型。6B 指 6 个 RRDB 网络模块，不是 60 亿参数或画质等级。" +
+                "4× 会生成原图 16 倍像素；同页 2× 只有 4 倍像素。黑白漫画要特别比较小字、网点和细线，不能只看输出尺寸。",
+            "https://github.com/xinntao/Real-ESRGAN/blob/master/docs/model_zoo.md"),
+        choice.engineId == EnhancementEngineIds.ANDROID_CUGAN -> MangaModelGuidance(
+            "彩页／条漫 · 无降噪 2×",
+            "当前接入的是 NOSE 包中的 2× 无降噪权重，适合先比较原本较干净的彩页或条漫。" +
+                "它不会因为文件小就自动更差，也不能当成强力去噪模型；处理速度取决于实际 GPU、驱动和页面。",
+            "https://github.com/nihui/realcugan-ncnn-vulkan"),
+        choice.engineId == EnhancementEngineIds.MANGAJANAI && title.contains("IllustrationJaNai", true) -> {
+            val variant = when {
+                title.contains("V3denoise", true) -> "清理网点噪声" to
+                    "V3denoise 偏向清理彩页的网点噪声，可能同时抹掉细纹理。"
+                title.contains("V3detail", true) -> "保留纹理细节" to
+                    "V3detail 偏向保留纹理，不清理网点噪声；部分图可能产生过多纹理。"
+                else -> "彩色插画修复" to "用于彩页、封面和插画；具体修复倾向以此版本的作者说明为准。"
+            }
+            MangaModelGuidance("彩页／封面 · ${variant.first}", variant.second +
+                "需要降噪时比较 denoise，原图干净时比较 detail。SPAN、FDAT、DAT、HAT 是不同网络，不能按 MB 排名。" +
+                "先用同一页对比文字、颜色和纹理，再按本机耗时决定。", "$mangaSource/releases")
+        }
+        choice.engineId == EnhancementEngineIds.MANGAJANAI && title.contains("MangaJaNai", true) -> {
+            val height = Regex("(?:^|[_ -])(1200|1300|1400|1500|1600|1920|2048)p(?:[_ -]|$)",
+                RegexOption.IGNORE_CASE).find(title)?.groupValues?.get(1)
+            MangaModelGuidance(if (height != null) "黑白漫画 · 原图高度约 ${height}px" else "黑白漫画 · 按原图高度选",
+                "1200p、1600p、2048p 等表示适合的原图整页高度，选最接近原图高度的型号，不是数字越大越好。" +
+                    "不要用分块高度或增强后尺寸来选。这个系列针对黑白漫画的文字与网点；彩页应比较 IllustrationJaNai。" +
+                    "同系列 2× 可先用于连续阅读，4× 留给需要更大输出且能接受处理等待的情况。", mangaSource)
+        }
+        else -> null
+    }
 }
 
 @Composable
@@ -198,6 +247,7 @@ private fun ModelChoiceRow(
     failed: Boolean = false,
     actionLabel: String? = null,
     detailsOnly: Boolean = false,
+    guidance: String? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     MotionTextButton(onClick, modifier.fillMaxWidth().heightIn(min = 56.dp).semantics {
@@ -222,6 +272,10 @@ private fun ModelChoiceRow(
             Text(title, style = MaterialTheme.typography.bodyMedium,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
+            guidance?.let {
+                Text(it, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
             Text(summary, style = MaterialTheme.typography.labelSmall,
                 color = if (failed) colors.error else colors.onSurfaceVariant,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -322,6 +376,12 @@ internal fun EnhancementModelDetail(
     if (engine != null) AnimeEnhancementNavigation(Icons.Outlined.Memory, "运行组件",
         "${engine.title} · ${engineReadinessLabel(engine.readiness)}", onClick = { onOpenEngine(engine.id) })
     EnhancementDivider()
+    val guidance = if (content != EnhancementContent.ANIME) mangaModelGuidance(choice) else null
+    if (content != EnhancementContent.ANIME) {
+        guidance?.let { EnhancementQuiet(it.detail) }
+        if (guidance == null) EnhancementQuiet("此模型没有专门的选型说明，请按原作者标注的适用画面和原生倍率选择；导入时填写的内容类型不代表已验证效果。")
+        EnhancementQuiet("文件体积不等于运行内存或画质。FP16／FP32 是数值精度，2×／4× 是宽高倍率，都不是画质分数；以同页对比和实际耗时取舍。")
+    }
     (offer?.detail ?: choice.profile?.detail)?.let { EnhancementQuiet(it) }
     if (choice.profile != null) EnhancementQuiet("用于即时播放增强，不生成完整离线增强视频。")
     EnhancementValue("适用内容", (model?.contents ?: offer?.contents ?: choice.profile?.contents.orEmpty())
@@ -332,6 +392,12 @@ internal fun EnhancementModelDetail(
     if (!source.isNullOrBlank()) MotionTextButton({ uriHandler.openUri(source) }, contentPadding = PaddingValues(horizontal = 0.dp)) {
         Icon(Icons.Outlined.Link, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
         Text(if (offer != null) "模型来源" else "组件来源")
+    }
+    if (guidance != null && guidance.sourceUrl != source) MotionTextButton(
+        { uriHandler.openUri(guidance.sourceUrl) }, contentPadding = PaddingValues(horizontal = 0.dp),
+    ) {
+        Icon(Icons.Outlined.Link, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
+        Text("作者选型说明")
     }
     (model?.sha256 ?: offer?.sha256)?.let { digest ->
         Text("SHA-256", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)

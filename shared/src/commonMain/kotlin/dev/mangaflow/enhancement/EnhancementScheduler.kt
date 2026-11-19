@@ -77,7 +77,7 @@ class EnhancementScheduler(
                 synchronized(lock) {
                     if (stopResourceObservation == null) return@collect
                     entries.values.filter { it.run != null }.forEach { entry ->
-                        resources.enhancementWaitReason(entry.task.priority.ordinal)?.let { reason ->
+                        resources.enhancementWaitReason(entry.task.priority.ordinal, running = true)?.let { reason ->
                             entry.run?.cancel(EnhancementYield(reason))
                         }
                     }
@@ -115,12 +115,20 @@ class EnhancementScheduler(
         entry.result
     }
 
-    /** A prefetched page becoming visible keeps its attempt and receives foreground admission. */
-    fun promote(id: String, priority: EnhancementPriority): Unit = synchronized(lock) {
-        val entry = entries[id]?.takeIf { !it.result.isCompleted && it.isCurrent() } ?: return@synchronized
-        if (priority >= entry.task.priority) return@synchronized
-        entry.task = entry.task.copy(priority = priority)
-        if (!entry.pauseRequested) entries.values.filter { it !== entry && it.task.priority > priority && it.run != null }
+    /** Promote a whole visible spread without cancelling either page's existing attempt. */
+    fun updatePriorities(priorities: Map<String, EnhancementPriority>): Unit = synchronized(lock) {
+        var changed = false
+        priorities.forEach { (id, priority) ->
+            val entry = entries[id]?.takeIf { !it.result.isCompleted && it.isCurrent() } ?: return@forEach
+            if (priority != entry.task.priority) {
+                entry.task = entry.task.copy(priority = priority)
+                changed = true
+            }
+        }
+        if (!changed) return@synchronized
+        val highest = entries.values.filter { !it.result.isCompleted && !it.pauseRequested && it.isCurrent() }
+            .minOfOrNull { it.task.priority }
+        if (highest != null) entries.values.filter { it.run != null && it.task.priority > highest }
             .forEach { it.run?.cancel(EnhancementYield("当前页优先")) }
         publish(); wake.trySend(Unit)
     }
@@ -201,7 +209,7 @@ class EnhancementScheduler(
                         }
                     }
                 } }, isCurrent = entry.isCurrent, admission = {
-                    resources.enhancementWaitReason(entry.task.priority.ordinal)
+                    resources.enhancementWaitReason(entry.task.priority.ordinal, running = true)
                 })
                 val run = scope.async(start = CoroutineStart.LAZY) {
                     ctx.checkpoint()

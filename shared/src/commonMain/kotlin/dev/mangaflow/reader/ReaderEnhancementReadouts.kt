@@ -1,41 +1,75 @@
 package dev.mangaflow.reader
 
+import androidx.compose.ui.unit.IntSize
 import dev.mangaflow.enhancement.EnhancementMetric
 import dev.mangaflow.enhancement.EnhancementPolicy
 import dev.mangaflow.enhancement.EnhancementTaskPhase
 import dev.mangaflow.enhancement.EnhancementTask
+import dev.mangaflow.enhancement.PreparationMode
 import dev.mangaflow.enhancement.QualityTier
+import dev.mangaflow.enhancement.ReaderEnhancedPage
 import dev.mangaflow.enhancement.ReaderEnhancementState
 import dev.mangaflow.enhancement.engine.EngineStage
 import dev.mangaflow.enhancement.ui.EnhancementReadout
 import dev.mangaflow.platform.formatDecimal
 
+internal data class ReaderEnhancementResolution(
+    val valueLabel: String,
+    val label: String,
+    val originalLabel: String?,
+    val description: String,
+    val enhanced: Boolean,
+)
+
+private fun briefEnhancementDetail(value: String): String {
+    val brief = value.replace('\n', ' ').trim()
+    return if (brief.length > 48) brief.take(48) + "…" else brief
+}
+
+/** The caller supplies the exact page/source-matched completed asset, never a configured scale. */
+internal fun readerEnhancementResolution(
+    pageIndex: Int, originalSize: IntSize?, asset: ReaderEnhancedPage?,
+): ReaderEnhancementResolution {
+    val original = originalSize?.takeIf { it.width > 0 && it.height > 0 }
+    val output = asset?.takeIf { it.width > 0 && it.height > 0 }
+    val originalLabel = original?.let { "${it.width} × ${it.height} px" }
+    val value = output?.let { "${it.width} × ${it.height} px" } ?: originalLabel ?: "—"
+    val origin = original?.let { "原图 ${it.width} × ${it.height} 像素" } ?: "原图尺寸尚未获取"
+    return ReaderEnhancementResolution(
+        valueLabel = value,
+        label = (if (output != null) "增强 " else "原图 ") + value,
+        originalLabel = originalLabel,
+        description = "第 ${pageIndex + 1} 页，" + if (output != null)
+            "已备增强文件 ${output.width} × ${output.height} 像素，$origin" else origin,
+        enhanced = output != null,
+    )
+}
+
 /** Use only engine-reported completed work; a running task is not an output receipt. */
-internal fun readerEnhancementTaskProgress(task: EnhancementTask): String = when (task.phase) {
+internal fun readerEnhancementTaskProgress(task: EnhancementTask, pageLabel: String = "本页"): String = when (task.phase) {
     EnhancementTaskPhase.RUNNING -> {
         val progress = task.progress
         when (progress?.stage) {
             EngineStage.MODEL_LOAD -> "模型加载中"
             EngineStage.PROCESS -> if (progress.total?.let { it > 0L } == true)
-                "本页处理 ${progress.completed}/${progress.total}"
-                else "本页处理中"
+                "${pageLabel}处理 ${progress.completed}/${progress.total}"
+                else "${pageLabel}处理中"
             EngineStage.ENCODE -> "增强文件写入中"
             EngineStage.VALIDATE -> "增强文件校验中"
             EngineStage.COMPLETE -> "增强结果收尾中"
             EngineStage.DOWNLOAD -> "增强组件下载中"
             EngineStage.VERIFY -> "增强输入校验中"
             EngineStage.INSTALL -> "增强组件安装中"
-            null -> "本页增强准备中"
+            null -> "${pageLabel}增强准备中"
         }
     }
     EnhancementTaskPhase.FAILED -> task.reason?.takeIf { it.isNotBlank() }?.let {
-        val brief = it.replace('\n', ' ').trim()
-        "增强失败 · " + if (brief.length > 48) brief.take(48) + "…" else brief
-    } ?: "本页增强失败"
-    EnhancementTaskPhase.PAUSED -> "本页增强暂停"
-    EnhancementTaskPhase.CANCELLED -> "本页增强取消"
-    EnhancementTaskPhase.COMPLETED -> "本页增强已备"
-    else -> "本页增强等待"
+        "${pageLabel}增强失败 · ${briefEnhancementDetail(it)}"
+    } ?: "${pageLabel}增强失败"
+    EnhancementTaskPhase.PAUSED -> "${pageLabel}增强暂停"
+    EnhancementTaskPhase.CANCELLED -> "${pageLabel}增强取消"
+    EnhancementTaskPhase.COMPLETED -> "${pageLabel}增强已备"
+    else -> "${pageLabel}增强等待"
 }
 
 /** Assets are prepared files. This controller has no decoded-image presentation acknowledgement. */
@@ -44,33 +78,58 @@ internal fun readerEnhancementReadouts(
 ): List<EnhancementReadout> = buildList {
     val pageMatches = currentPage != null && state.currentPage == currentPage
     val enabled = policy.tier != QualityTier.ORIGINAL
+    val visiblePages = if (pageMatches) state.visiblePages.ifEmpty { setOf(state.currentPage) }.sorted() else emptyList()
+    val readyPages = visiblePages.count { it in state.assets }
+    val pageScope = when (visiblePages.size) { 2 -> "双页"; in 3..Int.MAX_VALUE -> "可见页"; else -> "本页" }
     val task = state.currentTask.takeIf { pageMatches && enabled }
+    val currentDetail = state.detail?.takeIf { pageMatches && enabled && !state.currentEnhanced && it.isNotBlank() }
+    val currentProgress = task?.takeIf { it.phase != EnhancementTaskPhase.COMPLETED }?.let {
+        readerEnhancementTaskProgress(it, it.title?.ifBlank { "本页" } ?: "本页")
+    } ?: currentDetail?.let(::briefEnhancementDetail)
     if (EnhancementMetric.QUALITY in metrics) {
         val value = when {
             !enabled -> "原图"
             !pageMatches -> "本页增强 —"
+            visiblePages.size > 1 -> "${pageScope}已备 $readyPages/${visiblePages.size}" +
+                currentProgress?.let { " · $it" }.orEmpty()
             state.currentEnhanced -> "本页已备"
-            task != null -> readerEnhancementTaskProgress(task)
+            currentProgress != null -> currentProgress
             else -> "本页未备"
         }
         add(EnhancementReadout(EnhancementMetric.QUALITY, value,
-            if (enabled) listOfNotNull("本页增强文件，$value；文件就绪不代表已经呈现",
-                task?.reason ?: task?.progress?.detail).joinToString("，") else "当前选择原图"))
+            if (enabled) listOfNotNull("${pageScope}增强文件，$value；文件就绪不代表已经呈现",
+                (currentDetail ?: task?.reason ?: task?.progress?.detail)?.takeUnless { it in value })
+                .joinToString("，") else "当前选择原图"))
     }
     if (EnhancementMetric.DIMENSIONS in metrics) {
-        val asset = currentPage?.let(state.assets::get).takeIf { enabled && pageMatches && state.currentEnhanced }
-        val size = asset?.takeIf { it.width > 0 && it.height > 0 }?.let { "${it.width}×${it.height}" }
-        add(EnhancementReadout(EnhancementMetric.DIMENSIONS, size?.let { "已备 $it" } ?: "增强输出 —",
-            "本页已备增强文件尺寸 ${size ?: "无观测"}"))
+        if (!enabled || visiblePages.isEmpty()) {
+            add(EnhancementReadout(EnhancementMetric.DIMENSIONS, "增强输出 —", "当前没有可用的增强文件尺寸"))
+        } else visiblePages.forEach { index ->
+            val resolution = readerEnhancementResolution(index, null, state.assets[index])
+            val prefix = if (visiblePages.size > 1) "P${index + 1} · " else ""
+            add(EnhancementReadout(EnhancementMetric.DIMENSIONS,
+                prefix + if (resolution.enhanced) resolution.label else "增强输出 —",
+                if (resolution.enhanced) resolution.description else "第 ${index + 1} 页尚无已备增强文件尺寸"))
+        }
     }
     if (EnhancementMetric.PREPARED in metrics) {
-        val value = when {
+        val aheadReady = state.aheadPages.count { it in state.assets }
+        val preparationDetail = state.preparationDetail?.takeIf {
+            enabled && pageMatches && PreparationMode.SMART in policy.preparation &&
+                state.aheadPages.isNotEmpty() && it.isNotBlank()
+        }?.takeUnless { it == currentDetail && EnhancementMetric.QUALITY in metrics }
+        val prepared = when {
             !enabled -> "增强未开启"
             !pageMatches -> "前方增强 —"
-            state.nextReady -> "前方已备"
-            else -> "前方未备"
+            PreparationMode.SMART !in policy.preparation -> "提前增强未开启"
+            state.aheadPages.isEmpty() -> "前方无待备页"
+            else -> "前方已备 $aheadReady/${state.aheadPages.size} 页"
         }
-        add(EnhancementReadout(EnhancementMetric.PREPARED, value, "沿阅读方向的邻页增强文件，$value"))
+        val value = prepared + preparationDetail?.let { " · ${briefEnhancementDetail(it)}" }.orEmpty()
+        add(EnhancementReadout(EnhancementMetric.PREPARED, value,
+            "沿阅读方向、不包含当前可见页的增强文件，$prepared" +
+                (if (pageMatches && enabled && state.nextReady) "；下一屏全部已备" else "") +
+                preparationDetail?.let { "；$it" }.orEmpty()))
     }
     if (EnhancementMetric.TASKS in metrics) {
         val value = if (currentPage == null) "增强任务 —" else "处理 ${state.running} · 等待 ${state.queued}"

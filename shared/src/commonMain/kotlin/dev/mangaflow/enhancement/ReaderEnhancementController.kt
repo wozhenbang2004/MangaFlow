@@ -9,7 +9,6 @@ import dev.mangaflow.experience.ExperienceBudget
 import dev.mangaflow.experience.readerPageCacheKey
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.imagePlatformContext
-import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.randomUuid
 import dev.mangaflow.platform.sha256File
 import dev.mangaflow.platform.storage.StorageFile
@@ -51,6 +50,10 @@ data class ReaderEnhancementState(
     val assets: Map<Int, ReaderEnhancedPage> = emptyMap(),
     val currentTask: EnhancementTask? = null,
     val manuallyStoppedTaskIds: Set<String> = emptySet(),
+    val visiblePages: Set<Int> = emptySet(),
+    val aheadPages: Set<Int> = emptySet(),
+    val nextVisiblePages: Set<Int> = emptySet(),
+    val preparationDetail: String? = null,
 )
 
 /**
@@ -77,19 +80,25 @@ internal class ReaderEnhancementController(
     private val manuallyStopped = mutableMapOf<Int, Attempt>()
     private val failed = mutableMapOf<Int, String>()
     private val cacheMisses = mutableMapOf<Int, String>()
+    private val waitingOriginals = mutableMapOf<Int, String>()
     private val details = mutableMapOf<Int, String>()
     private val held = mutableMapOf<Int, EnhancedAssetLease>()
+    private val heldBytes = mutableMapOf<Int, Long>()
+    private val budgetDeferred = mutableSetOf<Int>()
+    private var budgetBlocked = false
+    private val cacheWaitDetail = "前方增强等待缓存额度，翻页或增加增强缓存后继续"
     private val assets = mutableMapOf<Int, ReaderEnhancedPage>()
     private val durations = ArrayDeque<Long>()
     private var generation = 0L
     private var nextAttempt = 0L
     private var policy = EnhancementPolicy()
     private var wanted = emptySet<Int>()
+    private var visible = emptySet<Int>()
+    private var ahead = emptySet<Int>()
+    private var nextVisible = emptySet<Int>()
     private var current = 0
     private var direction = 1
     private var closed = false
-    private var currentPageAt = 0L
-    private var pagesPerSecond = 0.0
     private var cacheHits = 0L
     private var cacheLookups = 0L
     private var imageWorkingLimitMiB = center.resources.state.value.runtime.materializationMiB
@@ -154,20 +163,61 @@ internal class ReaderEnhancementController(
 
     private fun cacheBudgetBytes(): Long = synchronized(lock) { policy.cacheMiB.toLong() * 1024 * 1024 }
 
+    private fun releaseHeldLocked(index: Int) {
+        held.remove(index)?.close(); heldBytes.remove(index); assets.remove(index)
+    }
+
+    private fun clearBudgetWaitsLocked() {
+        budgetDeferred.toList().forEach {
+            cancelPendingLocked(it, "增强缓存窗口已更新")
+            details.remove(it)
+        }
+        budgetDeferred.clear(); budgetBlocked = false
+    }
+
+    /** Bound retained optional files by actual bytes; active visible files keep their leases. */
+    private fun retainWithinBudgetLocked() {
+        val maximum = policy.cacheMiB.toLong() * 1024 * 1024
+        var retained = 0L
+        held.keys.sortedWith(compareBy<Int> { if (it in visible) 0 else if (it in ahead) 1 else 2 }
+            .thenBy { abs(it - current) }).forEach { index ->
+            val bytes = heldBytes[index] ?: 0L
+            if (index in visible || bytes <= (maximum - retained).coerceAtLeast(0L)) retained += bytes
+            else {
+                // Dropping a window lease does not delete the completed file. Do not immediately
+                // reacquire it from the cache: wait for a changed window or an explicit budget.
+                releaseHeldLocked(index)
+                budgetDeferred += index
+                details[index] = cacheWaitDetail
+                budgetBlocked = true
+            }
+        }
+        if (retained >= maximum) budgetBlocked = true
+    }
+
     /** Changing direction or jumping retires work; it never deletes a completed derivative. */
     fun updateWindow(page: Int, readDirection: Int, totalPages: Int, active: Boolean,
-        selected: EnhancementPolicy, budget: ExperienceBudget) {
+        selected: EnhancementPolicy, budget: ExperienceBudget,
+        visiblePages: Set<Int> = setOf(page), nextVisiblePages: Set<Int> = emptySet(),
+        aheadWindow: Set<Int>? = null) {
         val restart = synchronized(lock) {
             if (closed) return
-            val now = monotonicTimeMillis()
-            if (page != current && currentPageAt > 0L) {
-                val elapsed = (now - currentPageAt).coerceAtLeast(1L)
-                val observed = abs(page - current).toDouble() * 1000 / elapsed
-                pagesPerSecond = if (elapsed > 10_000) observed else pagesPerSecond * .6 + observed * .4
-            }
-            if (page != current) currentPageAt = now
-            if (page != current && failed.remove(page) != null) details.remove(page)
+            val previousVisible = visible
+            val previousWanted = wanted
+            val previousDirection = direction
             current = page; direction = if (readDirection < 0) -1 else 1
+            visible = visiblePages.filterTo(linkedSetOf()) { it in 0 until totalPages }
+                .ifEmpty { setOf(page).filterTo(linkedSetOf()) { it in 0 until totalPages } }
+            (visible - previousVisible).forEach { index ->
+                if (failed.remove(index) != null) details.remove(index)
+            }
+            val leadingEdge = if (direction > 0) visible.maxOrNull() else visible.minOrNull()
+            val trailingEdge = if (direction > 0) visible.minOrNull() else visible.maxOrNull()
+            nextVisible = nextVisiblePages.filterTo(linkedSetOf()) { index ->
+                index in 0 until totalPages && leadingEdge != null && (index - leadingEdge) * direction > 0
+            }.ifEmpty {
+                setOfNotNull(leadingEdge?.plus(direction)?.takeIf { it in 0 until totalPages })
+            }
             val pixelsChanged = selected.tier != policy.tier || selected.scale != policy.scale ||
                 selected.style != policy.style || selected.modelId != policy.modelId
             val processingChanged = selected.allowsReaderProcessing() != policy.allowsReaderProcessing()
@@ -177,48 +227,61 @@ internal class ReaderEnhancementController(
             if (pixelsChanged) {
                 generation++
                 pending.keys.toList().forEach { cancelPendingLocked(it, "画质设置已变更") }
-                held.values.forEach(EnhancedAssetLease::close); held.clear(); assets.clear()
-                details.clear(); failed.clear(); cacheMisses.clear(); lastAttempts.clear(); manuallyStopped.clear()
+                held.values.forEach(EnhancedAssetLease::close); held.clear(); heldBytes.clear(); assets.clear()
+                details.clear(); failed.clear(); cacheMisses.clear(); waitingOriginals.clear()
+                lastAttempts.clear(); manuallyStopped.clear()
             } else if (processingChanged) {
                 pending.keys.toList().forEach { cancelPendingLocked(it, "即时处理模式已变更") }
                 // Completed assets have the same pixel identity and remain usable in cache-only mode.
                 details.keys.filter { it !in manuallyStopped }.forEach(details::remove)
-                failed.clear(); cacheMisses.clear()
+                failed.clear(); cacheMisses.clear(); waitingOriginals.clear()
             } else if (cacheBudgetChanged) {
                 // A larger budget can make a failed output possible; running work keeps its attempt.
                 clearFailuresLocked()
             }
             // Completed assets remain useful even when every live processing mode is off.
             val enabled = active && selected.tier != QualityTier.ORIGINAL
-            val ahead = if (PreparationMode.SMART !in selected.preparation) 0 else when {
-                budget.protections.isNotEmpty() || budget.prefetchAhead <= 0 -> 0
-                pagesPerSecond > 3.0 -> 1
-                durations.size >= 3 && percentile(.95)!! > 1_500 -> 1
-                cacheLookups >= 6 && cacheHits.toDouble() / cacheLookups < .25 && pagesPerSecond > 1.5 -> 1
-                else -> minOf(2, budget.prefetchAhead)
-            }
+            // The shared reading budget already applies manual values and device protection.
+            // Do not replace it with a private two-page/slow-model cap, or count the second
+            // visible page as the next page. Admission can pause this window without erasing it.
+            val aheadCount = if (PreparationMode.SMART in selected.preparation)
+                budget.prefetchAhead.coerceIn(0, totalPages.coerceAtLeast(0)) else 0
+            ahead = if (!enabled || leadingEdge == null || aheadCount == 0) emptySet()
+                else if (aheadWindow != null) aheadWindow.filterTo(linkedSetOf()) {
+                    it in 0 until totalPages && it !in visible && (it - leadingEdge) * direction > 0
+                } else buildSet {
+                    (1..aheadCount).map { leadingEdge + direction * it }
+                        .filter { it in 0 until totalPages }.forEach(::add)
+                    addAll(nextVisible)
+                }
             wanted = if (!enabled) emptySet() else buildSet {
-                if (page in 0 until totalPages) add(page)
-                if (PreparationMode.SMART in selected.preparation) {
-                    (1..ahead).map { page + direction * it }.filter { it in 0 until totalPages }.forEach(::add)
-                    (page - direction).takeIf { it in 0 until totalPages }?.let(::add)
+                addAll(visible)
+                addAll(ahead)
+                if (PreparationMode.SMART in selected.preparation && budget.prefetchBehind > 0) {
+                    trailingEdge?.minus(direction)?.takeIf { it in 0 until totalPages }?.let(::add)
                 }
             }
+            if (previousVisible != visible || previousWanted != wanted || previousDirection != direction ||
+                cacheBudgetChanged || pixelsChanged || processingChanged) clearBudgetWaitsLocked()
             manuallyStopped.keys.filter { it !in wanted }.forEach { index ->
                 manuallyStopped.remove(index); details.remove(index)
             }
             pending.keys.filter { it !in wanted }.forEach { index ->
                 cancelPendingLocked(index, if (!active) "阅读暂不活跃" else "页面已离开处理范围")
             }
-            held.keys.filter { it !in wanted }.forEach { index -> held.remove(index)?.close(); assets.remove(index) }
+            held.keys.filter { it !in wanted }.forEach(::releaseHeldLocked)
+            retainWithinBudgetLocked()
             // Keep only nearby identity observations. The original prefetcher remains responsible for fetching.
-            originals.keys.filter { abs(it - page) > 16 }.forEach { index ->
+            originals.keys.filter { it !in wanted && abs(it - page) > 16 }.forEach { index ->
                 originals.remove(index); lastAttempts.remove(index); failed.remove(index)
-                cacheMisses.remove(index); details.remove(index); manuallyStopped.remove(index)
+                cacheMisses.remove(index); waitingOriginals.remove(index); details.remove(index); manuallyStopped.remove(index)
             }
-            val relevant = wanted.sortedBy { if (it == page) -1 else abs(it - page) }
+            val relevant = wanted.sortedWith(compareBy<Int> { if (it in visible) 0 else if (it in ahead) 1 else 2 }
+                .thenBy { abs(it - page) })
             publishLocked()
-            pending[page]?.let { center.scheduler.promote(it.id, EnhancementPriority.P0) }
+            center.scheduler.updatePriorities(pending.map { (index, entry) ->
+                entry.id to if (index in visible) EnhancementPriority.P0 else EnhancementPriority.P1
+            }.toMap())
             relevant
         }
         restart.forEach(::queueIfUseful)
@@ -235,9 +298,14 @@ internal class ReaderEnhancementController(
             if (closed) return
             if (originals[index]?.identity != original.identity) {
                 cancelPendingLocked(index, "原图身份已更新")
-                held.remove(index)?.close(); assets.remove(index)
-                failed.remove(index); cacheMisses.remove(index)
+                releaseHeldLocked(index)
+                failed.remove(index); cacheMisses.remove(index); waitingOriginals.remove(index)
                 lastAttempts.remove(index); details.remove(index); manuallyStopped.remove(index)
+            } else if (waitingOriginals.remove(index) != null) {
+                // The same exact original can reappear after cache eviction. A cache wait is
+                // not a model failure and must not poison this page's later preparation.
+                cancelPendingLocked(index, "原图已准备，继续增强")
+                details.remove(index)
             }
             originals[index] = original
             publishLocked()
@@ -247,8 +315,8 @@ internal class ReaderEnhancementController(
 
     fun invalidate(index: Int) = synchronized(lock) {
         cancelPendingLocked(index, "本页正在重新加载")
-        originals.remove(index); held.remove(index)?.close(); assets.remove(index)
-        failed.remove(index); cacheMisses.remove(index)
+        originals.remove(index); releaseHeldLocked(index)
+        failed.remove(index); cacheMisses.remove(index); waitingOriginals.remove(index)
         lastAttempts.remove(index); details.remove(index); manuallyStopped.remove(index)
         publishLocked()
     }
@@ -310,7 +378,13 @@ internal class ReaderEnhancementController(
         if (closed || index !in wanted || index in pending || index in assets) return null
         val original = originals[index] ?: return null
         if (manuallyStopped[index]?.let { attemptMatchesLocked(index, it) } == true) return null
-        if (failed[index] == original.identity || cacheMisses[index] == original.identity) return null
+        if (failed[index] == original.identity || cacheMisses[index] == original.identity ||
+            waitingOriginals[index] == original.identity) return null
+        if (index !in visible && budgetBlocked) {
+            budgetDeferred += index; details[index] = cacheWaitDetail
+            publishLocked()
+            return null
+        }
         val selected = policy
         val epoch = generation
         val id = "$sessionKey:$index:$epoch:${original.identity}:${++nextAttempt}"
@@ -332,14 +406,32 @@ internal class ReaderEnhancementController(
         var completedLease: EnhancedAssetLease? = null
         var cacheHit = false
         try {
-            val priority = synchronized(lock) { if (index == current) EnhancementPriority.P0 else EnhancementPriority.P1 }
+            val priority = synchronized(lock) { if (index in visible) EnhancementPriority.P0 else EnhancementPriority.P1 }
             val result = center.scheduler.submit(id, content, priority, sessionKey, epoch,
                 estimatedBytes = 16L * 1024 * 1024,
                 isCurrent = { valid(index, id, epoch, original) }, title = "第 ${index + 1} 页") { task ->
                 task.checkpoint()
+                val cacheWait = synchronized(lock) {
+                    (index !in visible && budgetBlocked).also { wait -> if (wait && valid(index, id, epoch, original)) {
+                        budgetDeferred += index; details[index] = cacheWaitDetail; publishLocked()
+                    } }
+                }
+                if (cacheWait) {
+                    center.scheduler.cancel(id, cacheWaitDetail)
+                    throw CancellationException(cacheWaitDetail)
+                }
                 task.progress(EngineProgress(EngineStage.VERIFY, detail = "检查原图与增强缓存"))
-                val source = withContext(Dispatchers.IO) { openOriginal(original) }
-                    ?: throw IllegalStateException("等待原图缓存，继续显示原画")
+                val source = withContext(Dispatchers.IO) { openOriginal(original) } ?: run {
+                    synchronized(lock) { if (valid(index, id, epoch, original)) {
+                        // A newer ready callback can arrive while the cache-only open is in flight.
+                        // Let finally queue that receipt; otherwise wait for the existing reader.
+                        if (originals[index] === original) waitingOriginals[index] = original.identity
+                        details[index] = "等待原图缓存，继续显示原画"
+                        publishLocked()
+                    } }
+                    center.scheduler.cancel(id, "等待原图缓存")
+                    throw CancellationException("等待原图缓存")
+                }
                 var work: EnhancedAssetWork? = null
                 try {
                     val sourceFile = StorageFile(source.path)
@@ -423,14 +515,19 @@ internal class ReaderEnhancementController(
             if (!valid(index, id, epoch, original)) return
             synchronized(lock) {
                 if (!valid(index, id, epoch, original)) return
-                held.remove(index)?.close(); held[index] = lease; completedLease = null
+                held.remove(index)?.close(); held[index] = lease; heldBytes[index] = result.bytes.coerceAtLeast(0L)
+                completedLease = null
                 assets[index] = ReaderEnhancedPage(lease.identity, lease.file.toURI(), lease.width, lease.height,
                     original.diskKey, result.elapsedMillis, cacheHit)
                 if (!cacheHit) { durations.addLast(result.elapsedMillis); while (durations.size > 128) durations.removeFirst() }
-                details.remove(index); publishLocked()
+                details.remove(index)
+                retainWithinBudgetLocked()
+                publishLocked()
             }
             center.telemetry.recordImage(sessionKey, content, result, cacheHit)
-            cache.trimToBytes(cacheBudgetBytes(), content.directory)
+            // A full live window must not create an acquire/evict/infer loop. The storage
+            // owner may reclaim unleased files independently; this handoff never deletes one.
+            if (synchronized(lock) { !budgetBlocked }) cache.trimToBytes(cacheBudgetBytes(), content.directory)
         } catch (cancelled: CancellationException) {
             if (synchronized(lock) { cacheMisses[index] != original.identity }) throw cancelled
         }
@@ -441,11 +538,15 @@ internal class ReaderEnhancementController(
             } }
         } finally {
             completedLease?.close()
-            synchronized(lock) {
+            val retryOriginal = synchronized(lock) {
+                val refreshed = valid(index, id, epoch, original) && originals[index] !== original &&
+                    waitingOriginals[index] != original.identity
                 // A cancelled attempt may finish after a new attempt for the same original started.
                 if (pending[index]?.let { it.id == id && it.job === owner } == true) pending.remove(index)
                 publishLocked()
+                refreshed
             }
+            if (retryOriginal) queueIfUseful(index)
         }
     }
 
@@ -464,24 +565,28 @@ internal class ReaderEnhancementController(
     }
     private fun publishLocked() {
         validity = Validity(closed, generation, wanted, originals.mapValues { it.value.identity }, pending.mapValues { it.value.id })
-        val currentEnhanced = assets[current] != null
-        val nextReady = assets[current + direction] != null
+        val currentEnhanced = visible.isNotEmpty() && visible.all { it in assets }
+        val nextReady = nextVisible.isNotEmpty() && nextVisible.all { it in assets }
         val tasks = center.scheduler.state.value.filter { it.sessionKey == sessionKey }
-        val pendingTask = pending[current]?.id?.let { id -> tasks.firstOrNull { it.id == id } }
-        val failure = lastAttempts[current]?.takeIf { it.generation == generation &&
-            it.originalIdentity == originals[current]?.identity && failed[current] == it.originalIdentity
+        val focus = visible.sortedWith(compareBy<Int> { if (it == current) 0 else 1 }.thenBy { abs(it - current) })
+            .firstOrNull { it !in assets } ?: current
+        val pendingTask = pending[focus]?.id?.let { id -> tasks.firstOrNull { it.id == id } }
+        val failure = lastAttempts[focus]?.takeIf { it.generation == generation &&
+            it.originalIdentity == originals[focus]?.identity && failed[focus] == it.originalIdentity
         }?.let { attempt -> tasks.firstOrNull { it.id == attempt.id && it.phase == EnhancementTaskPhase.FAILED } }
         val stopped = manuallyStopped.filter { (index, attempt) -> attemptMatchesLocked(index, attempt) }
-        val stoppedTask = stopped[current]?.let { attempt ->
+        val stoppedTask = stopped[focus]?.let { attempt ->
             tasks.firstOrNull { it.id == attempt.id && it.phase == EnhancementTaskPhase.CANCELLED }
         }
         val currentTask = pendingTask ?: failure ?: stoppedTask
-        val detail = details[current]
+        val detail = details[focus]?.let { if (visible.size > 1) "第 ${focus + 1} 页：$it" else it }
+            ?: if (focus in wanted && focus !in originals) "等待第 ${focus + 1} 页原图，继续显示原画" else null
         mutableState.value = ReaderEnhancementState(current, currentEnhanced, nextReady,
             tasks.count { it.phase in setOf(EnhancementTaskPhase.QUEUED, EnhancementTaskPhase.WAITING, EnhancementTaskPhase.PAUSED) },
             tasks.count { it.phase == EnhancementTaskPhase.RUNNING }, detail,
             percentile(.5), percentile(.95), cacheHits, cacheLookups, assets.toMap(), currentTask,
-            stopped.values.map { it.id }.toSet())
+            stopped.values.map { it.id }.toSet(), visible.toSet(), ahead.toSet(), nextVisible.toSet(),
+            cacheWaitDetail.takeIf { budgetBlocked && ahead.any { it !in assets } })
         if (!closed) {
             val visible = assets[current]
             val model = visible?.identity?.modelId?.let { id ->
@@ -500,9 +605,11 @@ internal class ReaderEnhancementController(
             closed = true; generation++
             validity = validity.copy(closed = true, generation = generation)
             center.scheduler.cancelSession(sessionKey, "阅读已结束")
-            held.values.forEach(EnhancedAssetLease::close); held.clear(); assets.clear(); originals.clear()
+            held.values.forEach(EnhancedAssetLease::close); held.clear(); heldBytes.clear(); assets.clear(); originals.clear()
+            budgetDeferred.clear()
             pending.values.forEach { it.job.cancel() }; pending.clear()
-            lastAttempts.clear(); failed.clear(); cacheMisses.clear(); details.clear(); manuallyStopped.clear()
+            lastAttempts.clear(); failed.clear(); cacheMisses.clear(); waitingOriginals.clear()
+            details.clear(); manuallyStopped.clear()
             scope.cancel()
             center.settings.setSessionOverride(sessionKey, content, null)
             center.telemetry.endSession(sessionKey)

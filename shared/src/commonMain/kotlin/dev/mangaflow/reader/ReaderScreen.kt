@@ -137,6 +137,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.DontMemoize
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableFloatState
 import androidx.compose.runtime.derivedStateOf
@@ -562,14 +563,10 @@ fun ReaderScreen(
     val preparationTracker = remember(sourceIdentity, pages, headers) { ReaderPreparationTracker(chapter.sourceId, pages.size) }
     val sharedPrefetchRequests = remember(sourceIdentity, pages, headers) { mutableStateMapOf<Int, ReaderPagePrefetch>() }
     val sharedPrefetchFailures = remember(sourceIdentity, pages, headers) { mutableStateMapOf<Int, String>() }
-    val preparation by preparationTracker.state.collectAsStateWithLifecycle()
-    LaunchedEffect(enhancement, pageIndex, preparation.direction, pages.size, readerForeground,
-        leavingReader, chapterChangeRequested, enhancementPolicy,
-        experienceBudget.enhancementAhead, experienceBudget.enhancementProtected) {
-        enhancement.updateWindow(pageIndex, preparation.direction, pages.size,
-            readerForeground && !leavingReader && !chapterChangeRequested,
-            enhancementPolicy, experience.state.value)
+    val enhancementSources = remember(sourceIdentity, pages, headers) {
+        mutableStateMapOf<Int, ReaderEnhancementSourceReceipt>()
     }
+    val preparation by preparationTracker.state.collectAsStateWithLifecycle()
     val comparisonSnapshot = comparisonTarget
     LaunchedEffect(comparisonSnapshot, compareEnhancement) {
         if (!compareEnhancement && comparisonTarget == comparisonSnapshot) comparisonTarget = null
@@ -1095,6 +1092,7 @@ fun ReaderScreen(
 
     CompositionLocalProvider(LocalReaderActionFinished provides { if (desktop) keyboardFocusRestore++ },
         LocalReaderEnhancement provides enhancement,
+        LocalReaderEnhancementSources provides enhancementSources,
         LocalReaderEnhancementPresentation provides ReaderEnhancementPresentation(enhancement, enhancementState,
             comparisonFraction = enhancementDivider.takeIf { compareEnhancement },
             comparisonPageIndex = pageIndex.takeIf { compareEnhancement },
@@ -1297,6 +1295,39 @@ fun ReaderScreen(
                 experience.setReaderWaiting(readerForeground &&
                     (loading || !imageVisible || foregroundPreparationPending))
             }
+            // Use the renderer's actual spread/window, including covers, wide artwork and
+            // manual singles. The saved cursor alone describes only one half of a spread.
+            val enhancementViewport by rememberUpdatedState(preparationViewport)
+            val enhancementCursor by rememberUpdatedState(pageIndex)
+            LaunchedEffect(enhancement, pages, preparation.direction, readerForeground,
+                leavingReader, chapterChangeRequested, enhancementPolicy,
+                experienceBudget.enhancementAhead, experienceBudget.enhancementProtected) {
+                snapshotFlow {
+                    val viewport = enhancementViewport
+                    val range = viewport?.visibleRange?.invoke()
+                    val visible = range?.let { (first, last) ->
+                        (first..last).filter { it in pages.indices }.toSet()
+                    }.orEmpty()
+                    // Share prefetch's established reading intent. A brief backward glance
+                    // must not turn enhancement around while original preparation stays ahead.
+                    val direction = if (preparation.direction < 0) -1 else 1
+                    val next = range?.let { (first, last) ->
+                        readerDirectionalPages(first, last, pages.size, 1, direction,
+                            viewport?.groups, completeSpreads = true).toSet()
+                    }.orEmpty()
+                    val ahead = range?.let { (first, last) ->
+                        readerDirectionalPages(first, last, pages.size, experienceBudget.enhancementAhead,
+                            direction, viewport?.groups, completeSpreads = true).toSet()
+                    }.orEmpty()
+                    ReaderEnhancementWindow(enhancementCursor.takeIf { it in visible }
+                        ?: visible.minOrNull() ?: enhancementCursor, direction, visible, next, ahead)
+                }.distinctUntilChanged().collect { window ->
+                    enhancement.updateWindow(window.page, window.direction, pages.size,
+                        readerForeground && !leavingReader && !chapterChangeRequested && window.visible.isNotEmpty(),
+                        enhancementPolicy, experience.state.value, visiblePages = window.visible,
+                        nextVisiblePages = window.next, aheadWindow = window.ahead)
+                }
+            }
             preparationViewport?.let { viewport ->
                 AdjacentPagePrefetch(pages, headers, preferences.mode, viewport.composed, viewport.loaded,
                     sharedPrefetchRequests, prefetchPage, scriptPrefetch = scriptPrefetch,
@@ -1306,7 +1337,10 @@ fun ReaderScreen(
                     onPageDimensions = viewport.dimensions, position = viewport.position, groups = viewport.groups,
                     scrollDirection = viewport.scrollDirection, directionAnchor = viewport.directionAnchor,
                     directionBaseline = viewport.directionBaseline, layoutKey = viewport.layoutKey,
-                    retainOriginalsAcrossLayouts = true, visibleRange = viewport.visibleRange)
+                    retainOriginalsAcrossLayouts = true,
+                    prepareEnhancementAhead = enhancementPolicy.tier != QualityTier.ORIGINAL &&
+                        PreparationMode.SMART in enhancementPolicy.preparation,
+                    visibleRange = viewport.visibleRange)
             }
 
             // Read the live dim preview during drawing; dragging does not publish or persist preferences.
@@ -1391,9 +1425,13 @@ fun ReaderScreen(
                                 "补页 · ${it.variant.sourceName} ${it.page.index + 1}"
                             },
                             currentSourceName.takeIf { chapter.variants.size > 1 },
-                            if (enhancementPolicy.tier != QualityTier.ORIGINAL)
-                                if (enhancementState.currentEnhanced) "本页增强已备" else "原图" else null,
-                            "前方增强已备".takeIf { enhancementState.nextReady }).joinToString(" · "),
+                            if (enhancementPolicy.tier != QualityTier.ORIGINAL) {
+                                val visible = enhancementState.visiblePages
+                                val ready = visible.count { it in enhancementState.assets }
+                                if (visible.size > 1) "增强已备 $ready/${visible.size}"
+                                else if (enhancementState.currentEnhanced) "本页增强已备" else "原图"
+                            } else null,
+                            "下一屏增强已备".takeIf { enhancementState.nextReady }).joinToString(" · "),
                             color = colors.onSurface.copy(alpha = .86f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     if (preferences.panelEngine == PanelEngine.OFF &&
@@ -1453,6 +1491,9 @@ fun ReaderScreen(
                             ReaderProgressSlider(
                                 pageIndex = pageIndex, pages = pages, pendingPage = targetPage,
                                 headers = headers, sourceId = chapter.sourceId,
+                                enhancementEnabled = enhancementPolicy.tier != QualityTier.ORIGINAL,
+                                showSpreadDimensions = preferences.panelEngine == PanelEngine.OFF &&
+                                    preferences.doublePage && preferences.mode != ReadingMode.VERTICAL,
                                 enabled = controlsVisible,
                                 onSeek = { destination ->
                                     if (destination != pageIndex) {
@@ -2502,6 +2543,40 @@ internal data class ReaderPrefetchViewport(
     val dimensions: (Int, IntSize) -> Unit = { _, _ -> },
 )
 
+private data class ReaderEnhancementWindow(
+    val page: Int, val direction: Int, val visible: Set<Int>, val next: Set<Int>, val ahead: Set<Int>,
+)
+
+/** A live image request proves a materialized/download URL belongs to this exact original. */
+private data class ReaderEnhancementSourceReceipt(val originalKey: String, val resolvedKey: String)
+private val LocalReaderEnhancementSources =
+    staticCompositionLocalOf<MutableMap<Int, ReaderEnhancementSourceReceipt>?> { null }
+
+/** Original preparation and enhancement must agree on every page in a requested spread. */
+private fun readerDirectionalPages(
+    first: Int, last: Int, pageCount: Int, count: Int, step: Int,
+    groups: List<PageSpread>?, completeSpreads: Boolean,
+): List<Int> {
+    if (count <= 0 || pageCount <= 0) return emptyList()
+    val edge = if (step > 0) last else first
+    if (edge !in 0 until pageCount) return emptyList()
+    if (groups == null) {
+        val available = if (step > 0) pageCount - 1 - edge else edge
+        return (1..minOf(count, available)).map { edge + step * it }
+    }
+    val owner = groups.indexOfFirst { it.contains(edge) }
+    if (owner < 0) return emptyList()
+    val selected = mutableListOf<Int>()
+    for (offset in 1..minOf(count, groups.size)) {
+        if (selected.size >= count) break
+        val spread = groups.getOrNull(owner + step * offset) ?: break
+        val unit = listOfNotNull(spread.first, spread.second)
+        if (!completeSpreads && selected.size + unit.size > count) break
+        selected += unit
+    }
+    return selected
+}
+
 private data class ReaderSourceIdentity(val logicalId: String, val chapterId: String,
     val sourceId: String, val sourceMangaId: String)
 
@@ -2516,6 +2591,7 @@ private data class PrefetchWindow(
     val runtime: ExperienceRuntimePreferences,
     val scrollDirection: Int?, val directionAnchor: Long?, val directionBaseline: Pair<Long, Long>?,
     val groups: List<PageSpread>?, val layoutKey: Any?, val originalCacheRevision: Long,
+    val prepareEnhancementAhead: Boolean,
 )
 
 private data class PrefetchedReaderPage(val page: Page, val diskCacheKey: String?)
@@ -2554,6 +2630,7 @@ internal fun AdjacentPagePrefetch(
     directionAnchor: (() -> Long)? = null,
     directionBaseline: (() -> Pair<Long, Long>)? = null,
     layoutKey: Any? = null, retainOriginalsAcrossLayouts: Boolean = false,
+    prepareEnhancementAhead: Boolean = false,
     visibleRange: () -> Pair<Int, Int>,
 ) {
     val context = LocalContext.current
@@ -2583,6 +2660,7 @@ internal fun AdjacentPagePrefetch(
     val currentGroups by rememberUpdatedState(groups)
     val currentHeight by rememberUpdatedState(viewportHeight)
     val currentLayout by rememberUpdatedState(layoutKey)
+    val currentEnhancementAhead by rememberUpdatedState(prepareEnhancementAhead)
     LaunchedEffect(pages, headers, if (retainOriginalsAcrossLayouts) null else mode, imageLoader,
         resolvePage, scriptPrefetch, sourceId, if (retainOriginalsAcrossLayouts) null else groups,
         if (retainOriginalsAcrossLayouts) null else viewportHeight,
@@ -2814,7 +2892,8 @@ internal fun AdjacentPagePrefetch(
                     checks.keys.toSet(), resolutionJobs.keys.toSet(), resolvedPages.keys.toSet(),
                     currentBudget.resolveRequests, currentBudget.decodeRequests, experience.canDecodePrefetch(), readerActive,
                     currentBudget.runtime, currentScrollDirection?.invoke(), currentDirectionAnchor?.invoke(),
-                    currentDirectionBaseline?.invoke(), currentGroups, currentLayout, originalCacheRevision)
+                    currentDirectionBaseline?.invoke(), currentGroups, currentLayout, originalCacheRevision,
+                    currentEnhancementAhead)
             }.distinctUntilChanged().combine(snapshotFlow {
                 prefetchEnabled && (currentBudget.prefetchBytes > 0L ||
                     currentBudget.decodedPrefetchPages > 0 && experience.canDecodePrefetch())
@@ -2879,29 +2958,17 @@ internal fun AdjacentPagePrefetch(
                 val seconds = window.runtime.predictionSeconds ?: when (currentBudget.mode) {
                     ExperienceMode.ECO -> 2; ExperienceMode.AUTO -> 5; ExperienceMode.PERFORMANCE -> 8 }
                 val readyLead = maxOf(1, window.decoded, window.parallel)
-                val ahead = if (currentOverrides.prefetchMode == PrefetchMode.MANUAL) window.ahead else
+                // Explicit advance enhancement needs the same original window. The original
+                // cache, byte budget and admission owners still decide when work can start.
+                val ahead = if (window.prepareEnhancementAhead || currentOverrides.prefetchMode == PrefetchMode.MANUAL) window.ahead else
                     minOf(window.ahead.toLong(), if (now - lastMove > window.runtime.idleWindowSeconds.coerceAtLeast(1).toLong() * 1000L)
                         readyLead.toLong() else if (speed == 0f) readyLead.toLong() * 2L else
                         maxOf(readyLead.toLong(), kotlin.math.ceil(speed.toDouble() * seconds.toDouble()).toLong()))
                         .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
                 fun candidates(count: Int, forward: Boolean): List<Int> {
-                    if (count <= 0) return emptyList()
                     val step = if (forward) direction else -direction
-                    val edge = if (step > 0) window.last else window.first
-                    if (groups == null) {
-                        val available = if (step > 0) pages.lastIndex - edge else edge
-                        return (1..minOf(count, available.coerceAtLeast(0))).map { edge + step * it }
-                    }
-                    val owner = groups.indexOfFirst { it.contains(edge) }
-                    if (owner < 0) return emptyList()
-                    val selected = mutableListOf<Int>()
-                    for (offset in 1..minOf(count, groups.size)) {
-                        val spread = groups.getOrNull(owner + step * offset) ?: break
-                        val unit = listOfNotNull(spread.first, spread.second)
-                        if (selected.size + unit.size > count) break
-                        selected += unit
-                    }
-                    return selected
+                    return readerDirectionalPages(window.first, window.last, pages.size, count,
+                        step, groups, completeSpreads = window.prepareEnhancementAhead && forward)
                 }
                 fun eligible(index: Int) = window.enabled && window.visibleReady && index in pages.indices &&
                     index !in visiblePages &&
@@ -3462,6 +3529,7 @@ private fun ReaderPageImage(
     val context = LocalContext.current
     val preparationTracker = LocalReaderPreparationTracker.current
     val enhancementPresentation = LocalReaderEnhancementPresentation.current
+    val enhancementSources = LocalReaderEnhancementSources.current
     val imageRangeOwner = LocalReaderCacheRangeOwner.current
     val imageRangeStore = remember(context) { dev.mangaflow.storage.StorageCacheStore.get(context) }
     val experience = remember(context) { ExperiencePolicyStore.get(context) }
@@ -3725,6 +3793,19 @@ private fun ReaderPageImage(
             maxWidthPx = imageRuntime.previewWidthPx, maxHeightPx = imageRuntime.previewHeightPx)
         val currentPreviewSize by rememberUpdatedState(previewSize)
         val resource = resolvedPage
+        val enhancementSource = remember(attempt, resource, loadedImage, originalCacheIdentity) {
+            resource?.let { resolved -> loadedImage?.let { image ->
+                ReaderEnhancementSourceReceipt(originalCacheIdentity,
+                    image.diskCacheKey ?: readerPageCacheKey(resolved, headers, sourceId))
+            } }
+        }
+        DisposableEffect(enhancementSources, logicalPageIndex, enhancementSource) {
+            if (enhancementSource != null) enhancementSources?.set(logicalPageIndex, enhancementSource)
+            onDispose {
+                if (enhancementSource != null && enhancementSources?.get(logicalPageIndex) === enhancementSource)
+                    enhancementSources?.remove(logicalPageIndex)
+            }
+        }
         val request = rememberReaderPageRequest(resource, headers, attempt, previewSize,
             build = @DontMemoize { requested -> readerImageRequest(context, requested, headers, sourceId)
                 .readerTransferProgress(transferObserver)
@@ -4082,6 +4163,8 @@ private fun ReaderProgressSlider(
     pendingPage: Int?,
     headers: Map<String, String>,
     sourceId: String,
+    enhancementEnabled: Boolean,
+    showSpreadDimensions: Boolean,
     enabled: Boolean,
     onSeek: (Int) -> Unit,
     onOpenNavigator: () -> Unit,
@@ -4097,12 +4180,41 @@ private fun ReaderProgressSlider(
     val lastPage = (pageCount - 1).coerceAtLeast(0)
     val shown = (preview ?: pendingPage?.toFloat() ?: pageIndex.toFloat()).coerceIn(0f, lastPage.toFloat())
     val dimensionRevision by ReaderDimensionCache.revision.collectAsStateWithLifecycle()
-    val shownPage = pages.getOrNull(shown.roundToInt())
-    val originalSize = remember(shownPage, headers, sourceId, dimensionRevision) {
-        shownPage?.let { ReaderDimensionCache.get(readerPageCacheKey(it, headers, sourceId)) }
+    val enhancement = LocalReaderEnhancementPresentation.current
+    val replacements = LocalReaderPageRepair.current?.state?.replacements.orEmpty()
+    val spread = enhancement?.state?.visiblePages?.takeIf {
+        showSpreadDimensions && it.size == 2 && pageIndex in it &&
+            enhancement.state.currentPage == pageIndex && preview == null && pendingPage == null
     }
-    val resolutionLabel = originalSize?.let { "${it.width} × ${it.height} px" } ?: "—"
-    val resolutionDescription = originalSize?.let { "原图 ${it.width} × ${it.height} 像素" } ?: "原图尺寸尚未获取"
+    val shownIndices = spread?.sorted() ?: listOf(shown.roundToInt())
+    val enhancementSources = LocalReaderEnhancementSources.current
+    val sourceReceipts = shownIndices.associateWith { enhancementSources?.get(it) }
+    val resolutions = remember(shownIndices, pages, headers, sourceId, dimensionRevision,
+        enhancement?.state?.assets, enhancementEnabled, replacements, sourceReceipts) {
+        shownIndices.map { index ->
+            val replacement = replacements[index]
+            val page = replacement?.page ?: pages.getOrNull(index)
+            val ownedHeaders = if (page?.sourceRouteId?.isNotBlank() == true) emptyMap()
+                else replacement?.headers ?: headers
+            val ownedSource = page?.sourceRouteId?.ifBlank { replacement?.variant?.sourceId ?: sourceId } ?: sourceId
+            val originalKey = page?.let { readerPageCacheKey(it, ownedHeaders, ownedSource) }
+            val resolvedKey = sourceReceipts[index]?.takeIf { it.originalKey == originalKey }?.resolvedKey ?: originalKey
+            val originalSize = resolvedKey?.let(ReaderDimensionCache::get)
+                ?: originalKey?.let(ReaderDimensionCache::get)
+                ?: page?.takeIf { it.width > 0 && it.height > 0 }?.let { IntSize(it.width, it.height) }
+            val asset = enhancement?.state?.assets?.get(index)?.takeIf {
+                // A matching source version alone cannot prove a URL alias. Use the same
+                // resolved cache identity as the live image, including repaired pages.
+                enhancementEnabled && page != null && it.identity.pageId == index.toString() &&
+                    it.identity.sourceId == ownedSource && it.identity.sourceVersion == readerEnhancementSourceVersion(page) &&
+                    it.sourceCacheIdentity == resolvedKey
+            }
+            index to readerEnhancementResolution(index, originalSize, asset)
+        }
+    }
+    val resolutionDescription = resolutions.joinToString("；") { it.second.description }
+    val pageLabel = if (spread != null) "${shownIndices.first() + 1}–${shownIndices.last() + 1}"
+        else "${shown.roundToInt() + 1}"
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
 
     LaunchedEffect(pressed, dragged, enabled) {
@@ -4132,18 +4244,31 @@ private fun ReaderProgressSlider(
             interactions = interactions,
             label = "阅读进度，第 ${shown.roundToInt() + 1} 页，共 $pageCount 页",
         )
-        Column(Modifier.width(112.dp * fontScale).heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
+        Column(Modifier.width((if (enhancementEnabled || showSpreadDimensions) 148.dp else 112.dp) * fontScale)
+            .heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
             .clickable(enabled = enabled && pageCount > 0, role = Role.Button,
                 onClickLabel = "打开页面导航", onClick = onOpenNavigator)
-            .semantics { contentDescription = "第 ${shown.roundToInt() + 1} 页，共 $pageCount 页，$resolutionDescription" }
+            .semantics { contentDescription = "第 $pageLabel 页，共 $pageCount 页，$resolutionDescription" }
             .padding(horizontal = 4.dp, vertical = 5.dp),
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
             Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                Text(mangaNumberText("${shown.roundToInt() + 1}"), color = colors.onSurface, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
+                Text(mangaNumberText(pageLabel), color = colors.onSurface, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
                 Text(mangaNumberText(" / $pageCount"), color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 16.sp)
             }
-            Text(mangaNumberText(resolutionLabel), color = colors.onSurfaceVariant, fontSize = 12.sp,
-                lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            resolutions.forEach { (index, resolution) ->
+                Row(horizontalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    if (spread != null) Text(mangaNumberText("${index + 1}"),
+                        color = colors.onSurfaceVariant, fontSize = 10.sp, lineHeight = 16.sp)
+                    if (resolution.enhanced) Icon(Icons.Rounded.AutoAwesome, "增强文件尺寸",
+                        tint = colors.primary, modifier = Modifier.size(12.dp))
+                    Text(mangaNumberText(resolution.valueLabel),
+                        color = if (resolution.enhanced) colors.onSurface else colors.onSurfaceVariant,
+                        fontSize = 11.sp, lineHeight = 16.sp,
+                        fontWeight = if (resolution.enhanced) FontWeight.Medium else FontWeight.Normal,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
         }
     }
 }

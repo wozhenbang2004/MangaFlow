@@ -62,6 +62,7 @@ import me.saket.telephoto.zoomable.Viewport
 import me.saket.telephoto.zoomable.ZoomableContent
 import me.saket.telephoto.zoomable.spatial.CoordinateSpace
 import me.saket.telephoto.zoomable.spatial.SpatialOffset
+import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
@@ -126,7 +127,10 @@ internal fun ReaderEnhancedLayer(
     val previewState by preview.state.collectAsState()
     val ready = previewState is AsyncImagePainter.State.Success
     var viewport by remember { mutableStateOf(IntSize.Zero) }
-    var tiles by remember(asset.identity) { mutableStateOf<List<EnhancedTileBitmap>>(emptyList()) }
+    var tiles by remember(asset.identity, liveLease) { mutableStateOf<List<EnhancedTileBitmap>>(emptyList()) }
+    // A completed file is not yet a complete drawable viewport. Keep the original
+    // underneath until the preview and every requested visible tile are ready.
+    val displayReady = ready && tiles.isNotEmpty()
     val fraction by rememberUpdatedState(comparisonFraction)
     val liveWindow by rememberUpdatedState(visibleWindow)
     val image = IntSize(asset.width, asset.height)
@@ -186,31 +190,36 @@ internal fun ReaderEnhancedLayer(
                 }
             }
         }.distinctUntilChanged().collectLatest { requested ->
+            if (requested.isEmpty()) return@collectLatest
             retained.keys.retainAll(requested.toSet())
-            tiles = retained.map { EnhancedTileBitmap(it.key, it.value) }
             for (tile in requested) {
                 if (tile in retained) continue
                 try {
                     val decoderLease = liveLease.retain()
                     try {
-                    val region = policy.withTileDecodeAdmission {
-                        withContext(Dispatchers.IO) {
-                            decodeNativeReaderRegion(liveLease.file.path, tile.bounds, tile.sample, policy.state.value.runtime)
+                        val region = policy.withTileDecodeAdmission {
+                            withContext(Dispatchers.IO) {
+                                decodeNativeReaderRegion(liveLease.file.path, tile.bounds, tile.sample, policy.state.value.runtime)
+                            }
                         }
-                    }
-                    currentCoroutineContext().ensureActive()
-                    retained[tile] = region.bitmap
-                    tiles = retained.map { EnhancedTileBitmap(it.key, it.value) }
+                        currentCoroutineContext().ensureActive()
+                        retained[tile] = region.bitmap
                     } finally { decoderLease.close() }
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: ReaderDetailUnavailable) { break }
                 catch (_: Exception) { break }
             }
+            currentCoroutineContext().ensureActive()
+            // Publish one immutable viewport batch. A failed or superseded batch
+            // leaves the original/previous complete layer intact, never a scan of tiles.
+            if (requested.all { it in retained }) {
+                tiles = requested.map { EnhancedTileBitmap(it, retained.getValue(it)) }
+            }
         }
     }
     Box(modifier.onSizeChanged { viewport = it }, contentAlignment = AbsoluteAlignment.TopLeft) {
         Canvas(Modifier.matchParentSize()) {
-            if (!ready) return@Canvas
+            if (!displayReady) return@Canvas
             val bounds = drawingBounds()
             if (bounds.width <= 0 || bounds.height <= 0) return@Canvas
             val divider = fraction?.floatValue?.coerceIn(0f, 1f)?.let {
@@ -233,7 +242,7 @@ internal fun ReaderEnhancedLayer(
                 }
             }
         }
-        if (ready && comparisonFraction != null && onComparisonFractionChange != null) {
+        if (displayReady && comparisonFraction != null && onComparisonFractionChange != null) {
             ReaderComparisonDivider(comparisonFraction, onComparisonFractionChange,
                 bounds = ::comparisonBounds, viewportWidth = viewport.width)
         }
@@ -311,17 +320,24 @@ private fun ReaderComparisonDivider(
 }
 
 private fun enhancedTiles(size: IntSize, bounds: Rect, sample: Int): List<EnhancedTile> {
-    if (bounds.width <= 0 || bounds.height <= 0) return emptyList()
-    val step = 512 * sample
-    val firstX = floor(bounds.left / step).toInt().coerceAtLeast(0)
-    val firstY = floor(bounds.top / step).toInt().coerceAtLeast(0)
-    val lastX = floor((bounds.right - 1).coerceAtLeast(bounds.left) / step).toInt().coerceAtMost((size.width - 1) / step)
-    val lastY = floor((bounds.bottom - 1).coerceAtLeast(bounds.top) / step).toInt().coerceAtMost((size.height - 1) / step)
-    return buildList {
-        for (y in firstY..lastY) for (x in firstX..lastX) {
-            if (this.size >= 32) return@buildList
-            add(EnhancedTile(IntRect(x * step, y * step, minOf((x + 1) * step, size.width),
-                minOf((y + 1) * step, size.height)), sample))
+    if (size.width <= 0 || size.height <= 0 || bounds.width <= 0 || bounds.height <= 0 ||
+        !bounds.left.isFinite() || !bounds.top.isFinite() || !bounds.right.isFinite() || !bounds.bottom.isFinite()) return emptyList()
+    var actualSample = sample.coerceIn(1, 128)
+    while (true) {
+        val step = 512 * actualSample
+        val firstX = floor(bounds.left / step).toInt().coerceAtLeast(0)
+        val firstY = floor(bounds.top / step).toInt().coerceAtLeast(0)
+        val lastX = (ceil(bounds.right / step).toInt() - 1).coerceAtMost((size.width - 1) / step)
+        val lastY = (ceil(bounds.bottom / step).toInt() - 1).coerceAtMost((size.height - 1) / step)
+        val count = (lastX - firstX + 1).coerceAtLeast(0).toLong() * (lastY - firstY + 1).coerceAtLeast(0)
+        if (count <= 32L) return buildList {
+            for (y in firstY..lastY) for (x in firstX..lastX) {
+                add(EnhancedTile(IntRect(x * step, y * step, minOf((x + 1) * step, size.width),
+                    minOf((y + 1) * step, size.height)), actualSample))
+            }
         }
+        // Bound decoded memory without silently omitting the bottom/right of the viewport.
+        if (actualSample >= 128) return emptyList()
+        actualSample *= 2
     }
 }
