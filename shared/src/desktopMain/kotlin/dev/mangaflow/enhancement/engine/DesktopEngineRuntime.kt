@@ -89,7 +89,7 @@ internal class DesktopEngineRuntime(private val directory: File) {
         } finally { archive.delete(); if (staging.exists()) staging.deleteRecursively() }
     }
 
-    private suspend fun download(pack: DesktopEnginePackage, file: File, progress: (EngineProgress) -> Unit) {
+    suspend fun download(pack: DesktopEnginePackage, file: File, progress: (EngineProgress) -> Unit) {
         var url = URI(pack.url).toURL()
         var connection: HttpURLConnection? = null
         try {

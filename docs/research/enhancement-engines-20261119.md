@@ -179,6 +179,13 @@ signed, ABI-specific optional package catalog. The original model pair is instal
 files. CPU-side wall time stays distinct from GPU-only timing. Device behavior
 has yet to be observed.
 
+The same Real-CUGAN session is reused per frame in Android's full offline
+Media3 MP4 exporter. The renderer passes actual decoded RGB regions to the
+same Vulkan tile path, keeps original AAC bytes and expected frame timestamps,
+and retains full AVC decode validation. This is an offline model even when the
+frame-rate target comes from the separate RIFE stage. No measured live Vulkan
+video throughput or live RIFE claim follows from this integration.
+
 The RIFE follow-up inspected the official vs-mlrt `external-models` archives
 `rife_v4.25_lite.7z`, `rife_v4.22.7z`, and `rife_v4.26.7z`. Each selected
 `rife_v2` ONNX file has FP32 `[N,7,H,W]` input and opset 16 with normalized RGB

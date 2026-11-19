@@ -1,10 +1,18 @@
 # 画质增强与智能预处理 V1.0 · 实施与未闭合验收
 
+## Windows 专用 AnimeJaNai 实时播放
+
+Windows x64 可选安装官方 mpv-AnimeJaNai 3.12.3 与 HD V3.1 Performance、Balanced 两个真实模型。官方播放库在独立目录与应用内同版 Mediamp JNI 组合，校验官方归档、单个文件和原装 JNI 依赖。首次按需载入新内核前记录启动标记。上次启动未产生首帧时，下次会先使用原装内核。Android 与非 Windows 平台不会加载这些组件。
+
+同一播放器内的原生滤镜处理 D3D11 SDR 视频。滤镜模型回执、原生输出尺寸与实际时间轴变化共同确认超分生效。独立的均衡 RIFE v4.22 下载可用于原画补帧，也可与已选超分组合。2×、60、120 FPS 和自定义帧率按片源帧率求比例，保留原播放器的音频、字幕和跳转。在完成模型加载或取得滤镜输出时，界面仍分别显示状态和输出帧率估计。
+
+Windows 的其他 RIFE 质量继续使用离线模型。实时 RTX 5060 性能、最终屏幕帧率、Windows 同源前方增强帧复用、Android 实时 RIFE 仍待闭合。当前 Windows 实时路径使用 DirectML，TensorRT 原生内核和目标设备的能力需单独验证。
+
 ## Android Vulkan 漫画增强续接
 
 Android 新增官方 Real-CUGAN NOSE 2× 无降噪模型，供彩色漫画和条漫选择，并沿用普通、成人各自的衍生缓存和当前页、临近页、整章准入。ncnn Vulkan 运行库按应用进程架构通过已有签名目录选装，模型安装校验官方 `.param` 与 `.bin` 的固定大小和摘要。每块以原版 18px 镜像边界进入 ncnn Vulkan，JNI 在确认硬件设备和推理层之后，用 `VkMat` 中间张量完成真实计算。完整 PNG 仍经原文件、模型和像素尺寸校验，再交给原缓存所有者。
 
-Vulkan 源码接线覆盖 2× 彩色图像，运行时保持原图可用。Android Vulkan 番剧推理、实时 RIFE、Windows 专用 AnimeJaNai 实时仍各自开放。设备驱动、实际吞吐、接缝、文字和色彩待用安装产物核对。
+同一已签名 Real-CUGAN 运行库也可用于已下载的 SDR MP4 番剧整集 2× 增强。Media3 解码后每帧交给复用的 Vulkan 模型会话，输出经完整解码、尺寸、时间轴、AAC 音轨字节检验才形成衍生版本。可按需在 Vulkan 超分前串接独立的 CPU RIFE。设备驱动、实际吞吐、接缝、文字和色彩待用安装产物核对。Android Vulkan 在线增强窗口和实时 RIFE 仍各自开放。
 
 ## 原生补帧、模型增强及前方帧复用接续
 
@@ -15,7 +23,7 @@ Vulkan 源码接线覆盖 2× 彩色图像，运行时保持原图可用。Andro
 - Android 5–15 秒前方窗口以同路由 MP4 或可 seek 的 HLS 点播为边界。实际预解码并预执行增强，保留有界无损帧缓存，消费时对同会话、时间轴和当前源帧作匹配，原音轨跟随原播放器。运行页记录处理时间、缓存字节、已处理帧和实际复用帧；缓存覆盖不意味着屏幕已显示这些帧。
 - Windows 实时 ArtCNN C4F16/C4F32 是上游固定的 MIT 权重与 GLSL，实现真实 2× 亮度超分。仅在 libmpv 反馈对应的 GPU 绘制阶段时显示实际执行。Windows 高质量整集处理继续用 VideoJaNai，Android 与 Windows 的已下载版本保留原始版本及回退。
 
-仍需 Windows 专用 AnimeJaNai 与实时 RIFE 的兼容播放内核，以及 Windows 在线增强窗口和 Android Vulkan/ncnn 适配。现有 Mediamp 原生渲染 ABI 与 AnimeJaNai 专用 libmpv 的互换没有得到验证。当前源码证据不确认目标两台设备的 4K、60/120 FPS 长时吞吐或音画效果。
+后续批次接入了上述 Windows 可选原生内核与 Android Vulkan。当前源码证据不确认目标两台设备的 4K、60/120 FPS 长时吞吐或音画效果。
 
 ## 增强后端续接 · Android RIFE、NNAPI 与 Windows ArtCNN
 

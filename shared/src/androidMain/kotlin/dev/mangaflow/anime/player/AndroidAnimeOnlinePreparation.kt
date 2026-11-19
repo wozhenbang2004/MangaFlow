@@ -33,7 +33,7 @@ import androidx.media3.transformer.ExperimentalAnalyzerModeFactory
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
-import dev.mangaflow.enhancement.engine.AndroidOnnxVideoProgram
+import dev.mangaflow.enhancement.engine.AndroidRgbVideoProgram
 import dev.mangaflow.enhancement.engine.engineSha256
 import dev.mangaflow.reader.panels.PanelRuntimeId
 import dev.mangaflow.reader.panels.PanelRuntimeStore
@@ -126,7 +126,7 @@ internal suspend fun prepareAndroidAnimeWindow(
                 val effect = GlEffect { _, isHdr ->
                     if (isHdr) throw VideoFrameProcessingException("HDR 片源保持原画")
                     val raw = ByteArray(outputWidth * outputHeight * 4)
-                    AndroidOnnxVideoProgram(session, width, height, scale, 64L * 1024 * 1024, job::ensureActive,
+                    AndroidRgbVideoProgram(session, width, height, scale, 64L * 1024 * 1024, job::ensureActive,
                         capture = { time, input, enhanced ->
                             job.ensureActive()
                             check(captures.size < 900 && time !in captures) { "预处理帧时间不连续" }

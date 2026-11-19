@@ -53,6 +53,8 @@ internal suspend fun prepareAndroidVideo(
     session: OrtSession?,
     rifeModel: EngineModel?,
     rifeSession: OrtSession?,
+    cugan: AndroidCuganSession?,
+    modelMatches: () -> Boolean,
     progress: (EngineProgress) -> Unit,
 ): EngineOutput {
     val coroutine = currentCoroutineContext()
@@ -90,8 +92,10 @@ internal suspend fun prepareAndroidVideo(
             val now = SystemClock.elapsedRealtime()
             if (completed == 1 || completed == expectedTimes.size || now - lastSampleAt >= 750) {
                 lastSampleAt = now
-                val detail = if (rifeSession == null) "逐帧 RGB 增强 · CPU ONNX"
-                    else "RIFE 已推理 ${inferredCount.get()} 帧 · CPU ONNX"
+                val detail = listOfNotNull(
+                    if (cugan != null) "Vulkan Real-CUGAN" else if (session != null) "RGB 增强 · CPU ONNX" else null,
+                    rifeSession?.let { "RIFE 已推理 ${inferredCount.get()} 帧 · CPU ONNX" },
+                ).joinToString(" · ")
                 progress(EngineProgress(EngineStage.PROCESS, completed.toLong(), expectedTimes.size.toLong(),
                     completed * 1000.0 / (now - processingStarted).coerceAtLeast(1), detail))
             }
@@ -102,13 +106,13 @@ internal suspend fun prepareAndroidVideo(
                 AndroidRifeEffect(rifeSession, sourceInfo.width, sourceInfo.height, sourceInfo.videoTimes, expectedTimes,
                     request.rifeEnsemble, request.sceneThreshold, inspect) { interpolated ->
                     if (interpolated) inferredCount.incrementAndGet()
-                    if (session == null) frameWritten()
+                    if (session == null && cugan == null) frameWritten()
                 }
             })
-            if (session != null) add(GlEffect { _, hdr ->
+            if (session != null || cugan != null) add(GlEffect { _, hdr ->
                 if (hdr) throw VideoFrameProcessingException("HDR 片源保持原视频")
-                AndroidOnnxVideoProgram(session, sourceInfo.width, sourceInfo.height, request.scale,
-                    VIDEO_WORKING_BYTES - frameMemory - rifeMemory, checkActive = inspect, onFrame = ::frameWritten)
+                AndroidRgbVideoProgram(session, sourceInfo.width, sourceInfo.height, request.scale,
+                    VIDEO_WORKING_BYTES - frameMemory - rifeMemory, checkActive = inspect, cugan = cugan, onFrame = ::frameWritten)
             })
         }
         val transcoded = exportVideo(context, source, temporary, effects)
@@ -130,12 +134,14 @@ internal suspend fun prepareAndroidVideo(
             "视频或音轨时间轴未通过校验，原版保持可用"
         }
         validateDecodedOutput(temporary, outputInfo.videoTimes, inspect, progress)
-        check(engineSha256(source) == sourceHash && listOfNotNull(model, rifeModel).all { engineSha256(File(it.path)) == it.sha256 }) {
+        check(engineSha256(source) == sourceHash && modelMatches() &&
+            (rifeModel == null || engineSha256(File(rifeModel.path)) == rifeModel.sha256)) {
             "处理期间原视频或模型发生变化，增强版未发布"
         }
         val videoSpan = outputInfo.videoTimes.last() - outputInfo.videoTimes.first()
         val output = EngineOutput(destination.canonicalPath, width, height, engineSha256(temporary), temporary.length(),
-            EnhancementEngineIds.ANDROID_VIDEO_ONNX, ANDROID_VIDEO_ENGINE_VERSION,
+            model?.engineId ?: EnhancementEngineIds.ANDROID_VIDEO_ONNX,
+            if (cugan == null) ANDROID_VIDEO_ENGINE_VERSION else AndroidCuganVulkan.VIDEO_VERSION,
             EnhancedAssetIdentity.digest("${model?.sha256.orEmpty()}|${rifeModel?.sha256.orEmpty()}"), SystemClock.elapsedRealtime() - measuredAt,
             video = EngineVideoMetadata(outputInfo.durationUs / 1_000L,
                 videoSpan.takeIf { it > 0L }?.let { (outputInfo.videoTimes.size - 1) * 1_000_000.0 / it },
@@ -353,8 +359,8 @@ private fun validateDecodedOutput(source: File, expectedTimes: LongArray, checkA
 
 private fun MediaFormat.intOrNull(key: String): Int? = if (containsKey(key)) getInteger(key) else null
 
-internal class AndroidOnnxVideoProgram(
-    private val session: OrtSession,
+internal class AndroidRgbVideoProgram(
+    private val session: OrtSession?,
     private val width: Int,
     private val height: Int,
     private val scale: Int,
@@ -363,9 +369,12 @@ internal class AndroidOnnxVideoProgram(
     private val capture: ((Long, ByteBuffer, ByteBuffer) -> Unit)? = null,
     private val onProcessed: ((Long) -> Unit)? = null,
     private val onReleased: (() -> Unit)? = null,
+    private val cugan: AndroidCuganSession? = null,
     private val onFrame: () -> Unit,
 ) : BaseGlShaderProgram(false, 1) {
-    private var renderer: AndroidOnnxTiles? = null
+    private var renderer: ((AndroidRgbRegion, AndroidRgbRow) -> Unit)? = null
+    private val outputWidth = Math.multiplyExact(width, scale)
+    private val outputHeight = Math.multiplyExact(height, scale)
     private var inputPixels: ByteBuffer? = null
     private var outputPixels: ByteBuffer? = null
     private var texture = 0
@@ -375,23 +384,29 @@ internal class AndroidOnnxVideoProgram(
 
     override fun configure(inputWidth: Int, inputHeight: Int): Size = videoFrame {
         require(inputWidth == width && inputHeight == height) { "当前片源解码尺寸发生变化" }
-        val plan = AndroidOnnxTiles(session, width, height, scale, 128, 24, budget, requireRgb = true)
-        renderer = plan
-        texture = GlUtil.createTexture(plan.outWidth, plan.outHeight, false)
+        if (cugan != null) {
+            require(session == null && scale == 2)
+            val tiles = cugan.tiles(width, height, budget)
+            renderer = { read, row -> tiles.render(checkActive, read, row) }
+        } else {
+            val tiles = AndroidOnnxTiles(checkNotNull(session), width, height, scale, 128, 24, budget, requireRgb = true)
+            renderer = { read, row -> tiles.render(checkActive, read, row) }
+        }
+        texture = GlUtil.createTexture(outputWidth, outputHeight, false)
         GLES20.glGenFramebuffers(1, inputFramebuffer, 0)
         GlUtil.checkGlError()
         inputPixels = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.LITTLE_ENDIAN)
-        outputPixels = ByteBuffer.allocateDirect(plan.outWidth * plan.outHeight * 4).order(ByteOrder.LITTLE_ENDIAN)
+        outputPixels = ByteBuffer.allocateDirect(outputWidth * outputHeight * 4).order(ByteOrder.LITTLE_ENDIAN)
         copyProgram = GlProgram(VIDEO_VERTEX, VIDEO_FRAGMENT).also {
             it.setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), 4)
         }
-        Size(plan.outWidth, plan.outHeight)
+        Size(outputWidth, outputHeight)
     }
 
     override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) = videoFrame {
         checkActive()
         val startedAt = onProcessed?.let { SystemClock.elapsedRealtimeNanos() }
-        val plan = checkNotNull(renderer)
+        val render = checkNotNull(renderer)
         val input = checkNotNull(inputPixels)
         val output = checkNotNull(outputPixels)
         GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, previousFramebuffer, 0)
@@ -405,26 +420,26 @@ internal class AndroidOnnxVideoProgram(
             GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, input)
             GlUtil.checkGlError()
         } finally {
-            GlUtil.focusFramebufferUsingCurrentContext(previousFramebuffer[0], plan.outWidth, plan.outHeight)
+            GlUtil.focusFramebufferUsingCurrentContext(previousFramebuffer[0], outputWidth, outputHeight)
         }
         val inputColors = input.asIntBuffer()
         output.rewind()
         val outputColors = output.asIntBuffer()
         // GL stores rows bottom-up; inference sees the same top-down orientation as a still image.
-        plan.render(checkActive, { left, top, regionWidth, regionHeight, pixels ->
+        render({ left, top, regionWidth, regionHeight, pixels ->
             for (y in 0 until regionHeight) {
                 val row = (height - 1 - top - y) * width + left
                 for (x in 0 until regionWidth) pixels[y * regionWidth + x] = swapRedBlue(inputColors.get(row + x)) or (255 shl 24)
             }
         }, { y, row ->
-            val offset = (plan.outHeight - 1 - y) * plan.outWidth
+            val offset = (outputHeight - 1 - y) * outputWidth
             row.forEachIndexed { x, pixel -> outputColors.put(offset + x, swapRedBlue(pixel)) }
         })
         output.rewind()
         capture?.invoke(presentationTimeUs, input.asReadOnlyBuffer().apply { rewind() },
             output.asReadOnlyBuffer().apply { rewind() })
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
-        GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, plan.outWidth, plan.outHeight, GLES20.GL_RGBA,
+        GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, outputWidth, outputHeight, GLES20.GL_RGBA,
             GLES20.GL_UNSIGNED_BYTE, output)
         val program = checkNotNull(copyProgram)
         program.use()

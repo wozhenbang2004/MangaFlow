@@ -71,6 +71,8 @@ data class AnimePlayerTrack(
     val selected: Boolean = false,
 )
 
+data class AnimeRealtimeFrameRequest(val model: EngineModel, val targetFps: Double?)
+
 /** Buffer times are targets, not a claim about memory use or startup latency. */
 data class AnimePlayerOptions(
     val backgroundAudio: Boolean = false,
@@ -83,12 +85,14 @@ data class AnimePlayerOptions(
     val enhancementScale: Int = 2,
     val enhancementModel: EngineModel? = null,
     val preparedVideoModel: EngineModel? = null,
+    val realtimeFrames: AnimeRealtimeFrameRequest? = null,
 ) {
     fun requireValid() {
         require(if (videoEnhancement == AnimeVideoEnhancementMode.MODEL)
             enhancementScale in setOf(1, 2, 4) && enhancementModel?.nativeScale == enhancementScale
         else enhancementScale in 1..2 && enhancementModel == null) { "实时模型与所选倍率不兼容" }
         require(preparedVideoModel == null || preparedVideoModel.nativeScale in setOf(1, 2, 4))
+        require(realtimeFrames?.targetFps?.let { it.isFinite() && it in 1.0..240.0 } != false)
         require(bufferStartMs >= 0 && bufferRebufferMs >= 0 && bufferMinMs >= 0 && bufferMaxMs > 0) {
             "缓冲时间不能为负，最大缓冲时间必须大于零"
         }

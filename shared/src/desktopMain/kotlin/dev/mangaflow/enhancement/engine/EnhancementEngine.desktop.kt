@@ -19,14 +19,17 @@ actual fun createEnhancementEngine(context: PlatformContext): EnhancementEngine 
 private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEngine {
     private val root = File(context.dataRoot, "enhancement/engines")
     private val runtime = DesktopEngineRuntime(root)
+    private val animeJaNai = DesktopAnimeJaNai(root)
     private val imports = ImportedEngineModels(File(context.dataRoot, "enhancement/models"), EnhancementEngineIds.MANGAJANAI)
     private val videoImports = ImportedEngineModels(File(context.dataRoot, "enhancement/models/video"), EnhancementEngineIds.VIDEOJANAI)
     private val windows = System.getProperty("os.name").contains("Windows", ignoreCase = true) &&
         System.getProperty("os.arch") in setOf("amd64", "x86_64")
 
     override suspend fun inspect(): EngineInventory = withContext(Dispatchers.IO) {
-        val models = installedModels() + DesktopArtCnn.models.takeIf { windows }.orEmpty()
-        val frameModels = installedFrameModels(runtime.folder(DesktopEnginePackages.video))
+        val models = installedModels() + DesktopArtCnn.models.takeIf { windows }.orEmpty() +
+            if (windows) animeJaNai.models() else emptyList()
+        val frameModels = installedFrameModels(runtime.folder(DesktopEnginePackages.video)) +
+            if (windows) animeJaNai.frames() else emptyList()
         fun descriptor(pack: DesktopEnginePackage, title: String, video: Boolean): EngineDescriptor {
             val executable = if (windows) runtime.executable(pack) else null
             val installed = models.any { it.engineId == pack.id } || video && frameModels.isNotEmpty()
@@ -60,15 +63,17 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
                 DesktopArtCnn.SOURCE, if (windows) EngineReadiness.BUILT_IN else EngineReadiness.UNSUPPORTED,
                 "真实 C4F16 / C4F32 GPU 模型，原生 2× 亮度超分。渲染器条件与实际执行在播放中显示。",
                 setOf(2), setOf(EngineContent.VIDEO), realtime = true),
-            EngineDescriptor(EnhancementEngineIds.DESKTOP_REALTIME, "AnimeJaNai / RIFE 实时", "待原生播放器适配", "上游组件各自许可",
-                "https://github.com/the-database/mpv-AnimeJaNai", EngineReadiness.UNSUPPORTED,
-                "当前内置 libmpv 不含 vf_animejanai；可使用离线增强，实时观看保留 Anime4K 或原画",
-                setOf(1, 2, 4), setOf(EngineContent.VIDEO), supportsInterpolation = true, realtime = true),
+            animeJaNai.runtimeDescriptor(windows),
+            animeJaNai.frameDescriptor(windows),
         ) + anime4kEngineDescriptors(), models, models.sumOf { it.bytes } + frameModels.sumOf { it.bytes }, directoryBytes(root), frameModels)
     }
 
     override suspend fun install(engineId: String, progress: (EngineProgress) -> Unit): EngineInventory {
         check(windows) { "当前组件支持 Windows x64" }
+        if (engineId == EnhancementEngineIds.DESKTOP_REALTIME || engineId == EnhancementEngineIds.DESKTOP_REALTIME_RIFE) {
+            withContext(Dispatchers.IO) { animeJaNai.install(engineId == EnhancementEngineIds.DESKTOP_REALTIME_RIFE, progress) }
+            return inspect()
+        }
         val pack = when (engineId) {
             EnhancementEngineIds.MANGAJANAI -> DesktopEnginePackages.manga
             EnhancementEngineIds.VIDEOJANAI -> DesktopEnginePackages.video

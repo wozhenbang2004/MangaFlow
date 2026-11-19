@@ -3101,6 +3101,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         enhancementScale = if (realtimeEnabled) selected.scale else 1,
         enhancementModel = selected.model.takeIf { realtimeEnabled },
         preparedVideoModel = prepared,
+        realtimeFrames = preferredRealtimeFrames(policy).takeIf { active?.localMedia?.enhancedVersion != true },
         )
     }
 
@@ -3108,17 +3109,41 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val inventory = enhancementCenter.inventory.value.models
         if (platformKind == PlatformKind.DESKTOP && policy.scale == 2) {
             val modelId = policy.modelId ?: when (policy.tier) {
-                QualityTier.FINE -> "artcnn:C4F16"
-                QualityTier.ULTRA -> "artcnn:C4F32"
+                QualityTier.FINE -> if (inventory.any { it.id == "animejanai-live:performance" })
+                    "animejanai-live:performance" else "artcnn:C4F16"
+                QualityTier.ULTRA -> if (inventory.any { it.id == "animejanai-live:balanced" })
+                    "animejanai-live:balanced" else "artcnn:C4F32"
                 else -> return null
             }
-            return inventory.firstOrNull { it.engineId == EnhancementEngineIds.DESKTOP_ARTCNN && it.id == modelId }
+            return inventory.firstOrNull {
+                it.engineId in setOf(EnhancementEngineIds.DESKTOP_ARTCNN, EnhancementEngineIds.DESKTOP_REALTIME) &&
+                    it.id == modelId
+            }
         }
         val capabilities = snapshot?.capabilities ?: playerInstance?.state?.value?.capabilities.orEmpty()
         if (dev.mangaflow.anime.player.AnimePlayerCapability.MODEL_ENHANCEMENT !in capabilities || platformKind != PlatformKind.ANDROID)
             return null
         return inventory.firstOrNull { it.engineId == EnhancementEngineIds.ANDROID_VIDEO_ONNX && it.id == policy.modelId &&
             it.nativeScale == policy.scale && EngineContent.VIDEO in it.contents }
+    }
+
+    private fun preferredRealtimeFrames(policy: EnhancementPolicy): dev.mangaflow.anime.player.AnimeRealtimeFrameRequest? {
+        if (platformKind != PlatformKind.DESKTOP || PreparationMode.IMMEDIATE !in policy.preparation ||
+            policy.frameMode == dev.mangaflow.enhancement.FrameMode.ORIGINAL ||
+            policy.frameQuality != dev.mangaflow.enhancement.FrameQuality.BALANCED) return null
+        val resources = enhancementCenter.resources.usage.value.resources
+        if (resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2) return null
+        val model = enhancementCenter.inventory.value.frameModels.firstOrNull {
+            it.engineId == EnhancementEngineIds.DESKTOP_REALTIME_RIFE
+        } ?: return null
+        val target = when (policy.frameMode) {
+            dev.mangaflow.enhancement.FrameMode.FPS60 -> 60.0
+            dev.mangaflow.enhancement.FrameMode.FPS120 -> 120.0
+            dev.mangaflow.enhancement.FrameMode.CUSTOM -> policy.customFps.toDouble().takeIf { it in 1.0..240.0 } ?: return null
+            dev.mangaflow.enhancement.FrameMode.DOUBLE -> null
+            else -> return null
+        }
+        return dev.mangaflow.anime.player.AnimeRealtimeFrameRequest(model, target)
     }
 
     private fun preferredOnlineModel(policy: EnhancementPolicy, mode: AnimeVideoEnhancementMode): EngineModel? {
@@ -3232,7 +3257,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val preparedWindow = snapshot.preparedVideoWindow
         val usingPrepared = snapshot.isPlaying && preparedWindow != null && preparedWindow.framesUsed > 0 &&
             monotonicTimeMillis() - preparedWindow.lastUsedAt in 0L..1_000L
-        val model = if (usingPrepared) preparedWindow?.modelName else if (snapshot.preEnhanced) "离线增强版本" else when (effect.mode) {
+        val model = if (usingPrepared) preparedWindow?.modelName else if (snapshot.preEnhanced) "离线增强版本"
+        else effect.modelName ?: when (effect.mode) {
             dev.mangaflow.anime.player.AnimeVideoEnhancementMode.OFF -> null
             dev.mangaflow.anime.player.AnimeVideoEnhancementMode.FAST -> "Anime4K S/S"
             dev.mangaflow.anime.player.AnimeVideoEnhancementMode.QUALITY -> "Anime4K M/M"

@@ -163,6 +163,7 @@ object EnhancementEngineIds {
     const val LOCAL_DETAIL_DIGEST = "a9241c52aac7eecfb6b4ced9fdd587004da45864954d528047406ce3aa09b620"
     const val ANDROID_ONNX = "android-onnx"
     const val ANDROID_CUGAN = "android-realcugan-vulkan"
+    const val ANDROID_CUGAN_VIDEO = "android-realcugan-video-vulkan"
     const val ANDROID_CUGAN_TILE_SIZE = 96
     const val ANDROID_CUGAN_PADDING = 18
     const val ANDROID_VIDEO_ONNX = "android-video-onnx"
@@ -171,6 +172,7 @@ object EnhancementEngineIds {
     const val VIDEOJANAI = "videojanai-cli"
     const val ANDROID_RIFE = "android-rife"
     const val DESKTOP_REALTIME = "animejanai-realtime"
+    const val DESKTOP_REALTIME_RIFE = "animejanai-realtime-rife"
     const val DESKTOP_ARTCNN = "artcnn-glsl"
 }
 

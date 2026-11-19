@@ -53,6 +53,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
         val installedVideo = videoModels.list()
         val frameModels = rifeModels.installed()
         val cuganModel = cugan.model()
+        val cuganVideoModel = cugan.videoModel(cuganModel)
         val runtime = runtimes.states.value[PanelRuntimeId.ONNX]
         fun modelReadiness(models: List<EngineModel>) = when {
             runtime?.installed != true -> EngineReadiness.NOT_INSTALLED
@@ -88,18 +89,19 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                     else -> "使用 Android 编解码器和 CPU ONNX，保留逐帧时间轴和 AAC 音轨；速度与设备兼容性待实际试用"
                 }, setOf(1, 2, 4), setOf(EngineContent.VIDEO), canInstall = canInstall, supportsInterpolation = true,
                 videoOutput = EngineVideoContainer.MP4),
+            cugan.descriptor(cuganVideoModel, video = true),
             EngineDescriptor(EnhancementEngineIds.ANDROID_VIDEO_REALTIME, "NNAPI 实时模型试用", ANDROID_VIDEO_ENGINE_VERSION,
                 "MIT；模型遵循各自许可", "https://onnxruntime.ai/docs/execution-providers/NNAPI-ExecutionProvider.html",
                 if (Build.VERSION.SDK_INT >= 29) videoReadiness else EngineReadiness.UNSUPPORTED,
                 "Android 10+ 可尝试仅硬件执行已导入的 RGB 模型。实际图与设备支持、处理耗时和回退状态在播放中显示。",
                 setOf(1, 2, 4), setOf(EngineContent.VIDEO), realtime = true),
-        ) + anime4kEngineDescriptors(), installed + installedVideo + listOfNotNull(cuganModel),
+        ) + anime4kEngineDescriptors(), installed + installedVideo + listOfNotNull(cuganModel, cuganVideoModel),
             (installed + installedVideo + frameModels + listOfNotNull(cuganModel)).sumOf { it.bytes },
             (runtime?.bytes ?: 0) + (runtimes.states.value[PanelRuntimeId.CUGAN]?.bytes ?: 0), frameModels)
     }
 
     override suspend fun install(engineId: String, progress: (EngineProgress) -> Unit): EngineInventory {
-        if (engineId == EnhancementEngineIds.ANDROID_CUGAN) {
+        if (engineId == EnhancementEngineIds.ANDROID_CUGAN || engineId == EnhancementEngineIds.ANDROID_CUGAN_VIDEO) {
             withContext(Dispatchers.IO) { cugan.install(progress) }
             return inspect()
         }
@@ -310,23 +312,31 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
         withContext(Dispatchers.IO) {
             nativeGate.withLock {
                 val model = request.model
+                val vulkan = model?.engineId == EnhancementEngineIds.ANDROID_CUGAN_VIDEO
                 val interpolation = request.targetFps != null || request.frameMultiplier != null
                 require(interpolation || model != null) { "请选择适用的番剧 ONNX 模型" }
                 require(model == null && request.scale == 1 || model != null &&
-                    model.engineId == EnhancementEngineIds.ANDROID_VIDEO_ONNX && EngineContent.VIDEO in model.contents &&
+                    model.engineId in setOf(EnhancementEngineIds.ANDROID_VIDEO_ONNX, EnhancementEngineIds.ANDROID_CUGAN_VIDEO) &&
+                    EngineContent.VIDEO in model.contents &&
                     model.nativeScale == request.scale) { "视频模型类型或倍率不匹配" }
                 require(request.segmentSeconds == 0 && (request.targetFps == null || request.frameMultiplier == null)) {
                     "当前 Android 离线引擎仅接收一个补帧目标，支持整集处理"
                 }
-                model?.let { check(engineSha256(File(it.path)) == it.sha256) { "模型已改变，请重新选择" } }
+                fun modelMatches() = model == null || if (vulkan) cugan.matches(model) else engineSha256(File(model.path)) == model.sha256
+                check(modelMatches()) { "模型已改变，请重新选择" }
                 val rife = if (interpolation) checkNotNull(rifeModels.find(request.rifeVersion, request.expectedRifeSha256)) {
                     "需导入 RIFE ${request.rifeVersion} 的官方 FP32 v2 模型"
                 } else null
                 try {
-                    runtimes.ensureLoaded(PanelRuntimeId.ONNX)
-                    progress(EngineProgress(EngineStage.MODEL_LOAD, detail = "准备真实 ONNX CPU 模型"))
-                    val image = model?.let(::modelSession)
-                    createSessionIfPresent(rife).use { frame -> prepareAndroidVideo(context, request, model, image, rife, frame, progress) }
+                    if (!vulkan || rife != null) runtimes.ensureLoaded(PanelRuntimeId.ONNX)
+                    progress(EngineProgress(EngineStage.MODEL_LOAD, detail = if (vulkan) "准备 Vulkan Real-CUGAN 模型" else "准备真实 ONNX CPU 模型"))
+                    val image = model?.takeUnless { vulkan }?.let(::modelSession)
+                    val gpu = if (vulkan) cugan.open(checkNotNull(model)) else null
+                    gpu.use { session ->
+                        createSessionIfPresent(rife).use { frame ->
+                            prepareAndroidVideo(context, request, model, image, rife, frame, session, ::modelMatches, progress)
+                        }
+                    }
                 } catch (memory: OutOfMemoryError) {
                     session?.close(); session = null; sessionIdentity = null
                     throw IllegalStateException("当前模型或输出尺寸超出手机内存预算，原视频保持可用", memory)

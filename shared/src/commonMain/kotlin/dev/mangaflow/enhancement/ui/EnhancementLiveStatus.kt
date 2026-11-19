@@ -208,7 +208,7 @@ private fun AnimeEnhancementStatus(
                     ?.let { EnhancementQuiet(it, error = true) }
             }
             1 -> {
-                val model = if (playback?.preEnhanced == true) "离线增强版本" else when (effect?.mode) {
+                val model = if (playback?.preEnhanced == true) "离线增强版本" else effect?.modelName ?: when (effect?.mode) {
                     AnimeVideoEnhancementMode.OFF -> "原画"
                     AnimeVideoEnhancementMode.FAST -> "Anime4K S/S"
                     AnimeVideoEnhancementMode.QUALITY -> "Anime4K M/M"
@@ -224,6 +224,7 @@ private fun AnimeEnhancementStatus(
                     "提交频率" to (submitFps?.let { formatDecimal(it, 1) + " 帧/s" } ?: "—"),
                     "前方增强" to animeSeconds(metrics?.preparedSeconds),
                 ))
+                effect?.filteredFps?.let { AnimeMetricRow("滤镜输出估计", formatDecimal(it, 1) + " FPS") }
                 if (prepared != null) {
                     AnimeMetricRow("预处理模型", prepared.modelName)
                     AnimeMetricRow("预处理耗时 / 缓存", animeMillis(prepared.processingMillis.toDouble()) +

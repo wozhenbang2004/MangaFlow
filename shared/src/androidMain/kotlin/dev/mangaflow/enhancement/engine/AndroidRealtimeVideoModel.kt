@@ -42,7 +42,7 @@ internal class AndroidRealtimeVideoModel private constructor(
             programs++
         }
         try {
-            AndroidOnnxVideoProgram(session, width, height, scale, REALTIME_WORKING_BYTES - bufferBytes,
+            AndroidRgbVideoProgram(session, width, height, scale, REALTIME_WORKING_BYTES - bufferBytes,
                 checkActive = {}, onProcessed = onProcessed, onReleased = ::releaseProgram, onFrame = {})
         } catch (failure: Throwable) {
             releaseProgram()

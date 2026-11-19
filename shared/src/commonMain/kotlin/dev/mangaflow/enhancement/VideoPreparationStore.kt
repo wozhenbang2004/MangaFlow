@@ -156,7 +156,19 @@ class VideoPreparationStore(
                 "尚未取得当前播放显示器的实际刷新率；请明确选择 2×、60 FPS、120 FPS 或自定义目标"
             }
             val inventory = center.engine.inspect()
-            val descriptor = inventory.engines.firstOrNull { it.videoOutput != null }
+            val engines = inventory.engines.filter { it.videoOutput != null }
+            val models = inventory.models.filter { model -> EngineContent.VIDEO in model.contents && engines.any { it.id == model.engineId } }
+            val model = when {
+                policy.tier == QualityTier.ORIGINAL -> null
+                policy.modelId != null -> models.firstOrNull { it.id == policy.modelId }
+                policy.tier in setOf(QualityTier.AUTO, QualityTier.BALANCED) -> models.firstOrNull { candidate ->
+                    candidate.nativeScale == policy.scale && engines.any { engine -> engine.id == candidate.engineId &&
+                        engine.readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.READY_FOR_TRIAL) }
+                }
+                else -> null
+            }
+            require(policy.tier == QualityTier.ORIGINAL || model != null) { "请在画质与性能中选择已安装的离线视频模型" }
+            val descriptor = if (model == null) engines.firstOrNull() else engines.firstOrNull { it.id == model.engineId }
             require(descriptor != null && descriptor.readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.READY_FOR_TRIAL)) {
                 descriptor?.detail ?: "当前平台尚无可执行的离线视频增强引擎"
             }
@@ -164,12 +176,6 @@ class VideoPreparationStore(
             require(policy.frameMode == FrameMode.ORIGINAL || descriptor.supportsInterpolation) {
                 "当前离线引擎仅支持画质增强，请选择原始帧率"
             }
-            val model = if (policy.tier == QualityTier.ORIGINAL) null else inventory.models.firstOrNull {
-                it.id == policy.modelId && it.engineId == descriptor.id && EngineContent.VIDEO in it.contents
-            } ?: if (policy.modelId == null && policy.tier in setOf(QualityTier.AUTO, QualityTier.BALANCED)) inventory.models.firstOrNull {
-                it.engineId == descriptor.id && EngineContent.VIDEO in it.contents && it.nativeScale == policy.scale
-            } else null
-            require(policy.tier == QualityTier.ORIGINAL || model != null) { "请在画质与性能中选择已安装的视频模型" }
             val scale = if (policy.tier == QualityTier.ORIGINAL) 1 else policy.scale
             require(scale in descriptor.supportedScales) { "该引擎不支持所选倍率" }
             require(model == null || model.nativeScale == scale) { "所选倍率与视频模型原生倍率不一致" }
@@ -191,12 +197,12 @@ class VideoPreparationStore(
             val ensemble = policy.frameQuality in setOf(FrameQuality.FINE, FrameQuality.ULTRA)
             val rifeName = "rife_v${rifeVersion.replace("-lite", "_lite")}${if (ensemble) "_ensemble" else ""}.onnx"
             val rife = if (policy.frameMode == FrameMode.ORIGINAL) null else inventory.frameModels.firstOrNull { model ->
-                if (descriptor.id == EnhancementEngineIds.ANDROID_VIDEO_ONNX)
+                if (container == EngineVideoContainer.MP4)
                     model.engineId == EnhancementEngineIds.ANDROID_RIFE && model.version == rifeVersion
-                else StorageFile(model.path).name == rifeName
+                else model.engineId == descriptor.id && StorageFile(model.path).name == rifeName
             }
             require(policy.frameMode == FrameMode.ORIGINAL || rife != null) {
-                if (descriptor.id == EnhancementEngineIds.ANDROID_VIDEO_ONNX) "请先导入 RIFE $rifeVersion 的官方 FP32 v2 模型"
+                if (container == EngineVideoContainer.MP4) "请先导入 RIFE $rifeVersion 的官方 FP32 v2 模型"
                 else "所选补帧档位需要 $rifeName，请先安装对应模型"
             }
             val modelDigest = EnhancedAssetIdentity.digest("${model?.sha256.orEmpty()}|${rife?.sha256.orEmpty()}")

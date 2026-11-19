@@ -16,6 +16,8 @@ data class AnimeVideoEnhancementState(
     val outputHeight: Int? = null,
     val observation: AnimeVideoEnhancementObservation? = null,
     val modelName: String? = null,
+    /** Estimated post-filter frame rate, independent of actual display presentation. */
+    val filteredFps: Double? = null,
 )
 
 /** Evidence from the current enhancement pass. A submission does not prove display presentation. */

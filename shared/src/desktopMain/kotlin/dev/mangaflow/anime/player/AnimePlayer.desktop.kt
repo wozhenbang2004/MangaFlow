@@ -2,7 +2,10 @@ package dev.mangaflow.anime.player
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import dev.mangaflow.enhancement.engine.DesktopAnimeJaNai
+import dev.mangaflow.enhancement.engine.EnhancementEngineIds
 import dev.mangaflow.platform.PlatformContext
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -25,13 +28,23 @@ private class DesktopAnimePlayer(
     private var warming = true
     private var videoBeforeBackground: String? = null
     private var enhancementMediaReady = false
+    private val animeJaNai = DesktopAnimeJaNai(File(context.dataRoot, "enhancement/engines"))
+    private val nativeEnhancement = DesktopAnimeJaNaiEnhancement(animeJaNai, playerScope) { generation, value ->
+        publish(generation) { it.copy(videoEnhancement = value) }
+    }
+    private val wantsNativeModel: Boolean
+        get() = options.enhancementModel?.engineId == EnhancementEngineIds.DESKTOP_REALTIME
     private val enhancement = DesktopAnimeVideoEnhancement(
         context = context,
         scope = playerScope,
         isCurrentSession = { handle, generation, mode ->
             isCurrent(generation) && engine.value?.impl === handle && options.videoEnhancement == mode
         },
-        update = { generation, value -> publish(generation) { it.copy(videoEnhancement = value) } },
+        update = { generation, value ->
+            if (!wantsNativeModel && (options.realtimeFrames == null || !animeJaNai.usesNativeRuntime())) {
+                publish(generation) { it.copy(videoEnhancement = value) }
+            }
+        },
     )
 
     override suspend fun createBackend(): MediampPlayer = createMpv()
@@ -45,7 +58,10 @@ private class DesktopAnimePlayer(
         return try {
             withContext(Dispatchers.IO) {
                 // The shipped platform runtime loads off the Swing UI thread.
+                animeJaNai.configureProcess(configuration.enhancementModel?.engineId == EnhancementEngineIds.DESKTOP_REALTIME ||
+                    configuration.realtimeFrames != null)
                 MpvMediampPlayerFactory().create(context, playerScope.coroutineContext) { handle ->
+                    if (animeJaNai.usesNativeRuntime()) handle.option("hwdec", "d3d11va")
                     handle.option("cache", "yes")
                     // Start with a short current-media window; expand only after actual
                     // native readiness and the initial buffering period have completed.
@@ -101,6 +117,9 @@ private class DesktopAnimePlayer(
     override fun onPlaybackStateNative() {
         val handle = engine.value?.impl as? MPVHandle
         if (handle != null) {
+            if (animeJaNai.usesNativeRuntime() && handle.getPropertyBooleanOrNull("video-frame-info/interlaced") != null) {
+                animeJaNai.confirmFirstFrame()
+            }
             val fps = handle.getPropertyString("container-fps")?.toDoubleOrNull()?.takeIf { it.isFinite() && it > 0 }
             val dropped = handle.getPropertyLongOrNull("frame-drop-count")?.takeIf { it >= 0 }
             mutableState.value = state.value.copy(sourceFps = fps, droppedFrames = dropped)
@@ -118,13 +137,18 @@ private class DesktopAnimePlayer(
     }
 
     private fun applyVideoEnhancement() {
+        val handle = engine.value?.impl as? MPVHandle
         enhancement.configure(
-            handle = engine.value?.impl as? MPVHandle,
+            handle = handle.takeUnless { wantsNativeModel },
             generation = nativeGeneration,
             mode = options.videoEnhancement,
             scale = options.enhancementScale,
-            model = options.enhancementModel,
+            model = options.enhancementModel.takeUnless { wantsNativeModel },
             mediaReady = enhancementMediaReady,
+        )
+        nativeEnhancement.configure(
+            handle, nativeGeneration, options.videoEnhancement, enhancementMediaReady,
+            options.enhancementModel.takeIf { wantsNativeModel }, options.realtimeFrames,
         )
     }
 
@@ -164,6 +188,7 @@ private class DesktopAnimePlayer(
     }
 
     override fun releaseNative() {
+        nativeEnhancement.release()
         enhancement.release()
         enhancementMediaReady = false
         mutableState.value = state.value.copy(videoEnhancement = AnimeVideoEnhancementState(

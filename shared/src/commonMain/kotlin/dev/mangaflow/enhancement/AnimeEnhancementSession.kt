@@ -16,8 +16,7 @@ fun selectRealtimeEnhancement(policy: EnhancementPolicy, resources: ExperienceRe
     sourceFps: Double?, measuredGpuP95Millis: Double?, realtimeModel: EngineModel? = null): RealtimeEnhancementSelection {
     val scale = policy.scale.takeIf { it in 1..2 } ?: 1
     fun original(reason: String? = null) = RealtimeEnhancementSelection(AnimeVideoEnhancementMode.OFF, scale, reason)
-    if (policy.tier == QualityTier.ORIGINAL) return original(if (policy.frameMode != FrameMode.ORIGINAL)
-        "当前实时内核尚未适配 RIFE；可对已下载剧集进行离线补帧" else null)
+    if (policy.tier == QualityTier.ORIGINAL) return original()
     if (PreparationMode.IMMEDIATE !in policy.preparation) return original(when {
         PreparationMode.SMART in policy.preparation -> "优先使用已完成的增强结果；当前在线片段尚未准备，继续播放原画"
         PreparationMode.COMPLETE in policy.preparation -> "仅使用完整预处理结果；未准备的内容保持原画"
@@ -25,7 +24,7 @@ fun selectRealtimeEnhancement(policy: EnhancementPolicy, resources: ExperienceRe
     })
     if (resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2)
         return original("设备保护已暂缓增强，目标档位保留；当前显示原画")
-    if (policy.tier in setOf(QualityTier.FINE, QualityTier.ULTRA)) {
+    if (policy.tier in setOf(QualityTier.FINE, QualityTier.ULTRA) || realtimeModel != null && policy.modelId != null) {
         if (realtimeModel != null) return RealtimeEnhancementSelection(AnimeVideoEnhancementMode.MODEL, realtimeModel.nativeScale,
             model = realtimeModel)
         return original("所选高质量模型用于离线预处理；当前实时内核尚未适配，原画继续播放")
