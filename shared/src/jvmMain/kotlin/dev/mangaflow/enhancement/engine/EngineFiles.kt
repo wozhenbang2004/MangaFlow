@@ -161,6 +161,7 @@ internal fun verifyEnginePng(file: File): Pair<Int, Int> {
                 }
             }
         }
+        error("PNG 数据缺少完整的 IEND 结束标记")
     } finally { inflater.end() }
 }
 

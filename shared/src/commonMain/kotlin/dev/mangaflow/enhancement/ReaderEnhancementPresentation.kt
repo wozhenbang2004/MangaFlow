@@ -36,6 +36,8 @@ import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import me.saket.telephoto.zoomable.ZoomableState
+import me.saket.telephoto.zoomable.Viewport
+import me.saket.telephoto.zoomable.ZoomableContent
 import me.saket.telephoto.zoomable.spatial.CoordinateSpace
 import me.saket.telephoto.zoomable.spatial.SpatialOffset
 import kotlin.math.floor

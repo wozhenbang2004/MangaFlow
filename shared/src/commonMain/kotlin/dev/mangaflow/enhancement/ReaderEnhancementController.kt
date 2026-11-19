@@ -115,8 +115,7 @@ internal class ReaderEnhancementController(
     /** Changing direction or jumping retires work; it never deletes a completed derivative. */
     fun updateWindow(page: Int, readDirection: Int, totalPages: Int, active: Boolean,
         selected: EnhancementPolicy, budget: ExperienceBudget) {
-        val restart: List<Int>
-        synchronized(lock) {
+        val restart = synchronized(lock) {
             if (closed) return
             val now = monotonicTimeMillis()
             if (page != current && currentPageAt > 0L) {
@@ -156,8 +155,9 @@ internal class ReaderEnhancementController(
             held.keys.filter { it !in wanted }.forEach { index -> held.remove(index)?.close(); assets.remove(index) }
             // Keep only nearby identity observations. The original prefetcher remains responsible for fetching.
             originals.keys.filter { abs(it - page) > 16 }.forEach(originals::remove)
-            restart = wanted.sortedBy { if (it == page) -1 else abs(it - page) }
+            val relevant = wanted.sortedBy { if (it == page) -1 else abs(it - page) }
             publishLocked()
+            relevant
         }
         restart.forEach(::queueIfUseful)
     }
@@ -192,17 +192,17 @@ internal class ReaderEnhancementController(
     }
 
     private fun queueIfUseful(index: Int) {
-        val job: Job
-        synchronized(lock) {
+        val job = synchronized(lock) {
             if (closed || index !in wanted || index in pending || index in assets) return
             val original = originals[index] ?: return
             if (failed[index] == original.identity || cacheMisses[index] == original.identity) return
             val selected = policy
             val epoch = generation
             val id = "$sessionKey:$index:$epoch:${original.identity}"
-            job = scope.launch(start = CoroutineStart.LAZY) { prepare(index, id, epoch, selected, original) }
-            pending[index] = Pending(id, original, epoch, selected, job)
+            val scheduledJob = scope.launch(start = CoroutineStart.LAZY) { prepare(index, id, epoch, selected, original) }
+            pending[index] = Pending(id, original, epoch, selected, scheduledJob)
             publishLocked()
+            scheduledJob
         }
         job.start()
     }
