@@ -30,6 +30,7 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material.icons.outlined.AutoMode
 import androidx.compose.material.icons.outlined.Schedule
@@ -72,6 +73,7 @@ import dev.mangaflow.net.DownloadProxyProvider
 import dev.mangaflow.net.DownloadProxyType
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.net.DownloadRoutingSettings
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.SourceNetworkSettings
 import dev.mangaflow.net.RelayLinkController
@@ -263,10 +265,10 @@ private fun DownloadConnectionSettings(
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
             }
-            SettingsDisclosure("未单独设置的项目", downloadRouteLabel(settings.defaultMode), Icons.Outlined.Language,
+            SettingsDisclosure("全局默认线路", downloadRouteLabel(settings.defaultMode), Icons.Outlined.Language,
                 expanded = expandedConnection == "fallback", compact = true,
                 onToggle = { if (interactive) expandedConnection = if (expandedConnection == "fallback") null else "fallback" }) {
-            Text("仅供未单独设置线路的项目使用，不覆盖来源选择。", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            Text("未单独设置的项目使用此线路；分类和来源的单独设置优先。", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             DownloadModeChoices(settings.defaultMode, enabled = interactive,
                 onSelect = { chosen ->
                     if (interactive) {
@@ -281,7 +283,7 @@ private fun DownloadConnectionSettings(
                     }
                 })
             if (settings.defaultMode == DownloadRouteMode.SYSTEM)
-                Text("沿用旧线路 · 点选后切换", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                Text("当前使用系统线路；点选后切换为所选模式。", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             if (settings.defaultMode == DownloadRouteMode.DIRECT && !relayDirect && environment?.defaultNetworkUsesVpn == true)
                 Text(if (settings.proxyProvider == DownloadProxyProvider.RELAY) "直连仍可能受系统 VPN 影响；联动未就绪会明确报错"
                     else "直连仍可能受系统 VPN 影响", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
@@ -624,8 +626,13 @@ private fun DownloadRouteSelector(
 ) {
     val effective = selected ?: inherited
     val followsSource = taskOnly && category == DownloadCategory.CHAPTERS && selected == null
-    val inheritLabel = if (taskOnly && category == DownloadCategory.CHAPTERS) "跟随漫画源"
-        else if (taskOnly) "跟随类型设置" else "跟随默认"
+    val inheritLabel = if (taskOnly && category == DownloadCategory.CHAPTERS) "使用漫画源设置"
+        else if (taskOnly) "使用${downloadCategoryLabel(category)}设置" else "使用全局设置"
+    val scopeLabel = when {
+        selected != null -> if (taskOnly) "本次" else "单独"
+        taskOnly -> "分类"
+        else -> "全局"
+    }
     var expanded by remember(category, taskOnly) { mutableStateOf(false) }
     var notice by remember(category, taskOnly) { mutableStateOf<String?>(null) }
     var showHelp by remember(category, taskOnly) { mutableStateOf(false) }
@@ -639,13 +646,17 @@ private fun DownloadRouteSelector(
             showHelp = true
         }
     }
-    val heading = if (taskOnly) "本次下载线路" else "下载线路"
-    val scopeHelp = if (taskOnly && category == DownloadCategory.CHAPTERS) "默认按所选漫画源确定；显式选择只用于本次下载。"
-        else if (taskOnly) "只用于本次下载，不更改默认线路。"
-        else "新任务使用此线路；已有任务需选择“使用当前设置重试”。"
-    val currentHelp = if (followsSource) "当前沿用所选漫画源的线路；选定后只用于本次下载。"
-        else (if (selected == null) "$inheritLabel：" else "单独设置：") + downloadRouteLabel(effective) +
-            if (effective == DownloadRouteMode.SYSTEM) "（旧配置，点选后切换）" else ""
+    val heading = if (taskOnly) "本次下载线路" else "此项线路"
+    val scopeHelp = if (taskOnly && category == DownloadCategory.CHAPTERS) "按所选漫画源确定，单独选择只用于本次下载；创建任务时保存线路。"
+        else if (taskOnly) "只用于本次下载；创建任务时保存线路，不更改分类或全局设置。"
+        else "用于后续请求与新任务；来源或本次任务的单独设置优先。已有下载保留原线路，可选择“使用当前设置重试”。"
+    val currentHelp = when {
+        followsSource -> "当前使用所选漫画源的线路；来源未单独设置时，使用章节下载或全局设置。"
+        selected == null -> "$inheritLabel：${downloadRouteLabel(inherited)}。" +
+            if (taskOnly) "创建任务时确定本次线路。" else "修改全局线路时，此项会随之变化。"
+        taskOnly -> "本次下载使用${downloadRouteLabel(effective)}。"
+        else -> "此项单独使用${downloadRouteLabel(effective)}，不随全局线路变化。"
+    }
     val directHelp = if (relayManaged) "直连与未指定地址的代理交给 Relay；联动中断时明确失败，不会自动换线。"
         else "直连只跳过 HTTP / SOCKS，系统 VPN 仍可能接管。"
     val panel: @Composable () -> Unit = {
@@ -665,9 +676,9 @@ private fun DownloadRouteSelector(
                 }
             }
             RouteChoiceRow(
-                mode = inherited, label = inheritLabel, selected = selected == null, enabled = enabled,
+                mode = inherited, label = inheritLabel, selected = selected == null, enabled = enabled, inherits = true,
                 detail = if (taskOnly && category == DownloadCategory.CHAPTERS) "按所选漫画源确定"
-                    else downloadRouteLabel(inherited),
+                    else "当前${downloadRouteLabel(inherited)} · " + if (taskOnly) "创建任务时确定" else "随全局变化",
                 onClick = {
                     notice = null
                     try { onSelect(null); expanded = false }
@@ -678,7 +689,7 @@ private fun DownloadRouteSelector(
             selectableDownloadRoutes.forEach { choice ->
                 val needsProxy = choice == DownloadRouteMode.PROXY
                 RouteChoiceRow(
-                    mode = choice, label = downloadRouteLabel(choice),
+                    mode = choice, label = (if (taskOnly) "本次" else "单独") + downloadRouteLabel(choice),
                     selected = selected == choice, enabled = enabled && (!needsProxy || hasProxy),
                     detail = if (needsProxy && !hasProxy) "尚未配置" else null,
                     onClick = {
@@ -711,8 +722,8 @@ private fun DownloadRouteSelector(
             }) {
             Icon(Icons.Outlined.SwapVert, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
             Spacer(Modifier.width(5.dp))
-            Text(if (followsSource) "跟随漫画源" else if (selected == null) "默认 · ${downloadRouteSummary(effective)}"
-                else downloadRouteSummary(effective), style = MaterialTheme.typography.labelMedium,
+            Text(if (followsSource) "漫画源设置" else "$scopeLabel · ${downloadRouteSummary(effective)}",
+                style = MaterialTheme.typography.labelMedium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         if (backdrop != null) {
@@ -777,6 +788,7 @@ private fun RouteChoiceRow(
     detail: String?,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    inherits: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
@@ -787,7 +799,11 @@ private fun RouteChoiceRow(
             role = Role.RadioButton, onClick = onClick).motionPress(interaction, enabled)
         .heightIn(min = 44.dp).padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        Icon(if (mode == DownloadRouteMode.DIRECT) Icons.Outlined.Language else Icons.Outlined.SwapVert,
+        Icon(when {
+            inherits -> Icons.Outlined.Link
+            mode == DownloadRouteMode.DIRECT -> Icons.Outlined.Language
+            else -> Icons.Outlined.SwapVert
+        },
             null, Modifier.size(16.dp), tint = colors.onSurfaceVariant.copy(alpha = if (enabled) 1f else .5f))
         Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -854,9 +870,14 @@ internal fun downloadRouteLabel(mode: DownloadRouteMode): String = when (mode) {
     DownloadRouteMode.PROXY -> "代理"
 }
 
-/** A legacy/late-bound route is not falsely presented as an explicit direct selection. */
-internal fun downloadRouteSummary(mode: DownloadRouteMode): String =
-    if (mode == DownloadRouteMode.SYSTEM) "线路" else downloadRouteLabel(mode)
+internal fun networkRouteOverview(settings: DownloadRoutingSettings): String {
+    val overrides = settings.categoryOverrides.size + settings.sourceOverrides.size
+    return "默认${downloadRouteLabel(settings.defaultMode)}" +
+        if (overrides > 0) "\n$overrides 项单独设置" else ""
+}
+
+/** Keep retained system routes explicit even in compact controls. */
+internal fun downloadRouteSummary(mode: DownloadRouteMode): String = downloadRouteLabel(mode)
 
 internal fun downloadCategoryLabel(category: DownloadCategory): String = when (category) {
     DownloadCategory.CHAPTERS -> "漫画章节下载"

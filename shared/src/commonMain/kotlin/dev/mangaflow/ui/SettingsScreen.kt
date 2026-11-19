@@ -503,7 +503,7 @@ fun SettingsScreen(
                             inlineDetail = true) { showEnhancement = true }
                         SettingsLinkRow("体验策略", experienceModeLabel(experienceBudget.mode), Icons.Outlined.Tune,
                             inlineDetail = true) { showExperience = true }
-                        SettingsLinkRow("网络与下载", downloadRouteLabel(routes.defaultMode), Icons.Outlined.SwapVert,
+                        SettingsLinkRow("网络与下载", networkRouteOverview(routes), Icons.Outlined.SwapVert,
                             inlineDetail = true) { showNetworkDownloads = true }
                         Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)
                             .animateContentSize(if (LocalMotionEnabled.current) tween(MangaMotion.Content) else snap()),
