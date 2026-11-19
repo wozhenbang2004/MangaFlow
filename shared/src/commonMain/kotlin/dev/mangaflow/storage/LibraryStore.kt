@@ -62,6 +62,7 @@ data class ChapterProgress(
     val updatedAt: Long = 0L,
     val panelIndex: Int = -1,
     val panelLayout: String = "",
+    val legacyLongImageFraction: Float? = null,
 )
 
 enum class ShelfState { NORMAL, FOLLOWING, HOARDING, PAUSED }
@@ -611,6 +612,109 @@ class LibraryStore(context: Context) {
 
     fun progressFor(mangaId: String): ReadingProgress? = _history.value.firstOrNull { it.manga.id == mangaId }
 
+    internal suspend fun captureAdultProgress(sourceIds: Set<String>): AdultProgressSnapshot = withContext(Dispatchers.IO) {
+        awaitReady()
+        synchronized(lock) { collectAdultProgress(sourceIds) }
+    }
+
+    /** Copies the exact reviewed coordinates into the same queued writer used by live reading. */
+    internal suspend fun applyAdultProgress(
+        expected: AdultProgressSnapshot, selected: Map<String, AdultProgressWork>, sourceIds: Set<String>,
+        scopeIsCurrent: () -> Boolean,
+    ): Int = withContext(Dispatchers.IO) {
+        backupLock.withLock {
+            awaitReady()
+            val changed = synchronized(lock) {
+                check(scopeIsCurrent() && _backupRestored.value == expected.backupRevision) {
+                    "本机来源或阅读数据已变更，请重新比较。"
+                }
+                val live = collectAdultProgress(sourceIds).works
+                require(selected.keys.all { id -> live[id]?.sameLocations(expected.works[id]) ?: (id !in expected.works) }) {
+                    "本机阅读位置已更新，请重新比较。"
+                }
+                check(selected.all { (id, work) -> id == work.manga.id && work.chapters.keys.all {
+                    adultProgressChapterMatches(id, it, sourceIds)
+                } }) { "所选记录已不属于成人阅读范围，请重新比较。" }
+                val changes = selected.filter { (id, work) -> !work.sameLocations(live[id]) }
+                if (changes.isEmpty()) return@synchronized 0
+                val write = pendingWrite()
+                val recent = _history.value.associateBy { it.manga.id }.toMutableMap()
+                changes.forEach { (id, work) ->
+                    val manga = live[id]?.manga ?: work.manga
+                    work.chapters.forEach { (chapterId, position) ->
+                        if (live[id]?.chapters?.get(chapterId) != position) {
+                            val key = chapterProgressKey(id, chapterId)
+                            pendingChapterPositions[key] = position
+                            write.chapters[key] = position
+                            if (position.legacyLongImageFraction == null &&
+                                readLegacyLongImageFraction(id, chapterId, position.pageIndex) != null) {
+                                val imageKey = longImagePositionKey(id, chapterId, position.pageIndex)
+                                pendingLongImagePositions[imageKey] = 0f
+                                write.longImages[imageKey] = 0f
+                            }
+                        }
+                    }
+                    work.recentChapterId?.let { chapterId ->
+                        val position = work.chapters.getValue(chapterId)
+                        recent[id] = ReadingProgress(manga, chapterId, position.chapterTitle,
+                            position.pageIndex, position.pageCount, position.scrollOffset, position.updatedAt,
+                            position.panelIndex, position.panelLayout)
+                    }
+                }
+                val next = recent.values.sortedByDescending { it.updatedAt }
+                if (next != _history.value) {
+                    _history.value = next
+                    write.history = next
+                }
+                _chapterHistoryRevision.value++
+                startProgressWriter()
+                changes.size
+            }
+            if (changed > 0) check(flushPendingWrites()) { "本机阅读位置尚未写入磁盘；请检查存储空间后重新比较。" }
+            changed
+        }
+    }
+
+    /** Captures live pending saves and durable records under their existing library owner. */
+    private fun collectAdultProgress(sourceIds: Set<String>): AdultProgressSnapshot {
+        val recent = _history.value.associateBy { it.manga.id }
+        val known = (_favorites.value + _history.value.map { it.manga }).associateBy(Manga::id)
+        val collected = linkedMapOf<String, MutableMap<String, ChapterProgress>>()
+        fun add(key: String, ifAbsent: Boolean = false, read: () -> ChapterProgress?) {
+            if (!key.startsWith(CHAPTER_PROGRESS_PREFIX)) return
+            val encoded = key.removePrefix(CHAPTER_PROGRESS_PREFIX)
+            val separator = encoded.indexOf(':')
+            if (separator <= 0) return
+            val length = encoded.substring(0, separator).toIntOrNull() ?: return
+            val value = encoded.substring(separator + 1)
+            if (length <= 0 || length >= value.length) return
+            val workId = value.substring(0, length)
+            val chapterId = value.substring(length)
+            if (!adultProgressChapterMatches(workId, chapterId, sourceIds)) return
+            val chapters = collected.getOrPut(workId) { linkedMapOf() }
+            if (ifAbsent && chapterId in chapters) return
+            val position = read()?.takeIf { it.pageCount > 0 } ?: return
+            val page = position.pageIndex.coerceIn(0, position.pageCount - 1)
+            val fraction = if (position.scrollOffset == 0) position.legacyLongImageFraction
+                ?: readLegacyLongImageFraction(workId, chapterId, page) else null
+            chapters[chapterId] = position.copy(pageIndex = page, legacyLongImageFraction = fraction)
+        }
+        if (!ignoreStoredProgress) disk.all.forEach { (key, value) ->
+            if (key.startsWith(CHAPTER_PROGRESS_PREFIX) && value is String &&
+                pendingProgressRemovals.keys.none { isProgressKeyFor(key, it) })
+                add(key) { readChapterPosition(value) }
+        }
+        pendingChapterPositions.forEach { (key, position) -> add(key) { position } }
+        recent.values.forEach { add(chapterProgressKey(it.manga.id, it.chapterId), ifAbsent = true) { it.chapterProgress() } }
+        return AdultProgressSnapshot(collected.filterValues { it.isNotEmpty() }.mapValues { (id, positions) ->
+            val manga = known[id] ?: SourceKeys.decodeManga(id).let {
+                Manga(id, "${dev.mangaflow.data.sourceDisplayName(it.sourceId)} · ${it.mangaId}", "",
+                    sourceId = it.sourceId, sourceMangaId = it.mangaId)
+            }
+            AdultProgressWork(manga, positions, recent[id]?.chapterId?.takeIf { it in positions })
+        }, _backupRestored.value)
+    }
+
     /** Exact encoded values make the bounded parse cache valid across pending writes and backup restores. */
     private fun readChapterPosition(encoded: String): ChapterProgress? {
         synchronized(lock) {
@@ -626,6 +730,8 @@ class LibraryStore(context: Context) {
                 updatedAt = json.optLong("updatedAt").coerceAtLeast(0L),
                 panelIndex = json.optInt("panelIndex", -1).coerceIn(-1, 127),
                 panelLayout = json.optString("panelLayout").take(160),
+                legacyLongImageFraction = json.optDouble("legacyLongImageFraction").toFloat()
+                    .takeIf { it > 0f && it <= 1f },
             )
         }.getOrNull() ?: return null
         synchronized(lock) {
@@ -681,12 +787,18 @@ class LibraryStore(context: Context) {
 
     fun longImagePositionFor(mangaId: String, chapterId: String, pageIndex: Int): Float? = synchronized(lock) {
         if (!stateRestored) return@synchronized null
-        if (!restoreLegacyLongImages) return@synchronized null
+        if (SourceKeys.isEncoded(mangaId)) progressFor(mangaId, chapterId)?.takeIf {
+            it.pageIndex == pageIndex && it.scrollOffset == 0
+        }?.legacyLongImageFraction?.let { return@synchronized it }
+        readLegacyLongImageFraction(mangaId, chapterId, pageIndex)
+    }
+
+    private fun readLegacyLongImageFraction(mangaId: String, chapterId: String, pageIndex: Int): Float? {
+        if (!restoreLegacyLongImages) return null
         val key = longImagePositionKey(mangaId, chapterId, pageIndex)
-        pendingLongImagePositions[key]?.let { return@synchronized it }
-        if (ignoreStoredProgress || mangaId in pendingProgressRemovals) return@synchronized null
-        if (!disk.contains(key)) return@synchronized null
-        runCatching { disk.getFloat(key, 0f) }.getOrNull()?.takeIf(Float::isFinite)?.coerceIn(0f, 1f)
+        pendingLongImagePositions[key]?.let { return it.takeIf { fraction -> fraction > 0f } }
+        if (ignoreStoredProgress || mangaId in pendingProgressRemovals || !disk.contains(key)) return null
+        return runCatching { disk.getFloat(key, 0f) }.getOrNull()?.takeIf { it.isFinite() && it > 0f }?.coerceAtMost(1f)
     }
 
     fun saveProgress(
@@ -710,6 +822,8 @@ class LibraryStore(context: Context) {
                 panelIndex = panelIndex.coerceIn(-1, 127),
                 panelLayout = panelLayout.take(160),
             )
+            val consumeLegacy = clearLegacyLongImagePosition &&
+                (longImagePositionFor(manga.id, chapter.id, progress.pageIndex) ?: 0f) > 0f
             val recent = progressFor(manga.id)
             val replaceRecent = updateRecent || recent == null || recent.chapterId == chapter.id
             val write = pendingWrite()
@@ -729,7 +843,7 @@ class LibraryStore(context: Context) {
             val position = progress.chapterProgress()
             pendingChapterPositions[key] = position
             write.chapters[key] = position
-            if (clearLegacyLongImagePosition && (longImagePositionFor(manga.id, chapter.id, progress.pageIndex) ?: 0f) > 0f) {
+            if (consumeLegacy) {
                 // Persist the converted outer offset and consume the old inner pan in one batch.
                 val legacyKey = longImagePositionKey(manga.id, chapter.id, progress.pageIndex)
                 pendingLongImagePositions[legacyKey] = 0f
@@ -1183,6 +1297,7 @@ private fun ChapterProgress.toJson(): JSONObject = JSONObject().apply {
     if (chapterTitle.isNotBlank()) put("chapterTitle", chapterTitle.take(160))
     if (updatedAt > 0L) put("updatedAt", updatedAt)
     if (panelIndex >= 0) { put("panelIndex", panelIndex); put("panelLayout", panelLayout) }
+    legacyLongImageFraction?.let { put("legacyLongImageFraction", it.toDouble()) }
 }
 
 internal fun Manga.toJson(): JSONObject = JSONObject().apply {

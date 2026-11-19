@@ -25,7 +25,7 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
         System.getProperty("os.arch") in setOf("amd64", "x86_64")
 
     override suspend fun inspect(): EngineInventory = withContext(Dispatchers.IO) {
-        val models = installedModels()
+        val models = installedModels() + DesktopArtCnn.models.takeIf { windows }.orEmpty()
         val frameModels = installedFrameModels(runtime.folder(DesktopEnginePackages.video))
         fun descriptor(pack: DesktopEnginePackage, title: String, video: Boolean): EngineDescriptor {
             val executable = if (windows) runtime.executable(pack) else null
@@ -56,6 +56,10 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
                 setOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON)),
             descriptor(DesktopEnginePackages.manga, "MangaJaNai / IllustrationJaNai", false),
             descriptor(DesktopEnginePackages.video, "AnimeJaNai / RIFE 离线处理", true),
+            EngineDescriptor(EnhancementEngineIds.DESKTOP_ARTCNN, "ArtCNN 实时亮度超分", DesktopArtCnn.VERSION, "MIT",
+                DesktopArtCnn.SOURCE, if (windows) EngineReadiness.BUILT_IN else EngineReadiness.UNSUPPORTED,
+                "真实 C4F16 / C4F32 GPU 模型，原生 2× 亮度超分。渲染器条件与实际执行在播放中显示。",
+                setOf(2), setOf(EngineContent.VIDEO), realtime = true),
             EngineDescriptor(EnhancementEngineIds.DESKTOP_REALTIME, "AnimeJaNai / RIFE 实时", "待原生播放器适配", "上游组件各自许可",
                 "https://github.com/the-database/mpv-AnimeJaNai", EngineReadiness.UNSUPPORTED,
                 "当前内置 libmpv 不含 vf_animejanai；可使用离线增强，实时观看保留 Anime4K 或原画",

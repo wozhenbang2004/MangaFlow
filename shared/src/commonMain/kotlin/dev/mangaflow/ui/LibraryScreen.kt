@@ -169,6 +169,7 @@ fun LibraryScreen(
     onCopySync: (() -> Unit)? = null,
     siteSyncStates: Map<String, AdultShelfSyncState> = emptyMap(),
     onSiteSync: ((String) -> Unit)? = null,
+    onAdultProgressSync: (() -> Unit)? = null,
     onImportCopy: (() -> Unit)? = null,
     preferredResumeTargets: Map<String, SavedResumeTarget> = emptyMap(),
     cloudFavorites: List<Manga> = emptyList(),
@@ -798,6 +799,10 @@ fun LibraryScreen(
                     modifier = Modifier.size(36.dp), tooltip = "查看拷贝差异") {
                     Icon(Icons.Outlined.Sync, "查看拷贝差异", Modifier.size(19.dp))
                 }
+                if (showHistory && onAdultProgressSync != null) MotionIconButton(onClick = onAdultProgressSync,
+                    enabled = active, modifier = Modifier.size(44.dp), tooltip = "同步成人阅读进度") {
+                    Icon(Icons.Outlined.Sync, "同步成人阅读进度", Modifier.size(19.dp))
+                }
                 MotionIconButton(onClick = { showCollections = true }, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Outlined.Collections, "画面收藏", Modifier.size(19.dp))
                 }
@@ -829,6 +834,10 @@ fun LibraryScreen(
                 }),
                 actions = {
                     toolbar {
+                        if (showHistory && onAdultProgressSync != null) MotionIconButton(onClick = onAdultProgressSync,
+                            enabled = active, modifier = Modifier.size(44.dp), tooltip = "同步成人阅读进度") {
+                            Icon(Icons.Outlined.Sync, "同步成人阅读进度", Modifier.size(19.dp))
+                        }
                         Box {
                             MotionIconButton(onClick = {
                                 pendingLibraryTool = null

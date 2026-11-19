@@ -595,6 +595,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
 }
 
 internal fun animePreparationLabel(preparation: AnimeNextEpisodePreparation): String = when {
+    preparation.startupFramePrepared -> "起播帧已解码"
     preparation.cachedBytes > 0L -> {
         val size = if (preparation.cachedBytes >= 1024L) "${preparation.cachedBytes / 1024L} KiB"
             else "${preparation.cachedBytes} B"

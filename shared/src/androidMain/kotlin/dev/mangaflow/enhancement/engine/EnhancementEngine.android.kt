@@ -11,6 +11,7 @@ import android.graphics.BitmapRegionDecoder
 import android.graphics.ColorSpace
 import android.graphics.Rect
 import android.net.Uri
+import android.os.Build
 import android.provider.OpenableColumns
 import androidx.exifinterface.media.ExifInterface
 import dev.mangaflow.platform.PlatformContext
@@ -40,6 +41,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
     private val root = File(this.context.noBackupFilesDir, "enhancement")
     private val models = ImportedEngineModels(File(root, "models"), EnhancementEngineIds.ANDROID_ONNX)
     private val videoModels = ImportedEngineModels(File(root, "video-models"), EnhancementEngineIds.ANDROID_VIDEO_ONNX)
+    private val rifeModels = AndroidRifeModels(File(root, "rife-models"))
     private val runtimes = PanelRuntimeStore.get(context)
     private val nativeGate = Mutex()
     private var session: OrtSession? = null
@@ -48,6 +50,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
     override suspend fun inspect(): EngineInventory = withContext(Dispatchers.IO) {
         val installed = models.list()
         val installedVideo = videoModels.list()
+        val frameModels = rifeModels.installed()
         val runtime = runtimes.states.value[PanelRuntimeId.ONNX]
         fun modelReadiness(models: List<EngineModel>) = when {
             runtime?.installed != true -> EngineReadiness.NOT_INSTALLED
@@ -70,23 +73,30 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                     else -> "CPU 原生推理与重叠分块；未声明 Vulkan 或手机性能验证"
                 }, setOf(1, 2, 4), setOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON),
                 canInstall = canInstall),
-            EngineDescriptor(EnhancementEngineIds.ANDROID_RIFE, "RIFE 运动补帧", "待 Media3 原生适配", "MIT · rife-ncnn-vulkan",
-                "https://github.com/nihui/rife-ncnn-vulkan", EngineReadiness.UNSUPPORTED,
-                "当前没有经过此设备验证的 Media3/Vulkan 补帧链路；保持原始帧率", emptySet(),
-                setOf(EngineContent.VIDEO), supportsInterpolation = true, realtime = true),
+            EngineDescriptor(EnhancementEngineIds.ANDROID_RIFE, "RIFE 运动补帧", ANDROID_VIDEO_ENGINE_VERSION, "上游 RIFE 与导出模型各自许可",
+                "https://github.com/AmusementClub/vs-mlrt/releases/tag/external-models", modelReadiness(frameModels),
+                "离线 CPU 推理。导入官方包内 rife_v2 的 4.25 Lite、4.22 或 4.26 FP32。精细、极致各对对应基座做双向两次推理。",
+                setOf(1), setOf(EngineContent.VIDEO), canInstall = canInstall, supportsInterpolation = true),
             EngineDescriptor(EnhancementEngineIds.ANDROID_VIDEO_ONNX, "番剧 ONNX 离线增强", ANDROID_VIDEO_ENGINE_VERSION,
                 "Apache-2.0 / MIT；模型遵循各自许可", "https://github.com/androidx/media/tree/1.11.1/libraries/transformer",
-                videoReadiness, when (videoReadiness) {
+                if (frameModels.isNotEmpty()) modelReadiness(installedVideo + frameModels) else videoReadiness, when (videoReadiness) {
                     EngineReadiness.NOT_INSTALLED -> "先准备签名 ONNX 运行库，再导入适用的 FP32 NCHW RGB 视频模型"
                     EngineReadiness.NEEDS_MODELS -> "导入 1×/2×/4× FP32 NCHW RGB 模型后，可增强已下载的 SDR MP4"
                     else -> "使用 Android 编解码器和 CPU ONNX，保留逐帧时间轴和 AAC 音轨；速度与设备兼容性待实际试用"
-                }, setOf(1, 2, 4), setOf(EngineContent.VIDEO), canInstall = canInstall,
+                }, setOf(1, 2, 4), setOf(EngineContent.VIDEO), canInstall = canInstall, supportsInterpolation = true,
                 videoOutput = EngineVideoContainer.MP4),
-        ) + anime4kEngineDescriptors(), installed + installedVideo, (installed + installedVideo).sumOf { it.bytes }, runtime?.bytes ?: 0)
+            EngineDescriptor(EnhancementEngineIds.ANDROID_VIDEO_REALTIME, "NNAPI 实时模型试用", ANDROID_VIDEO_ENGINE_VERSION,
+                "MIT；模型遵循各自许可", "https://onnxruntime.ai/docs/execution-providers/NNAPI-ExecutionProvider.html",
+                if (Build.VERSION.SDK_INT >= 29) videoReadiness else EngineReadiness.UNSUPPORTED,
+                "Android 10+ 可尝试仅硬件执行已导入的 RGB 模型。实际图与设备支持、处理耗时和回退状态在播放中显示。",
+                setOf(1, 2, 4), setOf(EngineContent.VIDEO), realtime = true),
+        ) + anime4kEngineDescriptors(), installed + installedVideo, (installed + installedVideo + frameModels).sumOf { it.bytes },
+            runtime?.bytes ?: 0, frameModels)
     }
 
     override suspend fun install(engineId: String, progress: (EngineProgress) -> Unit): EngineInventory {
-        require(engineId in setOf(EnhancementEngineIds.ANDROID_ONNX, EnhancementEngineIds.ANDROID_VIDEO_ONNX)) {
+        require(engineId in setOf(EnhancementEngineIds.ANDROID_ONNX, EnhancementEngineIds.ANDROID_VIDEO_ONNX,
+            EnhancementEngineIds.ANDROID_RIFE)) {
             "当前设备没有这一引擎的可安装组件"
         }
         progress(EngineProgress(EngineStage.DOWNLOAD, detail = "已交给现有组件下载队列，遵守系统后台执行限制"))
@@ -96,6 +106,10 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
 
     override suspend fun importModel(sourcePath: String, nativeScale: Int, content: EngineContent): EngineModel = withContext(Dispatchers.IO) {
         val destination = if (content == EngineContent.VIDEO) videoModels else models
+        suspend fun importFile(file: File, name: String): EngineModel {
+            if (content == EngineContent.VIDEO) rifeModels.tryImport(file, name)?.let { return it }
+            return destination.import(file, nativeScale, content, name.substringBeforeLast('.'))
+        }
         val uri = Uri.parse(sourcePath)
         if (uri.scheme == "content") {
             val name = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
@@ -118,11 +132,12 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                         }
                     }
                 } ?: error("无法读取所选模型文件")
-                destination.import(temporary, nativeScale, content, name.substringBeforeLast('.'))
+                importFile(temporary, name)
             } finally { temporary.delete() }
         } else {
             require(uri.scheme == null || uri.scheme == "file") { "只接受用户选择的本机模型文件" }
-            destination.import(File(if (uri.scheme == "file") checkNotNull(uri.path) else sourcePath), nativeScale, content)
+            val file = File(if (uri.scheme == "file") checkNotNull(uri.path) else sourcePath)
+            importFile(file, file.name)
         }
     }
 
@@ -278,17 +293,24 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
     override suspend fun processVideo(request: EngineVideoRequest, progress: (EngineProgress) -> Unit): EngineOutput =
         withContext(Dispatchers.IO) {
             nativeGate.withLock {
-                val model = requireNotNull(request.model) { "请选择适用的番剧 ONNX 模型" }
-                require(model.engineId == EnhancementEngineIds.ANDROID_VIDEO_ONNX && EngineContent.VIDEO in model.contents &&
+                val model = request.model
+                val interpolation = request.targetFps != null || request.frameMultiplier != null
+                require(interpolation || model != null) { "请选择适用的番剧 ONNX 模型" }
+                require(model == null && request.scale == 1 || model != null &&
+                    model.engineId == EnhancementEngineIds.ANDROID_VIDEO_ONNX && EngineContent.VIDEO in model.contents &&
                     model.nativeScale == request.scale) { "视频模型类型或倍率不匹配" }
-                require(request.targetFps == null && request.frameMultiplier == null && request.segmentSeconds == 0) {
-                    "当前 Android 离线引擎支持整集画质处理，使用原始帧率"
+                require(request.segmentSeconds == 0 && (request.targetFps == null || request.frameMultiplier == null)) {
+                    "当前 Android 离线引擎仅接收一个补帧目标，支持整集处理"
                 }
-                check(engineSha256(File(model.path)) == model.sha256) { "模型已改变，请重新选择" }
+                model?.let { check(engineSha256(File(it.path)) == it.sha256) { "模型已改变，请重新选择" } }
+                val rife = if (interpolation) checkNotNull(rifeModels.find(request.rifeVersion, request.expectedRifeSha256)) {
+                    "需导入 RIFE ${request.rifeVersion} 的官方 FP32 v2 模型"
+                } else null
                 try {
                     runtimes.ensureLoaded(PanelRuntimeId.ONNX)
                     progress(EngineProgress(EngineStage.MODEL_LOAD, detail = "准备真实 ONNX CPU 模型"))
-                    prepareAndroidVideo(context, request, model, modelSession(model), progress)
+                    val image = model?.let(::modelSession)
+                    createSessionIfPresent(rife).use { frame -> prepareAndroidVideo(context, request, model, image, rife, frame, progress) }
                 } catch (memory: OutOfMemoryError) {
                     session?.close(); session = null; sessionIdentity = null
                     throw IllegalStateException("当前模型或输出尺寸超出手机内存预算，原视频保持可用", memory)
@@ -305,13 +327,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
     private fun modelSession(model: EngineModel): OrtSession {
         if (sessionIdentity == model.sha256) session?.let { return it }
         session?.close(); session = null; sessionIdentity = null
-        val created = OrtSession.SessionOptions().use { options ->
-            options.setIntraOpNumThreads(2); options.setInterOpNumThreads(1)
-            options.setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
-            options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
-            options.setMemoryPatternOptimization(false)
-            OrtEnvironment.getEnvironment().createSession(model.path, options)
-        }
+        val created = checkNotNull(createSessionIfPresent(model))
         try {
             require(created.inputNames.size == 1 && created.outputNames.size == 1) { "当前支持单输入、单输出的图像模型" }
             val input = created.inputInfo.values.single().info as? TensorInfo ?: error("模型输入不是图像张量")
@@ -321,6 +337,16 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
             session = created; sessionIdentity = model.sha256
             return created
         } catch (failure: Throwable) { created.close(); throw failure }
+    }
+
+    private fun createSessionIfPresent(model: EngineModel?): OrtSession? = model?.let {
+        OrtSession.SessionOptions().use { options ->
+            options.setIntraOpNumThreads(2); options.setInterOpNumThreads(1)
+            options.setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
+            options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
+            options.setMemoryPatternOptimization(false)
+            OrtEnvironment.getEnvironment().createSession(it.path, options)
+        }
     }
 
     private suspend fun renderLocal(decoder: BitmapRegionDecoder, output: File, budget: Long, progress: (EngineProgress) -> Unit) {

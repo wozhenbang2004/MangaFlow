@@ -39,6 +39,10 @@ internal class WebDavTransferSnapshot internal constructor(
     val config: WebDavBackupConfig, internal val password: String, val route: DownloadRouteSnapshot,
 )
 
+internal data class WebDavCompanionDocument(val payload: String?, val etag: String?) {
+    val writable: Boolean get() = payload == null || etag != null
+}
+
 /** The same bounded HTTPS WebDAV protocol on every platform, with an OS-protected secret. */
 class WebDavBackupStore(private val context: PlatformContext) {
     private val disk = preferences(context, "mangaflow_webdav_backup")
@@ -151,6 +155,75 @@ class WebDavBackupStore(private val context: PlatformContext) {
             rememberTransfer(upload = false, expected = snapshot.config)
             payload
         } finally { transfer?.close() }
+    }
+
+    internal fun checkCompanionConnection(snapshot: WebDavTransferSnapshot) {
+        val (current, secret) = readCredentials()
+        check(current.endpoint == snapshot.config.endpoint && current.username == snapshot.config.username &&
+            current.remotePath == snapshot.config.remotePath && secret == snapshot.password) {
+            "WebDAV 连接已更改，请重新读取。"
+        }
+    }
+
+    /** A separately named document under the saved WebDAV directory, bounded by the backup transport. */
+    internal suspend fun readCompanion(name: String, snapshot: WebDavTransferSnapshot,
+        sharedDirectory: Boolean = false): WebDavCompanionDocument = withContext(Dispatchers.IO) {
+        checkCompanionConnection(snapshot)
+        val credentials = snapshot.config to snapshot.password
+        val base = normalizeEndpoint(snapshot.config.endpoint)
+        val client = transferClient(snapshot.route)
+        try {
+            val url = buildUrl(base, companionPath(snapshot, name, sharedDirectory))
+            val response = execute(client, requestBuilder(url, credentials).get()
+                .header("Accept", "application/json").build(), "读取 WebDAV 记录")
+            checkCompanionConnection(snapshot)
+            if (response.code == 404) return@withContext WebDavCompanionDocument(null, null)
+            ensureSuccessful(response, "读取 WebDAV 记录")
+            check(response.bytes.isNotEmpty()) { "远端记录为空，请检查服务器文件。" }
+            val etag = response.header("ETag")?.trim()?.takeIf { value ->
+                value.length in 2..512 && value.first() == '"' && value.last() == '"' &&
+                    value.drop(1).dropLast(1).all { it.code >= 33 && it.code != 127 && it != '"' }
+            }
+            WebDavCompanionDocument(response.text(), etag)
+        } finally { client.close() }
+    }
+
+    /** Require the exact reviewed strong ETag, or reserve a previously missing filename. */
+    internal suspend fun writeCompanion(name: String, payload: String, expected: WebDavCompanionDocument,
+        snapshot: WebDavTransferSnapshot, sharedDirectory: Boolean = false): Unit = withContext(Dispatchers.IO) {
+        check(expected.writable) { "WebDAV 服务器未提供可安全核对的记录版本，请检查服务器设置。" }
+        val bytes = payload.encodeToByteArray()
+        require(bytes.isNotEmpty() && bytes.size <= MAX_BACKUP_BYTES) { "记录为空或超过 8 MiB，已停止上传。" }
+        checkCompanionConnection(snapshot)
+        val credentials = snapshot.config to snapshot.password
+        val path = companionPath(snapshot, name, sharedDirectory)
+        val base = normalizeEndpoint(snapshot.config.endpoint)
+        val client = transferClient(snapshot.route)
+        try {
+            if (expected.payload == null && !sharedDirectory) path.dropLast(1).indices.forEach { index ->
+                checkCompanionConnection(snapshot)
+                val url = buildUrl(base, path.take(index + 1), collection = true)
+                val response = execute(client, requestBuilder(url, credentials)
+                    .method("MKCOL", RequestBody(ByteArray(0), null)).build(), "准备 WebDAV 目录")
+                if (response.code != 405) ensureSuccessful(response, "准备 WebDAV 目录")
+            }
+            checkCompanionConnection(snapshot)
+            val request = requestBuilder(buildUrl(base, path), credentials)
+                .method("PUT", RequestBody(bytes, "application/json; charset=utf-8"))
+            if (expected.payload == null) request.header("If-None-Match", "*")
+            else request.header("If-Match", requireNotNull(expected.etag))
+            val response = execute(client, request.build(), "写入 WebDAV 记录")
+            check(response.code != 412) { "另一设备已更新远端记录，请重新比较。" }
+            ensureSuccessful(response, "写入 WebDAV 记录")
+        } finally { client.close() }
+    }
+
+    private fun companionPath(snapshot: WebDavTransferSnapshot, name: String, sharedDirectory: Boolean): List<String> {
+        require(name.matches(Regex("[a-z0-9.-]{1,120}")) && name !in setOf(".", "..")) { "WebDAV 记录名称无效。" }
+        val backing = normalizeRemotePath(snapshot.config.remotePath)
+        val filename = if (sharedDirectory) name else backing.last() + "." + name
+        require(filename != backing.last()) { "WebDAV 记录与备份重名。" }
+        return backing.dropLast(1) + filename
     }
 
     private fun transferClient(route: DownloadRouteSnapshot) = NetworkClient(

@@ -2880,10 +2880,24 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 val cached = snapshot?.detail
                 if (requestId != libraryOpenRequestId) return@launch
                 val offline = if (local) downloadedChapters(manga.id) else knownDownloadChapters(manga.id)
+                fun savedFallback(): Chapter {
+                    val title = chapterTitle.ifBlank { "继续阅读" }
+                    if (!isAdultSource(manga.sourceId) || !SourceKeys.isEncoded(chapterId))
+                        return Chapter(chapterId, title, 0)
+                    val ref = SourceKeys.decodeChapter(manga.id, chapterId)
+                    require(repository.sharesSourceProfile(manga.sourceId, ref.sourceId)) {
+                        "继续阅读所用版本的来源已变化，请进入作品详情重新选择。"
+                    }
+                    val info = repository.sources.firstOrNull { it.id == ref.sourceId }
+                    val version = ChapterVariant(ref.sourceId, info?.name ?: ref.sourceId, ref.mangaId, ref.chapterId,
+                        title, language = info?.language.orEmpty(), edition = "")
+                    return Chapter(chapterId, title, 0, variants = listOf(version),
+                        sourceId = ref.sourceId, sourceMangaId = ref.mangaId, sourceChapterId = ref.chapterId)
+                }
                 val chapter = cached?.chapters?.let { findSourceChapter(it, chapterId) }
                     ?: offline.firstOrNull { it.id == chapterId }
                     ?: fallback
-                    ?: Chapter(chapterId, chapterTitle.ifBlank { "继续阅读" }, 0)
+                    ?: savedFallback()
                 val chapters = selectedChapters(retainedChapters(cached?.chapters.orEmpty(), offline), chapter)
                 val hasCurrentCatalog = cached?.chapters?.let { findSourceChapter(it, chapterId) != null } == true &&
                     snapshot?.fresh == true

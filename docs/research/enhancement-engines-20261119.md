@@ -164,6 +164,35 @@ cache namespaces.
 
 ## Android implementation and native research boundary
 
+The RIFE follow-up inspected the official vs-mlrt `external-models` archives
+`rife_v4.25_lite.7z`, `rife_v4.22.7z`, and `rife_v4.26.7z`. Each selected
+`rife_v2` ONNX file has FP32 `[N,7,H,W]` input and opset 16 with normalized RGB
+frame pairs and a timestep plane. Input/output channels, source PTS, codec
+output and actual imported bytes are checked in the adapter. The older v1
+exports use 11 channels. The upstream ensemble archive only has 4.0–4.6 variants,
+and the upstream RIFEMerge API explicitly disallows fused ensemble variants
+for 4.22 and 4.25 onward. Android's higher motion tiers therefore use the
+separately disclosed bidirectional two-evaluation averaging with the exact
+4.22 or 4.26 base model. Runtime compatibility and timing await actual devices.
+
+For immediate Android processing, ONNX Runtime 1.31.1's NNAPI flags and session
+configuration are checked against the actual AAR. The adapter disables both
+the NNAPI CPU device and ORT CPU fallback. The original video continues while
+the model opens. Graph coverage, geometry, latency, and admitted memory must
+fit before or during the first real frames. NNAPI accelerator type is device
+dependent.
+
+Windows adopts [ArtCNN v1.6.2](https://github.com/Artoriuz/ArtCNN/releases/tag/v1.6.2)
+unaltered MIT GLSL C4F16/C4F32 for 2× luma scaling. These are labelled separately
+from AnimeJaNai. The pinned shader inputs and their `WHEN` conditions are
+retained. The mpv 0.40 source documents `vo-passes/fresh` scalar fields and the
+libmpv render control forwarding them. Timing only uses observed matching
+ArtCNN pass names including Depth-To-Space. Pass timing is distinct from
+display presentation, and there is no device evidence yet. The official
+AnimeJaNai 3.12.3 Windows manifest uses a different patched mpv runtime. The
+MediaMP 0.5.1 loader validates its pinned native manifest and its Windows render
+wrapper depends on the corresponding renderer ABI.
+
 The subsequent experience-parity batch adds Android offline video restoration via
 [Media3 Transformer 1.11.1](https://github.com/androidx/media/tree/1.11.1/libraries/transformer)
 and the existing signed ONNX Runtime 1.31.1 CPU backend. The adapter uses the

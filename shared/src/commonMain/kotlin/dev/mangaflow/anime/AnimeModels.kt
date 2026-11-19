@@ -284,6 +284,7 @@ data class AnimeNextEpisodePreparation(
     val episodeId: String,
     val addressResolved: Boolean = false,
     val cachedBytes: Long = 0L,
+    val startupFramePrepared: Boolean = false,
 )
 
 data class AnimeScreenState(

@@ -4,13 +4,19 @@ package dev.mangaflow.anime.player
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import dev.mangaflow.anime.AnimePlaybackAsset
 import dev.mangaflow.platform.monotonicTimeMillis
+import dev.mangaflow.platform.wallTimeMillis
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -20,6 +26,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,6 +52,7 @@ import org.openani.mediamp.source.UriMediaData
 
 internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : SessionAnimePlayer(scope) {
     val engine = MutableStateFlow<MediampPlayer?>(null)
+    val startupSurface = MutableStateFlow<MediampPlayer?>(null)
     private var bridge: AnimeStreamBridge? = null
     private var cachedStartup: Pair<AnimePlaybackAsset, AnimeBufferedStartup>? = null
     private var localBridge: AnimeLocalStreamBridge? = null
@@ -58,9 +66,31 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
     protected open val externalSubtitles: Boolean = true
     protected open val supportsBufferControl: Boolean = false
     protected open val supportsVideoEnhancement: Boolean = false
+    protected open val supportsModelEnhancement: Boolean = false
+    protected open val supportsDecoderStartup: Boolean = false
     protected abstract suspend fun createBackend(): MediampPlayer
+    protected open suspend fun createDecoderStartup(byteLimit: Long): MediampPlayer? = null
+    protected open fun hasDecodedStartupFrame(backend: MediampPlayer, positionMs: Long): Boolean = false
+    protected open fun activateDecoderStartup(backend: MediampPlayer): Boolean = false
     protected open fun validateAsset(asset: AnimePlaybackAsset) {}
     protected open fun validateLocalMedia(lease: AnimeLocalMediaLease) {}
+
+    private class DecoderStartup(
+        val asset: AnimePlaybackAsset,
+        val positionMs: Long,
+        val options: AnimePlayerOptions,
+        val session: Long,
+        val timeline: Long,
+        val validUntil: Long,
+    ) {
+        var backend: MediampPlayer? = null
+        var transport: AnimeStreamBridge? = null
+        var ready = false
+        var expiry: Job? = null
+    }
+
+    private var startup: DecoderStartup? = null
+    private var handoff: DecoderStartup? = null
 
     override suspend fun cacheStartup(asset: AnimePlaybackAsset, byteLimit: Long, validUntil: Long): Long {
         val media = AnimeStreamBridge.warmStartup(asset, playerScope, byteLimit, validUntil) ?: return 0L
@@ -75,14 +105,110 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
         return media.bytes.size.toLong()
     }
 
+    override suspend fun prepareStartup(asset: AnimePlaybackAsset, positionMs: Long, byteLimit: Long,
+        validUntil: Long): Boolean = withContext(Dispatchers.Main.immediate) {
+        val current = state.value
+        if (!supportsDecoderStartup || !foreground || !current.isPlaying || byteLimit <= 0L || positionMs < 0L ||
+            monotonicTimeMillis() >= validUntil) return@withContext false
+        startup?.let(::retireDecoderStartup)
+        val pending = DecoderStartup(asset, positionMs, options, current.sessionGeneration, current.timelineGeneration, validUntil)
+        startup = pending
+        fun preparing() = startup === pending && foreground && state.value.isPlaying && startupCurrent(pending)
+        try {
+            validateAsset(asset)
+            val buffered = cachedStartup?.takeIf { (cachedAsset, media) ->
+                cachedAsset.sameStartupMedia(asset) && monotonicTimeMillis() < media.validUntil
+            }?.second
+            val transport = AnimeStreamBridge.create(asset, playerScope, buffered, startupByteLimit = byteLimit)
+            pending.transport = transport
+            if (!preparing()) return@withContext false
+            val backend = createDecoderStartup(byteLimit) ?: return@withContext false
+            pending.backend = backend
+            if (!preparing()) return@withContext false
+            startupSurface.value = backend
+            backend.setMediaData(UriMediaData(transport.mediaUrl, extraFiles = MediaExtraFiles(subtitleFiles(asset, transport))),
+                playWhenReady = false, startPositionMillis = positionMs)
+            while (preparing()) {
+                val snapshot = backend.state.value
+                if (snapshot.mediaStatus is MediaStatus.Error || snapshot.mediaStatus == MediaStatus.Ended ||
+                    snapshot.mediaStatus == MediaStatus.Released || transport.lastFailure != null) return@withContext false
+                if (snapshot.mediaStatus == MediaStatus.Ready && !snapshot.playWhenReady &&
+                    hasDecodedStartupFrame(backend, positionMs)) {
+                    transport.parkStartupReads()
+                    pending.ready = true
+                    pending.expiry = playerScope.launch {
+                        delay((validUntil - monotonicTimeMillis()).coerceAtLeast(0L))
+                        if (startup === pending || handoff === pending) retireDecoderStartup(pending)
+                    }
+                    return@withContext true
+                }
+                delay(80L)
+            }
+            false
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { false }
+        finally { if (!pending.ready || !currentCoroutineContext().isActive) retireDecoderStartup(pending) }
+    }
+
+    override fun discardStartup(asset: AnimePlaybackAsset?) = command(fatal = false) {
+        startup?.takeIf { asset == null || it.asset.sameStartupMedia(asset) }?.let(::retireDecoderStartup)
+        handoff?.takeIf { asset == null || it.asset.sameStartupMedia(asset) }?.let(::retireDecoderStartup)
+        if (asset == null || cachedStartup?.first?.sameStartupMedia(asset) == true) cachedStartup = null
+    }
+
+    override fun onPlaybackEnding(next: AnimePlayerRequest?) {
+        handoff?.let(::retireDecoderStartup)
+        val pending = startup
+        if (pending != null && next != null && startupCurrent(pending) && admits(pending, next)) {
+            startup = null
+            handoff = pending
+        } else pending?.let(::retireDecoderStartup)
+        if (next == null) cachedStartup = null
+    }
+
+    private fun startupCurrent(pending: DecoderStartup) = state.value.sessionGeneration == pending.session &&
+        state.value.timelineGeneration == pending.timeline && options == pending.options &&
+        monotonicTimeMillis() < pending.validUntil && pending.asset.expiresAt?.let { it > wallTimeMillis() } != false
+
+    private fun admits(pending: DecoderStartup, next: AnimePlayerRequest) = pending.ready && foreground &&
+        next.localMedia == null && !next.bypassMediaCache && next.positionMs == pending.positionMs &&
+        pending.asset.sameStartupMedia(next.asset) && pending.transport?.lastFailure == null &&
+        pending.backend?.state?.value?.let { it.mediaStatus == MediaStatus.Ready && !it.playWhenReady } == true
+
+    private fun retireDecoderStartup(pending: DecoderStartup) {
+        if (startup === pending) startup = null
+        if (handoff === pending) handoff = null
+        pending.expiry?.cancel()
+        pending.expiry = null
+        if (startupSurface.value === pending.backend) startupSurface.value = null
+        runCatching { pending.transport?.close() }
+        pending.transport = null
+        runCatching { pending.backend?.close() }
+        pending.backend = null
+    }
+
+    private fun AnimePlaybackAsset.sameStartupMedia(other: AnimePlaybackAsset) = playbackIdentity() == other.playbackIdentity() &&
+        episodeId == other.episodeId && sourceEpisodeId == other.sourceEpisodeId && mimeType == other.mimeType &&
+        url == other.url && headers == other.headers && subtitles == other.subtitles && expiresAt == other.expiresAt
+
     override suspend fun openNative(request: AnimePlayerRequest, generation: Long) {
+        val warm = handoff?.let { pending ->
+            val usable = admits(pending, request) && monotonicTimeMillis() < pending.validUntil &&
+                pending.asset.expiresAt?.let { it > wallTimeMillis() } != false &&
+                runCatching { activateDecoderStartup(checkNotNull(pending.backend)) }.getOrDefault(false)
+            if (!usable) { retireDecoderStartup(pending); null }
+            else pending.also { handoff = null; it.expiry?.cancel() }
+        }
+        val promotePlaying = state.value.playWhenReady
         val prepared = cachedStartup?.takeIf { (asset, media) ->
             !request.bypassMediaCache && request.localMedia == null && monotonicTimeMillis() < media.validUntil &&
                 asset.playbackIdentity() == request.asset.playbackIdentity() &&
                 asset.url == request.asset.url && asset.headers == request.asset.headers
         }?.second
         cachedStartup = null
-        val transport = if (request.localMedia == null) {
+        val transport = if (warm != null) {
+            checkNotNull(warm.transport).also { bridge = it }
+        } else if (request.localMedia == null) {
             validateAsset(request.asset)
             AnimeStreamBridge.create(request.asset, playerScope, prepared).also {
                 if (!isCurrent(generation)) { it.close(); return }
@@ -103,15 +229,21 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
             } finally { pending?.close() }
             null
         }
-        val native = createBackend()
+        val native = warm?.backend ?: createBackend()
         try {
             currentCoroutineContext().ensureActive()
         } catch (failure: Throwable) {
+            if (startupSurface.value === native) startupSurface.value = null
             native.close()
             throw failure
         }
-        if (!isCurrent(generation)) { native.close(); return }
+        if (!isCurrent(generation)) {
+            if (startupSurface.value === native) startupSurface.value = null
+            native.close()
+            return
+        }
         engine.value = native
+        if (warm != null) startupSurface.value = null
         val child = CoroutineScope(playerScope.coroutineContext + SupervisorJob(playerScope.coroutineContext[Job]))
         observers = child
         val metadata = native.features[MediaMetadata]
@@ -119,6 +251,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
             add(AnimePlayerCapability.BACKGROUND_AUDIO)
             if (supportsBufferControl) add(AnimePlayerCapability.BUFFER_CONTROL)
             if (supportsVideoEnhancement) add(AnimePlayerCapability.VIDEO_ENHANCEMENT)
+            if (supportsModelEnhancement) add(AnimePlayerCapability.MODEL_ENHANCEMENT)
             if (native.features[VideoAspectRatio] != null) add(AnimePlayerCapability.VIDEO_SCALE)
             if (native.features[AudioLevelController] != null) add(AnimePlayerCapability.VOLUME)
             if (metadata?.audioTracks != null) add(AnimePlayerCapability.AUDIO_TRACKS)
@@ -130,6 +263,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
                 if (fact.mediaStatus == MediaStatus.Idle || fact.mediaStatus == MediaStatus.Released) return@collect
                 val nativeError = fact.mediaStatus as? MediaStatus.Error
                 if (nativeError != null) {
+                    startup?.let(::retireDecoderStartup)
                     if (loadingNative == null && recovery?.isActive != true && isCurrent(generation)) {
                         recovery = child.launch(Dispatchers.Main.immediate) {
                             try { loadMedia(native, transport, request, generation, nativeError.error) }
@@ -162,6 +296,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
                 }
                 if (isCurrent(generation) && engine.value === native) {
                     if (fact.mediaStatus == MediaStatus.Ready && !fact.isBuffering) recoveryNotice = null
+                    if (!state.value.isPlaying && !state.value.ended) startup?.let(::retireDecoderStartup)
                     onPlaybackStateNative()
                 }
             }
@@ -245,16 +380,25 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
         if (!externalSubtitles && request.asset.subtitles.isNotEmpty()) publish(generation) {
             it.copy(notice = "iOS 使用系统播放器；当前支持 HLS 内嵌字幕，外挂 ASS / SRT 需要切换为内嵌字幕线路")
         }
-        loadMedia(native, transport, request, generation)
+        if (warm == null) loadMedia(native, transport, request, generation)
+        else {
+            onMediaOpeningNative()
+            onMediaReadyNative()
+            transport?.promoteStartupReads()
+            if (promotePlaying) native.play()
+        }
     }
+
+    private fun subtitleFiles(asset: AnimePlaybackAsset, transport: AnimeStreamBridge?): List<Subtitle> =
+        if (externalSubtitles && transport != null) asset.subtitles.map {
+            Subtitle(transport.subtitleUrl(it), it.mimeType, it.language, it.label)
+        } else emptyList()
 
     private suspend fun loadMedia(
         native: MediampPlayer, transport: AnimeStreamBridge?, request: AnimePlayerRequest,
         generation: Long, initialFailure: PlaybackException? = null,
     ) {
-        val extras = if (externalSubtitles && transport != null) request.asset.subtitles.map {
-            Subtitle(transport.subtitleUrl(it), it.mimeType, it.language, it.label)
-        } else emptyList()
+        val extras = subtitleFiles(request.asset, transport)
         var failure = initialFailure
         val operation = Any()
         loadingNative = operation
@@ -370,7 +514,15 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
 internal fun NativeAnimeSurface(player: AnimePlayer, modifier: Modifier) {
     val native = player as? RoutedNativeAnimePlayer ?: return
     val engine by native.engine.collectAsState()
+    val preparing by native.startupSurface.collectAsState()
     val current = engine
-    if (current == null) Box(modifier.background(Color.Black))
-    else MediampPlayerSurface(current, modifier.background(Color.Black))
+    val standby = preparing
+    Box(modifier.background(Color.Black)) {
+        listOfNotNull(standby, current).distinct().forEach { backend ->
+            key(backend) {
+                MediampPlayerSurface(backend, if (backend === current) Modifier.matchParentSize().zIndex(1f)
+                    else Modifier.size(2.dp).alpha(0f))
+            }
+        }
+    }
 }

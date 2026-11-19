@@ -33,6 +33,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Effect
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -55,6 +56,7 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.LoadControl
 import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.dash.DefaultDashChunkSource
 import androidx.media3.exoplayer.hls.HlsDataSourceFactory
@@ -62,6 +64,7 @@ import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.effect.GlEffect
 import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.extractor.text.DefaultSubtitleParserFactory
 import androidx.media3.extractor.text.SubtitleExtractor
@@ -70,13 +73,16 @@ import androidx.media3.ui.SubtitleView
 import androidx.media3.ui.compose.ContentFrame
 import dev.mangaflow.anime.AnimePlaybackAsset
 import dev.mangaflow.anime.sources.animePublicUrl
+import dev.mangaflow.enhancement.engine.AndroidRealtimeVideoModel
 import dev.mangaflow.net.applyDownloadRoute
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
+import dev.mangaflow.platform.wallTimeMillis
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -84,9 +90,11 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -113,10 +121,59 @@ internal class AndroidAnimePlayer(
     private data class RemoteMediaPlan(
         val type: Int, val cacheWasEnabled: Boolean, val createSource: (Int, Boolean) -> MediaSource,
     )
+    private class RemoteMediaResources(
+        val plan: RemoteMediaPlan,
+        val client: OkHttpClient,
+        val bytes: AtomicLong,
+        val releaseCache: () -> Unit,
+        val unsupportedSubtitle: Boolean,
+    ) {
+        fun close() {
+            client.dispatcher.cancelAll()
+            client.connectionPool.evictAll()
+            releaseCache()
+        }
+    }
+
+    private class Startup(
+        val asset: AnimePlaybackAsset,
+        val positionMs: Long,
+        val options: AnimePlayerOptions,
+        val validUntil: Long,
+        val gate: AndroidAnimeStartupGate,
+        val resources: RemoteMediaResources,
+        val player: ExoPlayer,
+        val surface: AndroidAnimeStartupSurface,
+        val media: MediaSource,
+        val listener: Player.Listener,
+        val result: CompletableDeferred<Boolean>,
+    ) {
+        var firstFrame = false
+
+        fun close() {
+            gate.retire()
+            result.complete(false)
+            player.removeListener(listener)
+            resources.client.dispatcher.cancelAll()
+            try { player.release() }
+            finally {
+                surface.close()
+                resources.close()
+            }
+        }
+    }
+
+    private var startupRequest: AnimePlaybackAsset? = null
+    private var startupGeneration = 0L
+    private var startup: Startup? = null
+    private var startupExpiry: Job? = null
     private var remoteMediaPlan: RemoteMediaPlan? = null
     private var inspectedAfterParserError = false
     private var enhancementRevision = 0L
     private var enhancementEffect: AndroidAnime4KEffect? = null
+    private var realtimeLoading: Job? = null
+    private var realtimeModel: AndroidRealtimeVideoModel? = null
+    @Volatile private var preparedVideo: AndroidPreparedWindow? = null
     private var lastEnhancementSubmissionAt: Long? = null
     private var enhancementRecoveryUsed = false
     private var nativeVideoRecoveryPending = false
@@ -146,6 +203,149 @@ internal class AndroidAnimePlayer(
     override suspend fun cacheStartup(asset: AnimePlaybackAsset, byteLimit: Long, validUntil: Long): Long =
         cacheAndroidAnimeStartup(context, asset, byteLimit)
 
+    override suspend fun prepareVideoWindow(request: AnimePreparedVideoRequest): Boolean {
+        val generation = nativeGeneration
+        fun current(): Boolean {
+            val snapshot = state.value
+            val exo = engine.value
+            return isCurrent(generation) && !nativeVideoOnly && options.preparedVideoModel == request.model &&
+                this.request?.localMedia == null && this.request?.asset == request.asset &&
+                exo != null && exo.isCurrentMediaItemSeekable && !exo.isCurrentMediaItemLive &&
+                snapshot.sessionGeneration == request.sessionGeneration && snapshot.timelineGeneration == request.timelineGeneration
+        }
+        if (!current()) return false
+        val result = try { prepareAndroidAnimeWindow(context, request) }
+        catch (cancel: CancellationException) { throw cancel }
+        catch (failure: Exception) {
+            if (current()) publish(generation) { it.copy(preparedVideoIssue = readablePlayerError(failure)) }
+            return false
+        }
+        currentCoroutineContext().ensureActive()
+        if (!current() || state.value.positionMs >= result.receipt.endMs) return false
+        preparedVideo = result
+        publish(generation) { it.copy(preparedVideoWindow = result.receipt, preparedVideoIssue = null) }
+        return true
+    }
+
+    override fun discardPreparedVideo() {
+        preparedVideo = null
+        if (state.value.preparedVideoWindow != null || state.value.preparedVideoIssue != null)
+            mutableState.value = state.value.copy(preparedVideoWindow = null, preparedVideoIssue = null)
+    }
+
+    override suspend fun prepareStartup(asset: AnimePlaybackAsset, positionMs: Long, byteLimit: Long, validUntil: Long): Boolean =
+        withContext(Dispatchers.Main.immediate) {
+            if (byteLimit <= 0L || !foreground || state.value.isBuffering ||
+                validUntil <= SystemClock.elapsedRealtime()) return@withContext false
+            discardStartupNow()
+            val attempt = startupGeneration
+            val preparedOptions = options
+            startupRequest = asset
+            val gate = AndroidAnimeStartupGate(byteLimit, validUntil)
+            var resources: RemoteMediaResources? = null
+            var candidate: ExoPlayer? = null
+            var surface: AndroidAnimeStartupSurface? = null
+            var retained = false
+            try {
+                val next = AnimePlayerRequest(asset, positionMs.coerceAtLeast(0L), playWhenReady = false)
+                val remote = createRemoteMedia(next, gate).also { resources = it }
+                if (startupGeneration != attempt || !foreground || options != preparedOptions) return@withContext false
+                val exo = createEngine(gate).also { candidate = it }
+                val output = AndroidAnimeStartupSurface().also { surface = it }
+                val media = remote.plan.createSource(remote.plan.type, false)
+                val ready = CompletableDeferred<Boolean>()
+                val observer = object : Player.Listener {
+                    private fun acknowledge() {
+                        val owner = startup?.takeIf { it.player === exo } ?: return
+                        if (!owner.firstFrame || exo.playbackState != Player.STATE_READY) return
+                        if (exo.isCurrentMediaItemLive || exo.isCurrentMediaItemDynamic) {
+                            ready.complete(false)
+                            return
+                        }
+                        gate.park()
+                        ready.complete(true)
+                    }
+
+                    override fun onRenderedFirstFrame() {
+                        val owner = startup?.takeIf { it.player === exo } ?: return
+                        owner.firstFrame = true
+                        acknowledge()
+                    }
+
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        if (playbackState == Player.STATE_ENDED) ready.complete(false) else acknowledge()
+                    }
+                    override fun onPlayerError(error: PlaybackException) { ready.complete(false) }
+                }
+                val owner = Startup(asset, next.positionMs, preparedOptions, validUntil, gate, remote,
+                    exo, output, media, observer, ready)
+                startup = owner
+                resources = null
+                candidate = null
+                surface = null
+                exo.addListener(observer)
+                // Keep the ordinary Media3 effect graph configurable when this exact engine
+                // takes over. The hidden output is used to acknowledge native decoded frames.
+                exo.setVideoEffects(emptyList())
+                output.attach(exo)
+                exo.setMediaSource(media, next.positionMs)
+                exo.prepare()
+                val timeLeft = (validUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+                val result = withTimeoutOrNull(timeLeft) { ready.await() } == true
+                if (!result || startup !== owner || exo.playerError != null ||
+                    state.value.isBuffering || !foreground || options != preparedOptions) return@withContext false
+                retained = true
+                startupExpiry = playerScope.launch(Dispatchers.Main.immediate) {
+                    try { delay((validUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0L)) }
+                    finally { if (startup === owner) discardStartupNow() }
+                }
+                true
+            } finally {
+                candidate?.let { runCatching { it.release() } }
+                surface?.close()
+                resources?.close()
+                if (!retained && startupGeneration == attempt) discardStartupNow()
+            }
+        }
+
+    override fun discardStartup(asset: AnimePlaybackAsset?) {
+        playerScope.launch(Dispatchers.Main.immediate) {
+            if (asset == null || startupRequest?.let { isSameStartupAsset(it, asset) } == true) discardStartupNow()
+        }
+    }
+
+    private fun discardStartupNow() {
+        ++startupGeneration
+        startupRequest = null
+        val previous = startup
+        startup = null
+        startupExpiry?.cancel()
+        startupExpiry = null
+        previous?.let { runCatching { it.close() } }
+    }
+
+    private fun isSameStartupAsset(left: AnimePlaybackAsset, right: AnimePlaybackAsset): Boolean =
+        left.copy(title = "", resolutions = emptyList()) == right.copy(title = "", resolutions = emptyList())
+
+    private fun takeStartup(request: AnimePlayerRequest): Startup? {
+        val owner = startup
+        if (owner == null || !owner.firstFrame || owner.positionMs != request.positionMs ||
+            request.bypassMediaCache || request.localMedia != null || options != owner.options ||
+            !isSameStartupAsset(owner.asset, request.asset) || owner.player.playerError != null ||
+            owner.player.playbackState != Player.STATE_READY || owner.player.currentPosition != request.positionMs ||
+            owner.validUntil <= SystemClock.elapsedRealtime() ||
+            owner.asset.expiresAt?.let { it <= wallTimeMillis() } == true) {
+            discardStartupNow()
+            return null
+        }
+        ++startupGeneration
+        startupRequest = null
+        startup = null
+        startupExpiry?.cancel()
+        startupExpiry = null
+        return owner
+    }
+
     init {
         mutableState.value = mutableState.value.copy(capabilities = setOf(
             AnimePlayerCapability.AUDIO_TRACKS, AnimePlayerCapability.SUBTITLE_TRACKS,
@@ -153,102 +353,150 @@ internal class AndroidAnimePlayer(
             AnimePlayerCapability.VIDEO_SCALE, AnimePlayerCapability.VOLUME,
             AnimePlayerCapability.BACKGROUND_AUDIO, AnimePlayerCapability.BUFFER_CONTROL,
             AnimePlayerCapability.VIDEO_ENHANCEMENT,
-        ))
+        ) + listOfNotNull(AnimePlayerCapability.MODEL_ENHANCEMENT.takeIf { Build.VERSION.SDK_INT >= 29 }))
     }
 
     override suspend fun openNative(request: AnimePlayerRequest, generation: Long) {
+        takeStartup(request)?.let { warm ->
+            if (adoptStartup(warm, generation)) return
+        }
         if (request.localMedia != null) {
             openLocal(request, generation)
             return
         }
+        val remote = createRemoteMedia(request)
+        if (!isCurrent(generation)) {
+            remote.close()
+            return
+        }
+        adoptRemoteResources(remote)
+        prepareMedia(generation, remote.plan.createSource(remote.plan.type, false), remote.unsupportedSubtitle)
+    }
+
+    private fun adoptStartup(owner: Startup, generation: Long): Boolean {
+        val exo = owner.player
+        try {
+            exo.removeListener(owner.listener)
+            owner.surface.detach(exo)
+            owner.surface.close()
+            owner.gate.promote()
+            exo.setPriority(C.PRIORITY_PLAYBACK)
+            exo.setWakeMode(C.WAKE_MODE_NETWORK)
+            connectEngine(generation, exo)
+            adoptRemoteResources(owner.resources)
+        } catch (_: Exception) {
+            runCatching { owner.close() }
+            return false
+        }
+        preparedMedia = owner.media
+        publishTracks(generation, exo.currentTracks)
+        reportUnsupportedSubtitles(generation, owner.resources.unsupportedSubtitle)
+        applyVideoEnhancement(generation, exo)
+        configureActiveMedia(exo)
+        startPlaybackPolling(generation, exo)
+        return true
+    }
+
+    private fun adoptRemoteResources(remote: RemoteMediaResources) {
+        remoteMediaPlan = remote.plan
+        http = remote.client
+        releaseCache = remote.releaseCache
+        receivedBytes = remote.bytes
+        lastSampleBytes = remote.bytes.get()
+        lastSampleAt = SystemClock.elapsedRealtime()
+    }
+
+    private suspend fun createRemoteMedia(
+        request: AnimePlayerRequest,
+        gate: AndroidAnimeStartupGate? = null,
+    ): RemoteMediaResources {
         val asset = request.asset
         checkedMediaUrl(asset.url)
         // SimpleCache opens its database/files once, off the UI thread. The process owns it.
         var pendingLease: (() -> Unit)? = null
-        val cacheOwner = try {
-            val owner = withContext(Dispatchers.IO) {
+        var pendingClient: OkHttpClient? = null
+        try {
+            val cacheOwner = withContext(Dispatchers.IO) {
                 AndroidAnimeCache.get(context).also { pendingLease = it.acquire() }
             }
             currentCoroutineContext().ensureActive()
-            if (!isCurrent(generation)) return
-            releaseCache = pendingLease
+
+            val client = animeMediaHttpClient(asset).also { pendingClient = it }
+
+            val mediaBytes = AtomicLong(0L)
+            val transferObserver = object : TransferListener {
+                override fun onTransferInitializing(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {}
+                override fun onTransferStart(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {}
+                override fun onBytesTransferred(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean, bytesTransferred: Int) {
+                    if (isNetwork && bytesTransferred > 0) mediaBytes.addAndGet(bytesTransferred.toLong())
+                }
+                override fun onTransferEnd(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {}
+            }
+            val nativeUpstream = OkHttpDataSource.Factory(client).setTransferListener(transferObserver)
+            fun gated(source: DataSource): DataSource = gate?.wrap(source) ?: source
+            val upstream = DataSource.Factory { gated(nativeUpstream.createDataSource()) }
+            val cacheDataSourceFactory = animeCacheDataSource(asset, cacheOwner, nativeUpstream)
+            val cacheFactory = DataSource.Factory {
+                val source = if (!request.bypassMediaCache && cacheOwner.targetBytes > 0L)
+                    cacheDataSourceFactory.createDataSource() else nativeUpstream.createDataSource()
+                gated(source)
+            }
+            val subtitleParser = DefaultSubtitleParserFactory()
+            val subtitles = mutableListOf<() -> MediaSource>()
+            var unsupportedSubtitle = false
+            asset.subtitles.forEach { subtitle ->
+                checkedMediaUrl(subtitle.url)
+                val mime = subtitle.mimeType ?: subtitleMime(subtitle.url)
+                val format = Format.Builder().setId(subtitle.id).setLabel(subtitle.label)
+                    .setLanguage(subtitle.language).setSampleMimeType(mime)
+                    .setSelectionFlags(if (subtitles.isEmpty()) C.SELECTION_FLAG_DEFAULT else 0).build()
+                if (mime == null || !subtitleParser.supportsFormat(format)) {
+                    unsupportedSubtitle = true
+                    return@forEach
+                }
+                // Media3's enableLazyLoadingWithSingleTrack is package-private; subtitle
+                // extraction is supported through its public progressive factory.
+                subtitles += {
+                    val extractors = ExtractorsFactory { arrayOf(SubtitleExtractor(subtitleParser.create(format), format)) }
+                    ProgressiveMediaSource.Factory(upstream, extractors).setLoadOnlySelectedTracks(true)
+                        .createMediaSource(MediaItem.fromUri(subtitle.url))
+                }
+            }
+            val contentType = Util.inferContentTypeForUriAndMimeType(Uri.parse(asset.url), asset.mimeType)
+            val plan = RemoteMediaPlan(contentType, !request.bypassMediaCache && cacheOwner.targetBytes > 0L) { type, bypassProgressiveCache ->
+                val mime = when (type) {
+                    C.CONTENT_TYPE_HLS -> MimeTypes.APPLICATION_M3U8
+                    C.CONTENT_TYPE_DASH -> MimeTypes.APPLICATION_MPD
+                    else -> asset.mimeType.takeIf { type == contentType }
+                }
+                val item = MediaItem.Builder().setMediaId(asset.playbackIdentity()).setUri(asset.url).setMimeType(mime)
+                    .setMediaMetadata(MediaMetadata.Builder().setTitle(asset.title.ifBlank { "动漫播放" }).build())
+                    .build()
+                val media = when (type) {
+                    C.CONTENT_TYPE_HLS -> HlsMediaSource.Factory(HlsDataSourceFactory { dataType ->
+                        // Mutable playlists and key material never enter the disposable media cache.
+                        if (dataType == C.DATA_TYPE_MEDIA || dataType == C.DATA_TYPE_MEDIA_INITIALIZATION)
+                            cacheFactory.createDataSource() else upstream.createDataSource()
+                    }).setExtractorFactory(AnimeHlsExtractorFactory()).createMediaSource(item)
+                    C.CONTENT_TYPE_DASH -> DashMediaSource.Factory(
+                        DefaultDashChunkSource.Factory(cacheFactory), upstream,
+                    ).createMediaSource(item)
+                    C.CONTENT_TYPE_OTHER -> ProgressiveMediaSource.Factory(
+                        if (bypassProgressiveCache) upstream else cacheFactory).createMediaSource(item)
+                    else -> throw IOException("这条线路的媒体协议暂不支持，请选择 HLS、DASH 或视频文件线路")
+                }
+                if (subtitles.isEmpty()) media else MergingMediaSource(*(listOf(media) + subtitles.map { it() }).toTypedArray())
+            }
+            val remote = RemoteMediaResources(plan, client, mediaBytes, requireNotNull(pendingLease), unsupportedSubtitle)
             pendingLease = null
-            owner
+            pendingClient = null
+            return remote
         } finally {
-            // withContext may be cancelled after IO acquired the lease but before
-            // delivering its result to Main.
+            pendingClient?.dispatcher?.cancelAll()
+            pendingClient?.connectionPool?.evictAll()
+            // Cancellation can occur after IO acquired the lease, before delivering it to Main.
             pendingLease?.invoke()
         }
-
-        val client = animeMediaHttpClient(asset)
-        http = client
-
-        val mediaBytes = AtomicLong(0L)
-        receivedBytes = mediaBytes
-        val transferObserver = object : TransferListener {
-            override fun onTransferInitializing(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {}
-            override fun onTransferStart(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {}
-            override fun onBytesTransferred(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean, bytesTransferred: Int) {
-                if (isNetwork && bytesTransferred > 0) mediaBytes.addAndGet(bytesTransferred.toLong())
-            }
-            override fun onTransferEnd(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {}
-        }
-        lastSampleBytes = 0L
-        lastSampleAt = SystemClock.elapsedRealtime()
-        fun upstream(): DataSource.Factory = OkHttpDataSource.Factory(client).setTransferListener(transferObserver)
-        val cacheDataSourceFactory = animeCacheDataSource(asset, cacheOwner, upstream())
-        val cacheFactory = DataSource.Factory {
-            if (!request.bypassMediaCache && cacheOwner.targetBytes > 0L) cacheDataSourceFactory.createDataSource()
-            else upstream().createDataSource()
-        }
-        val subtitleParser = DefaultSubtitleParserFactory()
-        val subtitles = mutableListOf<() -> MediaSource>()
-        var unsupportedSubtitle = false
-        asset.subtitles.forEach { subtitle ->
-            checkedMediaUrl(subtitle.url)
-            val mime = subtitle.mimeType ?: subtitleMime(subtitle.url)
-            val format = Format.Builder().setId(subtitle.id).setLabel(subtitle.label)
-                .setLanguage(subtitle.language).setSampleMimeType(mime)
-                .setSelectionFlags(if (subtitles.isEmpty()) C.SELECTION_FLAG_DEFAULT else 0).build()
-            if (mime == null || !subtitleParser.supportsFormat(format)) {
-                unsupportedSubtitle = true
-                return@forEach
-            }
-            // Media3's enableLazyLoadingWithSingleTrack is package-private; subtitle
-            // extraction is supported through its public progressive factory.
-            subtitles += {
-                val extractors = ExtractorsFactory { arrayOf(SubtitleExtractor(subtitleParser.create(format), format)) }
-                ProgressiveMediaSource.Factory(upstream(), extractors).setLoadOnlySelectedTracks(true)
-                    .createMediaSource(MediaItem.fromUri(subtitle.url))
-            }
-        }
-        val contentType = Util.inferContentTypeForUriAndMimeType(Uri.parse(asset.url), asset.mimeType)
-        val plan = RemoteMediaPlan(contentType, !request.bypassMediaCache && cacheOwner.targetBytes > 0L) { type, bypassProgressiveCache ->
-            val mime = when (type) {
-                C.CONTENT_TYPE_HLS -> MimeTypes.APPLICATION_M3U8
-                C.CONTENT_TYPE_DASH -> MimeTypes.APPLICATION_MPD
-                else -> asset.mimeType.takeIf { type == contentType }
-            }
-            val item = MediaItem.Builder().setMediaId(asset.playbackIdentity()).setUri(asset.url).setMimeType(mime)
-                .setMediaMetadata(MediaMetadata.Builder().setTitle(asset.title.ifBlank { "动漫播放" }).build())
-                .build()
-            val media = when (type) {
-                C.CONTENT_TYPE_HLS -> HlsMediaSource.Factory(HlsDataSourceFactory { dataType ->
-                    // Mutable playlists and key material never enter the disposable media cache.
-                    if (dataType == C.DATA_TYPE_MEDIA || dataType == C.DATA_TYPE_MEDIA_INITIALIZATION)
-                        cacheFactory.createDataSource() else upstream().createDataSource()
-                }).setExtractorFactory(AnimeHlsExtractorFactory()).createMediaSource(item)
-                C.CONTENT_TYPE_DASH -> DashMediaSource.Factory(
-                    DefaultDashChunkSource.Factory(cacheFactory), upstream(),
-                ).createMediaSource(item)
-                C.CONTENT_TYPE_OTHER -> ProgressiveMediaSource.Factory(
-                    if (bypassProgressiveCache) upstream() else cacheFactory).createMediaSource(item)
-                else -> throw IOException("这条线路的媒体协议暂不支持，请选择 HLS、DASH 或视频文件线路")
-            }
-            if (subtitles.isEmpty()) media else MergingMediaSource(*(listOf(media) + subtitles.map { it() }).toTypedArray())
-        }
-        remoteMediaPlan = plan
-        prepareMedia(generation, plan.createSource(contentType, false), unsupportedSubtitle)
     }
 
     private suspend fun openLocal(request: AnimePlayerRequest, generation: Long) {
@@ -299,23 +547,34 @@ internal class AndroidAnimePlayer(
             throw failure
         }
         preparedMedia = media
-        if (unsupportedSubtitle) publish(generation) {
-            it.copy(notice = "部分外挂字幕格式无法由当前设备读取；可换用内嵌字幕或其他线路")
-        }
+        reportUnsupportedSubtitles(generation, unsupportedSubtitle)
         prepareOnEngine(generation, exo, media)
     }
 
-    private fun createEngine(): ExoPlayer =
-        ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true))
-            .setLoadControl(DefaultLoadControl.Builder()
-                .setBufferDurationsMs(options.bufferMinMs, options.bufferMaxMs, options.bufferStartMs, options.bufferRebufferMs)
-                .setTargetBufferBytes(64 * 1024 * 1024)
-                .setPrioritizeTimeOverSizeThresholds(false).build())
+    private fun reportUnsupportedSubtitles(generation: Long, unsupported: Boolean) {
+        if (unsupported) publish(generation) {
+            it.copy(notice = "部分外挂字幕格式无法由当前设备读取；可换用内嵌字幕或其他线路")
+        }
+    }
+
+    private fun createEngine(gate: AndroidAnimeStartupGate? = null): ExoPlayer {
+        val control = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(options.bufferMinMs, options.bufferMaxMs, options.bufferStartMs, options.bufferRebufferMs)
+            .setTargetBufferBytes(64 * 1024 * 1024)
+            .setPrioritizeTimeOverSizeThresholds(false).build()
+        val loadControl = if (gate == null) control else object : LoadControl by control {
+            override fun shouldContinueLoading(parameters: LoadControl.Parameters): Boolean =
+                gate.allowsLoading && control.shouldContinueLoading(parameters)
+        }
+        return ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true))
+            .setLoadControl(loadControl)
             .setAudioAttributes(AudioAttributes.Builder()
                 .setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
             .setHandleAudioBecomingNoisy(true)
-            .setWakeMode(C.WAKE_MODE_NETWORK)
+            .setWakeMode(if (gate == null) C.WAKE_MODE_NETWORK else C.WAKE_MODE_NONE)
+            .setPriority(if (gate == null) C.PRIORITY_PLAYBACK else C.PRIORITY_PLAYBACK_PRELOAD)
             .build()
+    }
 
     private fun connectEngine(generation: Long, exo: ExoPlayer) {
         val observer = object : Player.Listener {
@@ -369,11 +628,19 @@ internal class AndroidAnimePlayer(
         applyVideoEnhancement(generation, exo)
         exo.setMediaSource(media)
         exo.seekTo(state.value.positionMs)
+        configureActiveMedia(exo)
+        exo.prepare()
+        startPlaybackPolling(generation, exo)
+    }
+
+    private fun configureActiveMedia(exo: ExoPlayer) {
         exo.playbackParameters = PlaybackParameters(state.value.speed)
         exo.volume = state.value.volume
         exo.playWhenReady = state.value.playWhenReady
         setForegroundNative(foreground || state.value.inPictureInPicture, options.backgroundAudio)
-        exo.prepare()
+    }
+
+    private fun startPlaybackPolling(generation: Long, exo: ExoPlayer) {
         polling?.cancel()
         polling = playerScope.launch(Dispatchers.Main.immediate) {
             while (isActive && isCurrent(generation)) {
@@ -388,6 +655,7 @@ internal class AndroidAnimePlayer(
     private fun applyVideoEnhancement(generation: Long, exo: ExoPlayer) {
         val revision = ++enhancementRevision
         lastEnhancementSubmissionAt = null
+        clearRealtimeVideoModel()
         val mode = options.videoEnhancement
         val phase = when {
             mode == AnimeVideoEnhancementMode.OFF -> AnimeVideoEnhancementPhase.OFF
@@ -408,7 +676,40 @@ internal class AndroidAnimePlayer(
         try {
             enhancementEffect?.invalidateObservations()
             enhancementEffect = null
-            val effects = if (mode == AnimeVideoEnhancementMode.OFF) emptyList() else listOf(
+            if (mode == AnimeVideoEnhancementMode.MODEL) {
+                applyRealtimeVideoModel(generation, exo, revision)
+                return
+            }
+            val effects: List<Effect> = if (mode == AnimeVideoEnhancementMode.OFF) {
+                options.preparedVideoModel?.nativeScale?.let { scale ->
+                    listOf(GlEffect { _, hdr ->
+                        if (hdr) androidx.media3.effect.PassthroughShaderProgram()
+                        else {
+                            var lastReport = 0L
+                            var framesUsed = 0L
+                            var lastWindow: AndroidPreparedWindow? = null
+                            AndroidPreparedFrameProgram(scale, { preparedVideo }) { window ->
+                                val time = SystemClock.elapsedRealtime()
+                                if (lastWindow !== window) {
+                                    lastWindow = window
+                                    framesUsed = 0L
+                                    lastReport = 0L
+                                }
+                                framesUsed++
+                                if (lastReport == 0L || time - lastReport >= 250L) {
+                                    lastReport = time
+                                    val completed = framesUsed
+                                    playerScope.launch(Dispatchers.Main.immediate) {
+                                        if (isCurrent(generation) && enhancementRevision == revision && preparedVideo === window)
+                                            publish(generation) { it.copy(preparedVideoWindow =
+                                                window.receipt.copy(framesUsed = completed, lastUsedAt = time)) }
+                                    }
+                                }
+                            }
+                        }
+                    })
+                }.orEmpty()
+            } else listOf(
                 AndroidAnime4KEffect(mode, options.enhancementScale) { observation, programIsCurrent ->
                     val observedAt = SystemClock.elapsedRealtime()
                     // The callback originates on Media3's GL thread. Both backend and mode
@@ -441,6 +742,83 @@ internal class AndroidAnimePlayer(
         }
     }
 
+    private fun clearRealtimeVideoModel() {
+        realtimeLoading?.cancel()
+        realtimeLoading = null
+        realtimeModel?.let { runCatching { it.close() } }
+        realtimeModel = null
+    }
+
+    private fun applyRealtimeVideoModel(generation: Long, exo: ExoPlayer, revision: Long) {
+        exo.setVideoEffects(emptyList())
+        val model = checkNotNull(options.enhancementModel)
+        fun current() = isCurrent(generation) && engine.value === exo && enhancementRevision == revision &&
+            options.enhancementModel == model && !nativeVideoOnly && !nativeVideoRecoveryPending
+        realtimeLoading = playerScope.launch(Dispatchers.Main.immediate) {
+            var opening: AndroidRealtimeVideoModel? = null
+            try {
+                publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(AnimeVideoEnhancementMode.MODEL,
+                    AnimeVideoEnhancementPhase.WAITING, "原画可播，正在准备仅硬件 NNAPI 模型")) }
+                val video = withTimeoutOrNull(6_000L) { state.first { it.videoWidth != null && it.videoHeight != null } }
+                    ?: error("当前视频尺寸尚未确认")
+                val width = checkNotNull(video.videoWidth)
+                val height = checkNotNull(video.videoHeight)
+                withContext(Dispatchers.Default) { opening = AndroidRealtimeVideoModel.open(context, model, width, height) }
+                if (!current()) return@launch
+                val active = checkNotNull(opening)
+                realtimeModel = active
+                opening = null
+                val fps = video.sourceFps?.takeIf { it.isFinite() && it > 0 } ?: 30.0
+                val frameBudget = 1_000_000_000.0 / fps * .85
+                var submitted = 0L
+                var slow = 0
+                var lastReport = 0L
+                exo.setVideoEffects(listOf(active.effect { elapsed ->
+                    submitted++
+                    // Treat SDK graph warm-up separately and never repeatedly stall the current media.
+                    slow = if (elapsed > frameBudget) slow + 1 else 0
+                    val tooSlow = (submitted == 1L && elapsed > 120_000_000L) || slow >= 3
+                    val now = SystemClock.elapsedRealtime()
+                    if (tooSlow || submitted == 1L || now - lastReport >= 350L) {
+                        lastReport = now
+                        val frames = submitted
+                        playerScope.launch(Dispatchers.Main.immediate) {
+                            if (!current() || realtimeModel !== active) return@launch
+                            if (tooSlow) {
+                                ++enhancementRevision
+                                try { exo.setVideoEffects(emptyList()) }
+                                catch (_: Exception) { recoverNativeVideo(generation, exo) }
+                                finally { clearRealtimeVideoModel() }
+                                publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(
+                                    AnimeVideoEnhancementMode.MODEL, AnimeVideoEnhancementPhase.UNAVAILABLE,
+                                    "实际处理耗时超过帧预算，已恢复原画；可使用离线增强")) }
+                            } else {
+                                val observation = AnimeVideoEnhancementObservation(frames, intermediateTextureBytes =
+                                    width.toLong() * height * model.nativeScale * model.nativeScale * 4,
+                                    recentlySubmitting = canReportLiveEnhancement(exo))
+                                val millis = elapsed / 1_000_000L
+                                publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(
+                                    AnimeVideoEnhancementMode.MODEL, AnimeVideoEnhancementPhase.ACTIVE,
+                                    "NNAPI 硬件 · 本帧处理 ${millis}ms", width, height, width * model.nativeScale,
+                                    height * model.nativeScale, observation, model.title)) }
+                            }
+                        }
+                    }
+                }))
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) {
+                if (current()) {
+                    realtimeModel?.let { runCatching { it.close() } }; realtimeModel = null
+                    publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(AnimeVideoEnhancementMode.MODEL,
+                        AnimeVideoEnhancementPhase.UNAVAILABLE, "NNAPI 未能启用，原画继续播放。" + (failure.message?.take(140) ?: ""))) }
+                }
+            } catch (_: LinkageError) {
+                if (current()) publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(AnimeVideoEnhancementMode.MODEL,
+                    AnimeVideoEnhancementPhase.UNAVAILABLE, "NNAPI 组件不可用，原画继续播放")) }
+            } finally { opening?.let { runCatching { it.close() } } }
+        }
+    }
+
     private fun recoverNativeVideo(
         generation: Long,
         exo: ExoPlayer,
@@ -453,6 +831,7 @@ internal class AndroidAnimePlayer(
         nativeVideoRestored = false
         enhancementRevision++
         lastEnhancementSubmissionAt = null
+        clearRealtimeVideoModel()
         nativeVideoFallbackPhase = phase
         nativeVideoFallbackDetail = detail
         recovery?.cancel()
@@ -865,7 +1244,9 @@ internal class AndroidAnimePlayer(
     override fun setVolumeNative(volume: Float) { engine.value?.volume = volume }
 
     override fun configureNative(previous: AnimePlayerOptions, next: AnimePlayerOptions) {
-        if (previous.videoEnhancement != next.videoEnhancement || previous.enhancementScale != next.enhancementScale) {
+        if (previous.videoEnhancement != next.videoEnhancement || previous.enhancementScale != next.enhancementScale ||
+            previous.preparedVideoModel != next.preparedVideoModel || previous.enhancementModel != next.enhancementModel) {
+            discardPreparedVideo()
             val exo = engine.value
             if (exo != null) applyVideoEnhancement(nativeGeneration, exo)
             else mutableState.value = mutableState.value.copy(videoEnhancement = AnimeVideoEnhancementState(
@@ -875,7 +1256,8 @@ internal class AndroidAnimePlayer(
         }
         if (engine.value != null && previous.copy(backgroundAudio = next.backgroundAudio,
                 automaticRecoveryAttempts = next.automaticRecoveryAttempts,
-                videoEnhancement = next.videoEnhancement, enhancementScale = next.enhancementScale) != next) {
+                videoEnhancement = next.videoEnhancement, enhancementScale = next.enhancementScale,
+                preparedVideoModel = next.preparedVideoModel, enhancementModel = next.enhancementModel) != next) {
             mutableState.value = mutableState.value.copy(notice = "新的缓冲参数将在下次打开媒体时生效")
         }
     }
@@ -931,6 +1313,7 @@ internal class AndroidAnimePlayer(
         engine.value?.playWhenReady = playing
     }
     override fun seekNative(positionMs: Long) {
+        discardPreparedVideo()
         resetBufferingObservation(); nativeFrameWaitSince = null
         clearLiveEnhancement()
         engine.value?.seekTo(positionMs)
@@ -941,6 +1324,8 @@ internal class AndroidAnimePlayer(
         return exo.playbackParameters.speed
     }
     override fun releaseNative() {
+        clearRealtimeVideoModel()
+        discardPreparedVideo()
         enhancementEffect?.invalidateObservations()
         enhancementEffect = null
         resetBufferingObservation()

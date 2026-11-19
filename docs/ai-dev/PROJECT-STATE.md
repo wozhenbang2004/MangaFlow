@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## 成人章内连续性、两端预解码和真实增强 · 2026-11-19
+
+继续执行用户「没彻底完成不许停下来」及「让一个子代理专项去彻底解决」的追加要求。追加标准包括档位、倍率、补帧独立，最高档是真实模型，以预处理优先，同时记录 Android 天玑 9400 与 Windows RTX 5060 的实际效果。沿用 [成人旅程](../design/adult-experience-20261119.md)、[媒体实施记录](../anime/lanerc-port.md)与[增强差距及源码状态](../design/enhancement-v1-delivery-20261119.md)。
+
+- 成人章内讨论和精确进度同步接入已配置的 HTTPS WebDAV。帖子绑定实际章节，续读同步保留原生变体、偏移和画格，冲突由用户确认。已核对的 JM/PicACG 合同没有原生章节讨论或精确进度回写。
+- Android Media3 与 Windows libmpv 预解码实际起播帧，并仅在确切来源、画质、线路和续看位置匹配时提升原已准备的播放器。正式播放的画面呈现仍按对应平台观测。
+- Android 音视频新增离线 RIFE、NNAPI 硬件实时时延回退，以及兼容 MP4/HLS 点播的 5–15 秒图像预处理。匹配原时间戳和源画面时复用预处理结果。Windows 在原有 VideoJaNai/RIFE 离线外接入 ArtCNN 实时亮度超分。
+
+Windows 专用 AnimeJaNai 实时、两端实时 RIFE、Android Vulkan/ncnn 执行与 Windows 在线增强窗口仍缺对应集成。此前 0.1.399 选集回调编译失败已由 Android 0.1.400 的实际构建纠正。当前批次的设备、WebDAV 和模型效果仍待目标设备验收。
+
 ## 普通漫画体验基准的成人与番剧交付 · 2026-11-19
 
 用户本轮「交给你完全落地了」承接[完整研究的 P0–P2](https://chatgpt.com/space/page_8da8196d6f14819180de20561b2d9a84)。源码基线为 `2a65502`，含研究之后的季度候选与无关结果折叠。现行用户旅程以[成人设计](../design/adult-experience-20261119.md)、[番剧设计](../design/anime-redesign-20261119.md)和[增强交付](../design/enhancement-v1-delivery-20261119.md)为入口。

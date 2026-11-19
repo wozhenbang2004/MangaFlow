@@ -464,17 +464,20 @@ private fun SourceAccountChoice(label: String, chosen: Boolean, enabled: Boolean
 }
 
 @Composable
-private fun SourceAccountField(
+internal fun SourceAccountField(
     label: String, value: String, enabled: Boolean, secret: Boolean,
+    singleLine: Boolean = true,
     modifier: Modifier = Modifier, onChange: (String) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     BasicTextField(value, onChange, modifier = modifier.fillMaxWidth().semantics { contentDescription = label }
         .clip(RoundedCornerShape(11.dp))
-        .background(colors.onSurface.copy(alpha = .045f)).padding(12.dp), singleLine = true, enabled = enabled,
+        .background(colors.onSurface.copy(alpha = .045f)).padding(12.dp), singleLine = singleLine,
+        maxLines = if (singleLine) 1 else 6, enabled = enabled,
         visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(keyboardType = if (secret) KeyboardType.Password else KeyboardType.Text,
-            imeAction = ImeAction.Next), textStyle = MaterialTheme.typography.bodySmall.copy(color = colors.onSurface),
+            imeAction = if (singleLine) ImeAction.Next else ImeAction.Default),
+        textStyle = MaterialTheme.typography.bodySmall.copy(color = colors.onSurface),
         decorationBox = { inner -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(label, fontSize = 11.sp, color = colors.onSurfaceVariant); inner()
         } })

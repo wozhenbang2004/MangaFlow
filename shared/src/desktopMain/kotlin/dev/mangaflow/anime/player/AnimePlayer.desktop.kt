@@ -9,6 +9,7 @@ import kotlinx.coroutines.withContext
 import org.openani.mediamp.MediampPlayer
 import org.openani.mediamp.mpv.MPVHandle
 import org.openani.mediamp.mpv.MpvMediampPlayerFactory
+import kotlin.math.abs
 
 actual fun createAnimePlayer(context: PlatformContext, scope: CoroutineScope): AnimePlayer =
     DesktopAnimePlayer(context, scope)
@@ -19,6 +20,8 @@ private class DesktopAnimePlayer(
 ) : RoutedNativeAnimePlayer(scope) {
     override val supportsBufferControl = true
     override val supportsVideoEnhancement = true
+    override val supportsModelEnhancement = System.getProperty("os.name", "").startsWith("Windows", ignoreCase = true)
+    override val supportsDecoderStartup = System.getProperty("os.name", "").startsWith("Windows", ignoreCase = true)
     private var warming = true
     private var videoBeforeBackground: String? = null
     private var enhancementMediaReady = false
@@ -31,9 +34,14 @@ private class DesktopAnimePlayer(
         update = { generation, value -> publish(generation) { it.copy(videoEnhancement = value) } },
     )
 
-    override suspend fun createBackend(): MediampPlayer {
+    override suspend fun createBackend(): MediampPlayer = createMpv()
+
+    override suspend fun createDecoderStartup(byteLimit: Long): MediampPlayer = createMpv(byteLimit)
+
+    private suspend fun createMpv(startupByteLimit: Long? = null): MediampPlayer {
         var pending: MediampPlayer? = null
         val configuration = options
+        val preroll = startupByteLimit != null
         return try {
             withContext(Dispatchers.IO) {
                 // The shipped platform runtime loads off the Swing UI thread.
@@ -41,13 +49,14 @@ private class DesktopAnimePlayer(
                     handle.option("cache", "yes")
                     // Start with a short current-media window; expand only after actual
                     // native readiness and the initial buffering period have completed.
-                    handle.option("cache-secs", (configuration.bufferStartMs / 1000.0).toString())
+                    handle.option("cache-secs", if (preroll) "0.25" else (configuration.bufferStartMs / 1000.0).toString())
                     handle.option("demuxer-readahead-secs", "0")
-                    handle.option("cache-pause", "yes")
-                    handle.option("cache-pause-initial", "yes")
+                    handle.option("cache-pause", if (preroll) "no" else "yes")
+                    handle.option("cache-pause-initial", if (preroll) "no" else "yes")
                     handle.option("cache-pause-wait", (configuration.bufferStartMs / 1000.0).toString())
-                    handle.option("demuxer-max-bytes", (32L * 1024 * 1024).toString())
-                    handle.option("demuxer-max-back-bytes", (8L * 1024 * 1024).toString())
+                    handle.option("demuxer-max-bytes", (startupByteLimit ?: ACTIVE_FORWARD_BYTES).toString())
+                    handle.option("demuxer-max-back-bytes", if (preroll) "0" else ACTIVE_BACK_BYTES.toString())
+                    if (preroll) check(handle.option("mute", "yes")) { "预解码播放器无法静音" }
                     handle.option("prefetch-playlist", "no")
                     handle.option("ytdl", "no")
                     check(handle.option("access-references", "no")) { "播放器无法关闭外部资源引用" }
@@ -57,6 +66,22 @@ private class DesktopAnimePlayer(
             pending?.close()
             throw failure
         }
+    }
+
+    override fun hasDecodedStartupFrame(backend: MediampPlayer, positionMs: Long): Boolean {
+        val handle = backend.impl as? MPVHandle ?: return false
+        val time = handle.getPropertyDoubleOrNull("time-pos")?.takeIf(Double::isFinite) ?: return false
+        // libmpv only exposes frame-info after obtaining a current video-output image.
+        return abs(time * 1000 - positionMs) <= 500 &&
+            handle.getPropertyBooleanOrNull("video-frame-info/interlaced") != null
+    }
+
+    override fun activateDecoderStartup(backend: MediampPlayer): Boolean {
+        val handle = backend.impl as? MPVHandle ?: return false
+        return handle.setPropertyString("demuxer-max-bytes", ACTIVE_FORWARD_BYTES.toString()) &&
+            handle.setPropertyString("demuxer-max-back-bytes", ACTIVE_BACK_BYTES.toString()) &&
+            handle.setPropertyBoolean("cache-pause", true) && handle.setPropertyBoolean("cache-pause-initial", true) &&
+            handle.setPropertyBoolean("mute", false)
     }
 
     override fun onMediaOpeningNative() {
@@ -87,6 +112,7 @@ private class DesktopAnimePlayer(
     }
 
     override fun configureNative(previous: AnimePlayerOptions, next: AnimePlayerOptions) {
+        if (previous != next) discardStartup()
         applyBufferPolicy()
         applyVideoEnhancement()
     }
@@ -97,11 +123,13 @@ private class DesktopAnimePlayer(
             generation = nativeGeneration,
             mode = options.videoEnhancement,
             scale = options.enhancementScale,
+            model = options.enhancementModel,
             mediaReady = enhancementMediaReady,
         )
     }
 
     override fun setForegroundNative(foreground: Boolean, backgroundAudio: Boolean) {
+        if (!foreground) discardStartup()
         val handle = engine.value?.impl as? MPVHandle ?: return
         if (!foreground && backgroundAudio && videoBeforeBackground == null) {
             val selection = handle.getPropertyString("vid") ?: "auto"
@@ -145,6 +173,11 @@ private class DesktopAnimePlayer(
         videoBeforeBackground = null
         warming = true
         super.releaseNative()
+    }
+
+    private companion object {
+        const val ACTIVE_FORWARD_BYTES = 32L * 1024 * 1024
+        const val ACTIVE_BACK_BYTES = 8L * 1024 * 1024
     }
 }
 

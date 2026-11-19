@@ -773,6 +773,10 @@ MangaFlow's anime adapters use public source/API contracts. A source entry does 
   GraphQL protocol integration. User credentials are supplied separately and never distributed with the application.
 - **AndroidX Media3** — https://developer.android.com/media/media3 and https://github.com/androidx/media
   Android playback, media sessions, data sources and compressed media caching. Apache License 2.0; licenses and attribution supplied by its published artifacts remain applicable.
+- **ArtCNN v1.6.2** — https://github.com/Artoriuz/ArtCNN/releases/tag/v1.6.2
+  Bundled unmodified C4F16 and C4F32 GLSL release files for Windows libmpv. MIT, Copyright (c) 2024 João Chrisóstomo. The full upstream notice is packaged alongside the shaders in `shared/src/desktopMain/resources/artcnn/LICENSE`.
+- **RIFE FP32 v2 ONNX exports** — https://github.com/AmusementClub/vs-mlrt/releases/tag/external-models
+  Android accepts exact v2 weights from upstream 4.25 Lite, 4.22 and 4.26 model archives. Weights are imported from user-selected files and retain the applicable upstream model notices. RIFE algorithm source: https://github.com/hzwer/ECCV2022-RIFE.
 - **MediaMP 0.5.1** — https://github.com/open-ani/mediamp/tree/v0.5.1
   Desktop mpv and iOS AVKit adapters. MediaMP glue and the bundled native runtime have distinct license obligations. The chosen Windows/macOS native runtime includes dynamically linked libmpv/FFmpeg and related components under their applicable LGPL and other licenses; it is not described as an exclusively Apache-licensed bundle. Corresponding native dependency versions and build/source references are maintained in the upstream tagged project, submodules and runtime distribution. The application does not use the all-platform runtime aggregator or introduce Linux GPL runtime artifacts.
 - **Apple AVKit / AVFoundation** — system frameworks used on iOS. Native platform format and subtitle limitations remain applicable.

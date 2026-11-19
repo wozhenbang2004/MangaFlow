@@ -218,6 +218,7 @@ import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.data.Page
+import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
@@ -226,6 +227,7 @@ import dev.mangaflow.experience.*
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.PageCollection
+import dev.mangaflow.storage.PrivateChapterKey
 import dev.mangaflow.storage.ReaderPreferences
 import dev.mangaflow.reader.panels.GuidedPanelReader
 import dev.mangaflow.reader.panels.PanelEngine
@@ -296,6 +298,7 @@ fun ReaderScreen(
     reviewRepository: dev.mangaflow.data.ReviewRepository,
     onBack: () -> Unit,
     adultProfile: Boolean = false,
+    adultSourceIds: Set<String> = emptySet(),
     onRequestNotificationPermission: () -> Unit = {},
     onChapterVisible: (Manga, Chapter) -> Unit = { _, _ -> },
     onNearChapterEnd: (Manga, Chapter) -> Unit = { _, _ -> },
@@ -373,7 +376,12 @@ fun ReaderScreen(
     val chapter = chapters.firstOrNull { it.id == chapterId }
         ?: Chapter(chapterId, libraryStore.progressFor(manga.id)?.takeIf { it.chapterId == chapterId }?.chapterTitle ?: "正在阅读", 0)
     val localImport = manga.sourceUrl == LOCAL_SOURCE_URL
-    val discussionState = rememberChapterDiscussionState(manga, chapter, communityRepository, reviewRepository)
+    val discussionState = if (!adultProfile) rememberChapterDiscussionState(manga, chapter, communityRepository, reviewRepository) else null
+    val privateDiscussionKey = if (adultProfile && !localImport) remember(manga.id, chapter, adultSourceIds) {
+        PrivateChapterKey.from(manga, chapter, adultSourceIds)
+    } else null
+    val privateDiscussion = privateDiscussionKey?.let { rememberPrivateChapterDiscussionState(it) }
+    val commentsAvailable = !localImport && (discussionState != null || privateDiscussion != null)
     val siblings = remember(chapters, chapter, chaptersLoading, chaptersError) {
         ChapterSemantics.readingSequence(chapters, chapter,
             catalogComplete = !chaptersLoading && chaptersError == null)
@@ -427,6 +435,7 @@ fun ReaderScreen(
     var showPanelModels by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) { if (!PanelReadingAvailable) showPanelModels = false }
     var showComments by remember(chapterId) { mutableStateOf(false) }
+    LaunchedEffect(commentsAvailable) { if (!commentsAvailable) showComments = false }
     var showSpreadAdjustment by remember(chapterId) { mutableStateOf(false) }
     var manualSingles by remember(manga.id, chapterId, presentedCollection?.key) {
         mutableStateOf(presentedCollection?.singlePages ?: libraryStore.spreadSinglesFor(manga.id, chapterId))
@@ -1008,7 +1017,7 @@ fun ReaderScreen(
     LaunchedEffect(touchExploration) { if (touchExploration) controlsVisible = true }
     LaunchedEffect(discussionState, pageIndex, pages.size, readerForeground, leavingReader, localImport) {
         if (!localImport && readerForeground && !leavingReader && pages.isNotEmpty() && pageIndex >= pages.lastIndex - 3) {
-            discussionState.ensureLoaded()
+            discussionState?.ensureLoaded()
         }
     }
     LaunchedEffect(atChapterEnd, touchExploration, chromeEngaged, readerStatusInspecting) {
@@ -1289,22 +1298,22 @@ fun ReaderScreen(
             }
         }
 
-        if (!localImport && active && !leavingReader && atChapterEnd && !loading && error == null &&
+        if (commentsAvailable && active && !leavingReader && atChapterEnd && !loading && error == null &&
             !showComments && !showSettings && !showChapters && !showSpreadAdjustment &&
             !showReaderActions && !readerActionsPresent && !showPageNavigator && !sourcePickerBlocking &&
             !readerStatusInspecting && !progressInteracting) {
-            ChapterEndComments(
-                chapterId = chapterId, state = discussionState, backdrop = readerBackdrop,
-                bottomClearance = if (controlsVisible) with(LocalDensity.current) {
-                    (bottomControlsHeightPx - dev.mangaflow.reader.readerNavigationInsets().getBottom(this)).coerceAtLeast(0).toDp()
-                } else 0.dp,
-                touchExploration = touchExploration,
-                onOpen = { showComments = true },
-                modifier = Modifier.align(Alignment.BottomStart)
-                    .windowInsetsPadding(dev.mangaflow.reader.readerNavigationInsets().union(WindowInsets.displayCutout)
+            val bottom = if (controlsVisible) with(LocalDensity.current) {
+                (bottomControlsHeightPx - dev.mangaflow.reader.readerNavigationInsets().getBottom(this)).coerceAtLeast(0).toDp()
+            } else 0.dp
+            val anchor = Modifier.align(Alignment.BottomStart)
+                .windowInsetsPadding(dev.mangaflow.reader.readerNavigationInsets().union(WindowInsets.displayCutout)
                     .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
-                    .padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
-            )
+                .padding(start = 16.dp, end = 16.dp, bottom = 12.dp)
+            if (discussionState != null) ChapterEndComments(chapterId = chapterId, state = discussionState,
+                backdrop = readerBackdrop, bottomClearance = bottom, touchExploration = touchExploration,
+                onOpen = { showComments = true }, modifier = anchor)
+            else PrivateChapterDiscussionButton(readerBackdrop, onOpen = { showComments = true },
+                modifier = anchor.padding(bottom = bottom))
         }
 
         AnimatedVisibility(
@@ -1456,7 +1465,11 @@ fun ReaderScreen(
                             val openPrevious: () -> Unit = {
                                 openPreviousChapter?.invoke()
                             }
-                            val commentsLabel = if (localImport) "本地章节没有在线评论" else "本章评论"
+                            val commentsLabel = when {
+                                privateDiscussion != null -> "本话私有讨论"
+                                commentsAvailable -> "本章评论"
+                                else -> "本章暂未提供讨论"
+                            }
                             var savingChapter by remember(chapterId) { mutableStateOf(false) }
                             val downloaded = activeDownload?.status == DownloadStatus.COMPLETED
                             val downloading = activeDownload?.status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
@@ -1476,7 +1489,7 @@ fun ReaderScreen(
                             }
                             val secondaryActions = !inlineChapterNavigation || (!inlineCatalog && !desktop) ||
                                 (!inlinePicture && currentPicture != null) ||
-                                (!inlineComments && pages.isNotEmpty() && !localImport) ||
+                                (!inlineComments && pages.isNotEmpty() && commentsAvailable) ||
                                 (canChooseSource && pages.isEmpty()) || canCorrectSpread || returnLocation != null
                             LaunchedEffect(secondaryActions) {
                                 if (!secondaryActions) showReaderActions = false
@@ -1527,7 +1540,7 @@ fun ReaderScreen(
                                     pictureIcon, pictureLabel, enabled = currentPicture != null,
                                     interactive = controlsVisible, buttonSize = 44.dp, onClick = toggleCurrentPicture)
                                 if (inlineComments) ReaderIcon(
-                                    Icons.Outlined.Forum, commentsLabel, enabled = pages.isNotEmpty() && !localImport,
+                                    Icons.Outlined.Forum, commentsLabel, enabled = pages.isNotEmpty() && commentsAvailable,
                                     interactive = controlsVisible, buttonSize = 44.dp, onClick = { showComments = true })
                                 key(chapterId) {
                                     Box {
@@ -1564,7 +1577,7 @@ fun ReaderScreen(
                                                 toggleCurrentPicture()
                                             }
                                             if (!inlineComments) CompactMenuAction(Icons.Outlined.Forum, commentsLabel,
-                                                enabled = showReaderActions && pages.isNotEmpty() && !localImport) {
+                                                enabled = showReaderActions && pages.isNotEmpty() && commentsAvailable) {
                                                 showReaderActions = false
                                                 showComments = true
                                             }
@@ -1800,10 +1813,18 @@ fun ReaderScreen(
         loading = sourceLoading, error = sourceError,
         onPresenceChange = { sourcePickerPresent = it },
     )
-    if (showComments) ChapterDiscussion(
-        chapter, colors.background, colors.onSurface,
-        onClose = { showComments = false }, state = discussionState,
-    )
+    if (showComments) {
+        if (discussionState != null) ChapterDiscussion(chapter, colors.background, colors.onSurface,
+            onClose = { showComments = false }, state = discussionState)
+        else if (privateDiscussion != null) {
+            val name = chapter.variants.firstOrNull { it.sourceId == chapter.sourceId &&
+                it.mangaId == chapter.sourceMangaId && it.chapterId == chapter.sourceChapterId }?.sourceName?.takeIf { it.isNotBlank() }
+                ?: manga.sourceName.takeIf { chapter.sourceId == manga.sourceId && it.isNotBlank() }
+                ?: sourceDisplayName(chapter.sourceId)
+            PrivateChapterDiscussion(chapter.title, name, privateDiscussion, colors.background, colors.onSurface,
+                onClose = { showComments = false })
+        }
+    }
 }
 
 @OptIn(FlowPreview::class, ExperimentalLayoutApi::class)

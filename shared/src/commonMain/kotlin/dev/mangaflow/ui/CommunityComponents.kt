@@ -770,6 +770,7 @@ private fun providerName(id: String): String = when (id) {
     "dantotsu" -> "Dantotsu"
     "jmcomic" -> "禁漫"
     "picacg" -> "哔咔"
+    "mangaflow-webdav" -> "私有讨论"
     else -> dev.mangaflow.data.ReviewProviders.find(id)?.name ?: id
 }
 

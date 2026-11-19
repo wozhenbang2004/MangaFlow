@@ -332,6 +332,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val adoptedResumeTargets by model.library.resumeTargets.collectAsStateWithLifecycle()
     var copySyncOpen by rememberSaveable { mutableStateOf(false) }
     var shelfSyncSource by rememberSaveable { mutableStateOf<String?>(null) }
+    var adultProgressOpen by remember { mutableStateOf(false) }
+    var openWebDavSettings by remember { mutableStateOf(false) }
     var shelfSyncAfterLogin by remember { mutableStateOf<String?>(null) }
     var copySyncFocus by remember { mutableStateOf<String?>(null) }
     fun openCopyComparison(mangaId: String? = null) {
@@ -713,6 +715,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             copySyncFocus = null
             shelfSyncSource = null
             shelfSyncAfterLogin = null
+            adultProgressOpen = false
+            openWebDavSettings = false
+            model.services.adultProgressSync.dismiss()
             selectedCover = null
             keyboard?.hide()
             focus.clearFocus(force = true)
@@ -743,6 +748,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 onOpenAccount = { shelfSyncAfterLogin = id; recoverProfileAccount(id) })
         }
     }
+    if (restrictedMode && adultProgressOpen) AdultProgressSyncSheet(
+        controller = model.services.adultProgressSync, backdrop = drawerBackdrop,
+        sourceName = { id -> sourceEntries.firstOrNull { it.source.id == id }?.source?.name ?: id },
+        onDismiss = { adultProgressOpen = false },
+        onConfigure = { openWebDavSettings = true; changeSection(Section.SETTINGS) },
+    )
     if (profileSourcesOpen) ContentProfileSourceSheet(
         entries = profileEntries, selectedId = scopedBrowse.sourceId, backdrop = drawerBackdrop,
         onSelect = { id -> scopedBrowse.selectSource(id, keepSearch = searchExpanded || tagSearchVisible) },
@@ -1127,6 +1138,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     is Frame.Reader -> ReaderScreen(
                         manga = current.session.manga, chapters = current.session.chapters,
                         adultProfile = current.session.manga.sourceId in privateSourceIds,
+                        adultSourceIds = privateSourceIds,
                         initialChapterId = current.session.chapterId,
                         initialCollection = current.session.collection,
                         startAtBeginning = current.session.startAtBeginning,
@@ -1586,6 +1598,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 model.library.mergeFavorites(listOf(manga))
                                         },
                                         siteSyncStates = if (restrictedMode) siteSyncStates else emptyMap(),
+                                        onAdultProgressSync = if (restrictedMode) ({ adultProgressOpen = true }) else null,
                                         onSiteSync = if (restrictedMode) {
                                             { id -> shelfSyncSource = id; model.services.adultShelfSync[id]?.check() }
                                         } else null,
@@ -1658,6 +1671,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onRetrySync = model::retryAccountSync,
                                     )
                                     Section.SETTINGS -> SettingsScreen(model.updates, model.library, onRequestNotifications,
+                                        openWebDavSettings = openWebDavSettings,
+                                        onWebDavSettingsOpened = { openWebDavSettings = false },
+                                        onWebDavSettingsClosed = {
+                                            if (restrictedMode) { changeSection(Section.LIBRARY); adultProgressOpen = true }
+                                        },
                                         clearBrowseCache = model::clearBrowseCache, clearMetadataCache = model::clearMetadataCache,
                                         contentTopPadding = chromePadding,
                                         sourceBackdrop = searchBackdrop, sourceRegistry = model.bodySources,

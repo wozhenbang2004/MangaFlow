@@ -22,6 +22,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import okio.Buffer
 
@@ -55,6 +57,7 @@ internal class AnimeStreamBridge private constructor(
     private val asset: AnimePlaybackAsset,
     parentScope: CoroutineScope,
     private val startup: AnimeBufferedStartup?,
+    startupByteLimit: Long?,
 ) {
     private enum class Kind { AUTO, MANIFEST, MEDIA, KEY, SUBTITLE }
     private data class Resource(
@@ -67,6 +70,7 @@ internal class AnimeStreamBridge private constructor(
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[Job]))
     private val client = NetworkClient(acceptCompression = false, route = asset.route)
     private val lock = SynchronizedObject()
+    private val warmReads = startupByteLimit?.let(::StartupReads)
     private val resources = linkedMapOf<String, Resource>()
     private val token = randomUuid().replace("-", "") + randomUuid().replace("-", "")
     private lateinit var server: AnimeLoopbackServer
@@ -89,6 +93,9 @@ internal class AnimeStreamBridge private constructor(
     private val subtitles = linkedMapOf<String, String>()
 
     fun subtitleUrl(subtitle: AnimeSubtitle): String = requireNotNull(subtitles[subtitle.id])
+
+    fun parkStartupReads() { warmReads?.park() }
+    fun promoteStartupReads() { warmReads?.promote() }
 
     fun close() {
         server.close()
@@ -164,6 +171,7 @@ internal class AnimeStreamBridge private constructor(
             var redirects = 0
             while (true) {
                 currentCoroutineContext().ensureActive()
+                warmReads?.admit(0)
                 val requestBuilder = Request.Builder().url(url).method(request.method, null)
                     .header("Accept-Encoding", "identity")
                 scopedHeaders(resource, url).forEach { (name, value) -> requestBuilder.header(name, value) }
@@ -217,6 +225,7 @@ internal class AnimeStreamBridge private constructor(
                         }
                     },
                     onChunk = { bytes, count ->
+                        warmReads?.admit(count)
                         if (!classified) {
                             prefix.write(bytes, 0, count)
                             if (prefix.size >= 256) {
@@ -278,6 +287,35 @@ internal class AnimeStreamBridge private constructor(
             if (!output.started) runCatching { output.error(502, "Unable to read this playback resource") }
         } finally {
             connection.close()
+        }
+    }
+
+    /** Serve only the bounded preroll while the extra decoder holds optional admission. */
+    private class StartupReads(limit: Long) {
+        private enum class Phase { WARMING, PARKED, PROMOTED }
+        private val phase = MutableStateFlow(Phase.WARMING)
+        private val lock = SynchronizedObject()
+        private var remaining = limit
+
+        fun park() = synchronized(lock) { phase.value = Phase.PARKED }
+        fun promote() = synchronized(lock) { phase.value = Phase.PROMOTED }
+
+        suspend fun admit(bytes: Int) {
+            while (true) {
+                val admitted = synchronized(lock) {
+                    when (phase.value) {
+                        Phase.WARMING -> {
+                            check(bytes <= remaining) { "桌面预解码已用完本次媒体字节额度" }
+                            remaining -= bytes
+                            true
+                        }
+                        Phase.PARKED -> false
+                        Phase.PROMOTED -> true
+                    }
+                }
+                if (admitted) return
+                phase.first { it != Phase.PARKED }
+            }
         }
     }
 
@@ -401,7 +439,8 @@ internal class AnimeStreamBridge private constructor(
             finally { bridge.close() }
         }
 
-        suspend fun create(asset: AnimePlaybackAsset, scope: CoroutineScope, startup: AnimeBufferedStartup? = null): AnimeStreamBridge {
+        suspend fun create(asset: AnimePlaybackAsset, scope: CoroutineScope, startup: AnimeBufferedStartup? = null,
+            startupByteLimit: Long? = null): AnimeStreamBridge {
             var pending: AnimeStreamBridge? = null
             return try {
                 withContext(Dispatchers.IO) {
@@ -410,7 +449,7 @@ internal class AnimeStreamBridge private constructor(
                         "当前平台的统一路由暂不支持 DASH，请选择 HLS 或视频文件线路"
                     }
                     require(!primary.encodedPath.endsWith(".pls", true)) { "当前线路不是受支持的视频文件或 HLS 清单" }
-                    val bridge = AnimeStreamBridge(asset, scope, startup)
+                    val bridge = AnimeStreamBridge(asset, scope, startup, startupByteLimit)
                     try {
                         bridge.server = AnimeLoopbackServer(bridge.scope, bridge::handle)
                         pending = bridge

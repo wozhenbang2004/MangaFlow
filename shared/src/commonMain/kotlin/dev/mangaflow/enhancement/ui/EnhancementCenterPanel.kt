@@ -433,6 +433,7 @@ private fun EnhancementModels(inventory: EngineInventory, progress: Map<String, 
     }
     val engines = inventory.engines.filter { engine -> if (content == EnhancementContent.ANIME)
         EngineContent.VIDEO in engine.contents else engine.contents.any { it != EngineContent.VIDEO } }
+    val uriHandler = LocalUriHandler.current
     if (engines.isEmpty()) EnhancementQuiet("尚未取得引擎信息。")
     engines.forEach { engine ->
         EnhancementSection(engine.title, Icons.Outlined.Memory, engineReadinessLabel(engine.readiness)) {
@@ -460,6 +461,14 @@ private fun EnhancementModels(inventory: EngineInventory, progress: Map<String, 
                         Text("${model.nativeScale}× · ${enhancementBytes(model.bytes)} · ${model.sha256.take(12)}",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                }
+            }
+            if (engine.id == EnhancementEngineIds.ANDROID_RIFE) {
+                inventory.frameModels.filter { it.engineId == engine.id }.forEach { model ->
+                    EnhancementValue(model.title, "${enhancementBytes(model.bytes)} · ${model.sha256.take(12)}")
+                }
+                MotionTextButton({ uriHandler.openUri(engine.sourceUrl) }, contentPadding = PaddingValues(horizontal = 0.dp)) {
+                    Text("打开官方 RIFE 模型包")
                 }
             }
         }
@@ -551,7 +560,7 @@ private fun EnhancementModelImport(center: EnhancementCenter, onSelectModel: (St
                 withContext(NonCancellable) {
                     try {
                         val model = receipt.await()
-                        if (attached) select.value(model.id)
+                        if (attached && model.engineId != EnhancementEngineIds.ANDROID_RIFE) select.value(model.id)
                         notice = "已导入 ${model.title}。首次真实试用会验证模型输入与输出倍率。"
                     } catch (error: Exception) { notice = error.message ?: "模型未能导入。" }
                     finally { releasePickedDocuments(listOf(uri)); importing = false }
@@ -559,10 +568,10 @@ private fun EnhancementModelImport(center: EnhancementCenter, onSelectModel: (St
             }
         }
     }
-    EnhancementSection("导入模型", Icons.Outlined.UploadFile, if (video) "FP32 NCHW RGB 视频模型" else "ONNX 权重文件",
+    EnhancementSection("导入模型", Icons.Outlined.UploadFile, if (video) "FP32 RGB / RIFE" else "ONNX 权重文件",
         action = { EnhancementDetailToggle(expanded, { expanded = !expanded }) }) {
         if (expanded) {
-            EnhancementQuiet(if (video) "请选用输入、输出均为 RGB 的单帧视频模型，选择其原生倍率。支持已下载的单文件 SDR MP4。"
+            EnhancementQuiet(if (video) "单帧增强请选择 RGB 模型的原生倍率。补帧请选择官方包的 rife_v2 文件，应用按摘要识别版本。"
                 else "按模型说明选择原生倍率和适用内容。文件摘要会实际计算，导入不代表已通过设备验证。")
             EnhancementChoices(listOf(1, 2, 4), scale, { "$it×" }, { scale = it }, "模型声明倍率")
             if (!video) EnhancementChoices(listOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON), style,

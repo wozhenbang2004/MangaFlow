@@ -168,13 +168,13 @@ class NetworkClient(
     }
     /** A real bounded download path; chunks are delivered before the next read rather than buffered in memory. */
     suspend fun download(request: Request, maximumBytes: Long, onChunk: (ByteArray, Int) -> Unit, onProgress: (Long, Long) -> Unit = { _, _ -> }): NetworkResponse {
-        val response = transfer(request, maximumBytes, onProgress, onChunk)
+        val response = transfer(request, maximumBytes, onProgress, { bytes, count -> onChunk(bytes, count) })
         return NetworkResponse(response.first, response.second, ByteArray(0))
     }
     /** Validate response headers before opening an output or consuming its body. */
     internal suspend fun downloadWithHeaders(
         request: Request, maximumBytes: Long, onResponse: (NetworkResponse) -> Boolean,
-        onChunk: (ByteArray, Int) -> Unit,
+        onChunk: suspend (ByteArray, Int) -> Unit,
     ): NetworkResponse {
         val response = transfer(request, maximumBytes, { _, _ -> }, onChunk, streaming = true) { code, headers ->
             onResponse(NetworkResponse(code, headers, ByteArray(0)))
@@ -183,7 +183,7 @@ class NetworkClient(
     }
     private suspend fun transfer(
         request: Request, maximumBytes: Long, progress: (Long, Long) -> Unit,
-        write: (ByteArray, Int) -> Unit, streaming: Boolean = false,
+        write: suspend (ByteArray, Int) -> Unit, streaming: Boolean = false,
         acceptResponse: (Int, Map<String, String>) -> Boolean = { _, _ -> true },
     ): Pair<Int, Map<String, String>> = coroutineScope {
         selectedRoute?.checkedActive()

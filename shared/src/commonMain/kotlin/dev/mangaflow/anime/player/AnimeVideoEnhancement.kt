@@ -1,7 +1,7 @@
 package dev.mangaflow.anime.player
 
 /** These are MangaFlow's small/medium CNN combinations, not upstream Mode A/B/C. */
-enum class AnimeVideoEnhancementMode { OFF, FAST, QUALITY }
+enum class AnimeVideoEnhancementMode { OFF, FAST, QUALITY, MODEL }
 
 /** Configuration acceptance alone cannot claim that a GPU has processed a frame. */
 enum class AnimeVideoEnhancementPhase { OFF, WAITING, CONFIGURED, ACTIVE, UNAVAILABLE, FAILED }
@@ -15,6 +15,7 @@ data class AnimeVideoEnhancementState(
     val outputWidth: Int? = null,
     val outputHeight: Int? = null,
     val observation: AnimeVideoEnhancementObservation? = null,
+    val modelName: String? = null,
 )
 
 /** Evidence from the current enhancement pass. A submission does not prove display presentation. */

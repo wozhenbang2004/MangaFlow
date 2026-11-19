@@ -119,10 +119,13 @@ private fun AnimeEnhancementStatus(
             it.sessionKey == animeEnhancementSessionKey(playback)
     }
     val effect = playback?.videoEnhancement.takeIf { hasSession }
+    val prepared = playback?.preparedVideoWindow.takeIf { hasSession }
     val observation = effect?.observation
     val playing = hasSession && playback?.isPlaying == true && !playback.isBuffering && !playback.playbackSuppressed &&
         playback.hasVideoTracks != false && playback.firstFrameRendered != false
     val recentlySubmitting = playing && observation?.recentlySubmitting == true
+    val usingPrepared = playing && prepared != null && prepared.framesUsed > 0 &&
+        monotonicTimeMillis() - prepared.lastUsedAt in 0L..1_000L
     val stateLabel = when {
         playback?.phase == AnimePlayerPhase.ERROR -> "播放未成功"
         playback?.phase == AnimePlayerPhase.OPENING -> "正在打开视频"
@@ -139,6 +142,8 @@ private fun AnimeEnhancementStatus(
     val processingLabel = when {
         !hasSession -> "打开视频后显示本集数据，设备读数仍可查看。"
         playback?.preEnhanced == true -> "已选择离线增强版本"
+        usingPrepared -> "正在复用预处理帧"
+        prepared != null -> "当前集前方帧已缓存"
         effect?.phase == AnimeVideoEnhancementPhase.FAILED -> "增强未成功 · 原因见处理页"
         effect?.phase == AnimeVideoEnhancementPhase.UNAVAILABLE -> "当前增强不可用 · 原因见处理页"
         effect?.mode == AnimeVideoEnhancementMode.OFF -> "当前使用原画设置"
@@ -149,8 +154,9 @@ private fun AnimeEnhancementStatus(
     }
     val currentFps = playback?.presentedFps.takeIf { playing }
     val inputSize = dimensions(playback?.videoWidth, playback?.videoHeight).takeIf { hasSession }
-    val submittedSize = if (effect?.phase == AnimeVideoEnhancementPhase.ACTIVE && (observation?.submittedFrames ?: 0) > 0)
-        dimensions(effect?.outputWidth, effect?.outputHeight) else null
+    val submittedSize = if (usingPrepared) dimensions(prepared?.outputWidth, prepared?.outputHeight)
+        else if (effect?.phase == AnimeVideoEnhancementPhase.ACTIVE && (observation?.submittedFrames ?: 0) > 0)
+            dimensions(effect?.outputWidth, effect?.outputHeight) else null
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (showHeading) Text("运行状态", style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.semantics { heading() })
@@ -206,6 +212,7 @@ private fun AnimeEnhancementStatus(
                     AnimeVideoEnhancementMode.OFF -> "原画"
                     AnimeVideoEnhancementMode.FAST -> "Anime4K S/S"
                     AnimeVideoEnhancementMode.QUALITY -> "Anime4K M/M"
+                    AnimeVideoEnhancementMode.MODEL -> effect.modelName ?: "等待模型回执"
                     null -> "—"
                 }
                 AnimeMetricRow(if (playback?.preEnhanced == true) "当前版本" else "已配置模型", model)
@@ -217,6 +224,12 @@ private fun AnimeEnhancementStatus(
                     "提交频率" to (submitFps?.let { formatDecimal(it, 1) + " 帧/s" } ?: "—"),
                     "前方增强" to animeSeconds(metrics?.preparedSeconds),
                 ))
+                if (prepared != null) {
+                    AnimeMetricRow("预处理模型", prepared.modelName)
+                    AnimeMetricRow("预处理耗时 / 缓存", animeMillis(prepared.processingMillis.toDouble()) +
+                        " / " + enhancementBytes(prepared.bytes))
+                    AnimeMetricRow("已缓存 / 实际复用 · 帧", "${prepared.frames} / ${prepared.framesUsed}")
+                }
                 EnhancementQuiet("提交频率不等于 GPU 完成或屏幕呈现帧率；提交尺寸对应处理缓冲区，不代表屏幕呈现分辨率。")
                 EnhancementDivider()
                 AnimeMetricRow("提交 / GPU 完成 / 呈现 · 累计",

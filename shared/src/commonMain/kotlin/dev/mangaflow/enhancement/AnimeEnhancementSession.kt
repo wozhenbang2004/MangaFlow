@@ -2,16 +2,18 @@ package dev.mangaflow.enhancement
 
 import dev.mangaflow.anime.player.AnimePlayerState
 import dev.mangaflow.anime.player.AnimeVideoEnhancementMode
+import dev.mangaflow.enhancement.engine.EngineModel
 import dev.mangaflow.experience.ExperienceResources
 
 fun animeEnhancementSessionKey(state: AnimePlayerState): String =
     "anime:${state.assetKey}:${state.sessionGeneration}"
 
-data class RealtimeEnhancementSelection(val mode: AnimeVideoEnhancementMode, val scale: Int, val reason: String? = null)
+data class RealtimeEnhancementSelection(val mode: AnimeVideoEnhancementMode, val scale: Int, val reason: String? = null,
+    val model: EngineModel? = null)
 
 /** Only the actual installed realtime backend is mapped here. Desired offline models remain unchanged. */
 fun selectRealtimeEnhancement(policy: EnhancementPolicy, resources: ExperienceResources,
-    sourceFps: Double?, measuredGpuP95Millis: Double?): RealtimeEnhancementSelection {
+    sourceFps: Double?, measuredGpuP95Millis: Double?, realtimeModel: EngineModel? = null): RealtimeEnhancementSelection {
     val scale = policy.scale.takeIf { it in 1..2 } ?: 1
     fun original(reason: String? = null) = RealtimeEnhancementSelection(AnimeVideoEnhancementMode.OFF, scale, reason)
     if (policy.tier == QualityTier.ORIGINAL) return original(if (policy.frameMode != FrameMode.ORIGINAL)
@@ -23,8 +25,11 @@ fun selectRealtimeEnhancement(policy: EnhancementPolicy, resources: ExperienceRe
     })
     if (resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2)
         return original("设备保护已暂缓增强，目标档位保留；当前显示原画")
-    if (policy.tier in setOf(QualityTier.FINE, QualityTier.ULTRA))
+    if (policy.tier in setOf(QualityTier.FINE, QualityTier.ULTRA)) {
+        if (realtimeModel != null) return RealtimeEnhancementSelection(AnimeVideoEnhancementMode.MODEL, realtimeModel.nativeScale,
+            model = realtimeModel)
         return original("所选高质量模型用于离线预处理；当前实时内核尚未适配，原画继续播放")
+    }
     if (policy.scale !in 1..2) return original("当前实时引擎支持 1× 修复与 2× 输出；更高倍率可离线处理")
     val mode = when (policy.tier) {
         QualityTier.LIGHT -> AnimeVideoEnhancementMode.FAST

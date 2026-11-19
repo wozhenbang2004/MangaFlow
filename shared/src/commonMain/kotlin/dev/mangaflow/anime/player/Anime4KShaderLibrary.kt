@@ -9,7 +9,7 @@ internal object Anime4KShaderLibrary {
     const val UPSTREAM_COMMIT = "7684e9586f8dcc738af08a1cdceb024cc184f426"
 
     fun sources(mode: AnimeVideoEnhancementMode, scale: Int = 2): List<Anime4KShader> = when (mode) {
-        AnimeVideoEnhancementMode.OFF -> emptyList()
+        AnimeVideoEnhancementMode.OFF, AnimeVideoEnhancementMode.MODEL -> emptyList()
         AnimeVideoEnhancementMode.FAST -> listOf(
             Anime4KShader("Anime4K_Restore_CNN_S.glsl", restoreSmall),
             Anime4KShader("Anime4K_Upscale_CNN_x2_S.glsl", upscaleSmall),

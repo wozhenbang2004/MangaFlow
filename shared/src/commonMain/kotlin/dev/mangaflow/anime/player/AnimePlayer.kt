@@ -3,6 +3,7 @@ package dev.mangaflow.anime.player
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import dev.mangaflow.anime.AnimePlaybackAsset
+import dev.mangaflow.enhancement.engine.EngineModel
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
 import kotlinx.coroutines.CancellationException
@@ -27,13 +28,39 @@ data class AnimePlayerRequest(
     val bypassMediaCache: Boolean = false,
 )
 
+data class AnimePreparedVideoRequest(
+    val asset: AnimePlaybackAsset,
+    val sessionGeneration: Long,
+    val timelineGeneration: Long,
+    val startMs: Long,
+    val endMs: Long,
+    val width: Int,
+    val height: Int,
+    val model: EngineModel,
+    val maximumSourceBytes: Long,
+    val maximumResultBytes: Long,
+)
+
+data class AnimePreparedVideoWindow(
+    val startMs: Long,
+    val endMs: Long,
+    val frames: Int,
+    val bytes: Long,
+    val modelName: String,
+    val outputWidth: Int,
+    val outputHeight: Int,
+    val processingMillis: Long,
+    val framesUsed: Long = 0L,
+    val lastUsedAt: Long = 0L,
+)
+
 enum class AnimePlayerPhase { IDLE, OPENING, READY, ENDED, ERROR, RELEASED }
 
 enum class AnimeVideoScale { FIT, FILL, ZOOM }
 enum class AnimeTrackKind { AUDIO, SUBTITLE, VIDEO }
 enum class AnimePlayerCapability {
     AUDIO_TRACKS, SUBTITLE_TRACKS, VIDEO_TRACKS, AUTOMATIC_AUDIO_TRACK,
-    VIDEO_SCALE, VOLUME, PICTURE_IN_PICTURE, BACKGROUND_AUDIO, BUFFER_CONTROL, VIDEO_ENHANCEMENT,
+    VIDEO_SCALE, VOLUME, PICTURE_IN_PICTURE, BACKGROUND_AUDIO, BUFFER_CONTROL, VIDEO_ENHANCEMENT, MODEL_ENHANCEMENT,
 }
 
 data class AnimePlayerTrack(
@@ -54,9 +81,14 @@ data class AnimePlayerOptions(
     val automaticRecoveryAttempts: Int = 2,
     val videoEnhancement: AnimeVideoEnhancementMode = AnimeVideoEnhancementMode.OFF,
     val enhancementScale: Int = 2,
+    val enhancementModel: EngineModel? = null,
+    val preparedVideoModel: EngineModel? = null,
 ) {
     fun requireValid() {
-        require(enhancementScale in 1..2) { "当前实时 Anime4K 支持 1× 修复与 2× 输出" }
+        require(if (videoEnhancement == AnimeVideoEnhancementMode.MODEL)
+            enhancementScale in setOf(1, 2, 4) && enhancementModel?.nativeScale == enhancementScale
+        else enhancementScale in 1..2 && enhancementModel == null) { "实时模型与所选倍率不兼容" }
+        require(preparedVideoModel == null || preparedVideoModel.nativeScale in setOf(1, 2, 4))
         require(bufferStartMs >= 0 && bufferRebufferMs >= 0 && bufferMinMs >= 0 && bufferMaxMs > 0) {
             "缓冲时间不能为负，最大缓冲时间必须大于零"
         }
@@ -111,6 +143,8 @@ data class AnimePlayerState(
     val droppedFrames: Long? = null,
     val presentedFps: Double? = null,
     val presentedFrames: Long? = null,
+    val preparedVideoWindow: AnimePreparedVideoWindow? = null,
+    val preparedVideoIssue: String? = null,
 ) {
     val ended: Boolean get() = phase == AnimePlayerPhase.ENDED
     val isPlaying: Boolean get() = phase == AnimePlayerPhase.READY && playWhenReady && !isBuffering
@@ -121,6 +155,12 @@ interface AnimePlayer {
     val state: StateFlow<AnimePlayerState>
     /** Optional original-media bytes confirmed in the backend's playback cache. */
     suspend fun cacheStartup(asset: AnimePlaybackAsset, byteLimit: Long, validUntil: Long): Long = 0L
+    /** True requires a retained native backend with a decoded frame for the exact start position. */
+    suspend fun prepareStartup(asset: AnimePlaybackAsset, positionMs: Long, byteLimit: Long, validUntil: Long): Boolean =
+        false
+    fun discardStartup(asset: AnimePlaybackAsset? = null) {}
+    suspend fun prepareVideoWindow(request: AnimePreparedVideoRequest): Boolean = false
+    fun discardPreparedVideo() {}
     fun open(request: AnimePlayerRequest)
     fun play()
     fun pause()
@@ -177,6 +217,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
                     closed = true
                     nativeGeneration++
                     opening?.cancel()
+                    onPlaybackEnding(null)
                     releaseNative()
                     mutableState.value = mutableState.value.copy(
                         sessionGeneration = mutableState.value.sessionGeneration + 1,
@@ -200,10 +241,13 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         val previous = mutableState.value
         val generation = ++nativeGeneration
         opening?.cancel()
+        onPlaybackEnding(next)
         releaseNative()
         request = next
         mutableState.value = AnimePlayerState(
-            sessionGeneration = previous.sessionGeneration + if (sameSession) 0 else 1, assetKey = next.asset.id,
+            sessionGeneration = previous.sessionGeneration + if (sameSession) 0 else 1,
+            timelineGeneration = previous.timelineGeneration + 1,
+            assetKey = next.asset.id,
             episodeId = next.asset.episodeId, phase = AnimePlayerPhase.OPENING,
             playWhenReady = next.playWhenReady && (foreground || previous.inPictureInPicture || options.backgroundAudio),
             positionMs = next.positionMs,
@@ -225,6 +269,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
                 throw cancel
             } catch (failure: Throwable) {
                 if (isCurrent(generation)) {
+                    onPlaybackEnding(null)
                     releaseNative()
                     fail(generation, failure)
                 }
@@ -283,7 +328,8 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         command(fatal = false) {
             val previous = this.options
             this.options = options
-            if (previous.videoEnhancement != options.videoEnhancement || previous.enhancementScale != options.enhancementScale) {
+            if (previous.videoEnhancement != options.videoEnhancement || previous.enhancementScale != options.enhancementScale ||
+                previous.enhancementModel != options.enhancementModel) {
                 mutableState.value = mutableState.value.copy(videoEnhancement = AnimeVideoEnhancementState(
                     options.videoEnhancement,
                     if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF) AnimeVideoEnhancementPhase.OFF
@@ -349,6 +395,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
     final override fun stop() = command {
         nativeGeneration++
         opening?.cancel()
+        onPlaybackEnding(null)
         releaseNative()
         request = null
         mutableState.value = AnimePlayerState(
@@ -369,6 +416,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
             closed = true
             nativeGeneration++
             opening?.cancel()
+            onPlaybackEnding(null)
             releaseNative()
             request = null
             mutableState.value = mutableState.value.copy(
@@ -414,6 +462,9 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
     protected abstract fun seekNative(positionMs: Long)
     protected abstract fun setSpeedNative(speed: Float): Float
     protected abstract fun releaseNative()
+    protected open fun onPlaybackEnding(next: AnimePlayerRequest?) {
+        if (next == null) discardStartup()
+    }
     protected open fun configureNative(previous: AnimePlayerOptions, next: AnimePlayerOptions) {}
     protected open fun setVideoScaleNative(scale: AnimeVideoScale) {}
     protected open fun setVolumeNative(volume: Float) { error("当前播放器不支持调整音量") }

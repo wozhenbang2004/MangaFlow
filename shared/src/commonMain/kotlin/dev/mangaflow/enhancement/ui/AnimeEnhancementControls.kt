@@ -116,8 +116,8 @@ internal fun AnimeEnhancementQuality(policy: EnhancementPolicy, inventory: Engin
         QualityTier.LIGHT -> "Anime4K S/S · 较轻的实时处理。"
         QualityTier.BALANCED -> "Anime4K M/M · 更精细的实时处理。"
         QualityTier.FINE, QualityTier.ULTRA -> if (model == null)
-            "需要兼容模型与离线预处理；准备完成前播放原画。"
-            else "用于离线预处理；当前实时播放仍使用原画。"
+            "使用兼容的高质量模型，实际执行与回退原因见运行状态。"
+            else "${model.title} · 能否即时增强取决于设备、模型和片源。"
     })
     if (policy.tier != QualityTier.ORIGINAL && PreparationMode.IMMEDIATE !in policy.preparation)
         EnhancementQuiet("即时处理已关闭，可在“预处理”中调整。")
@@ -127,11 +127,10 @@ internal fun AnimeEnhancementQuality(policy: EnhancementPolicy, inventory: Engin
     val selectedEngine = model?.let { choice -> engines.firstOrNull { it.id == choice.engineId } }
     val supported = (selectedEngine?.supportedScales ?: engines.flatMap { it.supportedScales }.toSet())
         .filter { it in setOf(1, 2, 4) }.sorted()
-    if (supported.isNotEmpty()) AnimeEnhancementChoices(supported, policy.scale,
+    AnimeEnhancementChoices(listOf(1, 2, 4), policy.scale,
         { if (it == 1) "1× 修复" else "$it×" }, "增强输出倍率",
         onSelect = { onChange(policy.copy(scale = it)) })
     if (policy.scale !in supported) EnhancementQuiet("已选 ${policy.scale}× · 当前没有兼容引擎，保留原画。")
-    else if (policy.scale > 2) EnhancementQuiet("${policy.scale}× 需要离线预处理，当前实时画面保持原画。")
     SettingsToggle("锁定所选档位", policy.locked, Icons.Outlined.Lock,
         onCheckedChange = { onChange(policy.copy(locked = it)) })
     if (policy.locked) EnhancementQuiet("设备保护触发时暂用原画，你的选择会保留。")
@@ -144,11 +143,7 @@ internal fun AnimeEnhancementFrames(policy: EnhancementPolicy, inventory: Engine
     customFps: @Composable () -> Unit) {
     Text("目标帧率", style = MaterialTheme.typography.titleSmall)
     Spacer(Modifier.height(8.dp))
-    // A custom value restored from another platform must remain identifiable and editable.
-    val modes = FrameMode.entries.filter {
-        it != FrameMode.CUSTOM || platformKind == PlatformKind.DESKTOP || policy.frameMode == FrameMode.CUSTOM
-    }
-    AnimeEnhancementChoices(modes, policy.frameMode,
+    AnimeEnhancementChoices(FrameMode.entries, policy.frameMode,
         { if (it == FrameMode.ORIGINAL) "原始帧率" else it.label }, "补帧目标",
         onSelect = { onChange(policy.copy(frameMode = it, detectScenes = true)) })
     if (policy.frameMode == FrameMode.CUSTOM) customFps()
@@ -194,7 +189,9 @@ internal fun AnimeEnhancementPreparation(policy: EnhancementPolicy, onChange: (E
         })
         Text(when (mode) {
             PreparationMode.IMMEDIATE -> "使用当前已支持的实时增强。"
-            PreparationMode.SMART -> "保留自动准备策略；在线片段尚不支持提前增强。"
+            PreparationMode.SMART -> if (platformKind == PlatformKind.ANDROID)
+                "兼容的点播片源可提前处理 5–15 秒画面，按原片时间与画面核对后复用。"
+                else "优先使用已准备的增强版本。"
             PreparationMode.COMPLETE -> "使用完整增强版本；处理需从离线任务发起。"
         }, Modifier.padding(start = 34.dp, bottom = 8.dp), style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)

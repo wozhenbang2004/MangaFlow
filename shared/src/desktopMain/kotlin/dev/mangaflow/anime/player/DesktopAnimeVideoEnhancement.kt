@@ -1,5 +1,6 @@
 package dev.mangaflow.anime.player
 
+import dev.mangaflow.enhancement.engine.EngineModel
 import dev.mangaflow.platform.PlatformContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -22,13 +23,15 @@ internal class DesktopAnimeVideoEnhancement(
     private var generation = -1L
     private var mode = AnimeVideoEnhancementMode.OFF
     private var scale = 2
+    private var model: EngineModel? = null
     private var mediaReady = false
     private var monitoring: Job? = null
     private var ownsShaders = false
 
-    fun configure(handle: MPVHandle?, generation: Long, mode: AnimeVideoEnhancementMode, mediaReady: Boolean, scale: Int = 2) {
+    fun configure(handle: MPVHandle?, generation: Long, mode: AnimeVideoEnhancementMode, mediaReady: Boolean, scale: Int = 2,
+        model: EngineModel? = null) {
         if (this.handle === handle && this.generation == generation && this.mode == mode &&
-            this.mediaReady == mediaReady && this.scale == scale) return
+            this.mediaReady == mediaReady && this.scale == scale && this.model == model) return
 
         monitoring?.cancel()
         monitoring = null
@@ -38,6 +41,7 @@ internal class DesktopAnimeVideoEnhancement(
         this.generation = generation
         this.mode = mode
         this.scale = scale
+        this.model = model
         this.mediaReady = mediaReady
         // A replaced backend is closed by the existing session owner. Its failed
         // cleanup must not transfer ownership or errors to a different backend.
@@ -56,11 +60,13 @@ internal class DesktopAnimeVideoEnhancement(
 
         monitoring = scope.launch(Dispatchers.Main.immediate) {
             try {
-                val paths = withContext(Dispatchers.IO) { DesktopAnime4KShaderStore.prepare(context, mode, scale) }
+                val paths = withContext(Dispatchers.IO) { DesktopAnime4KShaderStore.prepare(context, mode, scale, model) }
                 // append accepts a single literal path, even with ':' / ';' / '\\'.
                 // mpv's string getter prints this list with the platform separator.
                 val expectedList = paths.joinToString(File.pathSeparator)
                 var configured = false
+                var lastSampleTime: Double? = null
+                var budgetOverruns = 0
                 while (isCurrentSession(handle, generation, mode)) {
                     val width = positiveDimension(handle, "video-params/w")
                     val height = positiveDimension(handle, "video-params/h")
@@ -99,10 +105,28 @@ internal class DesktopAnimeVideoEnhancement(
                         check(handle.getPropertyString("glsl-shaders") == expectedList) {
                             "The renderer did not confirm the complete shader list"
                         }
-                        // Mediamp 0.5.1 has no public node getter for vo-passes.
-                        // Accepted paths cannot prove compiled/executed GPU frames.
-                        update(generation, state(mode, AnimeVideoEnhancementPhase.CONFIGURED,
-                            "播放器未反馈增强结果，尚不能确认是否生效", width, height))
+                        val sample = model?.let { readArtCnnPasses(handle, it.title) }
+                        if (sample == null) {
+                            update(generation, state(mode, AnimeVideoEnhancementPhase.CONFIGURED,
+                                if (model == null) "播放器未反馈增强结果，尚不能确认是否生效"
+                                else "模型已加载，等待光栅尺寸和渲染器执行 ArtCNN", width, height))
+                        } else {
+                            val frameTime = handle.getPropertyDoubleOrNull("video-pts")?.takeIf(Double::isFinite)
+                            val sourceFps = handle.getPropertyDoubleOrNull("container-fps")?.takeIf { it.isFinite() && it > 0 }
+                            if (frameTime != null && frameTime != lastSampleTime && sourceFps != null) {
+                                lastSampleTime = frameTime
+                                budgetOverruns = if (sample > 1_000_000_000.0 / sourceFps * .85) budgetOverruns + 1 else 0
+                            }
+                            if (budgetOverruns >= 3) {
+                                check(clearOwnedShaders()) { "无法关闭已超出预算的模型" }
+                                update(generation, state(mode, AnimeVideoEnhancementPhase.UNAVAILABLE,
+                                    "实际 GPU pass 耗时超过帧预算，原画继续播放", width, height))
+                                return@launch
+                            }
+                            update(generation, state(mode, AnimeVideoEnhancementPhase.ACTIVE,
+                                "2× 亮度超分 · 本次 8 个 GPU pass ${(sample / 10_000L) / 100.0}ms", width, height)
+                                .copy(modelName = model?.title))
+                        }
                     }
                     // Keep HDR / video-track changes gated without replacing the
                     // event listener owned by Mediamp's playback state machine.
@@ -114,7 +138,7 @@ internal class DesktopAnimeVideoEnhancement(
                 if (isCurrentSession(handle, generation, mode)) {
                     val restored = clearOwnedShaders()
                     update(generation, state(mode, AnimeVideoEnhancementPhase.FAILED,
-                        if (restored) "Anime4K 暂不可用，已恢复原始画质"
+                        if (restored) "画质模型暂不可用，已恢复原始画质"
                         else "无法确认增强已关闭，请重新打开视频"))
                 }
             }
@@ -147,6 +171,22 @@ internal class DesktopAnimeVideoEnhancement(
 
     private fun positiveDimension(handle: MPVHandle, property: String): Int? =
         handle.getPropertyLongOrNull(property)?.takeIf { it in 1..Int.MAX_VALUE.toLong() }?.toInt()
+
+    /** Scalar subproperties of mpv 0.40's latest fresh-render pass data. They aren't a display FPS counter. */
+    private fun readArtCnnPasses(handle: MPVHandle, name: String): Long? {
+        val prefix = "vo-passes/fresh"
+        val count = handle.getPropertyLongOrNull("$prefix/count")?.takeIf { it in 1..128 }?.toInt() ?: return null
+        val timings = linkedMapOf<String, Long>()
+        for (index in 0 until count) {
+            val desc = handle.getPropertyString("$prefix/$index/desc") ?: continue
+            val start = desc.indexOf("$name (")
+            if (start < 0) continue
+            val pass = desc.substring(start + name.length + 2).substringBefore(')')
+            val nanos = handle.getPropertyLongOrNull("$prefix/$index/last")?.takeIf { it in 1..1_000_000_000 } ?: continue
+            timings[pass] = nanos
+        }
+        return timings.values.sum().takeIf { timings.size == 8 && "Depth-To-Space" in timings }
+    }
 
     private fun state(
         mode: AnimeVideoEnhancementMode,

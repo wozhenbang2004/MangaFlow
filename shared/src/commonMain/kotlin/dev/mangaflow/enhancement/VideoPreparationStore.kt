@@ -46,9 +46,11 @@ data class VideoEnhancementVersion(
     val progress: EngineProgress? = null,
     val reason: String? = null,
     val container: EngineVideoContainer = EngineVideoContainer.MATROSKA,
+    val interpolatedFrames: Int? = null,
 ) {
     val label: String get() = listOfNotNull(width?.let { w -> height?.let { "$w × $it" } },
-        fps?.let { "${(it * 100).toInt() / 100.0} FPS" }).joinToString(" · ").ifEmpty { "${scale}× · ${frameMode.label}" }
+        fps?.let { "${(it * 100).toInt() / 100.0} FPS" }, interpolatedFrames?.let { "推理 $it 帧" })
+        .joinToString(" · ").ifEmpty { "${scale}× · ${frameMode.label}" }
     fun policy() = EnhancementPolicy(tier = tier, scale = scale, modelId = modelId, frameMode = frameMode,
         frameQuality = frameQuality, customFps = customFps, detectScenes = detectScenes,
         preparation = setOf(PreparationMode.COMPLETE))
@@ -188,10 +190,15 @@ class VideoPreparationStore(
             }
             val ensemble = policy.frameQuality in setOf(FrameQuality.FINE, FrameQuality.ULTRA)
             val rifeName = "rife_v${rifeVersion.replace("-lite", "_lite")}${if (ensemble) "_ensemble" else ""}.onnx"
-            val rife = if (policy.frameMode == FrameMode.ORIGINAL) null else inventory.frameModels.firstOrNull {
-                StorageFile(it.path).name == rifeName
+            val rife = if (policy.frameMode == FrameMode.ORIGINAL) null else inventory.frameModels.firstOrNull { model ->
+                if (descriptor.id == EnhancementEngineIds.ANDROID_VIDEO_ONNX)
+                    model.engineId == EnhancementEngineIds.ANDROID_RIFE && model.version == rifeVersion
+                else StorageFile(model.path).name == rifeName
             }
-            require(policy.frameMode == FrameMode.ORIGINAL || rife != null) { "所选补帧档位需要 $rifeName，请先安装对应模型" }
+            require(policy.frameMode == FrameMode.ORIGINAL || rife != null) {
+                if (descriptor.id == EnhancementEngineIds.ANDROID_VIDEO_ONNX) "请先导入 RIFE $rifeVersion 的官方 FP32 v2 模型"
+                else "所选补帧档位需要 $rifeName，请先安装对应模型"
+            }
             val modelDigest = EnhancedAssetIdentity.digest("${model?.sha256.orEmpty()}|${rife?.sha256.orEmpty()}")
             val parameters = listOf(descriptor.version, policy.tier, scale, policy.frameMode, policy.frameQuality,
                 policy.customFps, true, model?.id, modelDigest).joinToString("|")
@@ -250,6 +257,7 @@ class VideoPreparationStore(
                             check(temp.renameTo(output(row))) { "增强视频无法原子发布" }
                             val done = row.copy(phase = EnhancementTaskPhase.COMPLETED, width = result.width,
                                 height = result.height, fps = result.video.fps, durationMillis = result.video.durationMillis,
+                                interpolatedFrames = result.video.interpolatedFrames,
                                 bytes = result.bytes, outputDigest = result.sha256,
                                 outputModifiedAt = output(row).lastModified(), updatedAt = wallTimeMillis())
                             save(done); records[id] = done; publish()
@@ -401,7 +409,7 @@ class VideoPreparationStore(
         .put("created", r.createdAt).put("updated", r.updatedAt).put("width", r.width ?: 0).put("height", r.height ?: 0)
         .put("fps", r.fps ?: -1.0).put("duration", r.durationMillis ?: -1).put("bytes", r.bytes)
         .put("outputDigest", r.outputDigest ?: "").put("outputModified", r.outputModifiedAt).put("reason", r.reason ?: "")
-        .put("container", r.container.name)
+        .put("container", r.container.name).put("interpolatedFrames", r.interpolatedFrames ?: -1)
     private fun decode(j: JSONObject): VideoEnhancementVersion {
         require(j.optInt("schema") == 1)
         return VideoEnhancementVersion(j.getString("id"), j.getString("download"), j.getString("source"), j.getString("sourceDigest"), j.optString("sourceStamp"),
@@ -412,7 +420,8 @@ class VideoPreparationStore(
             j.optInt("width").takeIf { it > 0 }, j.optInt("height").takeIf { it > 0 }, j.optDouble("fps", -1.0).takeIf { it > 0 },
             j.optLong("duration", -1).takeIf { it >= 0 }, j.optLong("bytes"), j.optString("outputDigest").takeIf { it.isNotBlank() },
             outputModifiedAt = j.optLong("outputModified"), reason = j.optString("reason").takeIf { it.isNotBlank() },
-            container = EngineVideoContainer.valueOf(j.optString("container", EngineVideoContainer.MATROSKA.name)))
+            container = EngineVideoContainer.valueOf(j.optString("container", EngineVideoContainer.MATROSKA.name)),
+            interpolatedFrames = j.optInt("interpolatedFrames", -1).takeIf { it >= 0 })
     }
     private companion object { val DIGEST = Regex("[a-f0-9]{64}"); const val PREFIX = "video-enhance:" }
 }

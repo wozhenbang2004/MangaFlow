@@ -119,6 +119,9 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val sourcePlugins = SourcePluginStore.get(application)
     val starterSources = StarterSourceInstaller(application, sourcePlugins, scope)
     val library = LibraryStore(application)
+    val adultProgressSync = dev.mangaflow.account.AdultProgressSyncController(application, library, scope) {
+        bodySources.entries.value.filter { it.adult }.mapTo(mutableSetOf()) { it.source.id }
+    }
     val sourceChecks = SourceCheckController(application, repository, library, operations,
         prepareSources = ::awaitSourcesReady)
     val downloads = DownloadStore.get(application)

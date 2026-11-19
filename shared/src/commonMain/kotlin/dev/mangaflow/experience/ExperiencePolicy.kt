@@ -324,13 +324,13 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         enhancementWaitReasonLocked(priority, estimatedBytes)
     }
 
-    private fun enhancementWaitReasonLocked(priority: Int, estimatedBytes: Long): String? {
+    private fun enhancementWaitReasonLocked(priority: Int, estimatedBytes: Long, sharedRealtimeOwner: String? = null): String? {
         val current = mutableState.value
         return when {
             resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2 -> "设备保护：内存或温度压力"
             storageLow || resources.freeDiskBytes?.let { it <= current.diskReserveBytes } == true -> "存储空间不足"
             platformKind != PlatformKind.DESKTOP && !current.foreground -> "返回应用后继续处理"
-            realtimeEnhancementOwners.isNotEmpty() -> "当前播放优先"
+            realtimeEnhancementOwners.any { it != sharedRealtimeOwner } -> "当前播放优先"
             priority >= 2 && (readerUsers > 0 || readerWaiting) -> "当前阅读优先"
             priority >= 1 && resources.cpuLoad?.let { it >= .92 } == true -> "等待 CPU 负载回落"
             estimatedBytes > 0 && resources.availableMemoryBytes?.let {
@@ -340,8 +340,10 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         }
     }
 
-    internal fun tryAcquireEnhancement(priority: Int, estimatedBytes: Long = 0L): (() -> Unit)? = synchronized(lock) {
-        if (activeEnhancements > 0 || enhancementWaitReasonLocked(priority, estimatedBytes) != null) return@synchronized null
+    internal fun tryAcquireEnhancement(priority: Int, estimatedBytes: Long = 0L,
+        sharedRealtimeOwner: String? = null): (() -> Unit)? = synchronized(lock) {
+        if (activeEnhancements > 0 || enhancementWaitReasonLocked(priority, estimatedBytes, sharedRealtimeOwner) != null)
+            return@synchronized null
         activeEnhancements++
         enhancementReservedBytes += estimatedBytes.coerceAtLeast(0L)
         var released = false

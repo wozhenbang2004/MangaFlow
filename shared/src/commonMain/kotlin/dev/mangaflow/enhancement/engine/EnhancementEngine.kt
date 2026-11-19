@@ -138,6 +138,7 @@ data class EngineVideoMetadata(
     val audioTracks: Int,
     val subtitleTracks: Int,
     val chapters: Int,
+    val interpolatedFrames: Int? = null,
 )
 
 data class EngineOutput(
@@ -162,10 +163,12 @@ object EnhancementEngineIds {
     const val LOCAL_DETAIL_DIGEST = "a9241c52aac7eecfb6b4ced9fdd587004da45864954d528047406ce3aa09b620"
     const val ANDROID_ONNX = "android-onnx"
     const val ANDROID_VIDEO_ONNX = "android-video-onnx"
+    const val ANDROID_VIDEO_REALTIME = "android-video-nnapi"
     const val MANGAJANAI = "mangajanai-cli"
     const val VIDEOJANAI = "videojanai-cli"
     const val ANDROID_RIFE = "android-rife"
     const val DESKTOP_REALTIME = "animejanai-realtime"
+    const val DESKTOP_ARTCNN = "artcnn-glsl"
 }
 
 internal fun anime4kEngineDescriptors(): List<EngineDescriptor> = listOf("small" to "S/S", "medium" to "M/M").map { (size, profile) ->

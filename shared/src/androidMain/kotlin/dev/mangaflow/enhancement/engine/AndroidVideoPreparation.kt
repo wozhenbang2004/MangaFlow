@@ -43,14 +43,16 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
-internal const val ANDROID_VIDEO_ENGINE_VERSION = "Media3 1.11.1 / ONNX 1.31.1 / 1"
+internal const val ANDROID_VIDEO_ENGINE_VERSION = "Media3 1.11.1 / ONNX 1.31.1 / 2"
 private const val VIDEO_WORKING_BYTES = 128L * 1024 * 1024
 
 internal suspend fun prepareAndroidVideo(
     context: Context,
     request: EngineVideoRequest,
-    model: EngineModel,
-    session: OrtSession,
+    model: EngineModel?,
+    session: OrtSession?,
+    rifeModel: EngineModel?,
+    rifeSession: OrtSession?,
     progress: (EngineProgress) -> Unit,
 ): EngineOutput {
     val coroutine = currentCoroutineContext()
@@ -68,55 +70,76 @@ internal suspend fun prepareAndroidVideo(
         val width = Math.multiplyExact(sourceInfo.width, request.scale)
         val height = Math.multiplyExact(sourceInfo.height, request.scale)
         val frameMemory = (sourceInfo.width.toLong() * sourceInfo.height + width.toLong() * height) * 4
-        require(width % 2 == 0 && height % 2 == 0 && frameMemory <= VIDEO_WORKING_BYTES / 2) {
+        val rifeMemory = if (rifeSession == null) 0L else sourceInfo.width.toLong() * sourceInfo.height * 76
+        require(width % 2 == 0 && height % 2 == 0 && frameMemory <= VIDEO_WORKING_BYTES / 2 &&
+            frameMemory + rifeMemory < VIDEO_WORKING_BYTES) {
             "设备当前无法按此尺寸安全处理，建议选择较小倍率"
         }
+        require(rifeSession == null || sourceInfo.width.toLong() * sourceInfo.height <= 1_280L * 720L) {
+            "当前 Android 的 RIFE 配置可处理最多 921600 像素的原始帧，原版保持可用"
+        }
+        require(rifeSession == null || request.sceneThreshold in 0.01..1.0) { "补帧必须启用有效的切镜保护" }
+        val expectedTimes = if (rifeSession == null) sourceInfo.videoTimes else androidRifeTimes(sourceInfo.videoTimes, request)
 
         val frameCount = AtomicInteger()
+        val inferredCount = AtomicInteger()
         var lastSampleAt = 0L
         val processingStarted = SystemClock.elapsedRealtime()
-        val effect = GlEffect { _, hdr ->
-            if (hdr) throw VideoFrameProcessingException("HDR 片源保持原视频")
-            AndroidOnnxVideoProgram(session, sourceInfo.width, sourceInfo.height, request.scale, VIDEO_WORKING_BYTES - frameMemory,
-                checkActive = inspect) {
-                val completed = frameCount.incrementAndGet()
-                val now = SystemClock.elapsedRealtime()
-                if (completed == 1 || completed == sourceInfo.videoTimes.size || now - lastSampleAt >= 750) {
-                    lastSampleAt = now
-                    progress(EngineProgress(EngineStage.PROCESS, completed.toLong(), sourceInfo.videoTimes.size.toLong(),
-                        completed * 1000.0 / (now - processingStarted).coerceAtLeast(1), "逐帧 RGB 增强 · CPU ONNX"))
-                }
+        fun frameWritten() {
+            val completed = frameCount.incrementAndGet()
+            val now = SystemClock.elapsedRealtime()
+            if (completed == 1 || completed == expectedTimes.size || now - lastSampleAt >= 750) {
+                lastSampleAt = now
+                val detail = if (rifeSession == null) "逐帧 RGB 增强 · CPU ONNX"
+                    else "RIFE 已推理 ${inferredCount.get()} 帧 · CPU ONNX"
+                progress(EngineProgress(EngineStage.PROCESS, completed.toLong(), expectedTimes.size.toLong(),
+                    completed * 1000.0 / (now - processingStarted).coerceAtLeast(1), detail))
             }
         }
-        val transcoded = exportVideo(context, source, temporary, effect)
+        val effects = buildList {
+            if (rifeSession != null) add(GlEffect { _, hdr ->
+                if (hdr) throw VideoFrameProcessingException("HDR 片源保持原视频")
+                AndroidRifeEffect(rifeSession, sourceInfo.width, sourceInfo.height, sourceInfo.videoTimes, expectedTimes,
+                    request.rifeEnsemble, request.sceneThreshold, inspect) { interpolated ->
+                    if (interpolated) inferredCount.incrementAndGet()
+                    if (session == null) frameWritten()
+                }
+            })
+            if (session != null) add(GlEffect { _, hdr ->
+                if (hdr) throw VideoFrameProcessingException("HDR 片源保持原视频")
+                AndroidOnnxVideoProgram(session, sourceInfo.width, sourceInfo.height, request.scale,
+                    VIDEO_WORKING_BYTES - frameMemory - rifeMemory, checkActive = inspect, onFrame = ::frameWritten)
+            })
+        }
+        val transcoded = exportVideo(context, source, temporary, effects)
         inspect()
 
         progress(EngineProgress(EngineStage.VALIDATE, detail = "校验输出尺寸、逐帧时间轴和原始 AAC 音轨"))
         val outputInfo = inspectVideo(temporary, inspect)
         check(outputInfo.width == width && outputInfo.height == height) { "编码器输出尺寸与目标不同" }
         check(transcoded.videoEncoderName != null && transcoded.audioEncoderName == null &&
-            frameCount.get() == sourceInfo.videoTimes.size && transcoded.videoFrameCount == frameCount.get()) {
+            frameCount.get() == expectedTimes.size && transcoded.videoFrameCount == frameCount.get()) {
             "编码帧数或音频透传状态与原视频不一致"
         }
         check(sourceInfo.audio?.identity == outputInfo.audio?.identity) { "未能保留原始 AAC 音轨" }
         val sourceStart = minOf(sourceInfo.videoTimes.first(), sourceInfo.audio?.times?.first() ?: Long.MAX_VALUE)
         val outputStart = minOf(outputInfo.videoTimes.first(), outputInfo.audio?.times?.first() ?: Long.MAX_VALUE)
-        check(sameTimeline(sourceInfo.videoTimes, outputInfo.videoTimes, sourceStart, outputStart) &&
+        check(sameTimeline(expectedTimes, outputInfo.videoTimes, sourceStart, outputStart) &&
             sameTimeline(sourceInfo.audio?.times ?: LongArray(0), outputInfo.audio?.times ?: LongArray(0), sourceStart, outputStart) &&
             abs(outputInfo.durationUs - sourceInfo.durationUs) <= 50_000L) {
             "视频或音轨时间轴未通过校验，原版保持可用"
         }
         validateDecodedOutput(temporary, outputInfo.videoTimes, inspect, progress)
-        check(engineSha256(source) == sourceHash && engineSha256(File(model.path)) == model.sha256) {
+        check(engineSha256(source) == sourceHash && listOfNotNull(model, rifeModel).all { engineSha256(File(it.path)) == it.sha256 }) {
             "处理期间原视频或模型发生变化，增强版未发布"
         }
         val videoSpan = outputInfo.videoTimes.last() - outputInfo.videoTimes.first()
         val output = EngineOutput(destination.canonicalPath, width, height, engineSha256(temporary), temporary.length(),
             EnhancementEngineIds.ANDROID_VIDEO_ONNX, ANDROID_VIDEO_ENGINE_VERSION,
-            EnhancedAssetIdentity.digest("${model.sha256}|"), SystemClock.elapsedRealtime() - measuredAt,
+            EnhancedAssetIdentity.digest("${model?.sha256.orEmpty()}|${rifeModel?.sha256.orEmpty()}"), SystemClock.elapsedRealtime() - measuredAt,
             video = EngineVideoMetadata(outputInfo.durationUs / 1_000L,
                 videoSpan.takeIf { it > 0L }?.let { (outputInfo.videoTimes.size - 1) * 1_000_000.0 / it },
-                if (outputInfo.audio == null) 0 else 1, 0, 0))
+                if (outputInfo.audio == null) 0 else 1, 0, 0, rifeSession?.let { inferredCount.get() }))
         inspect()
         moveNewEngineFile(temporary, destination)
         progress(EngineProgress(EngineStage.COMPLETE, frameCount.get().toLong(), frameCount.get().toLong(),
@@ -128,7 +151,7 @@ internal suspend fun prepareAndroidVideo(
 }
 
 /** Transformer owns decoder/encoder/muxer lifetime. Its blocking cancel never occupies the UI. */
-private suspend fun exportVideo(context: Context, source: File, destination: File, effect: GlEffect): ExportResult {
+private suspend fun exportVideo(context: Context, source: File, destination: File, effects: List<GlEffect>): ExportResult {
     val thread = HandlerThread("MangaFlowVideoExporter").apply { start() }
     val handler = Handler(thread.looper)
     val dispatcher = handler.asCoroutineDispatcher("MangaFlowVideoExporter")
@@ -137,7 +160,7 @@ private suspend fun exportVideo(context: Context, source: File, destination: Fil
     try {
         withContext(dispatcher) {
             val sourceItem = MediaItem.Builder().setUri(Uri.fromFile(source)).setMimeType(MimeTypes.VIDEO_MP4).build()
-            val edited = EditedMediaItem.Builder(sourceItem).setEffects(Effects(emptyList(), listOf(effect))).build()
+            val edited = EditedMediaItem.Builder(sourceItem).setEffects(Effects(emptyList(), effects)).build()
             val frameProcessor = DefaultVideoFrameProcessor.Factory.Builder()
                 .setSdrWorkingColorSpace(DefaultVideoFrameProcessor.WORKING_COLOR_SPACE_ORIGINAL).build()
             val encoders = DefaultEncoderFactory.Builder(context).setEnableFallback(false).setEnableFormatFallback(false).build()
@@ -330,13 +353,16 @@ private fun validateDecodedOutput(source: File, expectedTimes: LongArray, checkA
 
 private fun MediaFormat.intOrNull(key: String): Int? = if (containsKey(key)) getInteger(key) else null
 
-private class AndroidOnnxVideoProgram(
+internal class AndroidOnnxVideoProgram(
     private val session: OrtSession,
     private val width: Int,
     private val height: Int,
     private val scale: Int,
     private val budget: Long,
     private val checkActive: () -> Unit,
+    private val capture: ((Long, ByteBuffer, ByteBuffer) -> Unit)? = null,
+    private val onProcessed: ((Long) -> Unit)? = null,
+    private val onReleased: (() -> Unit)? = null,
     private val onFrame: () -> Unit,
 ) : BaseGlShaderProgram(false, 1) {
     private var renderer: AndroidOnnxTiles? = null
@@ -364,6 +390,7 @@ private class AndroidOnnxVideoProgram(
 
     override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) = videoFrame {
         checkActive()
+        val startedAt = onProcessed?.let { SystemClock.elapsedRealtimeNanos() }
         val plan = checkNotNull(renderer)
         val input = checkNotNull(inputPixels)
         val output = checkNotNull(outputPixels)
@@ -394,6 +421,8 @@ private class AndroidOnnxVideoProgram(
             row.forEachIndexed { x, pixel -> outputColors.put(offset + x, swapRedBlue(pixel)) }
         })
         output.rewind()
+        capture?.invoke(presentationTimeUs, input.asReadOnlyBuffer().apply { rewind() },
+            output.asReadOnlyBuffer().apply { rewind() })
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
         GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, plan.outWidth, plan.outHeight, GLES20.GL_RGBA,
             GLES20.GL_UNSIGNED_BYTE, output)
@@ -404,6 +433,7 @@ private class AndroidOnnxVideoProgram(
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         GlUtil.checkGlError()
         onFrame()
+        if (startedAt != null) onProcessed?.invoke(SystemClock.elapsedRealtimeNanos() - startedAt)
     }
 
     override fun release() {
@@ -414,9 +444,11 @@ private class AndroidOnnxVideoProgram(
         renderer = null
         inputPixels = null
         outputPixels = null
-        releaseOutput.getOrThrow()
-        releaseProgram.getOrThrow()
-        releaseTexture.getOrThrow()
+        try {
+            releaseOutput.getOrThrow()
+            releaseProgram.getOrThrow()
+            releaseTexture.getOrThrow()
+        } finally { onReleased?.invoke() }
     }
 
     private fun swapRedBlue(pixel: Int) = (pixel and 0xff00ff00.toInt()) or ((pixel and 0xff) shl 16) or ((pixel ushr 16) and 0xff)

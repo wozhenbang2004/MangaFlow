@@ -1,5 +1,7 @@
 package dev.mangaflow.anime.player
 
+import dev.mangaflow.enhancement.engine.DesktopArtCnn
+import dev.mangaflow.enhancement.engine.EngineModel
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
 import dev.mangaflow.platform.storage.dataDirectory
@@ -17,17 +19,18 @@ import java.security.MessageDigest
 
 /** App-owned, immutable-by-version resources; no media/source identity enters paths. */
 internal object DesktopAnime4KShaderStore {
-    fun prepare(context: PlatformContext, mode: AnimeVideoEnhancementMode, scale: Int = 2): List<String> {
-        val shaders = Anime4KShaderLibrary.sources(mode, scale)
+    fun prepare(context: PlatformContext, mode: AnimeVideoEnhancementMode, scale: Int = 2, model: EngineModel? = null): List<String> {
+        val dedicated = mode == AnimeVideoEnhancementMode.MODEL
+        val shaders = if (dedicated) listOf(DesktopArtCnn.verifiedShader(checkNotNull(model)))
+            else Anime4KShaderLibrary.sources(mode, scale).map { it.name to it.source.encodeToByteArray() }
         if (shaders.isEmpty()) return emptyList()
         val root = Path.of(dataDirectory(context).path).toAbsolutePath().normalize()
-        val privateRoot = privateDirectory(root.resolve("anime4k"))
-        val directory = privateDirectory(privateRoot.resolve(Anime4KShaderLibrary.UPSTREAM_COMMIT))
-        check(shaders.map { it.name }.distinct().size == shaders.size) { "Duplicate enhancement resource" }
-        return shaders.map { shader ->
-            check(Regex("Anime4K_[A-Za-z0-9_]+\\.glsl").matches(shader.name)) { "Invalid enhancement resource" }
-            val path = directory.resolve(shader.name)
-            val bytes = shader.source.encodeToByteArray()
+        val privateRoot = privateDirectory(root.resolve(if (dedicated) "artcnn" else "anime4k"))
+        val directory = privateDirectory(privateRoot.resolve(if (dedicated) DesktopArtCnn.VERSION else Anime4KShaderLibrary.UPSTREAM_COMMIT))
+        check(shaders.map { it.first }.distinct().size == shaders.size) { "Duplicate enhancement resource" }
+        return shaders.map { (name, bytes) ->
+            check(Regex("(?:Anime4K|ArtCNN)_[A-Za-z0-9_]+\\.glsl").matches(name)) { "Invalid enhancement resource" }
+            val path = directory.resolve(name)
             val digest = sha256(bytes)
             if (!matches(path, bytes.size, digest)) {
                 check(!Files.isSymbolicLink(path)) { "Enhancement resource must be an ordinary file" }

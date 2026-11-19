@@ -188,6 +188,9 @@ fun SettingsScreen(
     onOpenDownloads: () -> Unit = {},
     animeController: AnimeController? = null,
     onBrowseAnime: (dev.mangaflow.anime.AnimeDiscoveryProvider) -> Unit = {},
+    openWebDavSettings: Boolean = false,
+    onWebDavSettingsOpened: () -> Unit = {},
+    onWebDavSettingsClosed: () -> Unit = {},
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -243,6 +246,7 @@ fun SettingsScreen(
     val wallpaper by wallpaperStore.state.collectAsStateWithLifecycle()
     var showWebDav by remember { mutableStateOf(false) }
     var webDavPresent by remember { mutableStateOf(false) }
+    var webDavConnectionOnly by remember { mutableStateOf(false) }
     var webDavNotice by remember { mutableStateOf<WebDavFeedback?>(null) }
     var expandedSetting by rememberSaveable { mutableStateOf<String?>(null) }
     var showBodySources by remember { mutableStateOf(false) }
@@ -254,6 +258,14 @@ fun SettingsScreen(
     var showExperience by remember { mutableStateOf(false) }
     var showEnhancement by remember { mutableStateOf(false) }
     val toggleSetting: (String) -> Unit = { expandedSetting = if (expandedSetting == it) null else it }
+    LaunchedEffect(screenActive, openWebDavSettings, backupBusy) {
+        if (screenActive && openWebDavSettings && (backupBusy == null || backupBusy.startsWith("webdav-"))) {
+            webDavNotice = null
+            webDavConnectionOnly = true
+            showWebDav = true
+            onWebDavSettingsOpened()
+        }
+    }
     LaunchedEffect(showWebDav, screenActive) {
         if (showWebDav && screenActive) webDavPresent = true
     }
@@ -675,12 +687,17 @@ fun SettingsScreen(
         busy = backupBusy?.takeIf { it.startsWith("webdav-") },
         cancellable = backupOperation?.cancellable == true,
         notice = webDavNotice,
+        connectionOnly = webDavConnectionOnly,
         onDismiss = { showWebDav = false },
         onCancel = { backupOperation?.takeIf { it.cancellable }?.let { operations.cancel(it.id) } },
         onClosed = {
             // Present the inspected restore only after the connection workspace has left.
             if (!showWebDav || !screenActive) {
                 webDavPresent = false
+                if (webDavConnectionOnly) {
+                    webDavConnectionOnly = false
+                    if (screenActive) onWebDavSettingsClosed()
+                }
                 if (screenActive) pendingWebDavRestore?.let {
                     backupNotice = null
                     pendingRestore = it
@@ -756,6 +773,7 @@ private fun WebDavBackupDialog(
     onUpload: (WebDavBackupDraft) -> Unit,
     onDownload: (WebDavBackupDraft) -> Unit,
     onClear: () -> Unit,
+    connectionOnly: Boolean = false,
 ) {
     var endpoint by remember(visible, config.endpoint) { mutableStateOf(config.endpoint) }
     var username by remember(visible, config.username) { mutableStateOf(config.username) }
@@ -792,7 +810,7 @@ private fun WebDavBackupDialog(
                 Column(Modifier.fillMaxWidth().heightIn(max = height).padding(horizontal = 16.dp, vertical = 8.dp)) dialogBody@{
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.CloudSync, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
-                        Text(if (pendingUpload == null) "WebDAV 备份" else "确认上传备份",
+                        Text(if (connectionOnly) "WebDAV 连接" else if (pendingUpload == null) "WebDAV 备份" else "确认上传备份",
                             Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.titleMedium,
                             maxLines = 2, overflow = TextOverflow.Ellipsis)
                         val closeLabel = if (pendingUpload == null) "关闭备份" else "取消上传"
@@ -875,7 +893,7 @@ private fun WebDavBackupDialog(
                                 DownloadRouteControl(DownloadCategory.WEBDAV, enabled = active)
                             }
                         }
-                        CopyShelfReveal(!editing && config.configured) {
+                        CopyShelfReveal(!editing && config.configured && !connectionOnly) {
                             Column {
                                 WebDavTransferAction(Icons.Outlined.CloudDownload, "预览远端备份", "读取后可查看内容并选择恢复", enabled) {
                                     onDownload(draft())
@@ -903,7 +921,8 @@ private fun WebDavBackupDialog(
                                 }, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                             }
                         }
-                        Text("书架、阅读位置与偏好；不含账号、缓存和漫画文件。手动备份，不自动双向同步。",
+                        Text(if (connectionOnly) "成人阅读进度使用此目录中的独立文件。"
+                            else "书架、阅读位置与偏好；不含账号、缓存和漫画文件。手动备份，不自动双向同步。",
                             style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                     }
                     CopyShelfReveal(editing) {
