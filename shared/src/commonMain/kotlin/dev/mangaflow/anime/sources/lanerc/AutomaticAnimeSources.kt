@@ -13,10 +13,16 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 
 enum class SourcePreparationPhase { PENDING, PREPARING, RETRYING, READY, DISABLED, FAILED }
-data class SourcePreparationState(val phase: SourcePreparationPhase, val message: String? = null)
+data class SourcePreparationState(
+    val phase: SourcePreparationPhase,
+    val message: String? = null,
+    val canRetry: Boolean = false,
+)
 
 /** The packaged manifest is the durable desired state; successful packages and opt-outs are persisted. */
 internal class AutomaticAnimeSources(
@@ -26,6 +32,7 @@ internal class AutomaticAnimeSources(
 ) {
     private val preferences = preferences(context, "anime-source-preparation")
     private val gate = Mutex()
+    private val permits = Semaphore(2)
     private val jobs = mutableMapOf<String, Job>()
     private val mutableState = MutableStateFlow(AUTOMATIC_ANIME_SOURCE_IDS.associateWith {
         SourcePreparationState(SourcePreparationPhase.PENDING)
@@ -35,15 +42,13 @@ internal class AutomaticAnimeSources(
     init {
         scope.launch {
             store.ready.await()
-            store.state.collect { listings ->
-                for (id in AUTOMATIC_ANIME_SOURCE_IDS) {
-                    val listing = listings.firstOrNull { it.id == id }
-                    if (listing?.installed == true) {
-                        publish(id, if (listing.enabled) SourcePreparationPhase.READY else SourcePreparationPhase.DISABLED,
-                            if (id in AUTOMATIC_ANIME_INACTIVE_IDS && !listing.enabled)
-                                "来源已准备；当前网络协议尚未适配，未启用。" else null)
-                    } else if (preferences.getBoolean("removed:$id")) {
-                        publish(id, SourcePreparationPhase.DISABLED, "已按你的选择移除，不会自动重装。")
+            store.state.collect {
+                gate.withLock {
+                    for (id in AUTOMATIC_ANIME_SOURCE_IDS) {
+                        if (!publishExisting(id) && jobs[id]?.isActive != true &&
+                            mutableState.value[id]?.phase in setOf(SourcePreparationPhase.READY, SourcePreparationPhase.DISABLED)) {
+                            publish(id, SourcePreparationPhase.FAILED, "来源包已变更，可重新准备。", canRetry = true)
+                        }
                     }
                 }
             }
@@ -52,40 +57,57 @@ internal class AutomaticAnimeSources(
 
     suspend fun start() = gate.withLock { startLocked(AUTOMATIC_ANIME_SOURCE_IDS) }
 
+    suspend fun retry(ids: Set<String> = AUTOMATIC_ANIME_SOURCE_IDS) = gate.withLock {
+        startLocked(ids.filterTo(linkedSetOf()) { id ->
+            state.value[id]?.let { it.phase == SourcePreparationPhase.FAILED && it.canRetry } == true
+        })
+    }
+
     private fun startLocked(ids: Set<String>) {
         for (id in ids) {
             if (jobs[id]?.isActive == true) continue
-            val listing = store.state.value.firstOrNull { it.id == id }
-            if (listing?.installed == true) {
-                publish(id, if (listing.enabled) SourcePreparationPhase.READY else SourcePreparationPhase.DISABLED)
-                continue
-            }
-            if (preferences.getBoolean("removed:$id")) {
-                publish(id, SourcePreparationPhase.DISABLED, "已按你的选择移除，不会自动重装。")
-                continue
-            }
+            if (publishExisting(id)) continue
             publish(id, SourcePreparationPhase.PENDING)
             jobs[id] = scope.launch {
                 // Resume missing manifest entries after process restart. Do not auto-update a saved
                 // package or replace its exact revision/settings just because a remote file changed.
                 for (attempt in 0..2) {
-                    if (attempt > 0) {
-                        publish(id, SourcePreparationPhase.RETRYING, "准备未完成，稍后自动重试。")
-                        delay(if (attempt == 1) 15_000L else 60_000L)
-                    }
-                    publish(id, SourcePreparationPhase.PREPARING)
                     try {
-                        store.installAutomatically(id)
-                        val installed = requireNotNull(store.state.value.firstOrNull { it.id == id })
-                        check(installed.installed) { "来源未能保存。" }
-                        publish(id, if (installed.enabled) SourcePreparationPhase.READY else SourcePreparationPhase.DISABLED,
-                            if (id in AUTOMATIC_ANIME_INACTIVE_IDS) "来源已准备；当前网络协议尚未适配，未启用。" else null)
+                        permits.withPermit {
+                            val prepare = gate.withLock {
+                                if (publishExisting(id)) false
+                                else {
+                                    publish(id, SourcePreparationPhase.PREPARING)
+                                    true
+                                }
+                            }
+                            if (!prepare) return@launch
+                            store.installAutomatically(id)
+                        }
+                        gate.withLock {
+                            jobs.remove(id)
+                            if (!publishExisting(id)) publish(id, SourcePreparationPhase.FAILED,
+                                "来源记录已更改，可重新准备。", canRetry = true)
+                        }
                         return@launch
                     } catch (cancel: CancellationException) { throw cancel }
                     catch (failure: Exception) {
-                        publish(id, SourcePreparationPhase.FAILED, failure.message ?: "来源暂未准备完成。")
-                        // Retrying identical incompatible bytes cannot fix the engine/host contract.
-                        if (failure is LanercCapabilityException || attempt == 2) return@launch
+                        val stage = (failure as? LanercPackagePreparationException)?.stage
+                        val willRetry = stage == LanercPackageStage.DOWNLOAD && attempt < 2
+                        val message = failure.message ?: "来源暂未准备完成。"
+                        gate.withLock {
+                            if (publishExisting(id)) {
+                                jobs.remove(id)
+                                return@launch
+                            }
+                            if (willRetry) publish(id, SourcePreparationPhase.RETRYING, "$message 稍后自动重试。")
+                            else {
+                                jobs.remove(id)
+                                publish(id, SourcePreparationPhase.FAILED, message, canRetry = stage != LanercPackageStage.INTEGRITY)
+                            }
+                        }
+                        if (!willRetry) return@launch
+                        delay(if (attempt == 0) 15_000L else 60_000L)
                     }
                 }
             }
@@ -109,8 +131,21 @@ internal class AutomaticAnimeSources(
         }
     }
 
-    private fun publish(id: String, phase: SourcePreparationPhase, message: String? = null) {
-        mutableState.update { it + (id to SourcePreparationState(phase, message)) }
+    private fun publishExisting(id: String): Boolean {
+        val listing = store.state.value.firstOrNull { it.id == id }
+        if (listing?.installed == true) {
+            publish(id, if (listing.enabled) SourcePreparationPhase.READY else SourcePreparationPhase.DISABLED,
+                if (id in AUTOMATIC_ANIME_INACTIVE_IDS && !listing.enabled)
+                    "来源已准备；当前网络协议尚未适配，未启用。" else null)
+            return true
+        }
+        if (!preferences.getBoolean("removed:$id")) return false
+        publish(id, SourcePreparationPhase.DISABLED, "已按你的选择移除，不会自动重装。")
+        return true
+    }
+
+    private fun publish(id: String, phase: SourcePreparationPhase, message: String? = null, canRetry: Boolean = false) {
+        mutableState.update { it + (id to SourcePreparationState(phase, message, canRetry)) }
     }
 }
 

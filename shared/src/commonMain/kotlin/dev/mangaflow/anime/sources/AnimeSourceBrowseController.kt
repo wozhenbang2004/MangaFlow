@@ -34,6 +34,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class AnimeBrowseSource(
     val id: String,
@@ -81,6 +84,7 @@ data class AnimeSourceHomeFeed(
     val loading: Boolean = false,
     val error: String? = null,
     val fetchedAt: Long? = null,
+    val queued: Boolean = false,
 )
 
 /** One application owner retains source browsing when a screen or title preview is dismissed. */
@@ -113,7 +117,19 @@ class AnimeSourceBrowseController(
     private var homeFeedsRequested = false
     private val feedRoutes = mutableMapOf<String, DownloadRouteSnapshot?>()
     private val feedGenerations = mutableMapOf<String, Long>()
-    private val feedRequests = mutableMapOf<String, Deferred<Result<List<LanercBrowseSection>>>>()
+    private val feedRequests = mutableMapOf<String, HomeFeedRequest>()
+    private val nativeHomeSlots = Semaphore(2)
+    // QuickJS has two shared slots. Let background Home use at most one of them.
+    private val scriptHomeSlots = Semaphore(1)
+
+    private class HomeAdmission(var foreground: Boolean, var force: Boolean) {
+        var waiting = false
+    }
+
+    private data class HomeFeedRequest(
+        val admission: HomeAdmission,
+        val job: Deferred<Result<List<LanercBrowseSection>>>,
+    )
 
     private data class Selection(
         val source: AnimeBrowseSource,
@@ -230,10 +246,16 @@ class AnimeSourceBrowseController(
         homeSources().forEach { homeFeed(it, force) }
     }
 
-    fun refreshHomeSource(id: String) = command {
+    fun refreshHomeSource(id: String) = refreshHomeSources(setOf(id))
+
+    fun refreshHomeSources(ids: Set<String>) = command {
         val changed = reconcileHomeFeeds()
-        if (homeFeedsRequested) changed.filter { it.id != id }.forEach { homeFeed(it) }
-        homeSources().firstOrNull { it.id == id }?.let { homeFeed(it, force = true) }
+        if (homeFeedsRequested) changed.filter { it.id !in ids }.forEach { homeFeed(it) }
+        homeSources().filter { it.id in ids }.forEach { homeFeed(it, force = true, foreground = ids.size == 1) }
+    }
+
+    fun prioritizeHomeSource(id: String) = command {
+        homeSources().firstOrNull { it.id == id }?.let { homeFeed(it, foreground = true) }
     }
 
     private fun command(action: () -> Unit) {
@@ -502,7 +524,7 @@ class AnimeSourceBrowseController(
         val before = mutableHomeFeeds.value
         (before.keys + feedRequests.keys).filter { it !in ids }.forEach { id ->
             feedGenerations[id] = (feedGenerations[id] ?: 0L) + 1L
-            feedRequests.remove(id)?.cancel()
+            feedRequests.remove(id)?.job?.cancel()
             feedRoutes.remove(id)
         }
         val changed = mutableListOf<AnimeBrowseSource>()
@@ -511,7 +533,7 @@ class AnimeSourceBrowseController(
             val previous = before[source.id]
             if (previous?.source != source || feedRoutes[source.id] != route) {
                 feedGenerations[source.id] = (feedGenerations[source.id] ?: 0L) + 1L
-                feedRequests.remove(source.id)?.cancel()
+                feedRequests.remove(source.id)?.job?.cancel()
                 feedRoutes[source.id] = route
                 changed += source
                 source.id to AnimeSourceHomeFeed(source)
@@ -549,7 +571,7 @@ class AnimeSourceBrowseController(
         force: Boolean,
         onSnapshot: (List<LanercBrowseSection>) -> Unit,
     ): List<LanercBrowseSection> = coroutineScope {
-        val request = homeFeed(source, force)
+        val request = homeFeed(source, force, foreground = true)
         val observer = launch(start = CoroutineStart.UNDISPATCHED) {
             homeFeeds.collect { feeds ->
                 val feed = feeds[source.id]
@@ -564,23 +586,32 @@ class AnimeSourceBrowseController(
     }
 
     /** Home and the selected source browser share the same first-page request and cache. */
-    private fun homeFeed(source: AnimeBrowseSource, force: Boolean = false): Deferred<Result<List<LanercBrowseSection>>> {
+    private fun homeFeed(source: AnimeBrowseSource, force: Boolean = false,
+        foreground: Boolean = false): Deferred<Result<List<LanercBrowseSection>>> {
         val id = source.id
         val route = routeFor(id)
         val before = mutableHomeFeeds.value[id]
         if (before?.source != source || feedRoutes[id] != route) {
             feedGenerations[id] = (feedGenerations[id] ?: 0L) + 1L
-            feedRequests.remove(id)?.cancel()
+            feedRequests.remove(id)?.job?.cancel()
             feedRoutes[id] = route
             publishFeed(AnimeSourceHomeFeed(source))
         }
-        feedRequests[id]?.takeIf { it.isActive }?.let { return it }
+        val running = feedRequests[id]?.takeIf { it.job.isActive }
+        if (running != null && (!foreground || !running.admission.waiting)) {
+            if (foreground) running.admission.foreground = true
+            if (force) running.admission.force = true
+            return running.job
+        }
         val cached = requireNotNull(mutableHomeFeeds.value[id])
-        if (!force && isFresh(cached)) return CompletableDeferred(Result.success(cached.sections))
+        if (running == null && !force && isFresh(cached)) return CompletableDeferred(Result.success(cached.sections))
         val request = (feedGenerations[id] ?: 0L) + 1L
         feedGenerations[id] = request
+        // Re-admit a queued source immediately. The old request loses authority before cancellation.
+        running?.job?.cancel()
+        val admission = HomeAdmission(foreground, force || running?.admission?.force == true)
         val cacheGeneration = homeCache.generation
-        publishFeed(cached.copy(loading = true, error = null))
+        publishFeed(cached.copy(loading = true, error = null, queued = false))
         val deferred = scope.async(Dispatchers.Main.immediate, start = CoroutineStart.LAZY) {
             fun ownsFeed() = request == feedGenerations[id] && route == feedRoutes[id] &&
                 route == routeFor(id) && homeSources().any { it == source }
@@ -593,17 +624,33 @@ class AnimeSourceBrowseController(
                     currentCoroutineContext().ensureActive()
                     if (!ownsFeed()) throw CancellationException("Anime home source changed")
                     if (stored != null && cacheGeneration == homeCache.generation) {
-                        val refresh = force || !isFresh(stored)
+                        val refresh = admission.force || !isFresh(stored)
                         publishFeed(stored.copy(loading = refresh))
                         if (!refresh) return@async Result.success(stored.sections)
                     }
                 }
-                val sections = if ("latest" in source.capabilities) {
+                val native = "latest" in source.capabilities
+                suspend fun loadSections(): List<LanercBrowseSection> {
+                    if (!native) return sources.extensions.readHomeSections(id, source.revision)
                     val provider = sources.provider(id)?.takeIf { it.supportsLatest && it.revision == source.revision }
                         ?: throw LanercCapabilityException("所选来源已改变，请刷新来源内容。")
-                    listOf(LanercBrowseSection("latest", "最近更新", provider.latest(1)))
-                } else {
-                    sources.extensions.readHomeSections(id, source.revision)
+                    return listOf(LanercBrowseSection("latest", "最近更新", provider.latest(1)))
+                }
+                val slots = if (native) nativeHomeSlots else scriptHomeSlots
+                val sections = if (admission.foreground) loadSections() else {
+                    admission.waiting = true
+                    if (slots.availablePermits == 0) mutableHomeFeeds.value[id]?.let { publishFeed(it.copy(queued = true)) }
+                    slots.withPermit {
+                        admission.waiting = false
+                        if (!ownsFeed()) throw CancellationException("Anime home source changed")
+                        mutableHomeFeeds.value[id]?.takeIf { it.queued }?.let { publishFeed(it.copy(queued = false)) }
+                        coroutineScope {
+                            val remote = async { loadSections() }
+                            val withinBudget = withTimeoutOrNull(BACKGROUND_HOME_TIMEOUT_MILLIS) { remote.await() }
+                            withinBudget ?: if (admission.foreground) remote.await()
+                            else throw LanercCapabilityException("来源更新等待过久，可单独重试。")
+                        }
+                    }
                 }
                 currentCoroutineContext().ensureActive()
                 if (!ownsFeed()) throw CancellationException("Anime home source changed")
@@ -613,11 +660,11 @@ class AnimeSourceBrowseController(
                 homeCache.write(observed, currentRoute, cacheGeneration)
                 Result.success(sections)
             } catch (cancelled: CancellationException) {
-                if (ownsFeed()) mutableHomeFeeds.value[id]?.let { publishFeed(it.copy(loading = false)) }
+                if (ownsFeed()) mutableHomeFeeds.value[id]?.let { publishFeed(it.copy(loading = false, queued = false)) }
                 throw cancelled
             } catch (failure: Exception) {
                 if (ownsFeed()) mutableHomeFeeds.value[id]?.let {
-                    publishFeed(it.copy(loading = false, error = sourceError(failure)))
+                    publishFeed(it.copy(loading = false, error = sourceError(failure), queued = false))
                 }
                 // A failed source is data for its observer, not cancellation of sibling feeds.
                 Result.failure(failure)
@@ -625,7 +672,7 @@ class AnimeSourceBrowseController(
                 if (request == feedGenerations[id]) feedRequests.remove(id)
             }
         }
-        feedRequests[id] = deferred
+        feedRequests[id] = HomeFeedRequest(admission, deferred)
         deferred.start()
         return deferred
     }
@@ -643,5 +690,6 @@ class AnimeSourceBrowseController(
 
     private companion object {
         val BROWSE_CAPABILITIES = setOf("homeSections", "categories", "searchFiltered")
+        const val BACKGROUND_HOME_TIMEOUT_MILLIS = 15_000L
     }
 }

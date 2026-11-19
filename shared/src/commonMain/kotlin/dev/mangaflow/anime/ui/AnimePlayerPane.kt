@@ -451,7 +451,13 @@ private fun AnimeVideoStatus(
         playback.phase == AnimePlayerPhase.IDLE || playback.phase == AnimePlayerPhase.OPENING ->
             PlayerStageMessage(if (playback.recoveryAttempt > 0) "正在重新连接视频" else "正在打开视频", sourceName)
         playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && playback.hasVideoTracks == false ->
-            PlayerStageMessage("这条线路只有音频", null)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                PlayerStageMessage("这条线路只有音频", null)
+                if (optionsAvailable > 1) MotionTextButton(onClick = onSources,
+                    modifier = Modifier.heightIn(min = 44.dp)) {
+                    Text("换条线路", color = Color.White)
+                }
+            }
         playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && awaitingVideo ->
             PlayerStageMessage(if (playback.playWhenReady) "正在等待画面" else "已暂停", null)
         playback.isBuffering && awaitingVideo -> PlayerStageMessage("正在缓冲首帧", sourceName)

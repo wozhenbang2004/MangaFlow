@@ -100,34 +100,41 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
     val homeFeeds by controller.sourceBrowse.homeFeeds.collectAsStateWithLifecycle()
     val homeScroll = scrolls.grid("home")
     val availableFeeds = remember(homeFeeds) { homeFeeds.values.toList() }
-    val firstContent = availableFeeds.filter { feed -> feed.sections.any { it.items.isNotEmpty() } }
-        .minByOrNull { it.fetchedAt ?: Long.MAX_VALUE }
-    val selectedFeed = availableFeeds.firstOrNull { it.source.id == scrolls.homeSourceId }
-        ?: firstContent ?: availableFeeds.firstOrNull()
-    // Only the first usable feed is chosen automatically. A deliberate selection, including
-    // a failed source, remains selected while its own refresh/retry updates the same objects.
-    LaunchedEffect(firstContent?.source?.id, scrolls.homeSourceId) {
-        if (scrolls.homeSourceId == null && firstContent != null)
-            scrolls.homeSourceId = firstContent.source.id
+    val usable = remember(availableFeeds) {
+        availableFeeds.filter { feed -> feed.sections.any { it.items.isNotEmpty() } }
+    }
+    val automatic = usable.firstOrNull { it.source.id == scrolls.automaticHomeSourceId } ?: usable.firstOrNull()
+    val explicit = scrolls.homeSourceId?.let(homeFeeds::get)
+    val selectedFeed = explicit ?: automatic ?: availableFeeds.firstOrNull()
+    SideEffect { scrolls.automaticHomeSourceId = automatic?.source?.id }
+    LaunchedEffect(active, explicit?.source) {
+        if (active && explicit != null) controller.sourceBrowse.prioritizeHomeSource(explicit.source.id)
     }
     var sourceMenuPresent by remember { mutableStateOf(false) }
     val contentActive = active && !sourceMenuPresent
-    val nativeFeatured = remember(homeFeeds) {
-        val rows = homeFeeds.values.filter { it.source.videoSource }
-            .sortedBy { it.fetchedAt ?: Long.MAX_VALUE }.map { feed ->
-            feed.sections.flatMap { it.items }.asSequence().filter { it.coverUrl.isNotBlank() }
-                .distinctBy { it.sourceId to it.id }.take(6).map { title ->
-                AnimeFeaturedEntry(
-                    key = "source:" + title.sourceId + ":" + title.id,
-                    title = title.title, coverUrl = title.coverUrl, sourceId = title.sourceId,
-                    sourceLabel = feed.source.name,
-                    caption = title.updateText.ifBlank { title.year?.toString().orEmpty() },
-                    sourceTitle = title,
-                )
-            }.toList()
-        }
-        interleaveAnimeHomeRows(rows, 6)
+    val (featuredOrder, nativeFeatured) = remember(homeFeeds) {
+        val rows = homeFeeds.values.filter { it.source.videoSource }.associate { feed ->
+            val entries = feed.sections.asSequence().flatMap { it.items.asSequence() }
+                .filter { it.coverUrl.isNotBlank() }.distinctBy { it.sourceId to it.id }.take(6)
+                .map { title ->
+                    AnimeFeaturedEntry(
+                        key = "source:" + title.sourceId + ":" + title.id,
+                        title = title.title, coverUrl = title.coverUrl, sourceId = title.sourceId,
+                        sourceLabel = feed.source.name,
+                        caption = title.updateText.ifBlank { title.year?.toString().orEmpty() },
+                        sourceTitle = title,
+                    )
+                }.toList()
+            feed.source.id to entries
+        }.filterValues { it.isNotEmpty() }
+        // Refresh timestamps do not reorder the gallery. Add newly arrived sources to the retained order.
+        val order = scrolls.featuredSourceOrder.filter(rows::containsKey) + (rows.keys - scrolls.featuredSourceOrder.toSet())
+        val mixed = interleaveAnimeHomeRows(order.map(rows::getValue), 6)
+        val selected = rows.values.asSequence().flatten().firstOrNull { it.key == scrolls.featuredKey }
+        val visible = if (selected != null && mixed.none { it.key == selected.key }) mixed.dropLast(1) + selected else mixed
+        order to visible
     }
+    SideEffect { scrolls.featuredSourceOrder = featuredOrder }
     val seasonalItems = state.discoveryFeeds["home:season"]?.items.orEmpty()
     val featured = remember(nativeFeatured, seasonalItems) {
         nativeFeatured.ifEmpty {
@@ -212,7 +219,7 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
                         failedFeeds.isNotEmpty() -> "暂时无法读取片源更新"
                         else -> "片源暂无更新条目"
                     }, retry = if (contentActive && !pending && failedFeeds.isNotEmpty()) ({
-                        failedFeeds.forEach { controller.sourceBrowse.refreshHomeSource(it.source.id) }
+                        controller.sourceBrowse.refreshHomeSources(failedFeeds.mapTo(mutableSetOf()) { it.source.id })
                     }) else null)
                 }
                 items(updates.take(if (scrolls.expandedUpdates) updates.size else updatePreviewCount),
@@ -258,7 +265,11 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
                     if (feed.sections.none { it.items.isNotEmpty() } && feed.error == null) {
                         item(key = "${prefix}:state", span = { GridItemSpan(maxLineSpan) }) {
                             AnimeDiscoveryInlineStatus(
-                                if (feed.loading || feed.fetchedAt == null) "正在读取来源内容" else "这个来源暂时没有内容",
+                                when {
+                                    feed.queued -> "等待读取来源内容"
+                                    feed.loading || feed.fetchedAt == null -> "正在读取来源内容"
+                                    else -> "这个来源暂时没有内容"
+                                },
                             )
                         }
                     }
@@ -382,6 +393,7 @@ private fun AnimeHomeSourceSelector(feeds: List<AnimeSourceHomeFeed>, selected: 
                     val hasContent = feed.sections.any { it.items.isNotEmpty() }
                     val status = when {
                         feed.error != null -> if (hasContent) "更新未完成" else "暂不可用"
+                        feed.queued -> "等待更新"
                         feed.loading || feed.fetchedAt == null -> "更新中"
                         !hasContent -> "暂无内容"
                         else -> null
@@ -396,7 +408,7 @@ private fun AnimeHomeSourceSelector(feeds: List<AnimeSourceHomeFeed>, selected: 
                     )
                 }
                 CompactMenuAction(Icons.Outlined.Refresh, "刷新${selected.source.name}",
-                    enabled = !selected.loading, onClick = { pendingRefresh = true; expanded = false })
+                    enabled = !selected.loading || selected.queued, onClick = { pendingRefresh = true; expanded = false })
             }
         }
         MotionIconButton(onClick = onBrowse, enabled = active && !present, modifier = Modifier.size(44.dp),

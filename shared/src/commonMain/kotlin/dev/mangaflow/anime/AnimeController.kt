@@ -65,6 +65,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private val mutableState = MutableStateFlow(AnimeScreenState())
     val state = mutableState.asStateFlow()
     val extensions get() = sources.extensions
+    internal val builtInVideoSources get() = sources.builtInVideoSources
     val danmaku by lazy { dev.mangaflow.anime.danmaku.AnimeDanmakuController(context, scope, sources.extensions) }
     private val downloadsOwner = lazy { dev.mangaflow.anime.downloads.AnimeDownloadStore(context, scope).also {
         it.setForeground(foreground)
@@ -156,6 +157,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val epoch: Long,
         val playerGeneration: Long,
         val libraryEpoch: Long,
+        val openedAt: Long,
         val sourceRevision: String? = null,
         val localMedia: AnimeLocalMedia? = null,
         var endedSaved: Boolean = false,
@@ -202,7 +204,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 catch (cancel: CancellationException) { throw cancel }
                 catch (failure: Exception) { notice(failure.message ?: "追番记录未能读取，原文件已保留；可通过备份恢复。") }
                 // Keep observing so an explicit recovery can replace a previously unreadable document.
+                var previousBindings: List<AnimeSourceBinding>? = null
                 library.state.collect { stored ->
+                    val settingsChanged = mutableState.value.settings != stored.settings
+                    val bindingsChanged = previousBindings != stored.bindings
+                    previousBindings = stored.bindings
                     if (stored.restoreEpoch != restoreEpoch) {
                         restoreEpoch = stored.restoreEpoch
                         ++detailGeneration
@@ -231,8 +237,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             stored.entries[undo.subjectId]?.revision == undo.expectedRevision
                         } == true,
                     ) }
-                    playerInstance?.configure(playerOptions(stored.settings))
-                    rebuildOptions()
+                    if (settingsChanged) playerInstance?.configure(playerOptions(stored.settings))
+                    if (bindingsChanged) rebuildOptions()
                 }
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) { notice(failure.message ?: "追番记录未能读取。") }
@@ -627,6 +633,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         ?: AnimeDetail(subject, emptyList()), detailLoading = false,
                         sourceBindings = listOf(binding), sourceCatalogs = listOf(shownCatalog)) }
                     rebuildOptions()
+                    if (catalog.notice == null && !changedSavedGroup && resumeRequest?.first == subject.id) {
+                        notice("这个来源的目录里暂时找不到上次观看的剧集，原进度已保留。")
+                    }
                     mutableState.value.detail?.let { startSourceAggregation(it) }
                 } catch (cancel: CancellationException) { throw cancel }
                 catch (failure: Exception) { if (currentDetail(generation, subject.id)) mutableState.update {
@@ -669,6 +678,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 mutableState.update { it.copy(detail = detail, detailLoading = false, detailError = failure,
                     detailFromCache = it.detailFromCache && (result.subject == null || result.episodes == null)) }
                 rebuildOptions()
+                if (result.episodes != null && resumeRequest?.first == subject.id) {
+                    notice("当前剧集目录里暂时找不到上次观看的剧集，原进度已保留。")
+                }
                 startSourceAggregation(detail)
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
@@ -1029,7 +1041,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             }.toMap()) }
         invalidatePreparation()
         resumeRequest?.takeIf { it.first == detail.subject.id }?.let { request ->
-            if (options[request.second].orEmpty().any { it.confirmed }) {
+            // Reuse the normal play path once the exact saved episode is present. It
+            // handles the case where matching sources have not delivered their catalogues.
+            if (detail.episodes.any { it.id == request.second }) {
                 resumeRequest = null
                 play(request.second)
             }
@@ -1676,7 +1690,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private suspend fun startPlayback(choice: PendingPlayback, rememberPrevious: Boolean = true) {
         check(validCandidate(choice)) { "来源、网络路线或集数对应已变化，请重新解析。" }
         if (choice.generation != resolveGeneration) return
-        saveCurrentPlayback()
+        try { saveCurrentPlayback() }
+        catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) {
+            if (choice.generation == resolveGeneration) notice("上一段观看位置暂未保存。")
+        }
         if (choice.generation != resolveGeneration) return
         check(validCandidate(choice) && mutableState.value.detail?.subject?.id == choice.detail.subject.id) {
             "来源关联已变化，请重新选择这一集。"
@@ -1695,6 +1713,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             else choice.asset.startPositionMs?.coerceAtLeast(0) ?: 0L
         active = ActivePlayback(choice.detail, choice.episode, choice.option, choice.asset,
             nextEpoch, engine.state.value.sessionGeneration + 1, library.state.value.restoreEpoch,
+            openedAt = monotonicTimeMillis(),
             sourceRevision = choice.sourceRevision, localMedia = choice.localMedia, openingSkipped = position > 0,
             automaticIntent = choice.automaticIntent)
         danmaku.setContext(active?.let(::playbackKey))
@@ -1704,10 +1723,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         mutableState.update { it.copy(resolving = false, selectedEpisodeId = choice.episode.id, pendingPlayback = null,
             playbackTarget = null, selectedPlaybackOption = choice.option.takeIf { choice.localMedia == null },
             canRestorePlayback = false, sourceError = null, playbackRecoveryStopReason = null,
+            playbackFirstFrameMs = null, playbackRouteMode = choice.asset.route.mode.takeIf { choice.localMedia == null },
             sourceDanmakuAvailable = active?.let(::hasSourceDanmaku) == true,
             playbackResolutions = choice.asset.resolutions, selectedResolutionId = choice.resolutionId ?:
                 choice.asset.resolutions.singleOrNull { item -> item.url == choice.asset.url }?.id) }
-        engine.configure(playerOptions(mutableState.value.settings))
         engine.open(AnimePlayerRequest(choice.asset, position, choice.playWhenReady, choice.localMedia))
     }
 
@@ -1778,7 +1797,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (downloadsOwner.isInitialized()) downloads.setPlaybackBusy(false)
         mutableState.update { it.copy(selectedEpisodeId = null, playbackResolutions = emptyList(),
             selectedResolutionId = null, canRestorePlayback = false, sourceDanmakuAvailable = false,
-            selectedPlaybackOption = null) }
+            selectedPlaybackOption = null, playbackFirstFrameMs = null, playbackRouteMode = null) }
     }
 
     fun setForeground(value: Boolean) {
@@ -1843,6 +1862,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 mutablePlaybackPhase.value = snapshot.phase
                 val owner = active ?: return@collect
                 if (!belongsTo(owner, snapshot)) return@collect
+                if (snapshot.firstFrameRendered == true && mutableState.value.playbackFirstFrameMs == null) {
+                    val elapsed = (monotonicTimeMillis() - owner.openedAt).coerceAtLeast(0L)
+                    mutableState.update { it.copy(playbackFirstFrameMs = elapsed) }
+                }
                 danmaku.updatePosition(playbackKey(owner), snapshot.positionMs, snapshot.isPlaying)
                 if (downloadsOwner.isInitialized()) downloads.setPlaybackBusy(playbackBusy(snapshot))
                 checkpoint(owner, snapshot, force = snapshot.phase != lastSavedPhase || snapshot.ended || !snapshot.playWhenReady)
@@ -2184,6 +2207,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     fun retryAutomaticSources() = sourceOperation("automatic-sources") { sources.extensions.retryAutomaticSources() }
+    fun retryAutomaticSource(id: String) = sourceOperation(id) { sources.extensions.retryAutomaticSource(id) }
     fun restoreAutomaticSource(id: String) = sourceOperation(id) { sources.extensions.restoreAutomaticSource(id) }
 
     fun installSource(id: String) = sourceOperation(id) { sources.extensions.install(id) }

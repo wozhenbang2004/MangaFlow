@@ -39,7 +39,9 @@ internal class AnimeDiscoveryScrolls(homeSourceState: MutableState<String?>) {
     val grids = mutableMapOf<String, LazyGridState>()
     val queries = mutableMapOf<String, AnimeDiscoveryQuery>()
     var featuredKey: String? = null
+    var featuredSourceOrder: List<String> = emptyList()
     var homeSourceId by homeSourceState
+    var automaticHomeSourceId by mutableStateOf<String?>(null)
     var expandedUpdates by mutableStateOf(false)
     var placedHomeFeature = false
     var expandedHomeSections by mutableStateOf(emptySet<String>())

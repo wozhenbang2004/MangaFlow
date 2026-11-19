@@ -1,5 +1,9 @@
 # MangaFlow · current work
 
+## 动漫来源管理和观看流程 · 2026-11-19
+
+来源分类、准备调度、首页／搜索渐进加载、同集续看和首帧观测的源码改动以 `043245d` 为基线。两张来源截图及 Lanerc APK 参考、实现与未闭合项见 [来源状态、搜索和续看](../anime/lanerc-port.md#来源状态搜索和续看--2026-11-19)。已核对源码、并发状态、调用点和差异，由 main 的既有 CI 处理构建。当前开放项为正式构建结果、实际设备与网络体验、LMM85 部分线路、ENC1、弹幕扩展播放器适配及漫画宿主协议。
+
 ## Core manga, adult and anime journeys · 2026-11-19
 
 The current redesign is scoped by [the three core journeys](../design/core-journeys-20261119.md), with the user’s outcome, the actual source paths, alternatives, design references and device checks in one place. Verified baseline `e01871d` published as Android `0.1.377`. The current user explicitly requests building, attempting an emulator, checking an upgrade, and delivering the matching APK. Device and network behavior requires evidence from the appropriate platform. Preserve saved records and use the normal signed release route. Earlier sections describe their own checkpoints.

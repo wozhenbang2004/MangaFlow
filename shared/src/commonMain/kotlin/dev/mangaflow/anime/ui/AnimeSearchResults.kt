@@ -16,6 +16,7 @@ import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.anime.AnimeSourceTitle
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeUnifiedSearchState
+import dev.mangaflow.anime.canLoadMoreSearch
 import dev.mangaflow.ui.motion.MotionTextButton
 
 internal fun LazyListScope.animeSearchResults(
@@ -35,10 +36,11 @@ internal fun LazyListScope.animeSearchResults(
     val index = search.index
     val failed = sources.filter { it.error != null }
     val failureCount = failed.size + if (index.error == null) 0 else 1
-    val pending = sources.count { it.loading }
-    val loadingIndex = index.loading && index.page == 0
-    val loadingMore = (index.loading && index.page > 0) || sources.any { it.loadingMore }
-    val hasMore = (index.hasMore && index.error == null) || sources.any { it.hasMore && it.error == null }
+    val pending = sources.count { it.page == 0 && it.error == null }
+    val loadingIndex = index.page == 0 && index.error == null
+    val paging = listOfNotNull("Bangumi".takeIf { index.loading && index.page > 0 }) +
+        sources.filter { it.loadingMore }.map { it.name }
+    val canLoadMore = index.canLoadMore || sources.any { it.canLoadMoreSearch }
     val sourceNames = sources.associate { it.providerId to it.name }
 
     if (groups.isEmpty()) item(key = "search-status") {
@@ -50,22 +52,28 @@ internal fun LazyListScope.animeSearchResults(
         }
     }
 
-    if (failureCount > 0) item(key = "search-issues") {
-        MotionTextButton(onClick = onToggleIssues, modifier = Modifier.heightIn(min = 44.dp)) {
-            Text(if (showIssues) "收起失败详情" else "$failureCount 个来源未返回")
-        }
-    }
-    if (showIssues) {
-        index.error?.let { message ->
-            item(key = "search-issue:index") {
-                AnimeDiscoveryInlineStatus("Bangumi · $message", retry = controller::retrySearchIndex)
+    fun LazyListScope.issues() {
+        if (failureCount == 0) return
+        item(key = "search-issues") {
+            MotionTextButton(onClick = onToggleIssues, modifier = Modifier.heightIn(min = 44.dp)) {
+                Text(if (showIssues) "收起搜索问题" else "$failureCount 个来源可重试")
             }
         }
-        items(failed, key = { "search-issue:${it.providerId}" }) { row ->
-            AnimeDiscoveryInlineStatus("${row.name} · ${row.error.orEmpty()}",
-                retry = { controller.retrySearchProvider(row.providerId) })
+        if (showIssues) {
+            index.error?.let { message ->
+                item(key = "search-issue:index") {
+                    AnimeDiscoveryInlineStatus("Bangumi · $message", retry = controller::retrySearchIndex,
+                        retryLabel = if (index.page > 0) "重试下一页" else "重试搜索")
+                }
+            }
+            items(failed, key = { "search-issue:${it.providerId}" }) { row ->
+                AnimeDiscoveryInlineStatus("${row.name} · ${row.error.orEmpty()}",
+                    retry = { controller.retrySearchProvider(row.providerId) },
+                    retryLabel = if (row.page > 0) "重试下一页" else "重试搜索")
+            }
         }
     }
+    if (groups.isEmpty()) issues()
 
     items(groups, key = { it.key }) { group ->
         val subject = group.subject
@@ -101,10 +109,16 @@ internal fun LazyListScope.animeSearchResults(
     if (groups.isNotEmpty() && (pending > 0 || loadingIndex)) item(key = "search-pending") {
         AnimeQuietLabel("正在补全搜索结果", Modifier.padding(12.dp))
     }
-    if (hasMore || loadingMore) item(key = "search-more") {
-        MotionTextButton(onClick = controller::loadMoreCatalog, enabled = !loadingMore,
+    if (canLoadMore) item(key = "search-more") {
+        MotionTextButton(onClick = controller::loadMoreCatalog,
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-            Text(if (loadingMore) "正在加载" else "更多结果")
+            Text("更多结果")
         }
     }
+    if (paging.isNotEmpty()) item(key = "search-more-pending") {
+        val names = paging.take(2).joinToString("、")
+        val remaining = (paging.size - 2).takeIf { it > 0 }?.let { "等 ${paging.size} 个来源" }.orEmpty()
+        AnimeQuietLabel("正在读取下一页 · $names$remaining", Modifier.padding(12.dp))
+    }
+    if (groups.isNotEmpty()) issues()
 }

@@ -2,7 +2,9 @@ package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
@@ -16,198 +18,185 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
+import dev.mangaflow.anime.sources.BUNDLED_ANIME_SOURCE_IDS
+import dev.mangaflow.anime.sources.lanerc.LanercSourceKind
+import dev.mangaflow.anime.sources.lanerc.LanercSourceListing
 import dev.mangaflow.anime.sources.lanerc.SourcePreparationPhase
 import dev.mangaflow.anime.sources.lanerc.SourcePreparationState
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 
-/** Catalogue presence, successful install and successful playback remain separate facts. */
+private val preparingPhases = setOf(
+    SourcePreparationPhase.PENDING, SourcePreparationPhase.PREPARING, SourcePreparationPhase.RETRYING,
+)
+
+private enum class AnimeSourceManagerTab(val label: String) {
+    VIDEO("视频"), BROWSE("浏览"), DANMAKU("弹幕")
+}
+
+/** Catalogue presence, successful preparation and actual playback are distinct. */
 @Composable
 internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, controller: AnimeController,
     backdrop: HazeState, onDismiss: () -> Unit,
     onBrowse: (AnimeDiscoveryProvider) -> Unit) {
-    var tab by remember { mutableIntStateOf(0) }
+    var tab by remember { mutableStateOf(AnimeSourceManagerTab.VIDEO) }
+    var moreVideoSources by remember { mutableStateOf(false) }
+    var referenceExpanded by remember { mutableStateOf(false) }
     var selectedId by remember { mutableStateOf<String?>(null) }
-    var removeConfirm by remember { mutableStateOf(false) }
+    var returnSourceId by remember { mutableStateOf<String?>(null) }
     var pendingBrowse by remember { mutableStateOf<AnimeDiscoveryProvider?>(null) }
-    var technicalExpanded by remember(selectedId) { mutableStateOf(false) }
-    val selected = state.sourceExtensions.firstOrNull { it.id == selectedId }
-    val listings = state.sourceExtensions.filter { item ->
-        when (tab) { 0 -> item.kind.name == "VIDEO"; 1 -> item.kind.name == "BROWSE"; else -> item.kind.name !in setOf("VIDEO", "BROWSE") }
+    val videoScroll = rememberLazyListState()
+    val moreScroll = rememberLazyListState()
+    val browseScroll = rememberLazyListState()
+    val danmakuScroll = rememberLazyListState()
+    val extensions = state.sourceExtensions
+    val fixedBuiltIns = controller.builtInVideoSources
+    val videoGroups = remember(extensions, fixedBuiltIns) { animeVideoGroups(extensions, fixedBuiltIns) }
+    val selected = videoGroups.asSequence().flatMap { it.sources.asSequence() }.firstOrNull { it.id == selectedId }
+        ?: extensions.firstOrNull { it.id == selectedId }
+    val references = extensions.filter { !it.installable && it.kind in setOf(LanercSourceKind.COMIC, LanercSourceKind.UNKNOWN) }
+
+    fun openSource(source: LanercSourceListing) {
+        returnSourceId = null
+        selectedId = source.id
     }
+
     MotionDialog(visible, onDismissRequest = { pendingBrowse = null; onDismiss() }, maximumWidth = 640.dp,
         onClosed = {
-            selectedId = null; removeConfirm = false
+            selectedId = null
+            returnSourceId = null
+            moreVideoSources = false
+            referenceExpanded = false
             val provider = pendingBrowse
             pendingBrowse = null
             if (provider != null) onBrowse(provider)
         }) {
         LiquidGlassSurface(backdrop, role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
+                val nested = selected != null || moreVideoSources
                 Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    if (selected != null) MotionIconButton(onClick = { selectedId = null; removeConfirm = false },
-                        modifier = Modifier.size(44.dp), tooltip = "返回来源目录") {
+                    if (nested) MotionIconButton(onClick = {
+                        if (selected != null) {
+                            selectedId = returnSourceId
+                            returnSourceId = null
+                        } else moreVideoSources = false
+                    }, modifier = Modifier.size(44.dp), tooltip = "返回来源目录") {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
                     }
-                    Text(selected?.name ?: "来源管理", Modifier.weight(1f).padding(start = if (selected == null) 8.dp else 0.dp),
+                    Text(selected?.displayName ?: if (moreVideoSources) "更多来源" else "来源管理",
+                        Modifier.weight(1f).padding(start = if (nested) 0.dp else 8.dp),
                         style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    MotionIconButton(onClick = { pendingBrowse = null; onDismiss() }, modifier = Modifier.size(44.dp), tooltip = "关闭来源管理") {
+                    MotionIconButton(onClick = { pendingBrowse = null; onDismiss() }, modifier = Modifier.size(44.dp),
+                        tooltip = "关闭来源管理") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
                 }
-                if (selected == null) {
-                    MotionTabs(tab, listOf("视频", "浏览", "其他"), onSelect = { tab = it },
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), controlHeight = 44.dp,
-                        treatment = MotionTabTreatment.Soft)
-                    LazyColumn(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (tab == 0) item {
-                            AnimeSectionTitle("内置与自动来源")
-                            AnimeQuietLabel("内置来源随包可用；支持的扩展会自动准备，无需逐个安装。", Modifier.padding(bottom = 12.dp))
-                        }
-                        if (tab == 1) {
-                            item(key = "builtin-browse-heading") { AnimeSectionTitle("内置资料") }
-                            items(AnimeDiscoveryProvider.entries, key = { "builtin-browse:" + it.name }) { provider ->
-                                AnimeSelection(animeDiscoveryProviderLabel(provider),
-                                    if (provider == AnimeDiscoveryProvider.BANGUMI) "已内置 · 评分、新番、番表"
-                                    else "已内置 · 评分、人气、趋势", selected = false,
-                                    onClick = { pendingBrowse = provider; onDismiss() })
-                            }
-                            if (listings.isNotEmpty()) item(key = "extension-browse-heading") { AnimeSectionTitle("扩展资料") }
-                        }
-                        items(listings, key = { it.id }) { item ->
-                            val busy = item.id in state.sourceOperationIds
-                            AnimeSelection(item.name, when {
-                                item.bundledAlternativeId != null -> "已有内置实现 · 无需重复安装"
-                                item.automaticPreparation -> animePreparationLabel(state.sourcePreparation[item.id])
-                                busy -> "正在处理"
-                                item.preparationUnavailableReason != null -> "协议待适配 · 查看原因"
-                                !item.installable -> when (item.kind.name) {
-                                    "COMIC" -> "漫画协议 · 动漫模块不支持"
-                                    "UNKNOWN" -> "协议待适配 · 暂不可用"
-                                    else -> "暂不兼容 · 点按查看原因"
-                                }
-                                item.error != null -> "准备未完成 · 点按重试"
-                                item.installed -> (if (item.enabled) "已启用" else "已暂停") + " · " + item.version
-                                item.kind.name == "VIDEO" -> "可安装的视频来源"
-                                item.kind.name == "BROWSE" -> "浏览资料 · 可安装"
-                                item.kind.name == "DANMAKU" -> "弹幕匹配 · 可安装"
-                                else -> "目录条目 · " + animeExtensionKind(item.kind.name)
-                            }, selected = item.installed && item.enabled, onClick = {
-                                selectedId = item.id; removeConfirm = false
-                            })
-                        }
-                        if (listings.isEmpty() && tab != 1) item { AnimeMessage("这一类暂无来源") }
+                if (selected != null) {
+                    val alternatives = videoGroups.firstOrNull { selected in it.sources }?.sources.orEmpty()
+                        .filter { it.id != selected.id && (it.installed || it.id in BUNDLED_ANIME_SOURCE_IDS) }
+                    key(selected.id) {
+                        AnimeSourceManagerDetail(selected, alternatives, selected.id in fixedBuiltIns, state, controller,
+                            Modifier.weight(1f, fill = false),
+                            onSelectAlternative = { alternative ->
+                                returnSourceId = if (alternative.id == returnSourceId) null else selected.id
+                                selectedId = alternative.id
+                            },
+                            onRemoved = { selectedId = returnSourceId; returnSourceId = null })
                     }
-                    val automaticStates = state.sourcePreparation.values
-                    val preparing = automaticStates.any { it.phase in setOf(SourcePreparationPhase.PENDING,
-                        SourcePreparationPhase.PREPARING, SourcePreparationPhase.RETRYING) }
-                    if (automaticStates.any { it.phase == SourcePreparationPhase.FAILED }) {
-                        MotionButton(onClick = controller::retryAutomaticSources,
-                            enabled = state.sourceOperationIds.isEmpty(),
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
-                            Text("重试未完成的自动准备")
+                } else if (moreVideoSources) {
+                    val inactive = videoGroups.map { it.primary }.filterNot { it.active }
+                    val (automatic, manual) = inactive.partition { it.automaticPreparation && !it.installed &&
+                        state.sourcePreparation[it.id]?.phase != SourcePreparationPhase.DISABLED }
+                    val (paused, available) = manual.partition { it.installed || it.id in BUNDLED_ANIME_SOURCE_IDS ||
+                        state.sourcePreparation[it.id]?.phase == SourcePreparationPhase.DISABLED }
+                    val failed = automatic.any { state.sourcePreparation[it.id]?.retryableFailure == true }
+                    LazyColumn(Modifier.weight(1f, fill = false), state = moreScroll, contentPadding = PaddingValues(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (automatic.isNotEmpty()) {
+                            item(key = "automatic-header") {
+                                AnimeSectionTitle("自动准备")
+                            }
+                            sourceManagerRows(automatic, state, ::openSource)
+                            if (failed) item(key = "automatic-retry") {
+                                CompactMenuAction(Icons.Outlined.Refresh, "重试可恢复的来源", enabled = state.sourceOperationIds.isEmpty(),
+                                    onClick = controller::retryAutomaticSources)
+                            }
                         }
-                    } else if (preparing) {
-                        AnimeQuietLabel("正在后台准备来源，不影响已就绪来源的使用。",
-                            Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
+                        if (paused.isNotEmpty()) {
+                            item(key = "paused-header") { AnimeSectionTitle("已停用") }
+                            sourceManagerRows(paused, state, ::openSource, fixedBuiltIns.keys)
+                        }
+                        if (available.isNotEmpty()) {
+                            item(key = "available-header") { AnimeSectionTitle("可添加") }
+                            sourceManagerRows(available, state, ::openSource)
+                        }
+                        if (references.isNotEmpty()) {
+                            item(key = "reference-toggle") {
+                                CompactMenuAction(if (referenceExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                                    "参考目录 · ${references.size} 个", onClick = { referenceExpanded = !referenceExpanded })
+                            }
+                            if (referenceExpanded) sourceManagerRows(references, state, ::openSource)
+                        }
+                        if (inactive.isEmpty() && references.isEmpty()) item {
+                            AnimeMessage("暂无需要管理的其他来源")
+                        }
                     }
                 } else {
-                    val preparation = state.sourcePreparation[selected.id]
-                    val busy = selected.id in state.sourceOperationIds || preparation?.phase in
-                        setOf(SourcePreparationPhase.PENDING, SourcePreparationPhase.PREPARING, SourcePreparationPhase.RETRYING)
-                    LazyColumn(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(20.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        item {
-                            AnimeQuietLabel(animeExtensionKind(selected.kind.name) + if (selected.installed) " · " + selected.version else "")
-                        }
-                        if (selected.automaticPreparation) item {
-                            AnimeQuietLabel(animePreparationLabel(preparation))
-                            if (!preparation?.message.isNullOrBlank()) AnimeQuietLabel(preparation?.message.orEmpty())
-                        }
-                        if (selected.preparationUnavailableReason != null) item {
-                            AnimeQuietLabel(selected.preparationUnavailableReason)
-                        }
-                        if (selected.bundledAlternativeId != null) item {
-                            AnimeQuietLabel("此站已有随包内置实现，无需重复安装脚本。")
-                        }
-                        val search = state.sourceResults.firstOrNull { it.providerId == selected.id }
-                        val catalogueError = state.sourceCatalogErrors[selected.id]
-                        if (search != null || catalogueError != null) item {
-                            AnimeQuietLabel(when {
-                                catalogueError != null -> "最近目录读取 · " + catalogueError
-                                search?.loading == true -> "正在搜索"
-                                search?.error != null -> "最近搜索 · " + search.error
-                                else -> "最近搜索取得 " + search?.items.orEmpty().size + " 个候选"
-                            })
-                        }
-                        if (selected.error != null) item {
-                            Text(selected.error.orEmpty(), color = if (selected.installable) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodySmall)
-                        }
-                        if (removeConfirm) item {
-                            Text("移除已安装脚本。作品关联与观看记录保留，可重新安装后继续。", style = MaterialTheme.typography.bodyMedium)
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                MotionTextButton(onClick = { removeConfirm = false }) { Text("取消") }
-                                MotionButton(onClick = { controller.removeSource(selected.id); selectedId = null; removeConfirm = false },
-                                    enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("确认移除") }
-                            }
-                        } else if (selected.installed) {
-                            item {
-                                SettingsToggle("启用这个来源", selected.enabled, Icons.Outlined.PowerSettingsNew,
-                                    onCheckedChange = { if (!busy) controller.enableSource(selected.id, it) })
-                            }
-                            item { CompactMenuAction(Icons.Outlined.Refresh, "检查并更新脚本", enabled = !busy,
-                                onClick = { controller.updateSource(selected.id) }) }
-                            if (selected.previousVersion != null) item {
-                                CompactMenuAction(Icons.Outlined.Undo, "恢复上一个脚本版本", enabled = !busy,
-                                    onClick = { controller.rollbackSource(selected.id) })
-                            }
-                            item { CompactMenuAction(Icons.Outlined.DeleteOutline, "移除脚本", enabled = !busy,
-                                destructive = true, onClick = { removeConfirm = true }) }
-                        } else if (selected.automaticPreparation) item {
-                            if (preparation?.phase == SourcePreparationPhase.FAILED) {
-                                MotionTextButton(onClick = controller::retryAutomaticSources, enabled = !busy) {
-                                    Text("重试未完成的自动准备")
+                    MotionTabs(tab.ordinal, AnimeSourceManagerTab.entries.map { it.label },
+                        onSelect = { tab = AnimeSourceManagerTab.entries[it] },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), controlHeight = 44.dp,
+                        treatment = MotionTabTreatment.Soft)
+                    when (tab) {
+                        AnimeSourceManagerTab.VIDEO -> {
+                            val active = videoGroups.map { it.primary }.filter { it.active }
+                            val remaining = videoGroups.size - active.size
+                            LazyColumn(Modifier.weight(1f, fill = false), state = videoScroll, contentPadding = PaddingValues(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                item(key = "active-video-header") {
+                                AnimeSectionTitle("已启用 · ${active.size}", subtitle = "用于搜索和剧集匹配") {
+                                        if (remaining > 0 || references.isNotEmpty()) {
+                                            MotionTextButton(onClick = { moreVideoSources = true }) { Text("更多来源") }
+                                        }
+                                    }
                                 }
-                            } else if (preparation?.phase == SourcePreparationPhase.DISABLED) {
-                                AnimeQuietLabel("此来源已停用，自动重试不会覆盖你的选择。")
-                                MotionTextButton(onClick = { controller.restoreAutomaticSource(selected.id) }, enabled = !busy) {
-                                    Text("重新准备此来源")
+                                sourceManagerRows(active, state, ::openSource, fixedBuiltIns.keys)
+                                if (active.isEmpty()) item { AnimeMessage("暂无已启用的视频来源") }
+                            }
+                        }
+                        AnimeSourceManagerTab.BROWSE -> {
+                            val browse = extensions.filter { it.kind == LanercSourceKind.BROWSE }
+                            LazyColumn(Modifier.weight(1f, fill = false), state = browseScroll, contentPadding = PaddingValues(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                item(key = "builtin-browse-heading") { AnimeSectionTitle("作品与播出资料") }
+                                items(AnimeDiscoveryProvider.entries, key = { "builtin-browse:" + it.name }) { provider ->
+                                    AnimeSelection(animeDiscoveryProviderLabel(provider),
+                                        if (provider == AnimeDiscoveryProvider.BANGUMI) "评分、新番、番表"
+                                        else "评分、人气、趋势", selected = false,
+                                        onClick = { pendingBrowse = provider; onDismiss() })
                                 }
-                            } else {
-                                AnimeQuietLabel("无需手动安装，准备状态会自动更新。")
-                            }
-                        } else if (selected.bundledAlternativeId != null) {
-                            // The native implementation is already provided; do not offer duplicate script install.
-                        } else if (selected.installable) item {
-                            MotionButton(onClick = { controller.installSource(selected.id) }, enabled = !busy,
-                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                                Text(if (busy) "正在安装" else "安装来源")
-                            }
-                        } else item {
-                            AnimeQuietLabel(selected.error ?: "这种来源目前不能安装。")
-                        }
-                        item {
-                            MotionTextButton(onClick = { technicalExpanded = !technicalExpanded }) {
-                                Text(if (technicalExpanded) "收起技术信息" else "技术信息")
-                                Icon(if (technicalExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                                    null, Modifier.size(16.dp))
+                                if (browse.isNotEmpty()) {
+                                    item(key = "extension-browse-heading") { AnimeSectionTitle("扩展目录") }
+                                    sourceManagerRows(browse, state, ::openSource)
+                                }
                             }
                         }
-                        if (technicalExpanded) item {
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                if (selected.aliases.isNotEmpty()) AnimeQuietLabel(selected.aliases.joinToString(" · "))
-                                if (selected.installed && selected.digest.isNotBlank()) AnimeQuietLabel("脚本版本 " + selected.digest.take(12))
-                                val declared = selected.capabilities.mapNotNull(::animeExtensionCapability).distinct()
-                                if (declared.isNotEmpty()) AnimeQuietLabel("脚本声明 · " + declared.joinToString(" · "))
-                                AnimeQuietLabel(selected.scriptUrl)
+                        AnimeSourceManagerTab.DANMAKU -> {
+                            val danmaku = extensions.filter { it.kind == LanercSourceKind.DANMAKU }
+                            LazyColumn(Modifier.weight(1f, fill = false), state = danmakuScroll, contentPadding = PaddingValues(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                item(key = "builtin-danmaku") {
+                                    AnimeSectionTitle("弹弹play 官方服务", subtitle = "在播放时打开弹幕面板，配置应用凭据后搜索剧集")
+                                }
+                                if (danmaku.isNotEmpty()) {
+                                    item(key = "extension-danmaku-heading") { AnimeSectionTitle("脚本扩展") }
+                                    sourceManagerRows(danmaku, state, ::openSource)
+                                }
                             }
                         }
                     }
                 }
-                if (state.notice != null && selected?.error == null) {
+                if (state.notice != null && state.notice != selected?.error) {
                     Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, bottom = 8.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         Text(state.notice, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
@@ -221,18 +210,179 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
     }
 }
 
-private fun animeExtensionKind(kind: String): String = when (kind) {
-    "VIDEO" -> "视频来源"
-    "BROWSE" -> "浏览资料"
-    "COMIC" -> "漫画来源"
-    "DANMAKU" -> "弹幕来源"
-    else -> "类型尚未确认"
+private data class AnimeVideoSourceGroup(val primary: LanercSourceListing, val sources: List<LanercSourceListing>)
+
+private fun animeVideoGroups(extensions: List<LanercSourceListing>, builtIns: Map<String, String>): List<AnimeVideoSourceGroup> {
+    val directory = builtIns.map { (id, name) ->
+        LanercSourceListing(id, name, LanercSourceKind.VIDEO, scriptUrl = "", installed = true, enabled = true)
+    } + extensions.filter { it.kind == LanercSourceKind.VIDEO }
+    val ids = directory.mapTo(hashSetOf()) { it.id }
+    return directory.groupBy { it.bundledAlternativeId?.takeIf(ids::contains) ?: it.id }.map { (id, variants) ->
+        val native = variants.firstOrNull { it.id == id }
+        val primary = native?.takeIf { it.active } ?: variants.firstOrNull { it.active } ?: native ?: variants.first()
+        AnimeVideoSourceGroup(primary, variants)
+    }
+}
+
+private val LanercSourceListing.active: Boolean get() = installed && enabled
+private val LanercSourceListing.displayName: String get() = name.removeSuffix(" · 内建")
+private val SourcePreparationState.retryableFailure: Boolean get() = phase == SourcePreparationPhase.FAILED && canRetry
+
+private fun LazyListScope.sourceManagerRows(sources: List<LanercSourceListing>, state: AnimeScreenState,
+    onSelect: (LanercSourceListing) -> Unit, fixedBuiltInIds: Set<String> = emptySet()) {
+    items(sources, key = { it.bundledAlternativeId ?: it.id }) { source ->
+        val native = source.id in BUNDLED_ANIME_SOURCE_IDS || source.id in fixedBuiltInIds
+        AnimeSelection(source.displayName, animeSourceManagerLabel(source, state, native),
+            selected = source.active && source.kind != LanercSourceKind.DANMAKU, onClick = { onSelect(source) })
+    }
+}
+
+@Composable
+private fun AnimeSourceManagerDetail(
+    source: LanercSourceListing,
+    alternatives: List<LanercSourceListing>,
+    fixedBuiltIn: Boolean,
+    state: AnimeScreenState,
+    controller: AnimeController,
+    modifier: Modifier = Modifier,
+    onSelectAlternative: (LanercSourceListing) -> Unit,
+    onRemoved: () -> Unit,
+) {
+    var technicalExpanded by remember { mutableStateOf(false) }
+    var removeConfirm by remember { mutableStateOf(false) }
+    val native = fixedBuiltIn || source.id in BUNDLED_ANIME_SOURCE_IDS
+    val preparation = state.sourcePreparation[source.id]
+    val preparationNote = preparation?.message
+    val busy = source.id in state.sourceOperationIds || "all-video" in state.sourceOperationIds ||
+        preparation?.phase in preparingPhases
+    val homeFeeds by controller.sourceBrowse.homeFeeds.collectAsState()
+    val home = homeFeeds[source.id]
+    val search = state.sourceResults.firstOrNull { it.providerId == source.id }
+    val catalogueError = state.sourceCatalogErrors[source.id]
+    LazyColumn(modifier, contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            AnimeSectionTitle(animeExtensionKind(source.kind), subtitle = animeSourceManagerLabel(source, state, native))
+        }
+        if (source.preparationUnavailableReason != null) item {
+            Text(source.preparationUnavailableReason, style = MaterialTheme.typography.bodySmall)
+        }
+        if (source.installed && !source.enabled && source.id in setOf("anime-lanerc-23", "anime-lanerc-ain")) item {
+            AnimeQuietLabel("旧版曾因接口兼容性默认停用。此处保留本机已保存的选择，可通过下方开关启用。")
+        }
+        preparationNote?.takeIf { it.isNotBlank() }?.let { note ->
+            item { Text(note, style = MaterialTheme.typography.bodySmall) }
+        }
+        if (source.error != null && preparationNote?.startsWith(source.error) != true) item {
+            Text(source.error, style = MaterialTheme.typography.bodySmall,
+                color = if (source.installable) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (source.kind == LanercSourceKind.DANMAKU) item {
+            AnimeQuietLabel("观看时可使用官方弹幕服务，或读取已接入的站内弹幕。")
+        }
+        state.sourceRoutes[source.id]?.takeIf { source.installable }?.let { route ->
+            item { AnimeQuietLabel("网络设置 · " + downloadRouteLabel(route)) }
+        }
+        if (home?.error != null) item { AnimeQuietLabel("本次浏览 · " + home.error) }
+        if (catalogueError != null) item { AnimeQuietLabel("本次剧集读取 · " + catalogueError) }
+        if (search != null) item {
+            AnimeQuietLabel(when {
+                search.loading -> "正在搜索关联作品"
+                search.error != null -> "本次关联搜索 · " + search.error
+                else -> "本次关联搜索 · ${search.items.size} 个结果"
+            })
+        }
+        if (removeConfirm) item {
+            Text("移除已安装脚本。作品关联与观看记录保留，可重新准备后继续。", style = MaterialTheme.typography.bodyMedium)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                MotionTextButton(onClick = { removeConfirm = false }) { Text("取消") }
+                MotionButton(onClick = { controller.removeSource(source.id); onRemoved() }, enabled = !busy,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("确认移除") }
+            }
+        } else when {
+            fixedBuiltIn -> item { AnimeQuietLabel("内置视频来源随应用版本更新。") }
+            native -> item {
+                Box(Modifier.motionInputGate(!busy)) {
+                    SettingsToggle("启用这个来源", source.active, Icons.Outlined.PowerSettingsNew,
+                        onCheckedChange = { if (!busy) controller.enableSource(source.id, it) })
+                }
+            }
+            source.installed -> {
+                item {
+                    Box(Modifier.motionInputGate(!busy)) {
+                        SettingsToggle(if (source.kind == LanercSourceKind.DANMAKU) "启用脚本扩展" else "启用这个来源",
+                            source.enabled, Icons.Outlined.PowerSettingsNew,
+                            onCheckedChange = { if (!busy) controller.enableSource(source.id, it) })
+                    }
+                }
+                item { CompactMenuAction(Icons.Outlined.Refresh, "检查并更新脚本", enabled = !busy,
+                    onClick = { controller.updateSource(source.id) }) }
+                if (source.previousVersion != null) item {
+                    CompactMenuAction(Icons.Outlined.Undo, "恢复上一个脚本版本", enabled = !busy,
+                        onClick = { controller.rollbackSource(source.id) })
+                }
+                item { CompactMenuAction(Icons.Outlined.DeleteOutline, "移除脚本", enabled = !busy, destructive = true,
+                    onClick = { removeConfirm = true }) }
+            }
+            source.automaticPreparation -> when {
+                preparation?.retryableFailure == true -> item {
+                    CompactMenuAction(Icons.Outlined.Refresh, "重试准备此来源", enabled = !busy,
+                        onClick = { controller.retryAutomaticSource(source.id) })
+                }
+                preparation?.phase == SourcePreparationPhase.DISABLED -> item {
+                    CompactMenuAction(Icons.Outlined.Refresh, "重新准备此来源", enabled = !busy,
+                        onClick = { controller.restoreAutomaticSource(source.id) })
+                }
+                else -> Unit
+            }
+            source.installable && source.bundledAlternativeId == null -> item {
+                MotionButton(onClick = { controller.installSource(source.id) }, enabled = !busy,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Text(if (busy) "正在添加" else "添加来源")
+                }
+            }
+            else -> Unit
+        }
+        if (alternatives.isNotEmpty()) {
+            item(key = "alternatives-heading") { AnimeSectionTitle("同一来源的其他实现") }
+            items(alternatives, key = { "alternative:" + it.id }) { alternative ->
+                val altNative = alternative.id in BUNDLED_ANIME_SOURCE_IDS
+                AnimeSelection(if (altNative) "内置实现" else "原有扩展脚本",
+                    animeSourceManagerLabel(alternative, state, altNative), selected = alternative.active,
+                    onClick = { onSelectAlternative(alternative) })
+            }
+        }
+        val declared = source.capabilities.mapNotNull(::animeExtensionCapability).distinct()
+        val hasTechnical = native || source.aliases.isNotEmpty() || declared.isNotEmpty() || source.scriptUrl.isNotBlank()
+        if (hasTechnical) item {
+            CompactMenuAction(if (technicalExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                if (technicalExpanded) "收起技术信息" else "技术信息", onClick = { technicalExpanded = !technicalExpanded })
+        }
+        if (technicalExpanded) item {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                AnimeQuietLabel("来源标识 · " + source.id)
+                if (source.aliases.isNotEmpty()) AnimeQuietLabel(source.aliases.joinToString(" · "))
+                if (source.installed && source.version.isNotBlank()) AnimeQuietLabel("版本 · " + source.version)
+                if (source.installed && source.digest.isNotBlank()) AnimeQuietLabel("摘要 · " + source.digest.take(12))
+                if (declared.isNotEmpty()) AnimeQuietLabel((if (native) "已接入 · " else "脚本声明 · ") + declared.joinToString(" · "))
+                val sourceUrl = if (native) controller.sourceHomes[source.id] ?: source.scriptUrl else source.scriptUrl
+                if (sourceUrl.isNotBlank()) AnimeQuietLabel(sourceUrl)
+            }
+        }
+    }
+}
+
+private fun animeExtensionKind(kind: LanercSourceKind): String = when (kind) {
+    LanercSourceKind.VIDEO -> "视频来源"
+    LanercSourceKind.BROWSE -> "浏览资料"
+    LanercSourceKind.COMIC -> "漫画来源"
+    LanercSourceKind.DANMAKU -> "弹幕脚本"
+    LanercSourceKind.UNKNOWN -> "类型尚未确认"
 }
 
 private fun animeExtensionCapability(function: String): String? = when (function) {
     "search" -> "关键词搜索"
     "searchFiltered", "categories" -> "分类筛选"
-    "homeSections" -> "发现内容"
+    "homeSections", "latest" -> "发现内容"
     "detail" -> "作品资料"
     "related" -> "相关推荐"
     "play" -> "播放解析"
@@ -241,12 +391,31 @@ private fun animeExtensionCapability(function: String): String? = when (function
     else -> null
 }
 
-private fun animePreparationLabel(state: SourcePreparationState?): String = when (state?.phase) {
-    SourcePreparationPhase.PENDING -> "等待自动准备"
-    SourcePreparationPhase.PREPARING -> "正在自动准备"
-    SourcePreparationPhase.RETRYING -> "等待自动重试"
-    SourcePreparationPhase.READY -> "已准备 · 已启用"
-    SourcePreparationPhase.DISABLED -> "已停用"
-    SourcePreparationPhase.FAILED -> "自动准备未完成 · 可统一重试"
-    null -> "正在读取准备状态"
+private fun animeSourceManagerLabel(source: LanercSourceListing, state: AnimeScreenState, native: Boolean): String {
+    val preparation = state.sourcePreparation[source.id]
+    return when {
+        source.id in state.sourceOperationIds -> "正在处理"
+        source.kind == LanercSourceKind.COMIC -> "漫画图片协议 · 仅作参考"
+        source.kind == LanercSourceKind.UNKNOWN -> "ENC1 格式待适配 · 仅作参考"
+        !source.installable -> "暂不兼容 · 查看原因"
+        native && source.error != null -> "内置 · 读取状态失败"
+        native -> when {
+            source.active -> "内置 · 已启用"
+            source.installed -> "内置 · 已停用"
+            else -> "内置 · 已移除"
+        }
+        source.kind == LanercSourceKind.DANMAKU && source.active -> "脚本已启用 · 播放器尚未接入"
+        source.active && source.preparationUnavailableReason != null -> "扩展 · 部分线路待适配"
+        source.active -> if (source.kind == LanercSourceKind.BROWSE) "已启用 · 只提供资料" else "扩展 · 已启用"
+        source.installed -> "扩展 · 已停用"
+        preparation?.phase == SourcePreparationPhase.PENDING -> "等待自动准备"
+        preparation?.phase == SourcePreparationPhase.PREPARING -> "正在自动准备"
+        preparation?.phase == SourcePreparationPhase.RETRYING -> "等待自动重试"
+        preparation?.phase == SourcePreparationPhase.DISABLED -> "已移除 · 可重新准备"
+        preparation?.retryableFailure == true -> "准备失败 · 可重试"
+        preparation?.phase == SourcePreparationPhase.FAILED -> "准备失败 · 查看原因"
+        source.automaticPreparation -> "等待准备状态"
+        source.error != null -> "添加失败 · 查看原因"
+        else -> "可添加"
+    }
 }

@@ -7,6 +7,10 @@ import dev.mangaflow.anime.AnimeSourceCatalog
 import dev.mangaflow.anime.AnimeSourceEpisode
 import dev.mangaflow.anime.AnimeSourceTitle
 import dev.mangaflow.anime.AnimeSubtitle
+import dev.mangaflow.anime.sources.lanerc.LanercProvider
+import dev.mangaflow.anime.sources.lanerc.LanercSourceKind
+import dev.mangaflow.anime.sources.lanerc.LanercSourceListing
+import dev.mangaflow.anime.sources.lanerc.LanercSourceStore
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRoutingStore
@@ -35,18 +39,24 @@ interface AnimeProvider {
 
 class AnimeSourceRepository(context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
-    val extensions = dev.mangaflow.anime.sources.lanerc.LanercSourceStore.get(context)
+    val extensions = LanercSourceStore.get(context)
     private val nativeProviders: List<AnimeProvider> = listOf(TvtFunProvider(), AgeProvider(), GiriGiriProvider(), LmmProvider())
-    val providers: List<AnimeProvider> get() = nativeProviders + extensions.state.value
-        .filter { it.installed && it.enabled && it.kind == dev.mangaflow.anime.sources.lanerc.LanercSourceKind.VIDEO }
-        .map { listing ->
-            if (listing.id == "anime-native-jinpai") NativeJinpaiProvider(requireNotNull(listing.revision))
-            else if (listing.id == "anime-native-yzx") NativeYzxProvider(requireNotNull(listing.revision))
-            else if (listing.id == "anime-native-ani") AniChAnimeProvider(requireNotNull(listing.revision))
-            else if (listing.id in BUNDLED_HTML_ANIME_IDS) BundledHtmlAnimeProvider(listing.id, requireNotNull(listing.revision))
-            else dev.mangaflow.anime.sources.lanerc.LanercProvider(extensions, extensions.descriptor(listing.id))
+    internal val builtInVideoSources = nativeProviders.associate { it.id to it.name }
+    val providers: List<AnimeProvider> get() = nativeProviders + extensions.state.value.mapNotNull(::extensionProvider)
+
+    fun provider(id: String): AnimeProvider? = nativeProviders.firstOrNull { it.id == id }
+        ?: extensions.state.value.firstOrNull { it.id == id }?.let(::extensionProvider)
+
+    private fun extensionProvider(listing: LanercSourceListing): AnimeProvider? {
+        if (!listing.installed || !listing.enabled || listing.kind != LanercSourceKind.VIDEO) return null
+        return when (listing.id) {
+            "anime-native-jinpai" -> NativeJinpaiProvider(requireNotNull(listing.revision))
+            "anime-native-yzx" -> NativeYzxProvider(requireNotNull(listing.revision))
+            "anime-native-ani" -> AniChAnimeProvider(requireNotNull(listing.revision))
+            in BUNDLED_HTML_ANIME_IDS -> BundledHtmlAnimeProvider(listing.id, requireNotNull(listing.revision))
+            else -> LanercProvider(extensions, extensions.descriptor(listing.id))
         }
-    fun provider(id: String): AnimeProvider? = providers.firstOrNull { it.id == id }
+    }
 }
 
 /**

@@ -1,3 +1,7 @@
+## 动漫来源、渐进加载和续看 · 2026-11-19
+
+[来源状态、搜索和续看](docs/anime/lanerc-port.md#来源状态搜索和续看--2026-11-19) 记录当前两张截图、来源实际状态、采用的组件、播放流程与验收。来源管理围绕用户能选择和操作的来源组织。首页和搜索在已有结果上渐进更新。播放器围绕正在打开的作品和剧集提供恢复动作，并在高级设置呈现实际首帧信号。沿用既有动漫导航、内容布局和来源、剧集、线路身份规则。
+
 ## Adult discovery and anime content hierarchy · 2026-11-18 (BROWSE-REDESIGN-01–08)
 
 User wording: “唉，给我们的成人漫画还有动漫的UI UX升级重做一下好吧，尤其是成人区啊，太恶心了”. Source: current chat, recorded 2026-11-18 Asia/Shanghai; no new screenshot or exact message identifier is available. Adult discovery is the priority. This authorizes reorganizing the adopted controls; it does not establish installed visual acceptance or authorize a new theme, data merger, source preference or playback engine.

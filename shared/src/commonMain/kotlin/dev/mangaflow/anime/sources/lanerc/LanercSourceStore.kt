@@ -43,6 +43,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val packages = MutableStateFlow<Map<String, LanercInstalledPackage>>(emptyMap())
     private var builtIns: Map<String, BuiltInChoice> = emptyMap()
+    private val packageErrors = mutableMapOf<String, PackageError>()
     private val mutableState = MutableStateFlow(project(emptyMap()))
     val state = mutableState.asStateFlow()
     private var loadFailure: Boolean = false
@@ -110,7 +111,11 @@ class LanercSourceStore private constructor(context: PlatformContext) {
 
     private val automatic = AutomaticAnimeSources(application, this, scope)
     val preparation = automatic.state
-    suspend fun retryAutomaticSources() { ready.await(); automatic.start() }
+    suspend fun retryAutomaticSources() { ready.await(); automatic.retry() }
+    suspend fun retryAutomaticSource(id: String) = actionGate(id).withLock {
+        ready.await()
+        automatic.retry(setOf(id))
+    }
     suspend fun restoreAutomaticSource(id: String) = actionGate(id).withLock {
         ready.await()
         automatic.restore(id)
@@ -172,34 +177,40 @@ class LanercSourceStore private constructor(context: PlatformContext) {
 
     private suspend fun download(id: String, update: Boolean, initialEnabled: Boolean = true) {
         ready.await()
-        check(!loadFailure) { "来源存储未能读取，原文件仍保留；暂不能覆盖。" }
         val descriptor = descriptor(id)
         require(installable(descriptor)) { unsupported(descriptor) ?: "此类来源暂不支持。" }
-        val expected = packages.value[id]
+        val expected = writer.withLock {
+            if (loadFailure) throw LanercPackagePreparationException(LanercPackageStage.STORAGE,
+                "来源存储未能读取，原文件仍保留。请重启应用或恢复来源备份后重试。")
+            packages.value[id]
+        }
         if (!update && expected != null) return
         if (update) check(expected != null) { "请先安装该来源。" }
-        var stage = "下载"
+        var stage = LanercPackageStage.DOWNLOAD
         try {
             // The existing installer transport keeps its DNS/public-IP, route and redirect guards.
             val code = fetchPluginText(application, descriptor.scriptUrl)
+            stage = LanercPackageStage.INTEGRITY
             require(code.encodeToByteArray().size in 1..MAX_CODE_BYTES) { "脚本文件过大或为空。" }
-            stage = "校验"
             val digest = animeHash(code)
-            if (digest != descriptor.observedDigest) throw LanercPackageIntegrityException()
+            check(digest == descriptor.observedDigest) { "来源脚本与内置校验记录不一致。" }
             val version = Regex("(?im)(?:version|版本)\\s*[:=]\\s*['\"]?([A-Za-z0-9._-]{1,48})")
                 .find(code)?.groupValues?.get(1) ?: digest.take(12)
             val next = LanercInstalledPackage(id, code, digest, version, expected?.enabled ?: initialEnabled,
                 randomUuid(), expected?.optionsJson ?: "{}", expected?.code, expected?.digest, expected?.version,
                 optionsKey = expected?.optionsKey.orEmpty())
-            stage = "准备组件"
+            stage = LanercPackageStage.ENGINE
             LanercEnginePreparation.awaitReady(application)
-            stage = "兼容验证"
+            stage = LanercPackageStage.COMPATIBILITY
             runtime.validate(next, descriptor)
-            stage = "保存"
+            stage = LanercPackageStage.STORAGE
             withContext(Dispatchers.IO) {
                 writer.withLock {
-                    check(packages.value[id]?.revision == expected?.revision) { "来源已被其他操作更改，请重新安装或更新。" }
+                    if (packages.value[id]?.revision != expected?.revision)
+                        throw LanercPackagePreparationException(LanercPackageStage.STORAGE,
+                            "来源已被其他操作更改，请重新检查此来源。")
                     if (expected?.digest == digest) {
+                        packageErrors.remove(id)
                         mutableState.value = project(packages.value)
                         return@withLock
                     }
@@ -208,19 +219,24 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             }
         } catch (cancel: CancellationException) { throw cancel }
         catch (failure: Exception) {
-            val message = when (failure) {
-                is LanercPackageIntegrityException -> "来源脚本与内置校验记录不一致，已阻止执行；已安装版本仍然保留，需更新应用中的来源记录后再试。"
-                is LanercCapabilityException -> failure.message ?: "该来源需要尚未支持的宿主能力。"
-                else -> when (stage) {
-                    "下载" -> "${descriptor.name} 下载失败，请检查网络；已有版本仍保留，内置来源无需下载。"
-                    "校验" -> "${descriptor.name} 文件校验失败，未执行脚本；已有版本仍保留。"
-                    "兼容验证" -> "${descriptor.name} 兼容验证失败，未启用此包；请使用内置来源或更新应用。"
-                    else -> "${descriptor.name} 保存失败，请检查存储空间；已有版本仍保留。"
+            val message = when (stage) {
+                LanercPackageStage.DOWNLOAD -> "${descriptor.name} 脚本下载失败，请检查来源包下载线路。"
+                LanercPackageStage.INTEGRITY -> "${descriptor.name} 脚本内容和应用内的校验记录不符，需更新来源记录。"
+                LanercPackageStage.ENGINE -> (failure as? LanercCapabilityException)?.message
+                    ?: "脚本组件未能准备，请检查组件管理。"
+                LanercPackageStage.COMPATIBILITY -> (failure as? LanercCapabilityException)?.message
+                    ?: "${descriptor.name} 兼容验证未完成，请检查脚本组件或更新应用。"
+                LanercPackageStage.STORAGE -> "${descriptor.name} 保存失败，请检查存储空间。"
+            }
+            val problem = failure as? LanercPackagePreparationException ?: LanercPackagePreparationException(stage, message)
+            writer.withLock {
+                // A backup restore or setting change may have already replaced this exact package.
+                if (packages.value[id]?.revision == expected?.revision) {
+                    packageErrors[id] = PackageError(expected?.revision, problem.message.orEmpty())
+                    mutableState.value = project(packages.value)
                 }
             }
-            mutableState.value = mutableState.value.map { if (it.id == id) it.copy(error = message) else it }
-            if (failure is LanercCapabilityException) throw LanercCapabilityException(message)
-            throw IllegalStateException(message)
+            throw problem
         }
     }
 
@@ -273,6 +289,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
                 check(!loadFailure) { "来源存储未能读取，不能覆盖原文件。" }
                 val old = packages.value[id]
                 commit(packages.value - id)
+                if (packageErrors.remove(id) != null) mutableState.value = project(packages.value)
                 if (old?.optionsKey?.isNotEmpty() == true) runCatching { deleteSecret(application, optionsSecret(id, old.optionsKey)) }
             } }
         }
@@ -365,6 +382,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         val previous = packages.value
         packages.value = next
         builtIns = effectiveChoices
+        packageErrors.entries.removeAll { (id, error) -> error.revision != next[id]?.revision }
         mutableState.value = project(next)
         previous.values.filter { next[it.id]?.revision != it.revision }.forEach { runtime.invalidate(it.id) }
     }
@@ -414,7 +432,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             }
             LanercSourceListing(item.id, item.name, item.kind, item.scriptUrl,
                 installed != null, installed?.enabled == true, installed?.version.orEmpty(), installed?.digest.orEmpty(),
-                installed?.previousVersion, loadError ?: unsupported(item), item.aliases, item.functions,
+                installed?.previousVersion, loadError ?: packageErrors[item.id]?.message ?: unsupported(item), item.aliases, item.functions,
                 "{}", installable(item), installed?.revision, installed?.optionsJson?.let { it != "{}" } == true)
         }.map { listing ->
             listing.copy(
@@ -443,6 +461,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
     }
 
     private data class BuiltInChoice(val enabled: Boolean, val removed: Boolean, val revision: String)
+    private data class PackageError(val revision: String?, val message: String)
 
     companion object {
         private const val MAX_CODE_BYTES = 5 * 1024 * 1024
@@ -464,5 +483,6 @@ class LanercSourceStore private constructor(context: PlatformContext) {
     }
 }
 
-/** Kept distinct so a changed remote script is not presented as a retryable network failure. */
-private class LanercPackageIntegrityException : IllegalStateException()
+internal enum class LanercPackageStage { DOWNLOAD, INTEGRITY, ENGINE, COMPATIBILITY, STORAGE }
+
+internal class LanercPackagePreparationException(val stage: LanercPackageStage, message: String) : IllegalStateException(message)

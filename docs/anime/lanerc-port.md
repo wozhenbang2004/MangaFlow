@@ -1,5 +1,30 @@
 # Lanerc feature transfer into MangaFlow
 
+## 来源状态、搜索和续看 · 2026-11-19
+
+用户要求「彻底优化重做动漫模块的产品逻辑以及各种体验」，问来源「这么多没准备」是实现问题还是无法支持，并希望以 Lanerc 的功能、流畅和免代理体验为参照。当前对话附图 `1000122094.jpg` 和 `1000122095.jpg` 分别展示视频和其他分类，未提供安装版本。用户补充资料库已有 Lanerc APK，可按需准备逆向工具。
+
+| 截图条目 | 源码依据与处理 |
+| --- | --- |
+| yzx、AkiAnime、DMBus、AniCh | 已有随包适配，金牌也属于这一组。旧界面把目录条目与运行中的内置源混列，还给内置项提供必然失败的脚本更新操作。同站合并为一行，本机已有历史脚本时仍可查看和管理两个实现，各自保留真实 ID、绑定和开关。TvTFun、AGE、GiriGiriLove、LMM22 四个固定内置源也进入管理视图。 |
+| 23、Cain | `38fb37f` 曾因 HTTP 兼容性默认停用。现版已有对应的限定接口适配，新的自动准备允许启用。旧存储只有开关值，无法区分初始默认与手动停用。保留保存值，详情解释历史原因并提供开关。 |
+| LMM85 | 有公开直链适配。页面验证或媒体嗅探所需的宿主能力尚未接入，仍可能遇到特定线路不可用。LMM85 与 LMM22 是独立来源。 |
+| 囧次元 | 原参考是 ENC1 包，当前宿主未实现这一格式，也未确认其完整能力。显示在参考目录。 |
+| 酷漫星、咸番鸭、yulu、漫时光 | 这四项声明的是漫画图片接口。动漫播放器无法消费该接口，漫画宿主也尚未移植这些协议。显示在参考目录。 |
+| 弹弹play | 目录中的独立脚本可准备。播放器弹幕面板当前通过原有官方服务按凭据匹配，另支持有明确适配的站内弹幕。脚本安装状态不能代表播放器正在使用它。 |
+
+### 体验与验收
+
+- 来源首屏直接显示当前启用的视频来源，待准备、停用、添加和参考内容通过「更多来源」进入。浏览和弹幕保留真实用途。沿用项目的 MotionDialog、LiquidGlass PANEL、Ovio MotionTabs、AnimeSelection 和现有设置开关。来源详情保留各自的操作，实际退出面板后才跳转 Bangumi 或 AniList。观察项使用真实来源 ID，当前线路配置与浏览、剧集及关联搜索反馈各自归属。
+- 自动准备同时最多处理两个来源。下载失败退避，摘要不符停止执行，组件、兼容性和保存失败显示各自原因。失败条目可按状态单独重试。停用选择、移除记录、已安装版本、固定摘要和现有来源数据继续作为权威状态。
+- 首页先读已有分源缓存，后台原生和脚本分别限流。打开单个来源可优先获取，批量重试沿用后台限流。首页保留显式选择和可复用轮播项。搜索优先发送已取得的结果，允许较快来源追加下一页，失败按来源和实际页重试。普通 Bangumi 搜索使用现有缓存有效期，显式重试或更改该线路后重新请求。
+- 续看读取到保存的同一集时复用普通播放入口。已有确认线路直接尝试，尚无线路时显示本集匹配过程。目录缺少该集时保留历史并给反馈。保存上一段进度失败时提示，允许继续打开本集。进度变化本身不会再触发整部番的来源选项重建。
+- 「播放设置 → 缓冲与恢复」显示当前资源来源、实际选用的应用线路和会话打开至首个视频帧的观测，包含同一会话内内核重试时间。只在播放器报告已经渲染画面后显示该用时，纯音频、失败和缺少观测的平台分别有反馈。此计时不含打开作品、找集或解析地址。
+
+依据使用 [Lanerc 1.1.6 上传样本研究](https://chatgpt.com/space/page_e184ced85e8c8191985ad8153f1c6375) 的配置先显示缓存、多源结果逐源到达、同集换源和首帧分阶段做法，以及 [Mihon 来源管理](https://mihon.app/docs/guides/getting-started) 对扩展目录与实际来源的区分。上传的 ARM64 样本已完成静态调用链分析，先前模拟器未成功启动样本。本版沿用项目已采用的玻璃、Motion 和播放器实现，没有依赖反编译产物。国内 Wi-Fi 和移动网络直连及首帧速度仍需要实际设备观测。
+
+本批完成源码和差异审阅。正式构建使用 main 的既有工作流，界面密度、键盘／触摸、安装后速度、真实播放和来源可达性按设备证据验收。仍开放的源协议见下文清单。
+
 ## Anime discovery and playback redesign · 2026-11-19
 
 Lanerc's [resource FAQ](https://app.lanerc.com/newsinfo/1070035.html) describes ingesting, encoding and publishing episodes ahead of playback. Its [release notes](https://app.lanerc.com/newsinfo/1070160.html) describe offline caching and super-resolution separately. A [LINUX DO report](https://linux.do/t/topic/1064787) covers one older client and connection; national routing and present startup timings remain unmeasured. The visual reference uses an artwork-led home with direct paths to updates, rankings and categories. [Animeko](https://github.com/open-ani/animeko/blob/main/docs/contributing/code/media-framework.md) documents independent source results and preference-based playback. [Kazumi](https://github.com/Predidit/Kazumi) demonstrates native source-rule discovery, and [Mihon](https://github.com/mihonapp/mihon) demonstrates useful local history, library and offline behavior.

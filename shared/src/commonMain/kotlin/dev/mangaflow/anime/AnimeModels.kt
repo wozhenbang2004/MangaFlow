@@ -1,6 +1,7 @@
 package dev.mangaflow.anime
 
 import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.anime.player.AnimeVideoEnhancementMode
 
 /** Canonical subject identities never share the manga library's keys or progress. */
@@ -259,6 +260,8 @@ data class AnimeScreenState(
     val episodeOptions: Map<String, List<AnimeEpisodeOption>> = emptyMap(),
     val selectedEpisodeId: String? = null,
     val selectedPlaybackOption: AnimeEpisodeOption? = null,
+    val playbackFirstFrameMs: Long? = null,
+    val playbackRouteMode: DownloadRouteMode? = null,
     val resolving: Boolean = false,
     val playbackTarget: AnimePlaybackTarget? = null,
     val autoMatching: Boolean = false,

@@ -298,6 +298,21 @@ internal fun AnimePlayerSettings(
                             }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("应用跳过设置") } }
                         }
                         AnimePlayerPanel.BUFFER -> {
+                            if (state.selectedEpisodeId != null) item {
+                                AnimeSectionTitle("当前播放")
+                                val option = state.selectedPlaybackOption
+                                val route = state.playbackRouteMode?.let(::downloadRouteLabel)
+                                AnimeQuietLabel(listOfNotNull(option?.sourceName, route).joinToString(" · ")
+                                    .ifBlank { "离线文件" })
+                                val firstFrame = state.playbackFirstFrameMs
+                                AnimeQuietLabel(when {
+                                    firstFrame != null -> "本次播放会话 · 打开至首帧 ${firstFrame} 毫秒"
+                                    playback.hasVideoTracks == false -> "当前媒体只有音频"
+                                    playback.firstFrameRendered == null -> "当前内核未提供首帧观测"
+                                    playback.phase == AnimePlayerPhase.ERROR -> "本次未收到视频帧"
+                                    else -> "等待首个视频帧"
+                                })
+                            }
                             if (AnimePlayerCapability.BUFFER_CONTROL in capabilities) {
                                 item { AnimeQuietLabel("秒数是播放器的准备目标，实际缓存量由当前资源与可用预算决定。") }
                                 item { AnimeTextField(minimumDraft, { minimumDraft = it; error = null }, "最小缓冲（秒）") }

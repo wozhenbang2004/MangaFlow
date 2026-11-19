@@ -3,6 +3,7 @@ package dev.mangaflow.anime
 import dev.mangaflow.anime.sources.AnimeMetadataRepository
 import dev.mangaflow.anime.sources.AnimeProvider
 import dev.mangaflow.anime.sources.AnimeSourceRepository
+import dev.mangaflow.anime.sources.lanerc.LanercProvider
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
@@ -30,7 +31,12 @@ internal data class AnimeSearchIndex(
     val hasMore: Boolean = false,
     val loading: Boolean = false,
     val error: String? = null,
-)
+) {
+    val canLoadMore: Boolean get() = hasMore && !loading && error == null
+}
+
+internal val AnimeSourceResult.canLoadMoreSearch: Boolean
+    get() = hasMore && !loading && !loadingMore && error == null
 
 internal data class AnimeUnifiedSearchState(
     val query: String = "",
@@ -54,6 +60,8 @@ internal class AnimeUnifiedSearch(
     private val mutableState = MutableStateFlow(AnimeUnifiedSearchState())
     val state = mutableState.asStateFlow()
     private val permits = Semaphore(6)
+    // The script engine can run two requests. Its queue should not consume native search permits.
+    private val scriptPermits = Semaphore(2)
     private val sourceJobs = mutableMapOf<String, Job>()
     private val overlappingPages = mutableSetOf<String>()
     private var sourceKeys = emptyMap<String, Source>()
@@ -81,6 +89,7 @@ internal class AnimeUnifiedSearch(
         if (search.query.isBlank()) return
         val route = routeFor(INDEX_ID)
         val refreshIndex = indexRoute != route
+        val changedIndexRoute = indexRoute != null && refreshIndex
         if (refreshIndex) {
             indexJob?.cancel()
             indexRoute = route
@@ -103,27 +112,25 @@ internal class AnimeUnifiedSearch(
                 retained[provider.id]?.takeIf { provider.id !in refreshed }
                     ?: AnimeSourceResult(provider.id, provider.name)
             }), regroup = true)
-        if (refreshIndex) requestIndex()
+        if (refreshIndex) requestIndex(forceRefresh = changedIndexRoute)
         providers.filter { (provider, _) -> provider.id in refreshed }.forEach { (provider, _) -> requestSource(provider) }
     }
 
     fun loadMore() {
         val state = mutableState.value
-        if (state.index.hasMore && state.index.error == null) requestIndex()
+        if (state.index.canLoadMore) requestIndex()
         if (state.indexOnly) return
-        repository.providers.forEach { provider ->
-            val row = state.sources.firstOrNull { it.providerId == provider.id }
-            if (row?.hasMore == true && row.error == null) requestSource(provider)
-        }
+        val ready = state.sources.filter { it.canLoadMoreSearch }.mapTo(mutableSetOf()) { it.providerId }
+        repository.providers.filter { it.id in ready }.forEach(::requestSource)
     }
 
-    fun retryIndex() = requestIndex()
+    fun retryIndex() = requestIndex(forceRefresh = true)
 
     fun retrySource(sourceId: String) {
         repository.provider(sourceId)?.let(::requestSource)
     }
 
-    private fun requestIndex() {
+    private fun requestIndex(forceRefresh: Boolean = false) {
         val state = mutableState.value
         val route = indexRoute ?: return
         if (state.query.isBlank() || state.index.loading) return
@@ -149,7 +156,7 @@ internal class AnimeUnifiedSearch(
                 }
                 route.requireAvailable()
                 val result = withTimeoutOrNull(SEARCH_TIMEOUT_MILLIS) {
-                    metadata.browse(AnimeBrowseMode.POPULAR, state.query, page, null, "", null, forceRefresh = page == 1)
+                    metadata.browse(AnimeBrowseMode.POPULAR, state.query, page, null, "", null, forceRefresh = forceRefresh)
                 } ?: error("番剧资料搜索超时，请重试。")
                 check(result.page == page) { "番剧资料返回了不同页码。" }
                 if (current()) publish(mutableState.value.copy(index = AnimeSearchIndex(
@@ -184,12 +191,14 @@ internal class AnimeUnifiedSearch(
                 return false
             }
             try {
-                val found = permits.withPermit {
+                key.route.requireAvailable()
+                suspend fun find() = permits.withPermit {
                     if (!current()) return@withPermit null
-                    key.route.requireAvailable()
                     withTimeoutOrNull(SEARCH_TIMEOUT_MILLIS) { provider.search(state.query, page) }
                         ?: error("搜索超时，请重试。")
-                } ?: return@launch
+                }
+                val found = (if (provider is LanercProvider) scriptPermits.withPermit { find() } else find())
+                    ?: return@launch
                 if (!current()) return@launch
                 check(found.all { it.sourceId == provider.id && (it.sourceRevision == null || it.sourceRevision == key.revision) }) {
                     "来源返回的条目身份已变化，请重试。"
