@@ -34,6 +34,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.mangaflow.account.AccountProfile
 import dev.mangaflow.account.CloudHistoryEntry
+import dev.mangaflow.account.CopyLoginRoute
 import dev.mangaflow.account.CopyShelfMetadata
 import dev.mangaflow.storage.SavedResumeTarget
 import dev.mangaflow.ui.CopyProgressHintState
@@ -3481,8 +3482,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         visibleReading = null
     }
 
-    fun loginWithPassword(username: String, password: String) = authenticate {
-        accountRepository.loginWithPassword(username, password)
+    fun loginWithPassword(username: String, password: String, route: CopyLoginRoute = CopyLoginRoute.COPY_SETTINGS) = authenticate {
+        accountRepository.loginWithPassword(username, password, route)
     }
 
     fun cancelAccountLogin() {

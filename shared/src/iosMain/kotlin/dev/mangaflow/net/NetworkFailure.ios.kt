@@ -15,3 +15,14 @@ internal actual fun platformNetworkFailureKind(failure: Throwable): NetworkFailu
         else -> null
     }
 }
+
+internal actual fun platformTlsFailureDetail(failure: Throwable): String? {
+    val error = (failure as? DarwinHttpRequestException)?.origin ?: return null
+    if (error.domain != NSURLErrorDomain) return null
+    return when (error.code) {
+        -1201L -> "站点证书的有效期校验失败，请核对设备时间"
+        -1202L, -1203L -> "系统未能信任站点证书"
+        -1204L -> "站点证书尚未生效，请核对设备时间"
+        else -> null
+    }
+}

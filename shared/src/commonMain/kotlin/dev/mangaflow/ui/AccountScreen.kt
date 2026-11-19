@@ -26,6 +26,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -39,6 +40,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.AccountUiState
 import dev.mangaflow.account.CloudHistoryEntry
+import dev.mangaflow.account.CopyLoginRoute
 import dev.mangaflow.account.CopyShelfMetadata
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
@@ -48,6 +50,9 @@ import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.ChapterProgress
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.motion.MotionSwap
+import dev.mangaflow.ui.motion.MotionTabTreatment
+import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.MotionButton as Button
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import dev.mangaflow.ui.motion.MotionIconButton as IconButton
@@ -58,7 +63,7 @@ import dev.mangaflow.ui.platform.*
 fun AccountScreen(
     state: AccountUiState,
     repository: MangaRepository,
-    onLoginWithPassword: (String, String) -> Unit,
+    onLoginWithPassword: (String, String, CopyLoginRoute) -> Unit,
     active: Boolean,
     onLogout: () -> Unit,
     onCancelLogin: () -> Unit,
@@ -99,6 +104,7 @@ fun AccountScreen(
     var password by remember { mutableStateOf("") }
     var showSecret by remember { mutableStateOf(false) }
     var submitting by remember { mutableStateOf(false) }
+    var loginRoute by remember { mutableStateOf(CopyLoginRoute.COPY_SETTINGS) }
     val clearSecrets = {
         password = ""
         showSecret = false
@@ -109,7 +115,12 @@ fun AccountScreen(
         focus.clearFocus()
     }
     LaunchedEffect(state.busy) { if (!state.busy) submitting = false }
-    LaunchedEffect(active) { if (!active) clearInputs() }
+    LaunchedEffect(active, profile?.username) {
+        if (!active || profile != null) {
+            loginRoute = CopyLoginRoute.COPY_SETTINGS
+            clearInputs()
+        }
+    }
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) clearSecrets()
@@ -122,9 +133,10 @@ fun AccountScreen(
         if (active && !state.busy && !submitting && username.isNotBlank() && password.isNotEmpty()) {
             val submittedUsername = username.trim()
             val submittedPassword = password
+            val submittedRoute = loginRoute
             submitting = true
             clearInputs()
-            onLoginWithPassword(submittedUsername, submittedPassword)
+            onLoginWithPassword(submittedUsername, submittedPassword, submittedRoute)
         }
     }
 
@@ -190,6 +202,17 @@ fun AccountScreen(
                     keyboardActions = KeyboardActions(onDone = { submitPassword() }),
                     shape = RoundedCornerShape(18.dp), colors = accountInputColors(),
                 )
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("登录线路", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                    MotionTabs(loginRoute.ordinal, CopyLoginRoute.entries.map { it.label },
+                        onSelect = { if (formActive && !busy) loginRoute = CopyLoginRoute.entries[it] },
+                        modifier = Modifier.motionInputGate(formActive && !busy),
+                        track = colors.surfaceVariant, indicator = colors.surface,
+                        controlHeight = 44.dp, treatment = MotionTabTreatment.Soft,
+                        fullWidthIndicator = true, role = Role.RadioButton)
+                    if (loginRoute == CopyLoginRoute.SYSTEM) Text("仅用于密码提交。设备的系统 VPN 仍可能接管。",
+                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                }
                 Button(
                     onClick = submitPassword,
                     enabled = formActive && !busy && username.isNotBlank() && password.isNotEmpty(),

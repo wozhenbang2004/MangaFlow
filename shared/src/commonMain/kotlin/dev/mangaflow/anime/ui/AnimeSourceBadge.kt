@@ -95,7 +95,8 @@ internal fun AnimeSourceBadge(sources: List<Pair<String, String>>, modifier: Mod
             contentDescription = if (selected == null) "来源：$names" else "当前来源：$selected，来源：$names"
         }.padding(end = gap), contentAlignment = Alignment.CenterStart) {
         // The arrow opens the whole list if the cover can display only a few marks.
-        val markRoom = maxWidth - 12.dp - gap
+        val availableWidth = maxWidth
+        val markRoom = availableWidth - 12.dp - gap
         var used = 0.dp
         val visible = unique.take(3).takeWhile { (id, name) ->
             val width = if (animeReviewSourceId(id) != null) reviewSourceMarkWidth(markSize, fontScale)
@@ -106,7 +107,7 @@ internal fun AnimeSourceBadge(sources: List<Pair<String, String>>, modifier: Mod
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(gap)) {
             visible.forEach { (id, name) -> AnimeSourceMark(id, name, size = markSize, ink = ink) }
-            if (used + gap + 12.dp <= maxWidth) {
+            if (used + gap + 12.dp <= availableWidth) {
                 Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(12.dp), tint = ink.copy(alpha = .70f))
             }
         }

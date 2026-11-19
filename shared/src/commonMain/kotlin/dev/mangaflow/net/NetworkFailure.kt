@@ -11,7 +11,7 @@ internal enum class NetworkFailureKind(val message: String) {
     NO_NETWORK("设备当前没有可用网络"),
     DNS("无法解析来源地址，请检查网络"),
     CONNECTION("无法连接来源，请检查所选线路"),
-    TLS("来源安全连接校验失败，请检查设备时间或所选线路"),
+    TLS("未能完成来源安全连接"),
     CONNECT_TIMEOUT("连接来源超时，请检查所选线路"),
     RESPONSE_TIMEOUT("等待来源响应超时，请稍后重试"),
     TRANSFER_TIMEOUT("图片传输已停止响应，稍后从有效断点继续"),
@@ -23,6 +23,7 @@ internal class NetworkTransferException(
 ) : IOException(message, cause)
 
 internal expect fun platformNetworkFailureKind(failure: Throwable): NetworkFailureKind?
+internal expect fun platformTlsFailureDetail(failure: Throwable): String?
 
 internal fun networkFailureKind(failure: Throwable): NetworkFailureKind? {
     var current: Throwable? = failure
@@ -40,6 +41,20 @@ internal fun networkFailureKind(failure: Throwable): NetworkFailureKind? {
         current = next
     }
     return null
+}
+
+/** Only report explicit, platform-typed evidence. Never copy exception text into diagnostics. */
+internal fun networkTlsFailureDetail(failure: Throwable): String? {
+    var current: Throwable? = failure
+    var detail: String? = null
+    repeat(8) {
+        val candidate = current ?: return detail
+        platformTlsFailureDetail(candidate)?.let { detail = it }
+        val next = candidate.cause
+        if (next === candidate) return detail
+        current = next
+    }
+    return detail
 }
 
 /** Retry-After is either a nonnegative number of seconds or an HTTP date. */
