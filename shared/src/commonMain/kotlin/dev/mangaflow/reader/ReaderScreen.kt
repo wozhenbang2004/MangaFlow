@@ -3916,7 +3916,7 @@ private fun ReaderPageImage(
                     )
                     val originalSize = knownDimensions ?: observedDimensions
                         ?: page.takeIf { it.width > 0 && it.height > 0 }?.let { IntSize(it.width, it.height) }
-                    if (hasDimensions && originalSize != null && naturalHeightPx > previewHeight * 2 &&
+                    if (hasDimensions && originalSize != null && naturalHeightPx > previewSize.height * 2 &&
                         originalSize.readerAspectRatio() == aspect && loadedImage != null) {
                         key(resource?.url, detailRetry) {
                             VerticalReaderTiles(requireNotNull(resource), loadedImage?.diskCacheKey,
