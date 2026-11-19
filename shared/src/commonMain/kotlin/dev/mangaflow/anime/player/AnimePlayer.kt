@@ -2,6 +2,7 @@ package dev.mangaflow.anime.player
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.IntSize
 import dev.mangaflow.anime.AnimePlaybackAsset
 import dev.mangaflow.enhancement.engine.EngineModel
 import dev.mangaflow.platform.PlatformContext
@@ -131,6 +132,8 @@ data class AnimeNativeVideoStatistics(
     val outputDroppedFrames: Long?,
     val estimatedFilterFps: Double?,
     val estimatedDelayedFrames: Long?,
+    /** Frame size after the video filters, before the video renderer's scaling and shaders. */
+    val filterOutputSize: IntSize? = null,
 )
 
 /** Native compressed-buffer observations. Missing measurements are deliberately not inferred from targets. */
@@ -241,6 +244,8 @@ data class AnimePlayerState(
     val realtimeMotion: AnimeRealtimeMotionState? = null,
     val nativeVideoStatistics: AnimeNativeVideoStatistics? = null,
     val bufferMetrics: AnimeBufferMetrics? = null,
+    /** Measured bounds of the playback surface in pixels, including any letterboxing. */
+    val playbackViewportSize: IntSize? = null,
 ) {
     val ended: Boolean get() = phase == AnimePlayerPhase.ENDED
     val isPlaying: Boolean get() = phase == AnimePlayerPhase.READY && playWhenReady && !isBuffering

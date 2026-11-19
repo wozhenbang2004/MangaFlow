@@ -130,11 +130,11 @@ internal fun EnhancementModelList(
     ModelChoiceRow("使用预设", "返回画质页选择预设算法；保留 ${policy.scale}× 输出设置",
         selectedModel == null, true, onClick = onUsePresets)
     ModelListTools("可选模型", onImport, onRefresh)
-    EnhancementQuiet("选用后由这个模型决定画质，预设档位不再参与。")
+    EnhancementQuiet("选用后按具体模型处理。通过「使用预设」切回档位选择。")
     if (content != EnhancementContent.ANIME)
         EnhancementQuiet("先按黑白／彩色与原图尺寸选。MB、MiB 是文件体积，不是画质排名；放大更多也不代表细节一定更准。")
-    if (content == EnhancementContent.ANIME && choices.any { it.profile != null })
-        EnhancementQuiet("Anime4K 的 S、M、L、VL、UL 表示逐渐增大的模型规模，通常也需要更多计算；不保证每段画面都更好。其他系列不按列表顺序排名。")
+    if (content == EnhancementContent.ANIME && choices.any { it.engineId == EnhancementEngineIds.ANIME4K_MEDIUM && it.builtIn })
+        EnhancementQuiet("日常观看可先选均衡（Anime4K M/M）。掉帧时试轻量（S/S）；有性能余量再比较其他模型。")
     if (choices.isEmpty()) EnhancementQuiet("还没有可选模型，可先准备运行组件或导入模型。")
     choices.forEach { choice ->
         val pending = choice.progressKey?.let { progress[it] }
@@ -151,7 +151,7 @@ internal fun EnhancementModelList(
                     modifier = Modifier.weight(1f), failed = pending?.failed == true && selectionId == null,
                     actionLabel = selection?.scale?.takeIf { it != policy.scale }?.let { "选用并改为 ${it}×" },
                     detailsOnly = selectionId != null && selection == null,
-                    guidance = if (content != EnhancementContent.ANIME) mangaModelGuidance(choice)?.summary else null)
+                    guidance = modelGuidance(choice, content)?.summary)
                 MotionIconButton(onClick = { onOpenModel(choice.key) }, modifier = Modifier.size(44.dp),
                     tooltip = "${choice.title} · 详情") {
                     Icon(Icons.Outlined.Info, "${choice.title} · 详情", Modifier.size(19.dp),
@@ -176,28 +176,71 @@ private fun anime4kSizeLabel(engineId: String): String? = when (engineId) {
     else -> null
 }
 
-private data class MangaModelGuidance(val summary: String, val detail: String, val sourceUrl: String)
+private data class ModelGuidance(val summary: String, val detail: String, val sourceUrl: String)
+
+private fun modelGuidance(choice: ModelChoice, content: EnhancementContent): ModelGuidance? =
+    if (content == EnhancementContent.ANIME) animeModelGuidance(choice) else mangaModelGuidance(choice)
+
+private fun animeModelGuidance(choice: ModelChoice): ModelGuidance? {
+    val anime4kSource = "https://github.com/bloc97/Anime4K/blob/master/md/GLSL_Instructions_Advanced.md"
+    val animeJaNaiSource = "https://github.com/the-database/mpv-AnimeJaNai"
+    val artCnnSource = "https://github.com/Artoriuz/ArtCNN"
+    return when (choice.model?.id) {
+        "artcnn:C4F16" -> ModelGuidance("实时 2× 亮度超分 · ArtCNN 轻量版",
+            "重建动画线条和亮度细节。C4F16 计算量较低，想比较 ArtCNN 时可从它试起。文件标注的 2× 是模型倍率，窗口大小由播放器决定。", artCnnSource)
+        "artcnn:C4F32" -> ModelGuidance("实时 2× 亮度超分 · ArtCNN 细节版",
+            "与 C4F16 同属 2× 亮度超分，C4F32 使用更多特征通道，对显卡要求更高。可用同一片段比较线条、纹理和掉帧。", artCnnSource)
+        "animejanai-live:performance" -> ModelGuidance("实时 2× 动画修复 · 优先速度",
+            "HD V3.1 Performance 通过 Windows DirectML 放大和修复动画画面。想用 AnimeJaNai 实时播放时，先用这一档确认本机流畅度。", animeJaNaiSource)
+        "animejanai-live:balanced" -> ModelGuidance("实时 2× 动画修复 · 侧重细节",
+            "HD V3.1 Balanced 使用比 Performance 更大的网络，保留细节的能力与计算开销都更高。适合 Performance 还有余量时比较。", animeJaNaiSource)
+        "animejanai-live:temporalfix-s1" -> ModelGuidance("实时 1× 时序修复 · 原尺寸",
+            "利用相邻帧减轻细线抖动或纹理闪烁，保持原分辨率和源帧率。适合想稳定画面细节时试用。", "https://github.com/pifroggi/vs_temporalfix")
+        else -> when (choice.engineId) {
+            EnhancementEngineIds.ANIME4K_SMALL -> ModelGuidance("轻量预设 · 从流畅度优先选起",
+                "Anime4K S/S 使用小型恢复和上采样网络。1× 修复原尺寸，2× 可启用超分着色器，适合显卡余量少或高分辨率播放时先试。", anime4kSource)
+            EnhancementEngineIds.ANIME4K_MEDIUM -> ModelGuidance("均衡预设 · 推荐先试",
+                "Anime4K M/M 使用中型恢复和上采样网络，适合日常动画播放。1× 保留原尺寸，2× 可启用超分着色器。掉帧时换 S/S。", anime4kSource)
+            "anime4k-optional-l", "anime4k-optional-vl", "anime4k-optional-ul" -> {
+                val tier = when (choice.engineId) {
+                    "anime4k-optional-l" -> "L · 高负载"
+                    "anime4k-optional-vl" -> "VL · 更高负载"
+                    else -> "UL · 系列最高负载"
+                }
+                ModelGuidance("实时动画修复 · $tier",
+                    "Anime4K 的 S → M → L → VL → UL 逐级增大，通常也更耗显卡。更大网络在部分片段可恢复更多细节，建议同场景比较线条、纹理和流畅度。", anime4kSource)
+            }
+            EnhancementEngineIds.VIDEOJANAI -> ModelGuidance("片段预处理／离线增强 · 先算后播",
+                "使用 VideoJaNai 在后台准备片段或生成单独的增强文件，适合能接受等待和缓存空间开销的场景。效果、倍率和耗时取决于所选权重。",
+                "https://github.com/the-database/VideoJaNai")
+            EnhancementEngineIds.ANDROID_CUGAN_VIDEO -> ModelGuidance("安卓 2× 超分 · 保留原有纹理",
+                "Real-CUGAN NOSE 采用 2× 无降噪权重与 Vulkan。优先试动画线条和压缩痕迹较少的片段，实时速度取决于手机 GPU 与片源。",
+                "https://github.com/nihui/realcugan-ncnn-vulkan")
+            else -> null
+        }
+    }
+}
 
 /** Describes published families; it never ranks weights or changes the selected model. */
-private fun mangaModelGuidance(choice: ModelChoice): MangaModelGuidance? {
+private fun mangaModelGuidance(choice: ModelChoice): ModelGuidance? {
     val title = choice.title
     val mangaSource = "https://github.com/the-database/MangaJaNai"
     return when {
-        choice.offer?.id == "animesharp-v2-mosr-soft-fp32" -> MangaModelGuidance(
+        choice.offer?.id == "animesharp-v2-mosr-soft-fp32" -> ModelGuidance(
             "较干净的彩页／插画 · 柔和修复",
             "Soft 适合较干净的图，偏向保留原有虚化和柔和层次；严重压缩痕迹不一定能清干净。" +
                 "当前是 MoSR 2× 版本，同系列还有其他网络与 Sharp 版本，不能按文件大小混排画质。黑白页先比较文字和网点是否保真。",
-            "https://huggingface.co/Kim2091/AnimeSharpV2"),
-        choice.offer?.id == "realesrgan-anime-6b-fp32" -> MangaModelGuidance(
+            "https://huggingface.co/Kim2091/AnimeSharpV2")
+        choice.offer?.id == "realesrgan-anime-6b-fp32" -> ModelGuidance(
             "动漫／插画 · 需要更大输出时比较",
             "这是原生 4× 动漫插画模型。6B 指 6 个 RRDB 网络模块，不是 60 亿参数或画质等级。" +
                 "4× 会生成原图 16 倍像素；同页 2× 只有 4 倍像素。黑白漫画要特别比较小字、网点和细线，不能只看输出尺寸。",
-            "https://github.com/xinntao/Real-ESRGAN/blob/master/docs/model_zoo.md"),
-        choice.engineId == EnhancementEngineIds.ANDROID_CUGAN -> MangaModelGuidance(
+            "https://github.com/xinntao/Real-ESRGAN/blob/master/docs/model_zoo.md")
+        choice.engineId == EnhancementEngineIds.ANDROID_CUGAN -> ModelGuidance(
             "彩页／条漫 · 无降噪 2×",
             "当前接入的是 NOSE 包中的 2× 无降噪权重，适合先比较原本较干净的彩页或条漫。" +
                 "它不会因为文件小就自动更差，也不能当成强力去噪模型；处理速度取决于实际 GPU、驱动和页面。",
-            "https://github.com/nihui/realcugan-ncnn-vulkan"),
+            "https://github.com/nihui/realcugan-ncnn-vulkan")
         choice.engineId == EnhancementEngineIds.MANGAJANAI && title.contains("IllustrationJaNai", true) -> {
             val variant = when {
                 title.contains("V3denoise", true) -> "清理网点噪声" to
@@ -206,14 +249,14 @@ private fun mangaModelGuidance(choice: ModelChoice): MangaModelGuidance? {
                     "V3detail 偏向保留纹理，不清理网点噪声；部分图可能产生过多纹理。"
                 else -> "彩色插画修复" to "用于彩页、封面和插画；具体修复倾向以此版本的作者说明为准。"
             }
-            MangaModelGuidance("彩页／封面 · ${variant.first}", variant.second +
+            ModelGuidance("彩页／封面 · ${variant.first}", variant.second +
                 "需要降噪时比较 denoise，原图干净时比较 detail。SPAN、FDAT、DAT、HAT 是不同网络，不能按 MB 排名。" +
                 "先用同一页对比文字、颜色和纹理，再按本机耗时决定。", "$mangaSource/releases")
         }
         choice.engineId == EnhancementEngineIds.MANGAJANAI && title.contains("MangaJaNai", true) -> {
             val height = Regex("(?:^|[_ -])(1200|1300|1400|1500|1600|1920|2048)p(?:[_ -]|$)",
                 RegexOption.IGNORE_CASE).find(title)?.groupValues?.get(1)
-            MangaModelGuidance(if (height != null) "黑白漫画 · 原图高度约 ${height}px" else "黑白漫画 · 按原图高度选",
+            ModelGuidance(if (height != null) "黑白漫画 · 原图高度约 ${height}px" else "黑白漫画 · 按原图高度选",
                 "1200p、1600p、2048p 等表示适合的原图整页高度，选最接近原图高度的型号，不是数字越大越好。" +
                     "不要用分块高度或增强后尺寸来选。这个系列针对黑白漫画的文字与网点；彩页应比较 IllustrationJaNai。" +
                     "同系列 2× 可先用于连续阅读，4× 留给需要更大输出且能接受处理等待的情况。", mangaSource)
@@ -317,9 +360,8 @@ internal fun EnhancementModelDetail(
     Text(choice.title, style = MaterialTheme.typography.titleMedium)
     EnhancementQuiet(listOfNotNull(choice.scaleLabel, choice.sizeLabel,
         choice.stateLabel(selectedModel, pending)).joinToString(" · "))
-    anime4kSizeLabel(choice.engineId)?.let { size ->
-        EnhancementQuiet("$size。S → M → L → VL → UL 的规模逐级增大；选择更大的型号通常增加计算开销，实际流畅度取决于本机和片源。")
-    }
+    val guidance = modelGuidance(choice, content)
+    if (content == EnhancementContent.ANIME) guidance?.let { EnhancementQuiet(it.detail) }
     if (selectionId != null) {
         MotionButton({ selection?.let(onSelectModel) }, modifier = Modifier.fillMaxWidth(), enabled = selection != null && !selected) {
             Icon(if (selected) Icons.Outlined.Check else Icons.Outlined.RadioButtonUnchecked, null, Modifier.size(18.dp))
@@ -376,11 +418,12 @@ internal fun EnhancementModelDetail(
     if (engine != null) AnimeEnhancementNavigation(Icons.Outlined.Memory, "运行组件",
         "${engine.title} · ${engineReadinessLabel(engine.readiness)}", onClick = { onOpenEngine(engine.id) })
     EnhancementDivider()
-    val guidance = if (content != EnhancementContent.ANIME) mangaModelGuidance(choice) else null
     if (content != EnhancementContent.ANIME) {
         guidance?.let { EnhancementQuiet(it.detail) }
         if (guidance == null) EnhancementQuiet("此模型没有专门的选型说明，请按原作者标注的适用画面和原生倍率选择；导入时填写的内容类型不代表已验证效果。")
         EnhancementQuiet("文件体积不等于运行内存或画质。FP16／FP32 是数值精度，2×／4× 是宽高倍率，都不是画质分数；以同页对比和实际耗时取舍。")
+    } else if (guidance == null) {
+        EnhancementQuiet("可按作者标注的适用片源、原生倍率和运行组件选择，再用同一片段比较效果。")
     }
     (offer?.detail ?: choice.profile?.detail)?.let { EnhancementQuiet(it) }
     if (choice.profile != null) EnhancementQuiet("用于即时播放增强，不生成完整离线增强视频。")

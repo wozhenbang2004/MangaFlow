@@ -1,7 +1,10 @@
 package dev.mangaflow.anime.player
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import dev.mangaflow.enhancement.engine.DesktopAnimeJaNai
 import dev.mangaflow.enhancement.engine.EnhancementEngineIds
 import dev.mangaflow.platform.PlatformContext
@@ -47,6 +50,7 @@ private class DesktopAnimePlayer(
     private val frameWindow = AnimePlaybackFrameWindow()
     private val videoRenderingActive = MutableStateFlow(false)
     private var windowOwnsVideo = false
+    private var viewportSize: IntSize? = null
     private val animeJaNai = DesktopAnimeJaNai(File(context.dataRoot, "enhancement/engines"))
     private val nativeEnhancement = DesktopAnimeJaNaiEnhancement(
         runtime = animeJaNai,
@@ -195,9 +199,15 @@ private class DesktopAnimePlayer(
         onlinePreparation.clear()
         warming = true
         enhancementMediaReady = false
+        publish(nativeGeneration) { it.copy(playbackViewportSize = viewportSize) }
         applyVideoEnhancement()
         applyBufferPolicy()
         setForegroundNative(foreground || state.value.inPictureInPicture, options.backgroundAudio)
+    }
+
+    fun updateViewport(size: IntSize?) = command(fatal = false) {
+        viewportSize = size?.takeIf { it.width > 0 && it.height > 0 }
+        publish(nativeGeneration) { it.copy(playbackViewportSize = viewportSize) }
     }
 
     override fun onMediaReadyNative() {
@@ -252,6 +262,11 @@ private class DesktopAnimePlayer(
                 val sample = withContext(Dispatchers.IO) {
                     runCatching {
                         fun counter(name: String) = handle.getPropertyLongOrNull(name)?.takeIf { it >= 0L }
+                        fun size(property: String): IntSize? {
+                            val width = counter("$property/w")?.takeIf { it in 1L..Int.MAX_VALUE.toLong() }
+                            val height = counter("$property/h")?.takeIf { it in 1L..Int.MAX_VALUE.toLong() }
+                            return if (width != null && height != null) IntSize(width.toInt(), height.toInt()) else null
+                        }
                         val fps = handle.getPropertyDoubleOrNull("container-fps")?.takeIf { it.isFinite() && it > 0 }
                         val statistics = AnimeNativeVideoStatistics(
                             sampledAtMillis = monotonicTimeMillis(),
@@ -261,6 +276,7 @@ private class DesktopAnimePlayer(
                             outputDroppedFrames = counter("frame-drop-count"),
                             estimatedFilterFps = handle.getPropertyDoubleOrNull("estimated-vf-fps")?.takeIf { it.isFinite() && it > 0 },
                             estimatedDelayedFrames = counter("vo-delayed-frame-count"),
+                            filterOutputSize = size("video-out-params"),
                         )
                         if (alternateRuntime && handle.getPropertyBooleanOrNull("video-frame-info/interlaced") != null)
                             animeJaNai.confirmFirstFrame()
@@ -316,6 +332,7 @@ private class DesktopAnimePlayer(
             previous.preparedVideoModel != next.preparedVideoModel) {
             statisticsRevision++
             frameWindow.reset()
+            publish(nativeGeneration) { it.copy(nativeVideoStatistics = null, frameMetrics = null) }
         }
         if (!previous.sameDecoderStartupOptions(next)) discardStartup()
         if (previous.preparedVideoModel != next.preparedVideoModel || previous.enhancementModel != next.enhancementModel ||
@@ -402,7 +419,7 @@ private class DesktopAnimePlayer(
         enhancement.release()
         enhancementMediaReady = false
         mutableState.value = state.value.copy(nativeVideoStatistics = null, sourceFps = null, droppedFrames = null, bufferMetrics = null,
-            frameMetrics = null,
+            frameMetrics = null, playbackViewportSize = null,
             videoEnhancement = AnimeVideoEnhancementState(
             mode = options.videoEnhancement,
             phase = AnimeVideoEnhancementPhase.OFF,
@@ -416,4 +433,8 @@ private class DesktopAnimePlayer(
 }
 
 @Composable
-actual fun AnimePlayerSurface(player: AnimePlayer, modifier: Modifier) = NativeAnimeSurface(player, modifier)
+actual fun AnimePlayerSurface(player: AnimePlayer, modifier: Modifier) {
+    val desktop = player as? DesktopAnimePlayer ?: return
+    DisposableEffect(desktop) { onDispose { desktop.updateViewport(null) } }
+    NativeAnimeSurface(desktop, modifier.onSizeChanged { desktop.updateViewport(it) })
+}

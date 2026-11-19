@@ -159,6 +159,8 @@ private fun AnimeEnhancementStatus(
     val effect = playback?.videoEnhancement.takeIf { hasSession }
     val prepared = playback?.preparedVideoWindow.takeIf { hasSession }
     val observation = effect?.observation
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val native = playback?.nativeVideoStatistics.takeIf { hasSession }
     val playing = hasSession && playback?.isPlaying == true && !playback.isBuffering && !playback.playbackSuppressed &&
         playback.hasVideoTracks != false && playback.firstFrameRendered != false
     val recentlySubmitting = playing && observation?.recentlySubmitting == true
@@ -186,13 +188,16 @@ private fun AnimeEnhancementStatus(
         effect?.phase == AnimeVideoEnhancementPhase.UNAVAILABLE -> "当前增强不可用 · 原因见处理页"
         effect?.mode == AnimeVideoEnhancementMode.OFF -> "当前使用原画设置"
         recentlySubmitting -> "正在提交增强帧"
+        desktop && effect?.phase == AnimeVideoEnhancementPhase.ACTIVE -> "已观测到增强运行"
         effect?.phase == AnimeVideoEnhancementPhase.ACTIVE -> "已收到增强提交样本"
+        desktop && effect?.phase == AnimeVideoEnhancementPhase.CONFIGURED -> "增强已加载 · 执行待观测"
         effect?.phase == AnimeVideoEnhancementPhase.CONFIGURED -> "增强已配置 · 等待处理样本"
         else -> "等待增强处理样本"
     }
     val frameMetrics = playback?.frameMetrics.takeIf { playing }
     val currentFps = frameMetrics?.outputFps
-    val estimatedFps = playback?.nativeVideoStatistics?.estimatedFilterFps.takeIf { playing }
+    val presentedFps = playback?.presentedFps.takeIf { playing }
+    val estimatedFps = native?.estimatedFilterFps.takeIf { playing }
     val recentWindow = frameMetrics?.windowDurationMs?.takeIf { it < 4_500L }
         ?.let { "近 ${formatDecimal(it / 1000.0, 1)} 秒" } ?: "近 5 秒"
     val inputSize = dimensions(playback?.videoWidth, playback?.videoHeight).takeIf { hasSession }
@@ -229,8 +234,12 @@ private fun AnimeEnhancementStatus(
                     (if (playback?.preEnhanced == true) "增强文件帧率" else "源视频帧率") to
                         animeFps(playback?.sourceFps.takeIf { hasSession }),
                     "所选帧率目标" to animeFps(metrics?.targetFps),
-                    (if (currentFps == null && estimatedFps != null) "滤镜估计" else "视频输出") to
-                        animeFps(currentFps ?: estimatedFps),
+                    when {
+                        presentedFps != null -> "屏幕呈现" to animeFps(presentedFps)
+                        currentFps != null -> "视频输出" to animeFps(currentFps)
+                        estimatedFps != null || desktop -> "滤镜帧率估计" to animeFps(estimatedFps)
+                        else -> "视频输出" to "—"
+                    },
                     "前方缓冲" to animeSeconds(playback?.bufferedAheadMs?.takeIf { hasSession && it >= 0 }?.div(1000.0)),
                 ))
                 AnimeMetricRow("$recentWindow · 丢帧", frameMetrics?.recentDroppedFrames?.let { "$it 帧" } ?: "—")
@@ -243,8 +252,9 @@ private fun AnimeEnhancementStatus(
                 EnhancementQuiet(when {
                     !hasSession -> "尚无本集数据。— 表示未采集，不代表数值为零。"
                     !playing -> "播放未在进行，当前帧率与近期丢帧暂停采样。"
+                    presentedFps != null -> "屏幕呈现取自播放器实际呈现的帧。"
                     currentFps != null -> "视频输出为播放器输出回调的实测帧率，不是屏幕刷新率；近期丢帧随时间更新。"
-                    estimatedFps != null -> "当前内核只提供滤镜帧率估计；未测得视频输出帧率。"
+                    estimatedFps != null -> "内核按帧时间戳估算滤镜帧率。当前屏幕呈现帧率未采集。"
                     else -> "正在等待当前采样；未提供的读数保留为空，不以目标帧率代替。"
                 })
                 EnhancementDivider()
@@ -252,18 +262,26 @@ private fun AnimeEnhancementStatus(
                     AnimeMetricRow("播放屏幕刷新率", formatDecimal(it, 1) + " Hz")
                 }
                 AnimeMetricRow(if (playback?.preEnhanced == true) "增强文件尺寸" else "视频输入尺寸", inputSize ?: "—")
-                if (playback?.preEnhanced != true) AnimeMetricRow("已提交帧尺寸", submittedSize ?: "—")
+                if (desktop) {
+                    val filtered = native?.filterOutputSize?.let { dimensions(it.width, it.height) }
+                    val viewport = playback?.playbackViewportSize?.takeIf { hasSession }?.let { dimensions(it.width, it.height) }
+                    AnimeMetricRow("滤镜输出尺寸", filtered ?: "未报告")
+                    AnimeMetricRow("播放视口尺寸", viewport ?: "未测得")
+                    if (hasSession) EnhancementQuiet("滤镜输出取自内核交给渲染器的帧。视口是含黑边的绘制区域。Anime4K／ArtCNN 的内部着色器尺寸未单独报告。")
+                }
+                if (playback?.preEnhanced != true && (!desktop || submittedSize != null))
+                    AnimeMetricRow("已提交帧尺寸", submittedSize ?: "—")
                 AnimeMetricRow("接收速度", playback?.downloadBytesPerSecond?.takeIf { hasSession && it >= 0 }
                     ?.let { enhancementBytes(it) + "/s" } ?: "—")
                 EnhancementDetailToggle(playbackDetails, { playbackDetails = !playbackDetails }, "累计与原生统计")
                 if (playbackDetails) {
-                    AnimeMetricRow("屏幕呈现帧率", animeFps(playback?.presentedFps.takeIf { playing }))
+                    AnimeMetricRow("屏幕呈现帧率", animeFps(presentedFps))
                     AnimeMetricRow("已呈现帧 · 累计", animeCount(playback?.presentedFrames.takeIf { hasSession }))
                     if (playback?.nativeVideoStatistics == null) {
                         AnimeMetricRow("解码/输出缓冲丢弃 · 累计", animeCount(playback?.droppedFrames.takeIf { hasSession }))
                     }
                     AnimeMetricRow("重复帧 · 累计", animeCount(metrics?.repeatedFrames))
-                    playback?.nativeVideoStatistics?.takeIf { hasSession }?.let { native ->
+                    if (native != null) {
                         AnimeMetricRow("解码器 / 视频输出", (native.hardwareDecoder ?: "—") + " / " + (native.videoOutput ?: "—"))
                         AnimeMetricRow("累计丢帧 · 解码 / 视频输出", animeCount(native.decoderDroppedFrames) + " / " +
                             animeCount(native.outputDroppedFrames))
@@ -330,6 +348,9 @@ private fun AnimeEnhancementStatus(
                     animeCount(observation?.submittedFrames ?: metrics?.submittedFrames) + " / " +
                         animeCount(metrics?.completedFrames) + " / " + animeCount(playback?.presentedFrames.takeIf { hasSession }))
                 AnimeMetricRow("GPU 处理 P50 / P95", animeMillis(metrics?.gpuP50Millis) + " / " + animeMillis(metrics?.gpuP95Millis))
+                if (desktop && hasSession && effect?.mode != AnimeVideoEnhancementMode.OFF &&
+                    metrics?.gpuP50Millis == null && metrics?.gpuP95Millis == null)
+                    EnhancementQuiet("当前渲染器没有报告可用于分位数统计的增强 GPU 耗时。")
                 AnimeMetricRow("CPU 提交 P50 / P95", animeMillis(metrics?.submitCpuP50Millis) + " / " + animeMillis(metrics?.submitCpuP95Millis))
                 AnimeMetricRow("最近提交线程 CPU", animeMillis(observation?.submitThreadCpuNanos?.div(1_000_000.0)))
                 AnimeMetricRow("最近 GPU 执行", animeMillis(observation?.gpuExecutionNanos?.div(1_000_000.0)))

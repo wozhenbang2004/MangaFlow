@@ -1,5 +1,14 @@
 # 画质增强与智能预处理 V1.0 · 实施与未闭合验收
 
+## Windows 番剧当前读数与模型选用 · ENH-DESKTOP-HUD-01–02 · 2026-11-20
+
+用户反馈：“我真好像还是不生效呢”“为什么没有显示当前的一个分辨率啊？这个显示还是输入的分辨率，还有当前的帧率”“每个模型很难选啊……讲一下模型的效果啊，哪个最好……是什么档位的”。截图 `codex-clipboard-cf8997c7-8ae2-447f-ac1d-69b468ebb085.png` 显示「增强已加载」「输入 1920×1080」「滤镜估计 24.0 fps」及空白 GPU 耗时。截图给出本集输入与滤镜估计，模型是否已执行及屏幕实际呈现有待验证。
+
+- **ENH-DESKTOP-HUD-01**：沿同一 mpv 会话采样 `video-out-params`。底栏优先显示输入与实测滤镜尺寸、源标称帧率与当前可用的帧率读数。播放视口以 Compose 实测的绘制区域像素为准，含黑边。Anime4K／ArtCNN 在渲染器内处理，内部尺寸缺测时明确显示范围。目标、滤镜估计和呈现帧率分别显示；GPU 耗时缺测时收进处理详情。 [mpv 属性定义](https://mpv.io/manual/stable/#property-list)
+- **ENH-DESKTOP-HUD-02**：沿现有模型列表在选用前提供用途与计算开销，详情提供同片段比较与作者说明。日常可先试「均衡」Anime4K M/M，出现掉帧可试「轻量」S/S。ArtCNN 亮度超分、AnimeJaNai DirectML、TemporalFix 原尺寸修复和 VideoJaNai 预处理分别按用途选。保留用户已选配置。 [Anime4K 选型](https://github.com/bloc97/Anime4K/blob/master/md/GLSL_Instructions_Advanced.md) · [ArtCNN 模型](https://github.com/Artoriuz/ArtCNN#models) · [AnimeJaNai 档位](https://github.com/the-database/mpv-AnimeJaNai#usage-instructions)
+
+Windows 本地 `:desktopApp:compileKotlin` 通过。隔离实验中，外置 D3D11 VO 报告输入 320×180、缩放滤镜输出 640×360、视口 740×420。已装 MediaMP 0.5.1 的内嵌 libmpv 0.41 路径可以渲染并回读像素，但不提供 `vo-passes`。支持统计的 VO 可以一次读取 `vo-passes` 整树，标量子键无值。实际剧集、Windows 界面、显示器呈现帧率及 Android 仍待验证。 [mpv 统计属性实现](https://github.com/mpv-player/mpv/blob/v0.41.0/player/command.c#L2724-L2769)
+
 ## 双页、提前增强与完整画面切换 · ENH-WINDOW-01–06 · 2026-11-20
 
 本轮从 `ff52905757225834b8425764cd110f34ae27eef3` 继续。用户原话：“它跟预热的冲突……是不是让预热前都白费了”“双页一起增强……或者说分别增强”“我明明……配置了提前增强，但它却没有去增强之后的页”“从上到下，从左到右……我能看到它那个过程……不喜欢这样”“四十多N的，三十多N的……是越大越好吗”“增强之后……分辨率……让别人能看出来这个是增强之后的分辨率”。原始消息ID、安装版本和设备日志未提供；语音中的“N”不擅自认定为参数量。本批保留上一轮模型说明、内存预算和同页拖线比较。

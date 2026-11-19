@@ -13,6 +13,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.longOrNull
 import org.openani.mediamp.mpv.MPVHandle
 import java.io.File
 
@@ -74,6 +80,7 @@ internal class DesktopAnimeVideoEnhancement(
                     mode == AnimeVideoEnhancementMode.QUALITY -> "M"
                     else -> null
                 }
+                val appliedModel = model?.title ?: anime4kSize?.let { "Anime4K $it/$it" }
                 // append accepts a single literal path, even with ':' / ';' / '\\'.
                 // mpv's string getter prints this list with the platform separator.
                 val expectedList = paths.joinToString(File.pathSeparator)
@@ -81,8 +88,7 @@ internal class DesktopAnimeVideoEnhancement(
                 var lastSampleTime: Double? = null
                 var budgetOverruns = 0
                 while (isCurrentSession(handle, generation, mode)) {
-                    // get_property synchronizes with mpv's engine and may wait behind GPU work.
-                    // In particular vo-passes can require hundreds of native calls per observation.
+                    // Property reads synchronize with mpv's engine and may wait behind GPU work.
                     val observed = withContext(Dispatchers.IO) { readObservation(handle, anime4kSize, model) }
                     if (!isCurrentSession(handle, generation, mode) || this@DesktopAnimeVideoEnhancement.handle !== handle)
                         return@launch
@@ -130,7 +136,8 @@ internal class DesktopAnimeVideoEnhancement(
                         val sample = observed.shaderPasses
                         if (sample == null) {
                             update(generation, state(mode, AnimeVideoEnhancementPhase.CONFIGURED,
-                                "着色器已加载。当前渲染器未提供可读的增强计数。", width, height))
+                                "着色器已加载。当前渲染器未提供可读的增强计数。", width, height)
+                                .copy(modelName = appliedModel))
                         } else {
                             val frameTime = observed.videoPts
                             val sourceFps = observed.sourceFps
@@ -152,7 +159,7 @@ internal class DesktopAnimeVideoEnhancement(
                             }
                             update(generation, state(mode, AnimeVideoEnhancementPhase.ACTIVE,
                                 "$effect · ${(sample.nanos / 10_000L) / 100.0} ms", width, height)
-                                .copy(modelName = model?.title))
+                                .copy(modelName = appliedModel))
                         }
                     }
                     // Keep HDR / video-track changes gated without replacing the
@@ -220,40 +227,48 @@ internal class DesktopAnimeVideoEnhancement(
         val shaderList = handle.getPropertyString("glsl-shaders")
         val passes = if (width != null && height != null &&
             gamma in SDR_TRANSFERS && output == "libmpv" && !shaderList.isNullOrBlank()) {
-            if (anime4kSize != null) readAnime4KPasses(handle, anime4kSize)
-            else model?.let { readArtCnnPasses(handle, it.title)?.let { nanos -> ShaderPasses(nanos, upscaled = true) } }
+            val fresh = readFreshPasses(handle)
+            if (anime4kSize != null) readAnime4KPasses(fresh, anime4kSize)
+            else model?.let { readArtCnnPasses(fresh, it.title)?.let { nanos -> ShaderPasses(nanos, upscaled = true) } }
         } else null
         return Observation(width, height, gamma, output, shaderList, passes,
             if (passes != null) handle.getPropertyDoubleOrNull("video-pts")?.takeIf(Double::isFinite) else null,
             if (passes != null) handle.getPropertyDoubleOrNull("container-fps")?.takeIf { it.isFinite() && it > 0 } else null)
     }
 
-    /** Scalar subproperties of mpv 0.40's latest fresh-render pass data. They aren't a display FPS counter. */
-    private fun readArtCnnPasses(handle: MPVHandle, name: String): Long? {
-        val prefix = "vo-passes/fresh"
-        val count = handle.getPropertyLongOrNull("$prefix/count")?.takeIf { it in 1..128 }?.toInt() ?: return null
+    private data class RenderPass(val description: String, val nanos: Long)
+
+    /** Mediamp reads raw string properties. mpv serializes this node as JSON and rejects scalar subkeys. */
+    private fun readFreshPasses(handle: MPVHandle): List<RenderPass> {
+        val payload = handle.getPropertyString("vo-passes") ?: return emptyList()
+        val root = runCatching { Json.parseToJsonElement(payload) as? JsonObject }.getOrNull() ?: return emptyList()
+        val fresh = root["fresh"] as? JsonArray ?: return emptyList()
+        return fresh.mapNotNull { element ->
+            val pass = element as? JsonObject ?: return@mapNotNull null
+            val description = (pass["desc"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
+            val nanos = (pass["last"] as? JsonPrimitive)?.longOrNull?.takeIf { it in 1..1_000_000_000 }
+                ?: return@mapNotNull null
+            RenderPass(description, nanos)
+        }
+    }
+
+    private fun readArtCnnPasses(passes: List<RenderPass>, name: String): Long? {
         val timings = linkedMapOf<String, Long>()
-        for (index in 0 until count) {
-            val desc = handle.getPropertyString("$prefix/$index/desc") ?: continue
+        for ((desc, nanos) in passes) {
             val start = desc.indexOf("$name (")
             if (start < 0) continue
             val pass = desc.substring(start + name.length + 2).substringBefore(')')
-            val nanos = handle.getPropertyLongOrNull("$prefix/$index/last")?.takeIf { it in 1..1_000_000_000 } ?: continue
             timings[pass] = nanos
         }
         return timings.values.sum().takeIf { timings.size == 8 && "Depth-To-Space" in timings }
     }
 
-    private fun readAnime4KPasses(handle: MPVHandle, size: String): ShaderPasses? {
-        val prefix = "vo-passes/fresh"
-        val count = handle.getPropertyLongOrNull("$prefix/count")?.takeIf { it in 1..128 }?.toInt() ?: return null
+    private fun readAnime4KPasses(passes: List<RenderPass>, size: String): ShaderPasses? {
         var elapsed = 0L
         var restores = false
         var upscales = false
-        for (index in 0 until count) {
-            val description = handle.getPropertyString("$prefix/$index/desc") ?: continue
+        for ((description, time) in passes) {
             if ("Anime4K" !in description || "($size)" !in description) continue
-            val time = handle.getPropertyLongOrNull("$prefix/$index/last")?.takeIf { it in 1..1_000_000_000 } ?: continue
             elapsed += time
             restores = restores || "Restore-CNN" in description
             upscales = upscales || "Upscale-CNN" in description

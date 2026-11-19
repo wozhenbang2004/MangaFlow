@@ -74,6 +74,8 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
     val window = playback?.preparedVideoWindow?.takeIf { it.frames > 0 }
     val usingPrepared = flowing && window != null && window.framesUsed > 0L &&
         monotonicTimeMillis() - window.lastUsedAt in 0L..1_000L
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val native = playback?.nativeVideoStatistics
     if (EnhancementMetric.QUALITY in metrics) {
         val quality = when {
             playback == null -> "画质 —"
@@ -87,11 +89,11 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
                     else -> "原画 · 增强未运行"
                 }
                 AnimeVideoEnhancementPhase.WAITING -> "增强 · 等待画面"
-                AnimeVideoEnhancementPhase.CONFIGURED -> if (platformKind == PlatformKind.DESKTOP)
+                AnimeVideoEnhancementPhase.CONFIGURED -> if (desktop)
                     "增强已加载" else "增强 · 等待输出"
                 AnimeVideoEnhancementPhase.ACTIVE -> when {
                     flowing && observation?.recentlySubmitting == true -> "增强处理中"
-                    flowing && platformKind == PlatformKind.DESKTOP -> "增强运行中"
+                    flowing && desktop -> "增强运行中"
                     else -> "增强已配置"
                 }
                 AnimeVideoEnhancementPhase.UNAVAILABLE -> "增强不可用"
@@ -109,20 +111,26 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
         val submitted = if (usingPrepared) dimensions(window?.outputWidth, window?.outputHeight)
             else if (effect?.phase == AnimeVideoEnhancementPhase.ACTIVE && (observation?.submittedFrames ?: 0L) > 0L)
                 dimensions(effect?.outputWidth, effect?.outputHeight) else null
+        val filtered = native?.filterOutputSize?.let { dimensions(it.width, it.height) }
+        val viewport = playback?.playbackViewportSize?.let { dimensions(it.width, it.height) }
+        val source = if (playback?.preEnhanced == true) "增强文件" else "输入"
         val value = when {
-            playback?.preEnhanced == true -> "增强文件 ${input ?: "—"}"
-            submitted != null -> "输入 ${input ?: "—"} · 提交 $submitted"
-            else -> "输入 ${input ?: "—"}"
+            desktop && playback != null -> "$source ${input ?: "—"} · 滤镜 ${filtered ?: "缺测"}"
+            submitted != null && playback?.preEnhanced != true -> "$source ${input ?: "—"} · 提交 $submitted"
+            else -> "$source ${input ?: "—"}"
         }
-        add(EnhancementReadout(EnhancementMetric.DIMENSIONS, value,
-            "视频输入尺寸 ${input ?: "无观测"}，已提交增强帧尺寸 ${submitted ?: "无观测"}；提交不代表最终呈现"))
+        val description = if (desktop)
+            "$source ${input ?: "未报告"}。滤镜输出 ${filtered ?: "未报告"}是进入渲染前的实际帧尺寸。" +
+                "视口 ${viewport ?: "未报告"}是播放器绘制区域，包含黑边。着色器增强后的画面尺寸未单独报告。"
+        else "视频输入尺寸 ${input ?: "无观测"}，已提交增强帧尺寸 ${submitted ?: "无观测"}。提交尺寸与屏幕呈现分开计量。"
+        add(EnhancementReadout(EnhancementMetric.DIMENSIONS, value, description))
     }
     if (EnhancementMetric.PRESENTED_FPS in metrics) {
         val recent = playback?.frameMetrics?.takeIf { flowing }
         val output = recent?.outputFps?.takeIf { it.isFinite() && it >= 0.0 }
         val presented = playback?.presentedFps?.takeIf { flowing && it.isFinite() && it >= 0.0 }
-        val estimate = playback?.nativeVideoStatistics?.estimatedFilterFps?.takeIf { flowing && recent != null }
-        val value = when {
+        val estimate = native?.estimatedFilterFps?.takeIf { flowing && recent != null }
+        val current = when {
             presented != null -> "呈现 ${formatDecimal(presented, 1)} fps"
             output != null -> "视频输出 ${formatDecimal(output, 1)} fps"
             estimate != null -> "滤镜估计 ${formatDecimal(estimate, 1)} fps"
@@ -132,14 +140,16 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
             recent == null -> "帧率 · 采样中"
             else -> "输出帧率未提供"
         }
+        val sourceFps = playback?.sourceFps?.takeIf { desktop && it.isFinite() && it > 0 }
+        val value = sourceFps?.let { "源 ${formatDecimal(it, 1)} · $current" } ?: current
         val description = when {
             presented != null -> "播放器实际呈现帧率 ${formatDecimal(presented, 1)} 帧每秒"
-            output != null -> "最近 ${formatDecimal(checkNotNull(recent).windowDurationMs / 1000.0, 1)} 秒视频输出帧释放回调实测；" +
-                "包含处理后输出，不等于屏幕实际呈现或屏幕刷新率"
-            estimate != null -> "播放器根据最近视频帧时间戳估计的滤镜输出帧率；丢帧时可能不准确，不等于当前屏幕帧率"
+            output != null -> "最近 ${formatDecimal(checkNotNull(recent).windowDurationMs / 1000.0, 1)} 秒视频输出帧释放回调实测。"
+            estimate != null -> "以最近视频帧的时间戳估算滤镜输出频率。屏幕呈现帧率未测得。"
             else -> value
         }
-        add(EnhancementReadout(EnhancementMetric.PRESENTED_FPS, value, description))
+        val sourceDescription = sourceFps?.let { "片源标称 ${formatDecimal(it, 1)} fps。" }.orEmpty()
+        add(EnhancementReadout(EnhancementMetric.PRESENTED_FPS, value, sourceDescription + description))
     }
     if (EnhancementMetric.DROPPED_FRAMES in metrics) {
         fun count(value: Long?) = value?.takeIf { it >= 0L }?.toString() ?: "—"
@@ -199,8 +209,12 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
     if (EnhancementMetric.GPU_TIME in metrics) {
         val elapsed = observation?.takeIf { flowing && effect?.phase == AnimeVideoEnhancementPhase.ACTIVE && it.recentlySubmitting }
             ?.gpuExecutionNanos?.takeIf { it >= 0L }
-        val value = elapsed?.let { formatDecimal(it / 1_000_000.0, 1) + " ms" } ?: "—"
-        add(EnhancementReadout(EnhancementMetric.GPU_TIME, "增强 GPU $value", "增强 GPU 实际采样耗时 $value"))
+        if (elapsed != null) {
+            val value = formatDecimal(elapsed / 1_000_000.0, 1) + " ms"
+            add(EnhancementReadout(EnhancementMetric.GPU_TIME, "增强 GPU $value", "增强 GPU 实际采样耗时 $value"))
+        } else if (!desktop) {
+            add(EnhancementReadout(EnhancementMetric.GPU_TIME, "增强 GPU —", "当前 GPU 耗时缺测"))
+        }
     }
     if (EnhancementMetric.BUFFER in metrics) {
         val buffer = playback?.bufferedAheadMs?.takeIf { it >= 0L }
