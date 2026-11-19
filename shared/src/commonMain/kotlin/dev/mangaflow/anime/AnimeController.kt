@@ -1246,7 +1246,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     associationPermits.withPermit {
                         if (!current()) return@withPermit
                         report(AnimeAssociationPhase.SEARCHING)
-                        val loaded = withTimeoutOrNull(24_000) aggregation@ {
+                        val loaded = withTimeoutOrNull(30_000) aggregation@ {
                             val existing = library.state.value.bindings.firstOrNull {
                                 it.subjectId == detail.subject.id && it.catalog.sourceId == sourceId
                             }
@@ -1373,7 +1373,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             }
                             var resolvedLine: AnimeSourceEpisode? = null
                             var lastProbeFailure: String? = null
-                            // At most two exact-episode lines, with one bounded address check each.
+                            // At most two exact-episode CDN lines; only verified media can auto-bind.
                             for (line in sampledLines.take(2)) {
                                 if (!current()) return@aggregation false
                                 try {
@@ -1387,6 +1387,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                         asset.expiresAt?.let { it > wallTimeMillis() } != false) {
                                         "来源返回的本集地址身份不一致"
                                     }
+                                    val preflight = inspectAnimeMediaBeforePlayback(asset)
+                                    if (preflight.verified != true) {
+                                        lastProbeFailure = preflight.failure ?:
+                                            "媒体地址未通过有限预探测；不会自动作为播放来源"
+                                        continue
+                                    }
                                     resolvedLine = line
                                     break
                                 } catch (cancel: CancellationException) { throw cancel }
@@ -1397,7 +1403,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             }
                             if (resolvedLine == null) {
                                 report(AnimeAssociationPhase.NEEDS_SELECTION,
-                                    "同作品目录已找到，但本集取址未通过（${lastProbeFailure ?: "未取得地址"}），不会自动加入可播放来源。", possible)
+                                    "同作品目录已找到，但本集媒体预探测未通过（${lastProbeFailure ?: "未取得地址"}），不会自动加入可播放来源。", possible)
                                 return@aggregation true
                             }
                             library.editPlaybackAssociation(detail.subject, editBindings = { bindings ->
@@ -1414,7 +1420,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 it.title.sourceId == sourceId
                             } + catalog, sourceCatalogErrors = state.sourceCatalogErrors - sourceId) }
                             rebuildOptions()
-                            report(AnimeAssociationPhase.LINKED, "本集已通过取址检查；实际解码仍以播放器为准。")
+                            report(AnimeAssociationPhase.LINKED, "本集媒体头已验证；首帧与完整播放仍以播放器为准。")
                             true
                         }
                         if (loaded != true) report(AnimeAssociationPhase.UNAVAILABLE, "来源暂未完成，已保留现有目录。")
@@ -1541,7 +1547,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val episodes = detail.episodes.associateBy { it.id }
         val confirmedByEpisode = mutableMapOf<String, List<AnimeEpisodeOption>>()
         val samples = mutableMapOf<String, AnimeWorkPlaybackMeasurements>()
-        val order = compareBy<AnimePlaybackMeasurements> { it.playbackObservedAt ?: 0L }
+        val order = compareBy<AnimePlaybackMeasurements> { it.playbackObservedAt != null }
+            .thenBy { it.mediaVerified == true }.thenBy { it.mediaFailure == null }
             .thenBy { it.mediaObservedAt ?: it.addressObservedAt ?: 0L }.thenBy { it.updatedAt }
         for ((key, receipt) in playbackMeasurements) {
             if (key.subjectId != detail.subject.id) continue
@@ -1607,8 +1614,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             if (force) notice("正在加载视频，缓冲后可测本集线路。")
             return
         }
+        // Probe up to two CDNs per source; one failed route must not hide a working alternate.
         val options = fairPlaybackOptions(detail.subject.id, episodeId, confirmedPlaybackLines(episodeId))
-            .distinctBy { it.sourceId }
+            .groupBy { it.sourceId }.values.flatMap { it.take(2) }.take(20)
         if (options.isEmpty()) return
         val pending = options.filter { option ->
             val key = playbackHistoryKey(detail.subject.id, episodeId, option)
@@ -1653,8 +1661,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 val reason = code?.let { "HTTP $it · 取址失败" }
                                     ?: (resolveFailure?.message ?: "本集取址未完成")
                                 storePlaybackMeasurements(key, line) { it.copy(addressMs = null, declaredQuality = null,
-                                    addressObservedAt = addressAt, mediaObservedAt = null, mediaVerified = null,
-                                    mediaFailure = reason) }
+                                    addressObservedAt = addressAt, mediaObservedAt = addressAt,
+                                    mediaHttpStatus = code, mediaVerified = false, mediaFailure = reason) }
                                 if (code in setOf(401, 403, 404, 410) && current()) rememberPlaybackFailure(key,
                                     AnimePlaybackFailure(line.sourceId, line.sourceName, "取播放地址", reason))
                                 return@withPermit

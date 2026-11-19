@@ -68,9 +68,8 @@ internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset):
         val matroska = bytes.size >= 4 && bytes[0] == 0x1a.toByte() &&
             bytes[1] == 0x45.toByte() && bytes[2] == 0xdf.toByte() && bytes[3] == 0xa3.toByte()
         val ts = bytes.size >= 188 * 5 && (0 until 5).all { bytes[it * 188] == 0x47.toByte() }
-        val webmOrFlv = bytes.size >= 9 && (bytes.copyOfRange(0, 4).decodeToString() == "FLV\u0001" ||
-            bytes.copyOfRange(0, 4).contentEquals(byteArrayOf(0x1a, 0x45, 0xdf.toByte(), 0xa3.toByte())))
-        val recognized = hls || dash || mp4 || matroska || ts || webmOrFlv
+        val flv = bytes.size >= 9 && bytes.copyOfRange(0, 3).decodeToString() == "FLV"
+        val recognized = hls || dash || mp4 || matroska || ts || flv
         val htmlOrJson = text.startsWith("<html", true) || text.startsWith("<!doctype html", true) ||
             text.startsWith("{") || text.startsWith("[")
         val heights = if (hls) Regex("""(?i)RESOLUTION=\d+x(\d+)""").findAll(text)

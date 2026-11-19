@@ -64,7 +64,7 @@ internal fun AnimeSourceMetricsStrip(measurements: AnimePlaybackMeasurements?, m
         val failure = measurements?.mediaFailure
         when {
             failure != null -> SourceMetricToken(Icons.Outlined.Link,
-                measurements.mediaHttpStatus?.toString() ?: "失败", scope + failure,
+                measurements?.mediaHttpStatus?.toString() ?: "失败", scope + failure,
                 Modifier.width(82.dp * scale), waiting = true)
             speed != null -> SourceMetricToken(Icons.Outlined.Speed, speed, scope + "播放实测传输速率 $speed", Modifier.width(82.dp * scale))
             probeSpeed != null -> SourceMetricToken(Icons.Outlined.Speed, probeSpeed, scope + "64 KiB 以内的小样本传输速率 $probeSpeed，非持续播放速率", Modifier.width(82.dp * scale))
@@ -116,7 +116,7 @@ internal fun AnimeSourceMetricsDetails(measurements: AnimePlaybackMeasurements?,
         val addressFailed = address == null && measurements?.addressObservedAt != null
         SourceMetricDetail(Icons.Outlined.Link, "取址", if (addressFailed) "未取得地址" else address, waiting = addressFailed)
         val mediaState = when {
-            measurements?.mediaFailure != null -> measurements.mediaFailure
+            measurements?.mediaFailure != null -> measurements?.mediaFailure
             measurements?.mediaVerified == true -> "媒体头已验证"
             measurements?.mediaObservedAt != null -> "尚未验证"
             else -> null
