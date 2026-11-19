@@ -25,12 +25,12 @@ function Install-File([string]$relative) {
     if ((-not ($relative -ceq 'MangaFlow.exe' -or
             $relative.StartsWith('app/', [StringComparison]::Ordinal) -or
             $relative.StartsWith('runtime/', [StringComparison]::Ordinal))) -or
-        $relative.Length -gt 500 -or $relative.Contains('\\') -or
+        $relative.Length -gt 500 -or $relative.Contains('\') -or
         $segments.Where({ $_ -eq '..' -or $_ -eq '.' -or $_ -eq '' -or
             $_.IndexOfAny([char[]]':*?"<>|') -ge 0 }).Count -gt 0) {
         throw 'The update contains an invalid package path.'
     }
-    $base = $root.TrimEnd('\\') + '\\'
+    $base = $root.TrimEnd('\') + '\'
     $resolved = [IO.Path]::GetFullPath((Join-Path $root $relative))
     if (-not $resolved.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'The update path leaves the installed application.'
@@ -129,7 +129,7 @@ try {
     foreach ($relative in $changed) {
         if (-not $entries.ContainsKey([string]$relative)) { throw 'An update file is not in the verified manifest.' }
         $source = [IO.Path]::GetFullPath((Join-Path $payload ([string]$relative)))
-        if (-not $source.StartsWith($payload.TrimEnd('\\') + '\\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid staged update path.' }
+        if (-not $source.StartsWith($payload.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid staged update path.' }
         Verify-File $source $entries[[string]$relative]
     }
 
@@ -147,7 +147,7 @@ try {
         }
         $queue = New-Object 'Collections.Generic.Queue[string]'
         $queue.Enqueue((Join-Path $root 'runtime'))
-        $rootPrefix = $root.TrimEnd('\\') + '\\'
+        $rootPrefix = $root.TrimEnd('\') + '\'
         while ($queue.Count -gt 0) {
             $directory = $queue.Dequeue()
             foreach ($entry in Get-ChildItem -LiteralPath $directory -Force) {
@@ -155,7 +155,7 @@ try {
                     throw 'A Java runtime directory contains a redirected path.'
                 }
                 if ($entry.PSIsContainer) { $queue.Enqueue($entry.FullName); continue }
-                $relative = $entry.FullName.Substring($rootPrefix.Length).Replace('\\', '/')
+                $relative = $entry.FullName.Substring($rootPrefix.Length).Replace('\', '/')
                 $null = Install-File $relative
                 if (-not $entries.ContainsKey($relative)) { $obsolete.Add($relative) }
             }
