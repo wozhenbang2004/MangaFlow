@@ -56,11 +56,14 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.DownloadDone
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -159,12 +162,20 @@ internal fun DetailCatalog(
     sourceError: String? = null,
     onCancelSourceSelection: () -> Unit = {},
     repository: MangaRepository? = null,
+    locateRevision: Int = 0,
+    onLocate: () -> Unit = {},
+    onLocateSources: (() -> Unit)? = null,
 ) {
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
     var chosenGroup by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
     var groupVisit by rememberSaveable(mangaId) { mutableIntStateOf(0) }
+    var appliedLocate by rememberSaveable(mangaId) { mutableIntStateOf(0) }
+    val locatePending = locateRevision != appliedLocate && progress != null
+    val locateChapter = remember(chapters, progress?.chapterId, locatePending) {
+        if (locatePending) chapters.firstOrNull { chapterContainsProgress(it, progress) } else null
+    }
     // A temporarily empty directory must not clear a restored group or its scroll position.
-    val group = chosenGroup?.takeIf { groups.isEmpty() || it in groups }
+    val group = locateChapter?.group ?: chosenGroup?.takeIf { groups.isEmpty() || it in groups }
     var shownError by remember { mutableStateOf<String?>(null) }
     var selectedChapterId by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
     var selectedChapterAnchor by remember(mangaId) { mutableStateOf<Rect?>(null) }
@@ -200,18 +211,32 @@ internal fun DetailCatalog(
     } else Modifier
     val showBusy = rememberDelayedBusy(loading)
     Column(Modifier.fillMaxSize()) {
-        if (groups.size > 1) Row(
+        if (groups.size > 1 || progress != null) Row(
             Modifier.fillMaxWidth().then(flow).heightIn(min = 36.dp).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            ChapterGroups(
+            if (groups.size > 1) ChapterGroups(
                 groups = groups, total = chapters.size, selected = group, active = active,
                 onSelect = {
                     if (group != it) groupVisit++
+                    appliedLocate = locateRevision
                     chosenGroup = it
                 }, modifier = Modifier.weight(1f),
-            )
+            ) else Spacer(Modifier.weight(1f))
+            if (progress != null) DetailAction(Icons.Outlined.MyLocation, "定位上次阅读",
+                enabled = active && !sourcePresent, onClick = onLocate)
+        }
+        if (locatePending && locateChapter == null && !loading && !sourceLoading) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("当前目录没有上次阅读的章节", Modifier.weight(1f), color = DetailMuted, fontSize = 12.sp,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (onLocateSources != null) DetailAction(Icons.Outlined.Public, "查看可用来源",
+                    enabled = active, onClick = onLocateSources)
+                DetailAction(Icons.Outlined.Refresh, "重查上次阅读章节", enabled = active, onClick = onRetry)
+                DetailAction(Icons.Outlined.Close, "关闭定位提示", enabled = active,
+                    onClick = { appliedLocate = locateRevision })
+            }
         }
         if (error != null) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.End) {
@@ -237,13 +262,7 @@ internal fun DetailCatalog(
             }
             // Comments/reader restoration keeps this visit; even a quick A→B→A is a new visit.
             var appliedVisit by rememberSaveable(mangaId) { mutableIntStateOf(groupVisit) }
-            LaunchedEffect(paneActive, groupVisit) {
-                if (!paneActive) grid.stopScroll()
-                else if (appliedVisit != groupVisit) {
-                    grid.scrollToItem(0)
-                    appliedVisit = groupVisit
-                }
-            }
+            LaunchedEffect(paneActive) { if (!paneActive) grid.stopScroll() }
             if (visibleChapters.isEmpty()) {
                 Box(Modifier.fillMaxSize()
                     .scrollable(rememberScrollableState { 0f }, Orientation.Vertical, enabled = paneActive),
@@ -272,6 +291,31 @@ internal fun DetailCatalog(
                                     isVolumeChapter(it) == isVolumeChapter(chapter) } == true) last().add(chapter)
                             else add(mutableListOf(chapter))
                         }
+                    }
+                }
+                val locateIndex = remember(runs, targetGroup, showGroup, locateChapter?.id) {
+                    if (locateChapter == null || targetGroup != locateChapter.group) null else {
+                        var itemIndex = 0
+                        var found: Int? = null
+                        for ((runIndex, run) in runs.withIndex()) {
+                            if (runIndex > 0 || showGroup && !isDefaultChapterGroup(run.first().group)) itemIndex++
+                            val index = run.indexOfFirst { it.id == locateChapter.id }
+                            if (index >= 0) { found = itemIndex + index; break }
+                            itemIndex += run.size
+                        }
+                        found
+                    }
+                }
+                LaunchedEffect(paneActive, groupVisit, locateRevision, locateIndex) {
+                    if (!paneActive) return@LaunchedEffect
+                    if (locateIndex != null && appliedLocate != locateRevision) {
+                        grid.scrollToItem(locateIndex)
+                        chosenGroup = targetGroup
+                        appliedVisit = groupVisit
+                        appliedLocate = locateRevision
+                    } else if (appliedVisit != groupVisit) {
+                        grid.scrollToItem(0)
+                        appliedVisit = groupVisit
                     }
                 }
                 BoxWithConstraints(Modifier.fillMaxSize()) {

@@ -198,6 +198,13 @@ data class AnimePlaybackChoice(
     val previousSourceId: String,
 )
 
+data class AnimePlaybackTarget(
+    val episode: AnimeEpisode,
+    val manualOption: AnimeEpisodeOption? = null,
+    val sourceName: String? = null,
+    val error: String? = null,
+)
+
 enum class AnimeBrowseMode { POPULAR, NEWEST, CALENDAR }
 
 data class AnimePlaybackSettings(
@@ -251,9 +258,9 @@ data class AnimeScreenState(
     val playbackRecoveryStopReason: String? = null,
     val episodeOptions: Map<String, List<AnimeEpisodeOption>> = emptyMap(),
     val selectedEpisodeId: String? = null,
+    val selectedPlaybackOption: AnimeEpisodeOption? = null,
     val resolving: Boolean = false,
-    val autoPlaySelectionEpisodeId: String? = null,
-    val autoPlaySelectionGeneration: Long = 0L,
+    val playbackTarget: AnimePlaybackTarget? = null,
     val autoMatching: Boolean = false,
     val pendingPlayback: AnimePlaybackChoice? = null,
     val accounts: List<AnimeTrackingAccount> = emptyList(),

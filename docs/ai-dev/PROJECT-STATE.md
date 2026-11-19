@@ -1,5 +1,9 @@
 # MangaFlow · current work
 
+## Core manga, adult and anime journeys · 2026-11-19
+
+The current redesign is scoped by [the three core journeys](../design/core-journeys-20261119.md), with the user’s outcome, the actual source paths, alternatives, design references and device checks in one place. Verified baseline `e01871d` published as Android `0.1.377`. The current user explicitly requests building, attempting an emulator, checking an upgrade, and delivering the matching APK. Device and network behavior requires evidence from the appropriate platform. Preserve saved records and use the normal signed release route. Earlier sections describe their own checkpoints.
+
 ## Adult discovery and anime hierarchy · source checkpoint 2026-11-18
 
 Route DELIVERY from a bounded UI/UX diagnosis; source implementation is complete, with compilation and installed outcomes reported separately. The user's adult-priority redesign request, design decisions and UIX-01–10 mapping are recorded in DESIGN BROWSE-REDESIGN-01–08. Integration base: main `a3458f8d79c8b23d8b0080e75f789bbee658f96e`. Preserve its Copy discovery, ranking/awards, ordinary/adult search isolation, JM shelf/account operations and anime source/playback repairs. Root is the sole commit/ref/document integrator; isolated source owners and read-only cross-reviewers participated.

@@ -111,41 +111,80 @@ internal object ChapterSemantics {
         return ReadingVolume(value, parts[2], "连载版 · ${parts[1]}")
     }
 
-    /** Keep ordinary groups intact; join only complete, unambiguous native MangaDex volumes. */
+    /** Only the contiguous, proven MangaDex edition around the current group can extend navigation. */
     fun readingSequence(chapters: List<Chapter>, current: Chapter, catalogComplete: Boolean): List<Chapter> {
         val sameGroup = chapters.filter { it.group == current.group }.sortedBy(Chapter::index)
         if (!catalogComplete || current.sourceId != "mangadex" || sameGroup.none { it.id == current.id })
             return sameGroup
         val currentVolume = readingVolume(current.group) ?: return sameGroup
+        val currentOrdinal = currentVolume.number.toPlainString().toLongOrNull() ?: return sameGroup
         fun selectedVariant(chapter: Chapter): ChapterVariant? = chapter.variants.singleOrNull {
             it.sourceId == "mangadex" && chapter.sourceId == it.sourceId &&
                 it.mangaId.isNotBlank() && chapter.sourceMangaId == it.mangaId &&
                 it.chapterId.isNotBlank() && chapter.sourceChapterId == it.chapterId
         }
         val selected = selectedVariant(current)?.takeIf { it.scanlator.isNotBlank() } ?: return sameGroup
-        val volumes = mutableListOf<Pair<ReadingVolume, List<Chapter>>>()
-        val seenVolumes = mutableSetOf<String>()
+        val volumes = mutableMapOf<Long, List<Chapter>>()
+        val ambiguousVolumes = mutableSetOf<Long>()
+        val fractionalAfter = mutableSetOf<Long>()
         for ((group, entries) in chapters.groupBy(Chapter::group)) {
             val label = readingVolume(group) ?: continue
             if (label.language != currentVolume.language) continue
-            // Do not skip an ambiguous middle volume to reach a later one. DecimalNumber
-            // comparison is exact, but equality is identity-based, so key by canonical text.
-            if (!seenVolumes.add(label.number.toPlainString()) || entries.any { chapter ->
-                    val variant = selectedVariant(chapter)
-                    variant == null || variant.mangaId != selected.mangaId ||
-                        variant.language != label.language || variant.edition != label.edition ||
-                        variant.scanlator != selected.scanlator
-                }) return sameGroup
-            val numbers = entries.mapNotNull { chapter ->
+            val number = label.number.toPlainString()
+            val ordinal = number.toLongOrNull()
+            if (ordinal == null) {
+                number.substringBefore('.').toLongOrNull()?.let { fractionalAfter += it }
+                continue
+            }
+            val lane = entries.filter { chapter ->
+                selectedVariant(chapter)?.let { variant ->
+                    variant.mangaId == selected.mangaId && variant.language == label.language &&
+                        variant.edition == label.edition && variant.scanlator == selected.scanlator
+                } == true
+            }.sortedBy(Chapter::index)
+            val numbers = lane.mapNotNull { chapter ->
                 parse(chapter)?.takeIf { it.system == "chapter" }?.key
             }
-            if (numbers.distinct().size != numbers.size ||
-                entries.map(Chapter::id).distinct().size != entries.size ||
-                entries.map(Chapter::index).distinct().size != entries.size) return sameGroup
-            volumes += label to entries
+            val known = numbers.toSet()
+            val laneIds = lane.mapTo(mutableSetOf(), Chapter::id)
+            // Other confirmed scanlations may duplicate a numbered chapter. They may not
+            // supply a missing chapter or ambiguous extra in the currently selected edition.
+            val valid = lane.isNotEmpty() && known.size == numbers.size && laneIds.size == lane.size &&
+                lane.map(Chapter::index).distinct().size == lane.size && entries.all { chapter ->
+                    chapter.id in laneIds || parse(chapter)?.let { it.system == "chapter" && it.key in known } == true
+                }
+            if (!valid || ordinal in volumes) ambiguousVolumes += ordinal
+            else volumes[ordinal] = lane
         }
-        return volumes.sortedWith { left, right -> left.first.number.compareTo(right.first.number) }
-            .flatMap { (_, entries) -> entries.sortedBy(Chapter::index) }
+        fun lane(number: Long) = volumes[number]?.takeUnless { number in ambiguousVolumes }
+        val start = lane(currentOrdinal)?.takeIf { entries -> entries.any { it.id == current.id } }
+            ?: return sameGroup
+        fun earlierThan(left: Chapter, right: Chapter): Boolean {
+            val before = parse(left)?.takeIf { it.system == "chapter" }?.number ?: return false
+            val after = parse(right)?.takeIf { it.system == "chapter" }?.number ?: return false
+            return before < after
+        }
+        val previous = mutableListOf<List<Chapter>>()
+        var first = start
+        var firstVolume = currentOrdinal
+        while (firstVolume > 1L && firstVolume - 1L !in fractionalAfter) {
+            val candidate = lane(firstVolume - 1L) ?: break
+            if (!earlierThan(candidate.last(), first.first())) break
+            previous += candidate
+            first = candidate
+            firstVolume--
+        }
+        val following = mutableListOf<List<Chapter>>()
+        var last = start
+        var lastVolume = currentOrdinal
+        while (lastVolume < Long.MAX_VALUE && lastVolume !in fractionalAfter) {
+            val candidate = lane(lastVolume + 1L) ?: break
+            if (!earlierThan(last.last(), candidate.first())) break
+            following += candidate
+            last = candidate
+            lastVolume++
+        }
+        return (previous.asReversed() + listOf(start) + following).flatten()
     }
 
     fun independentId(storageId: String): String = "logical:" + sha256(storageId.encodeToByteArray()).take(16).toByteArray().hexString()

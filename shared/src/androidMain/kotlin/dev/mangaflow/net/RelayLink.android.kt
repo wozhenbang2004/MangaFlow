@@ -236,6 +236,8 @@ private class AndroidRelayLink(private val app: Context) : RelayPlatformLink {
         ?: throw DownloadRouteException("Relay 联动身份未能恢复，请重新授权。") else null
 
     @Synchronized fun endpoint(binding: RelayRouteBinding, mode: DownloadRouteMode): RelayManagedEndpoint {
+        if (DownloadRoutingStore.activeProxyProvider() == DownloadProxyProvider.CUSTOM)
+            throw DownloadRouteException("已切换到自定义代理，请使用当前线路重试。")
         val snapshot = mutableState.value
         if (!enabled || identity != binding || snapshot.phase != RelayLinkPhase.APPLIED || !snapshot.vpnConnected ||
             !snapshot.authorized || SystemClock.elapsedRealtime() - receiptAt !in 0..30_000L) {

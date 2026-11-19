@@ -171,8 +171,9 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
         if (checked == null) editor.remove("proxy_host").remove("proxy_port").remove("proxy_type")
         else editor.putString("proxy_host", checked.host).putInt("proxy_port", checked.port)
             .putString("proxy_type", checked.type.name)
+        val provider = if (useAsDefault) DownloadProxyProvider.CUSTOM else mutableState.value.proxyProvider
+        editor.putString("proxy_provider", provider.name)
         if (useAsDefault) editor.putString("default", DownloadRouteMode.PROXY.name)
-            .putString("proxy_provider", DownloadProxyProvider.CUSTOM.name)
         editor.apply()
         mutableState.value = readSettings()
     }

@@ -242,15 +242,21 @@ private fun Modifier.drawerSelectionTapInput(
 
 private sealed interface Frame {
     val key: String
-    data class Root(val section: Section, val profile: String) : Frame {
+    val profile: String
+    data class Root(val section: Section, override val profile: String) : Frame {
         override val key = "root-$profile-${section.name}"
     }
-    data object CopyExplore : Frame { override val key = "copy-explore" }
-    class Detail(private val snapshot: State<DetailState>) : Frame {
+    data object CopyExplore : Frame {
+        override val key = "copy-explore"
+        override val profile = "ordinary"
+    }
+    class Detail(private val snapshot: State<DetailState>, override val profile: String) : Frame {
         val state: DetailState get() = snapshot.value
         override val key = "detail-${snapshot.value.manga.id}"
     }
-    data class Reader(val session: ReadingSession) : Frame { override val key = "reader-${session.manga.id}-${session.collection?.key.orEmpty()}" }
+    data class Reader(val session: ReadingSession, override val profile: String) : Frame {
+        override val key = "reader-${session.manga.id}-${session.collection?.key.orEmpty()}"
+    }
 }
 
 private val Frame.depth: Int get() = when (this) {
@@ -437,9 +443,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             searchExpanded = true
         }
     }
-    val browse by browseActions.state.collectVisibleAsState(
-        reading == null && detail == null || tagSearchVisible ||
-            searchExpanded && platformKind != PlatformKind.DESKTOP)
+    val browse by androidx.compose.runtime.key(profileKey) {
+        // Switching flows must install the new profile's initial state before drawing it.
+        browseActions.state.collectVisibleAsState(
+            reading == null && detail == null || tagSearchVisible ||
+                searchExpanded && platformKind != PlatformKind.DESKTOP)
+    }
     val scopedControls by scopedBrowse.controls.collectAsStateWithLifecycle()
     val favorites by model.library.favorites.collectVisibleAsState(reading == null)
     val history by model.library.history.collectVisibleAsState(reading == null || recentReadingOpen)
@@ -583,10 +592,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val detailFrame = detail?.let { state ->
         androidx.compose.runtime.key(state.manga.id) {
             val snapshot = rememberUpdatedState(state)
-            remember(snapshot) { Frame.Detail(snapshot) }
+            remember(snapshot, profileKey) { Frame.Detail(snapshot, profileKey) }
         }
     }
-    val frame: Frame = reading?.let { Frame.Reader(it) } ?: detailFrame ?:
+    val frame: Frame = reading?.let { Frame.Reader(it, profileKey) } ?: detailFrame ?:
         if (copyExploreOpen && !restrictedMode) Frame.CopyExplore else Frame.Root(section, profileKey)
     val desktop = platformKind == PlatformKind.DESKTOP
     val desktopNavigationVisible = desktop && reading == null && windowSize.width >= 760.dp &&
@@ -655,6 +664,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             recentReadingOpen = false
             profileSourcesOpen = false
             sourceSettingsOpen = false
+            sourceDetailsId = null
+            sourceDetailsManga = null
+            copySyncOpen = false
+            copySyncFocus = null
+            jmSyncOpen = false
             selectedCover = null
             keyboard?.hide()
             focus.clearFocus(force = true)
@@ -679,7 +693,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         repository = model.repository,
         starters = model.starterSources,
     )
-    sourceDetailsId?.let { id -> sourceEntries.firstOrNull { it.source.id == id && it.isInstalled && !it.removed }?.let { entry ->
+    sourceDetailsId?.let { id -> sourceEntries.firstOrNull {
+        it.source.id == id && it.adult == restrictedMode && it.isInstalled && !it.removed
+    }?.let { entry ->
         SourceCapabilityDetailsSheet(entry.source, model.repository, model.sourcePlugins, drawerBackdrop,
             manga = sourceDetailsManga?.takeIf { it.sourceId == id },
             onDismiss = { sourceDetailsId = null; sourceDetailsManga = null },
@@ -949,7 +965,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 // Root destinations share the shell; only their body owns a section save-state key.
                 contentKey = { if (it is Frame.Root) "root-shell" else it.key },
                 transitionSpec = {
-                    if (!motion || (initialState is Frame.Root && targetState is Frame.Root &&
+                    if (!motion || initialState.profile != targetState.profile ||
+                        (initialState is Frame.Root && targetState is Frame.Root &&
                         (targetState as Frame.Root).section == drawerRootTransition))
                         (fadeIn(snap()) togetherWith fadeOut(snap())).using(null)
                     else if (((initialState is Frame.Root || initialState is Frame.CopyExplore) && targetState is Frame.Detail ||
@@ -974,6 +991,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 label = "page",
                 modifier = Modifier.fillMaxSize(),
             ) { current ->
+                // Saveable route state can be retained after this content leaves the screen.
+                // Its covers, search results and inspection panes must retire with its profile.
+                if (current.profile != profileKey) return@AnimatedContent
                 val pendingDrawerSelection = drawerAction
                 LaunchedEffect(current.key, pendingDrawerSelection, motion) {
                     val selection = pendingDrawerSelection ?: return@LaunchedEffect
@@ -1445,6 +1465,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         },
                                         onOpenAccount = if (restrictedMode) null else { { changeSection(Section.ACCOUNT) } },
                                         copyShelfAvailable = !restrictedMode,
+                                        adultProfile = restrictedMode,
                                         jmSyncState = if (restrictedMode) jmShelfSync else null,
                                         onJmSync = if (restrictedMode) {
                                             { jmSyncOpen = true; model.services.jmShelfSync.check() }

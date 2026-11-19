@@ -162,7 +162,9 @@ internal fun AnimeSourcesPanel(
                     LazyColumn(Modifier.weight(1f, fill = false), state = sourceScroll, contentPadding = PaddingValues(16.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         if (focusEpisode != null) {
+                            val currentOption = state.selectedPlaybackOption.takeIf { state.selectedEpisodeId == focusEpisode.id }
                             val choices = state.episodeOptions[focusEpisode.id].orEmpty().filter { it.confirmed }
+                                .sortedBy { it != currentOption }
                             item(key = "episode-sources") { AnimeSectionTitle("本集线路", focusEpisode.title) }
                             item(key = "automatic-play") {
                                 MotionButton(onClick = { onAutomaticPlay(focusEpisode) },
@@ -170,15 +172,17 @@ internal fun AnimeSourcesPanel(
                                     Text(if (state.autoMatching) "正在自动匹配" else "自动选择线路并播放")
                                 }
                             }
-                            items(choices, key = { "choice:" + it.sourceId + ":" + it.episode.id }) { option ->
+                            items(choices, key = { "choice:" + it.sourceId + ":" + it.episode.group + ":" + it.episode.id }) { option ->
+                                val current = option == currentOption
                                 AnimeSelection(option.sourceName,
-                                    listOf(option.episode.group, option.episode.edition).filter { it.isNotBlank() }.distinct().joinToString(" · "),
-                                    selected = option.sourceId == state.preferredSourceId,
+                                    listOf(option.episode.group, option.episode.edition, if (current) "当前线路" else "")
+                                        .filter { it.isNotBlank() }.distinct().joinToString(" · "),
+                                    selected = current,
                                     onClick = { onPlay(focusEpisode.id, option) })
                             }
                             if (choices.isEmpty()) item { AnimeQuietLabel(if (state.autoMatching)
                                 "正在自动核对本集线路，已匹配的结果会在这里出现。"
-                                else "本集暂未匹配到可靠线路，可重试自动匹配；手动调整在下方。") }
+                                else "本集暂无已确认线路。") }
                         } else item(key = "source-overview") {
                             val matchedSources = state.episodeOptions.values.flatten().filter { it.confirmed }
                                 .map { it.sourceId }.distinct().size

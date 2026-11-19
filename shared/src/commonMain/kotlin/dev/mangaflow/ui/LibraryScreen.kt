@@ -129,6 +129,7 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
+import dev.mangaflow.ui.motion.BackHandler
 import dev.mangaflow.ui.motion.FeelEvent
 import dev.mangaflow.ui.motion.rememberFeelFeedback
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -175,6 +176,7 @@ fun LibraryScreen(
     onRefreshCloudFavorites: (() -> Unit)? = null,
     onOpenAccount: (() -> Unit)? = null,
     copyShelfAvailable: Boolean = true,
+    adultProfile: Boolean = false,
 ) {
     fun sourceIncluded(sourceId: String): Boolean =
         (includedSourceIds == null || sourceId in includedSourceIds) && sourceId !in excludedSourceIds
@@ -184,6 +186,8 @@ fun LibraryScreen(
     val scopedHistory = remember(history, includedSourceIds, excludedSourceIds) {
         history.filter { sourceIncluded(it.manga.sourceId) }
     }
+    val shelfTitle = if (adultProfile) "成人书架" else "书架"
+    val historyTitle = "最近阅读"
     val desktop = platformKind == PlatformKind.DESKTOP
     val density = LocalDensity.current
     val motion = LocalMotionEnabled.current
@@ -280,6 +284,10 @@ fun LibraryScreen(
         }
     }
     val visibleHistory = remember(scopedHistory, pendingHistory) { scopedHistory.filterNot { it.manga.id in pendingHistory } }
+    val adultResume = remember(adultProfile, visibleHistory) {
+        if (adultProfile) visibleHistory.asSequence().filter { it.chapterId.isNotBlank() }.maxByOrNull { it.updatedAt }
+        else null
+    }
     val copyNotice = copySyncState?.takeIf {
         it.owner != null && (it.differences.isNotEmpty() || it.favoritesError != null || it.progressError != null)
     }
@@ -326,6 +334,10 @@ fun LibraryScreen(
         dragPoint = Offset.Unspecified
         trashBounds = null
         if (!active || showHistory) onCancelOpen()
+    }
+    BackHandler(adultProfile && active && showHistory && !showCollections && !showStats &&
+        chapterHistoryManga == null && !libraryActionsOpen) {
+        showHistory = false
     }
     if (showCollections) PageCollectionsSheet(collections, repository,
         onOpen = { showCollections = false; onOpenPageCollection(it) },
@@ -414,6 +426,20 @@ fun LibraryScreen(
                             horizontalArrangement = Arrangement.spacedBy(gap),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
+                            if (adultResume != null) item(key = "adult-continue", span = {
+                                androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
+                            }) {
+                                Column(Modifier.widthIn(max = 460.dp).fillMaxWidth()) {
+                                    Text("继续阅读", style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    ContinueRow(adultResume, repository, onContinue = { progress ->
+                                        if (active) {
+                                            onCancelOpen()
+                                            onContinue(progress)
+                                        }
+                                    })
+                                }
+                            }
                             if (shelfScope == UnifiedShelfScope.COPY && copyNotice != null && importCopy != null) item(key = "copy-new-favorites", span = {
                                 androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                             }) { CopyShelfImportHint(copyNotice, active, importCopy) }
@@ -593,20 +619,26 @@ fun LibraryScreen(
         }
         if (desktop) {
             val stackedTools = maxWidth < 680.dp * density.fontScale.coerceAtLeast(1f)
-            DesktopManagementToolbar(if (showHistory) "最近阅读" else "书架", Modifier.align(Alignment.TopCenter)
+            DesktopManagementToolbar(if (showHistory) historyTitle else shelfTitle, Modifier.align(Alignment.TopCenter)
                 .onSizeChanged { headerHeightPx = it.height },
                 navigation = navigation, minimumToolsWidth = 680.dp) {
                 if (showHistory) MotionIconButton(onClick = { showHistory = false },
                     modifier = Modifier.size(36.dp), tooltip = "返回书架") {
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回书架", Modifier.size(19.dp))
-                } else MotionTabs(if (shelfScope == UnifiedShelfScope.LOCAL) 0 else 1, shelfLabels, selectShelf,
+                } else if (copyShelfAvailable) MotionTabs(if (shelfScope == UnifiedShelfScope.LOCAL) 0 else 1, shelfLabels, selectShelf,
                     modifier = if (stackedTools) Modifier.width(240.dp * density.fontScale.coerceAtLeast(1f))
                         else Modifier.widthIn(max = 280.dp).weight(1f, fill = false),
                     treatment = MotionTabTreatment.Soft, controlHeight = 36.dp)
                 if (!stackedTools) Spacer(Modifier.weight(1f))
-                if (!showHistory) MotionIconButton(onClick = { onCancelOpen(); showHistory = true },
-                    modifier = Modifier.size(36.dp), tooltip = "最近阅读") {
-                    Icon(Icons.Outlined.History, "最近阅读", Modifier.size(19.dp))
+                if (!showHistory) {
+                    if (adultProfile) LibraryRecentReadingButton(
+                        active = active, label = historyTitle, onOpen = { onCancelOpen(); showHistory = true },
+                        modifier = Modifier.heightIn(min = 36.dp),
+                    )
+                    else MotionIconButton(onClick = { onCancelOpen(); showHistory = true },
+                        modifier = Modifier.size(36.dp), tooltip = historyTitle) {
+                        Icon(Icons.Outlined.History, historyTitle, Modifier.size(19.dp))
+                    }
                 }
                 if (onOpenAccount != null) MotionIconButton(onClick = onOpenAccount,
                     modifier = Modifier.size(36.dp), tooltip = "拷贝账号") {
@@ -630,25 +662,33 @@ fun LibraryScreen(
         } else Column(Modifier.align(Alignment.TopCenter).onSizeChanged { headerHeightPx = it.height }
             .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
             .padding(horizontal = 8.dp, vertical = 2.dp)) {
-            PageTitleHeader(if (showHistory) "最近阅读" else "书架", backdrop, navigation,
-                leadingWidth = shelfWidth,
-                leading = {
+            val hasLeading = showHistory || copyShelfAvailable
+            PageTitleHeader(if (showHistory) historyTitle else shelfTitle, backdrop, navigation,
+                leadingWidth = if (hasLeading) shelfWidth else 0.dp,
+                leading = if (hasLeading) ({
                     if (showHistory) Row(Modifier.width(shelfWidth),
                         verticalAlignment = Alignment.CenterVertically) {
                         MotionIconButton(onClick = { showHistory = false }, modifier = Modifier.size(40.dp),
                             tooltip = "返回书架") {
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回书架", Modifier.size(19.dp))
                         }
-                        Text("最近阅读", style = MaterialTheme.typography.labelMedium)
+                        Text(historyTitle, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     } else LiquidGlassSurface(backdrop, Modifier.width(shelfWidth), cornerRadius = 22.dp,
                         role = GlassSurfaceRole.NAVIGATION, trackPointer = true) {
                         MotionTabs(if (shelfScope == UnifiedShelfScope.LOCAL) 0 else 1,
                             shelfLabels, selectShelf, modifier = Modifier.fillMaxWidth(),
                             treatment = MotionTabTreatment.Soft, controlHeight = 40.dp)
                     }
-                },
+                }) else null,
+                summary = if (hasLeading) null else ({
+                    Text(shelfTitle, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }),
                 actions = {
                     toolbar {
+                        if (adultProfile && !showHistory) LibraryRecentReadingButton(
+                            active = active, label = historyTitle, onOpen = { onCancelOpen(); showHistory = true },
+                            modifier = Modifier.heightIn(min = 44.dp),
+                        )
                         Box {
                             MotionIconButton(onClick = {
                                 pendingLibraryTool = null
@@ -675,7 +715,7 @@ fun LibraryScreen(
                                         }
                                     }
                                 }) {
-                                if (!showHistory) LibraryToolAction(Icons.Outlined.History, "最近阅读",
+                                if (!showHistory && !adultProfile) LibraryToolAction(Icons.Outlined.History, historyTitle,
                                     visibleHistory.size.toString()) {
                                     pendingLibraryTool = LibraryToolDestination.HISTORY
                                     libraryActionsOpen = false
@@ -735,6 +775,16 @@ fun LibraryScreen(
         }
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
             .padding(horizontal = 20.dp, vertical = 12.dp))
+    }
+}
+
+@Composable
+private fun LibraryRecentReadingButton(active: Boolean, label: String, onOpen: () -> Unit, modifier: Modifier = Modifier) {
+    TextButton(onClick = onOpen, modifier = modifier, enabled = active,
+        contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp)) {
+        Icon(Icons.Outlined.History, null, Modifier.size(17.dp))
+        Spacer(Modifier.width(5.dp))
+        Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

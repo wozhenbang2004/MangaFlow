@@ -64,6 +64,7 @@ import dev.mangaflow.net.identity
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.data.SourceMangaRef
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.resolveChapter
 import dev.mangaflow.data.sourceDisplayName
@@ -1531,11 +1532,14 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     else {
                         val totalHeat = loaded.manga.totalHeat() ?: current.manga.totalHeat()
                         val updatedManga = loaded.manga.copy(popularity = totalHeat, totalPopularity = totalHeat, rank = null)
-                        current.copy(manga = updatedManga, detail = loaded.copy(manga = updatedManga), loading = false)
+                        val chapters = projectionChapters(manga.id, loaded.chapters,
+                            current.detail?.chapters.orEmpty(), downloadedChapters(manga.id), primaryObserved = true)
+                        current.copy(manga = updatedManga,
+                            detail = loaded.copy(manga = updatedManga, chapters = chapters), loading = false)
                     }
                 }
                 if (continueChapterId != null) {
-                    val chapter = findSourceChapter(loaded.chapters, continueChapterId)
+                    val chapter = _detail.value?.detail?.chapters?.let { findSourceChapter(it, continueChapterId) }
                     if (chapter != null) readChapter(chapter)
                     else messages.send("阅读记录中的章节不在当前目录中，请从目录选择章节。")
                 }
@@ -1815,6 +1819,40 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             .distinctBy { it.logicalId.ifBlank { it.id } }.sortedBy(Chapter::index)
     }
 
+    /** An unobserved source cannot erase its last directory while its link is still valid. */
+    private fun projectionChapters(workId: String, primary: List<Chapter>, previous: List<Chapter>,
+        offline: List<Chapter>, primaryObserved: Boolean): List<Chapter> {
+        if (previous.isEmpty()) return retainedChapters(primary, offline)
+        val installed = repository.sources.mapTo(mutableSetOf()) { it.id }
+        val settings = unifiedChapters.settings(workId)
+        val unobserved = buildSet {
+            if (!primaryObserved) add(SourceKeys.decodeManga(workId))
+            settings.links.forEach { link ->
+                if (link.confirmedAt > 0L && link.manga.sourceId in installed &&
+                    repository.loadedSourceDetail(link.manga.id) == null) add(SourceKeys.decodeManga(link.manga.id))
+            }
+        }
+        if (unobserved.isEmpty()) return retainedChapters(primary, offline)
+        val retained = previous.mapNotNull { chapter ->
+            val logicalId = chapter.logicalId.ifBlank { chapter.id }
+            val variants = chapter.variants.filter { variant ->
+                val id = variant.storageId
+                val assigned = settings.manualLinks[id] ?: if (id in settings.separated)
+                    ChapterSemantics.independentId(id) else logicalId
+                assigned == logicalId && SourceMangaRef(variant.sourceId, variant.mangaId) in unobserved
+            }
+            if (chapter.variants.isNotEmpty()) {
+                chapter.takeIf { variants.any { it.storageId == chapter.id } }?.copy(variants = variants)
+            } else {
+                val reference = runCatching { SourceKeys.decodeChapter(workId, chapter.id) }.getOrNull()
+                chapter.takeIf { reference != null && it.sourceId == reference.sourceId &&
+                    (it.sourceMangaId.isBlank() || it.sourceMangaId == reference.mangaId) &&
+                    SourceMangaRef(reference.sourceId, reference.mangaId) in unobserved }
+            }
+        }
+        return retainedChapters(primary, offline + retained)
+    }
+
     private fun selectedChapters(chapters: List<Chapter>, selected: Chapter): List<Chapter> {
         val logical = selected.logicalId.ifBlank { selected.id }
         val group = chapters.indexOfFirst { it.logicalId.ifBlank { it.id } == logical ||
@@ -1838,21 +1876,24 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val workIds = listOfNotNull(detailWorkId, readingWorkId).distinct()
         val catalogs = withContext(Dispatchers.Default) {
             workIds.forEach(repository::reconcileSourceDiscovery)
-            workIds.associateWith { repository.cachedDetail(it) }
+            workIds.associateWith { repository.cachedCatalog(it) }
         }
         fun currentProjection(): Boolean = request == projectionRequestId &&
             settingsRevision == unifiedChapters.revision.value && catalogRevision == repository.catalogRevision.value
         if (!currentProjection()) return
-        var changedCatalog: MangaDetail? = null
+        var changedCatalog: Pair<MangaDetail, MangaDetail>? = null
         val currentDetail = _detail.value
         if (detailWorkId != null && detailRequestId == detailEpoch &&
             currentDetail != null && currentDetail.manga.id == detailWorkId) {
-            catalogs[detailWorkId]?.let { catalog ->
+            catalogs[detailWorkId]?.let { snapshot ->
+                val catalog = snapshot.detail
                 val ranked = currentDetail.rankedSourceWork
-                if (currentDetail.detail != catalog && (ranked == null ||
+                val display = catalog.copy(chapters = projectionChapters(detailWorkId, catalog.chapters,
+                    currentDetail.detail?.chapters.orEmpty(), downloadedChapters(detailWorkId), snapshot.fresh))
+                if (currentDetail.detail != display && (ranked == null ||
                     siteRankingsRepository.sameSourceResult(ranked, currentDetail.manga, catalog.manga))) {
-                    _detail.value = currentDetail.copy(detail = catalog)
-                    changedCatalog = catalog
+                    _detail.value = currentDetail.copy(detail = display)
+                    if (snapshot.fresh) changedCatalog = display to catalog
                 }
             }
         }
@@ -1860,22 +1901,24 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val session = _reading.value
         if (readingWorkId != null && readingRequestId == readingEpoch &&
             session != null && session.manga.id == readingWorkId) {
-            catalogs[readingWorkId]?.let { catalog ->
+            catalogs[readingWorkId]?.let { snapshot ->
                 // Read the visible source now: the reader can turn pages/chapters while
                 // a background projection is being built, without a new reading epoch.
                 val visible = visibleReading?.takeIf { it.first.id == session.manga.id }?.second
                     ?: findSourceChapter(session.chapters, session.chapterId)
-                val projected = if (visible != null) selectedChapters(catalog.chapters, visible) else catalog.chapters
+                val chapters = projectionChapters(readingWorkId, snapshot.detail.chapters,
+                    session.chapters, downloadedChapters(readingWorkId), snapshot.fresh)
+                val projected = if (visible != null) selectedChapters(chapters, visible) else chapters
                 if (session.chapters != projected) {
                     cancelReaderSourceStandbys()
                     _reading.value = session.copy(chapters = projected)
                 }
             }
         }
-        changedCatalog?.let { catalog ->
+        changedCatalog?.let { (display, catalog) ->
             projectionSaveLock.withLock {
                 if (currentProjection() && detailRequestId == detailEpoch &&
-                    _detail.value?.manga?.id == catalog.manga.id && _detail.value?.detail == catalog)
+                    _detail.value?.manga?.id == catalog.manga.id && _detail.value?.detail == display)
                     readerCatalogs.save(catalog)
             }
         }
@@ -2701,7 +2744,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     if (current?.manga?.id != session.manga.id) current
                     else current.copy(
                         manga = loaded.manga,
-                        chapters = selectedChapters(retainedChapters(loaded.chapters, current.chapters + offline),
+                        chapters = selectedChapters(projectionChapters(session.manga.id, loaded.chapters,
+                            current.chapters, offline, primaryObserved = true),
                             visibleReading?.takeIf { it.first.id == session.manga.id }?.second
                                 ?: findSourceChapter(current.chapters, current.chapterId)
                                 ?: Chapter(current.chapterId, "继续阅读", 0)),

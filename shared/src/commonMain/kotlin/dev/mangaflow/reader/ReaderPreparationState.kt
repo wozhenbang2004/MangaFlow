@@ -28,6 +28,7 @@ internal data class ReaderPreparationPage(
     val decode: ReaderPreparationStep = ReaderPreparationStep(),
     val originalPresent: Boolean? = null, val previewResident: Boolean? = null,
     val originalBytes: Long? = null, val inspectedAt: Long? = null, val freshUntil: Long? = null,
+    val previewInspectedAt: Long? = null, val previewFreshUntil: Long? = null,
     val receivedBytes: Long = 0L, val expectedBytes: Long? = null,
     val promoted: Boolean = false, val joining: Boolean = false,
 )
@@ -206,7 +207,7 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
             if (!independent) {
                 tickets.remove(key)?.let { activeTickets.remove(it); ticketOwners.remove(it) }
             }
-            rows[index] = row.copy(previewResident = null,
+            rows[index] = row.copy(previewResident = null, previewInspectedAt = null, previewFreshUntil = null,
                 decode = if (independent) row.decode else ReaderPreparationStep())
         }
         publishLocked()
@@ -238,11 +239,19 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
         rows[index]?.let { rows[index] = it.copy(joining = joining) }; publishLocked()
     }
     fun artifact(index: Int, original: Boolean?, bytes: Long?, preview: Boolean?,
-        freshnessMillis: Long = 4_000L, owner: Any? = null) = synchronized(lock) {
+        freshnessMillis: Long = 4_000L, owner: Any? = null,
+        startedAt: Long = monotonicTimeMillis(),
+    ) = synchronized(lock) {
         if (owner != null && this.owner !== owner) return@synchronized
         val now = monotonicTimeMillis()
-        rows[index]?.let { rows[index] = it.copy(originalPresent = original, originalBytes = bytes,
-            previewResident = preview, inspectedAt = now, freshUntil = now + freshnessMillis) }
+        val previous = rows[index] ?: return@synchronized
+        val originalNew = startedAt >= (previous.inspectedAt ?: Long.MIN_VALUE) &&
+            (original != null || previous.originalPresent == null || now > (previous.freshUntil ?: Long.MIN_VALUE))
+        val previewNew = preview != null && startedAt >= (previous.previewInspectedAt ?: Long.MIN_VALUE)
+        val withOriginal = if (originalNew) previous.copy(originalPresent = original, originalBytes = bytes,
+            inspectedAt = startedAt, freshUntil = now + freshnessMillis) else previous
+        rows[index] = if (previewNew) withOriginal.copy(previewResident = preview,
+            previewInspectedAt = startedAt, previewFreshUntil = now + freshnessMillis) else withOriginal
     }
     fun beginObservationScan(owner: Any, candidates: Int): Long? = synchronized(lock) {
         if (this.owner !== owner) return@synchronized null
@@ -294,8 +303,9 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
             scanning?.copy(endWindow = snapshot.windowRevision,
                 elapsedMillis = (now - scanStartedAt).coerceAtLeast(0L)), recentScans)
         snapshot = snapshot.copy(observations = observations, pages = rows.values.sortedBy { it.pageIndex }.map { row ->
-            if (row.freshUntil?.let { now <= it } == true) row
-            else row.copy(originalPresent = null, previewResident = null, originalBytes = null)
+            val original = if (row.freshUntil?.let { now <= it } == true) row
+                else row.copy(originalPresent = null, originalBytes = null)
+            if (row.previewFreshUntil?.let { now <= it } == true) original else original.copy(previewResident = null)
         })
         mutableState.value = snapshot
     }

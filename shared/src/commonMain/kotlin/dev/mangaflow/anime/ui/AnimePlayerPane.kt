@@ -51,8 +51,6 @@ internal fun AnimePlayerPane(
     state: AnimeScreenState,
     playback: AnimePlayerState,
     backdrop: HazeState,
-    requestedEpisode: AnimeEpisode?,
-    resolutionError: String?,
     active: Boolean,
     fullscreen: Boolean,
     onFullscreenChange: (Boolean) -> Unit,
@@ -69,8 +67,10 @@ internal fun AnimePlayerPane(
     val fillVideo = fullscreen || playback.inPictureInPicture
     val detail = state.detail
     val activeEpisode = detail?.episodes?.firstOrNull { it.id == state.selectedEpisodeId }
-    val episode = if (state.resolving || resolutionError != null) requestedEpisode ?: activeEpisode
-        else activeEpisode ?: requestedEpisode
+    val target = state.playbackTarget
+    val episode = target?.episode ?: activeEpisode
+    val resolutionError = target?.error
+    val hasAlternate = episode?.let { state.episodeOptions[it.id].orEmpty().count { option -> option.confirmed } > 1 } == true
     val ordered = detail?.episodes.orEmpty().filter { it.kind == episode?.kind }
     val index = ordered.indexOfFirst { it.id == episode?.id }
     val previous = ordered.getOrNull(index - 1).takeIf { index > 0 }
@@ -243,7 +243,8 @@ internal fun AnimePlayerPane(
                     )
                 })
                 if (!playback.inPictureInPicture) Box(Modifier.motionInputGate(active && !locked && !obscured && !settingsPresent)) {
-                    AnimeVideoStatus(state.resolving, state.autoMatching, failure, playback, next, onRetry, onSources, onEpisode,
+                    AnimeVideoStatus(state.resolving, state.autoMatching, target?.sourceName, failure, playback,
+                        next, onRetry, onSources, onEpisode, canChooseSource = episode != null,
                         onKeepPlayback = onKeepPlayback,
                         canKeepPlayback = playback.phase == AnimePlayerPhase.READY && (state.resolving || resolutionError != null),
                         onRestorePlayback = onRestorePlayback, canRestorePlayback = state.canRestorePlayback)
@@ -275,7 +276,8 @@ internal fun AnimePlayerPane(
                         Row {
                             if (fullscreen) MotionIconButton(onClick = { locked = true }, modifier = Modifier.size(44.dp),
                                 tooltip = "锁定触控") { Icon(Icons.Outlined.LockOpen, "锁定触控", Modifier.size(20.dp)) }
-                            MotionIconButton(onClick = { interact(); onSources() }, modifier = Modifier.size(44.dp),
+                            if (hasAlternate && failure == null && !state.resolving) MotionIconButton(
+                                onClick = { interact(); onSources() }, modifier = Modifier.size(44.dp),
                                 tooltip = "切换来源与线路") {
                                 Icon(Icons.Outlined.SwapHoriz, "切换来源", Modifier.size(21.dp))
                             }
@@ -328,14 +330,14 @@ internal fun AnimePlayerPane(
 }
 
 @Composable
-private fun AnimeVideoStatus(resolving: Boolean, autoMatching: Boolean, failure: String?, playback: AnimePlayerState,
+private fun AnimeVideoStatus(resolving: Boolean, autoMatching: Boolean, sourceName: String?, failure: String?, playback: AnimePlayerState,
     next: AnimeEpisode?, onRetry: () -> Unit, onSources: () -> Unit, onEpisode: (AnimeEpisode) -> Unit,
-    onKeepPlayback: () -> Unit, canKeepPlayback: Boolean,
+    canChooseSource: Boolean, onKeepPlayback: () -> Unit, canKeepPlayback: Boolean,
     onRestorePlayback: () -> Unit, canRestorePlayback: Boolean) {
     when {
         resolving -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            PlayerStageMessage(if (autoMatching) "正在匹配片源" else "正在取得播放地址",
-                if (autoMatching) "自动核对作品与集数" else null)
+            PlayerStageMessage(if (autoMatching) "正在匹配本集片源" else "正在准备本集",
+                sourceName.takeUnless { autoMatching })
             if (canKeepPlayback) MotionTextButton(onClick = onKeepPlayback, modifier = Modifier.heightIn(min = 44.dp)) {
                 Text("取消换源，保留当前播放", color = Color.White)
             }
@@ -345,7 +347,7 @@ private fun AnimeVideoStatus(resolving: Boolean, autoMatching: Boolean, failure:
             PlayerStageMessage("播放暂未成功", failure)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 MotionButton(onClick = onRetry, modifier = Modifier.heightIn(min = 44.dp)) { Text("重试") }
-                MotionOutlinedButton(onClick = onSources, modifier = Modifier.heightIn(min = 44.dp),
+                if (canChooseSource) MotionOutlinedButton(onClick = onSources, modifier = Modifier.heightIn(min = 44.dp),
                     colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(contentColor = Color.White)) { Text("换个来源") }
             }
             if (canKeepPlayback) MotionTextButton(onClick = onKeepPlayback, modifier = Modifier.heightIn(min = 44.dp)) {

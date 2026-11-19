@@ -230,9 +230,17 @@ internal class ReaderPageRepairController(
     }
 
     /** Automatic work is allowed only for an already confirmed exact relation. */
+    fun recoverVisible(indices: List<Int>) {
+        for (index in indices) {
+            if (job?.isActive == true) return
+            recover(index)
+        }
+    }
+
     fun recover(index: Int) {
         if (!valid() || index !in primaryPages.indices || !failureWindow.isFailed(index) ||
-            mutableState.value.selection != null || job?.isActive == true) return
+            mutableState.value.selection != null || job?.isActive == true ||
+            chapter.variants.none { it.storageId != chapter.id }) return
         val settings = policy.state.value.recovery
         if (settings.sourceLocked || !settings.autoRepair && !failureWindow.shouldSwitch(index, settings)) return
         val existing = mutableState.value.replacements[index]
@@ -242,7 +250,12 @@ internal class ReaderPageRepairController(
         job = scope.launch {
             mutableState.value = mutableState.value.copy(busy = true, reason = null)
             try {
-                val saved = withContext(Dispatchers.IO) { store.read(workId, chapter.id, index) } ?: return@launch
+                val saved = withContext(Dispatchers.IO) { store.read(workId, chapter.id, index) }
+                if (generation != revision || !valid() || !failureWindow.isFailed(index)) return@launch
+                if (saved == null) {
+                    mutableState.value = mutableState.value.copy(reason = "这页还未确认备用画面，可以手动对齐")
+                    return@launch
+                }
                 if (saved.workId != workId || saved.primaryChapterId != chapter.id || saved.primaryIndex != index ||
                     saved.primaryManifest != primaryManifest || saved.primaryEnvironment != primaryEnvironment ||
                     saved.logicalChapterId != chapter.logicalId.ifBlank { chapter.id }) {

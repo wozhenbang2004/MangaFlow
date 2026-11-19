@@ -31,6 +31,7 @@ import coil3.SingletonImageLoader
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
+import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.reader.ReaderDialogSurface
@@ -42,6 +43,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private data class StorageClearPlan(val items: List<StoredCacheItem>, val legacy: Boolean,
@@ -57,6 +59,8 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
 ) {
     val context = LocalMangaContext.current
     val store = remember(context) { StorageCacheStore.get(context) }
+    val experience = remember(context) { ExperiencePolicyStore.get(context) }
+    val scope = rememberCoroutineScope()
     val downloads = remember(context) { DownloadStore.get(context) }
     val entries by downloads.entries.collectAsStateWithLifecycle()
     val models = remember(context) { PanelModelStore.get(context) }
@@ -77,6 +81,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
     var plan by remember { mutableStateOf<StorageClearPlan?>(null) }
     val busy = clearOperation?.active == true
     var loading by remember { mutableStateOf(false) }
+    var clearingMemory by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
     var offlineBytes by remember { mutableLongStateOf(0L) }
     var revision by remember { mutableIntStateOf(0) }
@@ -316,8 +321,25 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                                     Text("缓存预算 ${storageBytes(paneSnapshot?.budgetBytes ?: 0L)} · 各类共享",
                                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                                    Text("内存图片 ${storageBytes(imageLoader.memoryCache?.size ?: 0L)} · 随阅读自动回收",
-                                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                        Text("内存图片 ${imageLoader.memoryCache?.size?.let(::storageBytes) ?: "—"}", Modifier.weight(1f),
+                                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                        MotionTextButton(onClick = {
+                                            if (!active || !visible || clearingMemory) return@MotionTextButton
+                                            clearingMemory = true
+                                            scope.launch {
+                                                try {
+                                                    val released = experience.clearDecodedMemory().await()
+                                                    notice = "已释放 ${storageBytes(released)} 缓存引用"
+                                                } catch (cancel: CancellationException) { throw cancel }
+                                                catch (_: Exception) { notice = "内存清理未完成，请重试" }
+                                                finally { clearingMemory = false }
+                                            }
+                                        }, enabled = active && visible && !busy && !clearingMemory,
+                                            modifier = Modifier.heightIn(min = 44.dp)) {
+                                            Text(if (clearingMemory) "正在清理" else "清理解码缓存")
+                                        }
+                                    }
                                     if (paneSnapshot?.pending == true || (paneSnapshot?.totalBytes ?: 0L) > (paneSnapshot?.budgetBytes ?: Long.MAX_VALUE))
                                         Text("使用中的内容保留，释放后继续回收", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                                 }

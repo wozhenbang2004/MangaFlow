@@ -629,16 +629,25 @@ fun ReaderScreen(
     }
     SideEffect { repairs.updatePresentation(chapter, repairViewportWidth, repairViewportHeight) }
     val repairState by repairs.state.collectAsStateWithLifecycle()
+    val preferredRepairVariants by rememberUpdatedState(readySourceVariants)
     val openPageRepair: (Int) -> Unit = remember(repairs, alternativeSources) {
         { index ->
             val variant = repairs.state.value.replacements[index]?.variant
                 ?.takeIf { selected -> alternativeSources.any { it.storageId == selected.storageId } }
+                ?: alternativeSources.firstOrNull { it.storageId in preferredRepairVariants }
                 ?: alternativeSources.firstOrNull()
             if (variant != null) repairs.select(index, variant)
         }
     }
     val rescueStandbys by rememberUpdatedState(onRescueSourceStandbys)
     val rescuePages = remember(sourceIdentity) { mutableStateMapOf<Int, Boolean>() }
+    val visibleRepairPages = remember(pageIndex, preparation.firstVisible, preparation.lastVisible, pages.size) {
+        if (pageIndex !in pages.indices) emptyList()
+        else if (pageIndex in preparation.firstVisible..preparation.lastVisible)
+            listOf(pageIndex) + (preparation.firstVisible..preparation.lastVisible).filter { it in pages.indices && it != pageIndex }
+        else listOf(pageIndex)
+    }
+    val latestVisibleRepairPages by rememberUpdatedState(visibleRepairPages)
     val verifiedSourceSwitch by rememberUpdatedState(onVerifiedSourceSwitch)
     DisposableEffect(repairs) { onDispose { repairs.close() } }
     LaunchedEffect(repairs, readerForeground) { if (!readerForeground) repairs.pause() }
@@ -646,8 +655,8 @@ fun ReaderScreen(
         if (experienceBudget.recovery.sourceLocked || !experienceBudget.recovery.autoRepair && !experienceBudget.recovery.autoSwitch)
             repairs.suspendAutomatic()
     }
-    LaunchedEffect(repairs, repairState.busy, repairState.selection, pageIndex, readerForeground, experienceBudget.recovery) {
-        if (readerForeground && !repairState.busy && repairState.selection == null) repairs.recover(pageIndex)
+    LaunchedEffect(repairs, repairState.busy, repairState.selection, visibleRepairPages, readerForeground, experienceBudget.recovery) {
+        if (readerForeground && !repairState.busy && repairState.selection == null) repairs.recoverVisible(visibleRepairPages)
     }
     LaunchedEffect(repairs, readerForeground) {
         if (!readerForeground) return@LaunchedEffect
@@ -656,12 +665,12 @@ fun ReaderScreen(
             delay(experience.state.value.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L)
         }
     }
-    LaunchedEffect(repairState.switchReady, pageIndex, sourceIdentity, readerForeground, sourceLoading, sourcePickerBlocking,
+    LaunchedEffect(repairState.switchReady, visibleRepairPages, sourceIdentity, readerForeground, sourceLoading, sourcePickerBlocking,
         leavingReader, chapterChangeRequested, experienceBudget.recovery.sourceLocked, experienceBudget.recovery.autoSwitch) {
-        if (repairState.switchReady == null) return@LaunchedEffect
+        val failedPage = repairState.switchReady?.alignment?.primaryIndex ?: return@LaunchedEffect
         if (readerForeground && !sourceLoading && !sourcePickerBlocking && !leavingReader && !chapterChangeRequested &&
-            !experience.state.value.recovery.sourceLocked && experience.state.value.recovery.autoSwitch) {
-            val ready = repairs.consumeSwitch(pageIndex) ?: return@LaunchedEffect
+            failedPage in visibleRepairPages && !experience.state.value.recovery.sourceLocked && experience.state.value.recovery.autoSwitch) {
+            val ready = repairs.consumeSwitch(failedPage) ?: return@LaunchedEffect
             verifiedSourceSwitch(chapter, ready.variant, ready.alignment.targetIndex, ready.alignment.targetManifest)
         }
     }
@@ -674,7 +683,7 @@ fun ReaderScreen(
             if (latestReadingIdentity == (manga.id to sourceIdentity) && pages.any { it == page }) {
                 prefetchedPageFailed(chapter, page)
                 repairs.failed(page.index)
-                repairs.recover(pageIndex)
+                repairs.recoverVisible(latestVisibleRepairPages)
             }
         }
     }
@@ -703,7 +712,6 @@ fun ReaderScreen(
     }
     val toolbarTravel = with(LocalDensity.current) { 12.dp.roundToPx() }
     val touchExploration = rememberReaderTouchExploration()
-    val delayedLoading = rememberDelayedBusy(loading)
     val chapterWaitVisible = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
         !showComments && !showSpreadAdjustment && !showPageNavigator && !sourcePickerBlocking
     LaunchedEffect(chapterLoadAttempt, chapterWaitVisible, loading, error) {
@@ -1040,7 +1048,7 @@ fun ReaderScreen(
             ) else Modifier)) {
             var preparationViewport: ReaderPrefetchViewport? = null
             when {
-                loading || error != null -> if (chapterWaitVisible && (delayedLoading || error != null)) ReaderImageRecovery(
+                loading || error != null -> if (chapterWaitVisible) ReaderImageRecovery(
                     index = null, failure = error.orEmpty(), pending = loading,
                     slow = chapterSlowLoading, stage = chapterLoadStage,
                     sourceName = currentSourceName.orEmpty(), attempt = chapterLoadAttempt,
@@ -2144,12 +2152,12 @@ private fun ChapterPages(
         )
         LaunchedEffect(atEnd) { atEndChanged(atEnd) }
         LaunchedEffect(pager, groups) {
-            snapshotFlow { groups.getOrNull(pager.currentPage)?.first ?: pages.lastIndex }
-                .distinctUntilChanged().collect { index -> location(index, 0) }
+            snapshotFlow { groups.getOrNull(pager.currentPage)?.first }
+                .distinctUntilChanged().collect { index -> if (index != null) location(index, 0) }
         }
         LaunchedEffect(pager, groups) {
-            snapshotFlow { groups.getOrNull(pager.settledPage)?.first ?: pages.lastIndex }
-                .distinctUntilChanged().collect { index -> save(index, 0) }
+            snapshotFlow { groups.getOrNull(pager.settledPage)?.first }
+                .distinctUntilChanged().collect { index -> if (index != null) save(index, 0) }
         }
         LaunchedEffect(pager, groups, active, nextChapterPages) {
             snapshotFlow {
@@ -2176,13 +2184,14 @@ private fun ChapterPages(
         DisposableEffect(pager, groups) {
             onDispose {
                 visibleImageChanged(false)
-                save(groups.getOrNull(pager.settledPage)?.first ?: pages.lastIndex, 0)
+                groups.getOrNull(pager.settledPage)?.let { save(it.first, 0) }
             }
         }
         prefetchViewport = ReaderPrefetchViewport(groups = groups,
             position = { pager.currentPage + pager.currentPageOffsetFraction }, visibleRange = {
-                val shown = groups.getOrNull(pager.currentPage)
-                (shown?.first ?: pages.lastIndex) to (shown?.last ?: pages.lastIndex)
+                val shown = groups.getOrNull(pager.currentPage) ?: groups.getOrNull(pager.settledPage)
+                    ?: groups.firstOrNull { it.contains(initialPage) } ?: groups[startingGroup]
+                shown.first to shown.last
             })
         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
             .bottomPullLoad(pull)) {
@@ -2200,8 +2209,7 @@ private fun ChapterPages(
                 val group = groups.getOrNull(index)
                 val replacements = LocalReaderPageRepair.current?.state?.replacements
                 if (group != null) key(sourceId, headers, pages[group.first], group.second?.let { pages[it] }, preferences.mode,
-                    replacements?.get(group.first), group.second?.let { replacements?.get(it) },
-                    contentWidthPx, previewHeightPx) {
+                    replacements?.get(group.first), group.second?.let { replacements?.get(it) }) {
                     CompositionLocalProvider(LocalLayoutDirection provides pageLayoutDirection) {
                     val second = group.second
                     val spreadZoom = rememberZoomableState()
@@ -2356,7 +2364,7 @@ private class ReaderPrefetchCacheRecovery(var recovered: Boolean = false)
 /** A download took ownership after initial resolution; only a local lookup may retry. */
 private class ReaderPrefetchDownloadOwned : Exception("已有下载负责本页")
 
-private data class LoadedReaderImage(val diskCacheKey: String?, val previewSize: IntSize,
+private data class LoadedReaderImage(val diskCacheKey: String?, val previewSize: IntSize, val requestedSize: IntSize,
     val memoryCacheKey: coil3.memory.MemoryCache.Key? = null)
 
 private fun IntSize.readerAspectRatio(): Float = (width.toFloat() / height).coerceAtLeast(.005f)
@@ -2488,6 +2496,8 @@ internal fun AdjacentPagePrefetch(
         val checkTokens = mutableMapOf<Int, PrefetchWork>()
         val retainedPages = mutableMapOf<Int, PrefetchedReaderPage>()
         val originalEpochs = mutableMapOf<Int, Int>()
+        val originalStamps = mutableMapOf<Int, ReaderOriginalStamp>()
+        val newlyAvailable = mutableSetOf<Int>()
         val inspected = mutableMapOf<Int, Int>()
         // An attempted cache-only check is not a claim that a preview remains resident.
         val previewChecks = mutableMapOf<Int, Pair<IntSize, Int>>()
@@ -2498,6 +2508,8 @@ internal fun AdjacentPagePrefetch(
             cacheRangeOwner?.let { rangeStore.registerReadingResource(it, index, page, diskKey) }
             retainedPages[index] = PrefetchedReaderPage(page, diskKey)
             originalEpochs[index] = (originalEpochs[index] ?: 0) + 1
+            originalStamps.remove(index)
+            newlyAvailable.add(index)
             inspected.remove(index)
             previewChecks.remove(index)
             deferredChecks.remove(index)
@@ -2527,6 +2539,7 @@ internal fun AdjacentPagePrefetch(
         val progressSampler = requestScope.launch {
             var cacheAt = 0L
             var previousScanMillis = 0L
+            var lastTargets = emptySet<Int>()
             while (true) {
                 listOf(PrefetchStage.RESOLVING to resolutionTokens, PrefetchStage.DOWNLOADING to workTokens,
                     PrefetchStage.CHECKING to checkTokens).forEach { (stage, tokens) ->
@@ -2538,31 +2551,53 @@ internal fun AdjacentPagePrefetch(
                     }
                 }
                 val now = monotonicTimeMillis()
-                if (now - cacheAt >= currentBudget.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L) {
-                    cacheAt = now
+                val targets = inspectTargets - inspectVisible
+                val fullScan = now - cacheAt >= currentBudget.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L
+                val scanTargets = if (fullScan) targets else (targets - lastTargets) + newlyAvailable.intersect(targets)
+                lastTargets = targets
+                if (scanTargets.isNotEmpty()) {
+                    if (fullScan) cacheAt = now
+                    newlyAvailable.removeAll(scanTargets)
                     val freshnessMillis = currentBudget.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 2_000L +
                         previousScanMillis * 2L
                     val scanLayout = currentLayout
                     val scanViewport = IntSize(currentViewportWidth(), currentHeight)
-                    val scanTargets = inspectTargets - inspectVisible
                     val scan = tracker?.beginObservationScan(owner, scanTargets.size)
                     var scanCompleted = false
                     try {
                         for (index in scanTargets) {
+                            if (index !in inspectTargets || index in inspectVisible) continue
                             val retained = retainedPages[index]
-                            val resource = retained?.page ?: resolvedPages[index] ?: continue
+                            val resolved = resolvedPages[index]
+                            val epoch = originalEpochs[index]
+                            val previewKey = memoryKeys[index]
+                            val native = pages.getOrNull(index)?.takeIf { page ->
+                                page.url.startsWith("file:") || (sourceId != "jmcomic" && !sourceId.startsWith("js_") &&
+                                    page.sourceImageToken.isBlank() && (page.url.startsWith("https:") || page.url.startsWith("http:")))
+                            }
+                            val resource = retained?.page ?: resolved ?: native ?: continue
+                            val started = monotonicTimeMillis()
                             val artifact = inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
-                                retained?.diskCacheKey, memoryKeys[index])
+                                retained?.diskCacheKey, previewKey, previousOriginal = originalStamps[index])
                             tracker?.inspectedObservation(owner, scan)
-                            if (index in inspectTargets && index !in inspectVisible)
-                                tracker?.artifact(index, artifact.originalPresent, artifact.originalBytes,
+                            if (index in inspectTargets && index !in inspectVisible && originalEpochs[index] == epoch &&
+                                retainedPages[index] === retained && resolvedPages[index] == resolved) {
+                                if (artifact.originalStamp != null) originalStamps[index] = artifact.originalStamp
+                                else if (artifact.originalPresent == false) originalStamps.remove(index)
+                                // The exact remote cache hit is useful before resolution. A miss may
+                                // still have a downloaded/materialized alias; only resolved misses count.
+                                val original = artifact.originalPresent.takeIf { it == true || retained != null ||
+                                    resolved != null || resource.url.startsWith("file:") }
+                                tracker?.artifact(index, original, artifact.originalBytes,
                                     artifact.previewResident.takeIf { scanLayout === currentLayout &&
+                                        memoryKeys[index] == previewKey &&
                                         scanViewport == IntSize(currentViewportWidth(), currentHeight) },
-                                    freshnessMillis = freshnessMillis, owner = owner)
+                                    freshnessMillis = freshnessMillis, owner = owner, startedAt = started)
+                            }
                         }
                         scanCompleted = true
                     } finally { tracker?.finishObservationScan(owner, scan, interrupted = !scanCompleted) }
-                    previousScanMillis = monotonicTimeMillis() - now
+                    if (fullScan) previousScanMillis = monotonicTimeMillis() - now
                 }
                 tracker?.sample()
                 delay(250L)
@@ -2674,9 +2709,12 @@ internal fun AdjacentPagePrefetch(
                     (pages[index].url.startsWith("file:") || pages[index].url.startsWith("https:") ||
                         pages[index].url.startsWith("http:") ||
                         sourceId.startsWith("js_") && pages[index].sourceImageToken.isNotBlank())
-                val aheadTargets = candidates(ahead, true).filter { it in pages.indices }
+                // Cadence chooses new work, while observations follow the actual cursor and the
+                // applied window size. A slow turn cannot discard verified overlapping originals.
+                val aheadTargets = candidates(window.ahead, true).filter { it in pages.indices }
                 val behindTargets = candidates(window.behind, false).filter { it in pages.indices }
-                val networkDesired = if (window.bytes > 0L) (aheadTargets + behindTargets).filter(::eligible).toSet() else emptySet()
+                val networkDesired = if (window.bytes > 0L)
+                    (candidates(ahead, true) + behindTargets).filter(::eligible).toSet() else emptySet()
                 // One total preview count covers both sides; it does not double the
                 // encoded/network window. Extra nearby pages are cache-only candidates.
                 val previewTargets = if (window.enabled) readerNearbyPreviewPages(window.first, window.last,
@@ -2718,6 +2756,9 @@ internal fun AdjacentPagePrefetch(
                 originalFinished.retainAll(retained)
                 retainedPages.keys.retainAll(retained)
                 originalEpochs.keys.retainAll(retained)
+                originalStamps.keys.retainAll(retained)
+                newlyAvailable.retainAll(retained)
+                memoryKeys.keys.retainAll(retained)
                 inspected.keys.retainAll(retained)
                 previewChecks.keys.retainAll(retained)
                 deferredChecks.keys.retainAll(retained)
@@ -3264,6 +3305,7 @@ private fun ReaderPageImage(
     var error by remember(attempt) { mutableStateOf<String?>(null) }
     var loading by remember(attempt) { mutableStateOf(true) }
     var slowLoading by remember(attempt) { mutableStateOf(false) }
+    var recoveryStage by remember(attempt) { mutableStateOf(PrefetchStage.QUEUED) }
     LaunchedEffect(attempt, pageVisible, slowLoading) {
         if (pageVisible && slowLoading) slowWaiting(true)
     }
@@ -3318,6 +3360,8 @@ private fun ReaderPageImage(
                     observedPrefetchAt = inherited.lastProgressAt
                 }
                 transportProgress = if (transport.receivedBytes > 0L || inherited == null) transport else inherited
+                val observed = if (waitingForPrefetch) attemptPrefetch?.work?.snapshot() else preparationWork.snapshot()
+                recoveryStage = observed?.stage ?: PrefetchStage.QUEUED
                 val latestByte = listOfNotNull(transport.lastProgressAt, inheritedProgressAt).maxOrNull()
                 val idle = attempt.idleMillis(visibleSince, latestByte)
                 val recovery = experience.state.value.recovery
@@ -3325,7 +3369,6 @@ private fun ReaderPageImage(
                 slowLoading = idle >= recovery.slowLoadSeconds.coerceAtLeast(1).toLong() * 1000L
                 if (idle >= waitLimit) {
                     attempt.stopped = true
-                    val observed = if (waitingForPrefetch) attemptPrefetch?.work?.snapshot() else preparationWork.snapshot()
                     // Stop only this page's captured optional Coil transfer. Cancellation is
                     // not completion: its owner retains the request and permits until it exits.
                     pendingPrefetch?.request?.dispose()
@@ -3408,7 +3451,6 @@ private fun ReaderPageImage(
         aspect = measuredAspect
         hasDimensions = true
     }
-    val delayedLoading = rememberDelayedBusy(loading)
     LaunchedEffect(attempt, pendingPrefetch, attempt.stopped, handoffCaptured) {
         if (!attempt.acceptsResult || !handoffCaptured) return@LaunchedEffect
         val oldPrefetch = pendingPrefetch
@@ -3442,6 +3484,7 @@ private fun ReaderPageImage(
             maxWidthPx = imageRuntime.previewWidthPx, maxHeightPx = imageRuntime.previewHeightPx)
         val previewWidth = previewSize.width
         val previewHeight = previewSize.height
+        val currentPreviewSize by rememberUpdatedState(previewSize)
         val resource = resolvedPage
         val request = remember(resource, headers, attempt, previewWidth, previewHeight) {
             resource?.let { requested -> readerImageRequest(context, requested, headers, sourceId)
@@ -3462,20 +3505,23 @@ private fun ReaderPageImage(
                 .crossfade(false)
                 .listener(
                     onStart = {
-                        if (attempt.acceptsResult) { loading = true; error = null; loadChanged(false) }
+                        if (attempt.acceptsResult && currentPreviewSize == previewSize && loadedImage == null) {
+                            loading = true; error = null; loadChanged(false)
+                        }
                     },
-                    onSuccess = { _, result -> if (attempt.acceptsResult) {
+                    onSuccess = { _, result -> if (attempt.acceptsResult && currentPreviewSize == previewSize) {
                         val width = result.image.width
                         val height = result.image.height
                         if (width > 0 && height > 0) {
-                            loadedImage = LoadedReaderImage(result.diskCacheKey, IntSize(width, height), result.memoryCacheKey)
+                            loadedImage = LoadedReaderImage(result.diskCacheKey, IntSize(width, height), previewSize,
+                                result.memoryCacheKey)
                         }
                         loading = false
                         if (width > 0 && height > 0 && bypassPrefetchCache && requested.url.startsWith("https:") &&
                             result.dataSource == coil3.decode.DataSource.NETWORK) prefetchCacheRecovery.recovered = true
                         loadChanged(true)
                     } },
-                    onError = { _, result -> if (attempt.acceptsResult) {
+                    onError = { _, result -> if (attempt.acceptsResult && currentPreviewSize == previewSize) {
                         loadChanged(false)
                         if (isReaderAdmissionDeferred(result.throwable)) {
                             // A resource wait must not trigger missing-file recovery or
@@ -3520,16 +3566,19 @@ private fun ReaderPageImage(
                 }
             }
         }
-        LaunchedEffect(attempt, resource, loadedImage, pageVisible) {
+        LaunchedEffect(attempt, resource, loadedImage, pageVisible, previewSize) {
             if (!pageVisible || resource == null) return@LaunchedEffect
+            var originalStamp: ReaderOriginalStamp? = null
             while (attempt.acceptsResult) {
                 val started = monotonicTimeMillis()
                 val interval = experience.state.value.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L
                 val artifact = inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
-                    loadedImage?.diskCacheKey, loadedImage?.memoryCacheKey)
+                    loadedImage?.diskCacheKey, loadedImage?.takeIf { it.requestedSize == previewSize }?.memoryCacheKey,
+                    previousOriginal = originalStamp)
+                originalStamp = artifact.originalStamp
                 if (attempt.acceptsResult) {
                     preparationTracker?.artifact(page.index, artifact.originalPresent, artifact.originalBytes, artifact.previewResident,
-                        freshnessMillis = (interval + monotonicTimeMillis() - started) * 2L)
+                        freshnessMillis = (interval + monotonicTimeMillis() - started) * 2L, startedAt = started)
                     preparationTracker?.sample()
                 }
                 delay(interval)
@@ -3642,7 +3691,7 @@ private fun ReaderPageImage(
                     onClickLabel = "显示或收起阅读工具", onClick = onTap,
                 ))
             }
-            if (pageVisible && (imageError != null || delayedLoading && pendingRecovery)) {
+            if (pageVisible && (imageError != null || pendingRecovery)) {
                 var feedbackHeight by remember { mutableIntStateOf(0) }
                 val feedbackPosition = if (paged) Modifier.align(Alignment.Center)
                 else Modifier.align(Alignment.TopCenter).offset {
@@ -3660,9 +3709,11 @@ private fun ReaderPageImage(
                     },
                     stage = when {
                         prefetchFailure != null && transportProgress.receivedBytes == 0L -> "预取发现异常 · 正在重新读取"
-                        resource == null -> "检查本机与已有下载"
                         awaitingPrefetch && reload > 0 -> "正在结束本页旧请求"
                         awaitingPrefetch -> "接续本页预读"
+                        recoveryStage == PrefetchStage.CHECKING -> "解码本页图片"
+                        recoveryStage == PrefetchStage.RESOLVING -> "解析本页并检查本机缓存"
+                        resource == null -> "检查本机与已有下载"
                         resource.url.startsWith("file:") -> "解码本机图片"
                         else -> "请求图片"
                     },
@@ -3670,7 +3721,7 @@ private fun ReaderPageImage(
                     modifier = feedbackPosition.onSizeChanged { feedbackHeight = it.height },
                     alternatives = sourceAlternatives,
                     readySourceVariants = readySourceVariants,
-                    onRetry = { reload++ }, onSwitch = onQuickSwitch, onMore = onMoreSources,
+                    onRetry = { attempt.stopped = true; reload++ }, onSwitch = onQuickSwitch, onMore = onMoreSources,
                     onRepairPage = onRepairPage,
                     onControls = onShowControls,
                     onStop = {

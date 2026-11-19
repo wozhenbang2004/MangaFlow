@@ -30,7 +30,7 @@ import dev.mangaflow.ui.motion.*
 /** Only disclosure and scroll live here; the application owner retains requests and native identities. */
 @Composable
 internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeState,
-    scrolls: AnimeDiscoveryScrolls, columns: Int?, active: Boolean, onManageSources: () -> Unit,
+    scrolls: AnimeDiscoveryScrolls, columns: Int?, active: Boolean,
     onChooseTitle: (AnimeSourceTitle, Boolean) -> Unit, contentBottomPadding: Dp = 24.dp) {
     val owner = controller.sourceBrowse
     val state by owner.state.collectAsStateWithLifecycle()
@@ -87,12 +87,8 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
                 modifier = Modifier.size(44.dp), tooltip = "刷新当前来源") {
                 Icon(Icons.Outlined.Refresh, "刷新当前来源", Modifier.size(20.dp))
             }
-            if (source != null && state.selectedTitle == null) MotionIconButton(onClick = onManageSources,
-                modifier = Modifier.size(44.dp), tooltip = "管理动漫来源") {
-                Icon(Icons.Outlined.Settings, "管理动漫来源", Modifier.size(20.dp))
-            }
         }
-        if (source == null) AnimeMessage("还没有可浏览的来源", action = "管理来源", onAction = onManageSources)
+        if (source == null) AnimeMessage("还没有可浏览的来源", "可在设置中管理动漫来源。")
         else MotionTabContent(source to state,
             contentKey = { (selected, snapshot) -> selected.id + ":" + selected.revision + ":" + (snapshot.selectedTitle?.id ?: "catalog") },
             order = { (_, snapshot) -> if (snapshot.selectedTitle == null) 0 else 1 }, modifier = Modifier.weight(1f)) { (shownSource, snapshot) ->

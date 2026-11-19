@@ -264,7 +264,10 @@ internal fun ReaderImageRecovery(
         }
         val liveTransfer = transferProgress?.takeIf { pending && attempt.acceptsResult }
         val transferStage = liveTransfer?.let { transfer ->
-            transfer.phase.label + if (transfer.receivedBytes > 0L) " · " + readerTransferBytes(transfer.receivedBytes) else ""
+            val expected = transfer.expectedBytes?.takeIf { it > 0L && it >= transfer.receivedBytes }
+            transfer.phase.label + if (transfer.receivedBytes > 0L)
+                " · " + readerTransferBytes(transfer.receivedBytes) + (expected?.let { " / ${readerTransferBytes(it)}" } ?: "")
+            else ""
         } ?: stage
         Text(if (pending) transferStage + if (slow) " · 等待较久" else "" else readerPageErrorLabel(failure),
             fontSize = 11.sp, color = foreground.copy(alpha = .66f), maxLines = 2)

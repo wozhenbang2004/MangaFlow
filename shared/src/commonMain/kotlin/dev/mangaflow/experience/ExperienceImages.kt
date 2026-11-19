@@ -37,6 +37,8 @@ import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.sha256
+import dev.mangaflow.reader.ReaderDimensionCache
+import dev.mangaflow.reader.readNativeReaderSize
 import dev.mangaflow.reader.readerFilePath
 import dev.mangaflow.reader.readerImageDimensions
 import dev.mangaflow.platform.storage.StorageFile
@@ -358,29 +360,44 @@ internal data class ReaderPagePreflight(
     val memoryCacheKey: MemoryCache.Key? = null,
 )
 
+/** A confirmed header for one exact cached artifact. A live file check is still required. */
+internal data class ReaderOriginalStamp(val key: String, val path: Path, val bytes: Long, val modifiedAt: Long)
+
 internal data class ReaderPreparedArtifacts(val originalPresent: Boolean?, val originalBytes: Long?,
-    val previewResident: Boolean?)
+    val previewResident: Boolean?, val originalStamp: ReaderOriginalStamp? = null)
 
 /** Inspect this exact artifact locally. Do not execute an image request or touch a memory LRU entry. */
 internal suspend fun inspectReaderPreparedArtifacts(
     context: PlatformContext, page: Page, headers: Map<String, String>, source: String,
     diskCacheKey: String? = null, memoryCacheKey: MemoryCache.Key? = null,
+    previousOriginal: ReaderOriginalStamp? = null,
 ): ReaderPreparedArtifacts = withContext(Dispatchers.IO) {
     var preview: Boolean? = null
     try {
         val loader = SingletonImageLoader.get(imagePlatformContext(context))
         preview = memoryCacheKey?.let { key -> loader.memoryCache?.keys?.contains(key) }
-        val local = readerFilePath(page.url)
-        val bytes = if (local != null) StorageFile(local).takeIf { it.isFile }?.length()
-        else loader.diskCache?.let { cache ->
-            cache.openSnapshot(diskCacheKey ?: readerPageCacheKey(page, headers, source))?.use {
-                cache.fileSystem.metadata(it.data).size
-            }
+        val key = diskCacheKey ?: readerPageCacheKey(page, headers, source)
+        suspend fun inspect(fileSystem: FileSystem, path: Path): ReaderPreparedArtifacts {
+            val metadata = fileSystem.metadataOrNull(path) ?: return ReaderPreparedArtifacts(false, null, preview)
+            val bytes = metadata.size?.takeIf { metadata.isRegularFile && it > 0L }
+                ?: return ReaderPreparedArtifacts(false, null, preview)
+            val stamp = metadata.lastModifiedAtMillis?.takeIf { it > 0L }?.let { ReaderOriginalStamp(key, path, bytes, it) }
+            if (stamp != null && stamp == previousOriginal) return ReaderPreparedArtifacts(true, bytes, preview, stamp)
+            val dimensions = readNativeReaderSize(path.toString(), ExperiencePolicyStore.get(context).state.value.runtime)
+            if (dimensions == null || dimensions.width <= 0 || dimensions.height <= 0)
+                return ReaderPreparedArtifacts(false, null, preview)
+            // A local writer may replace the file between header inspection and publication.
+            val current = fileSystem.metadataOrNull(path)
+            if (current == null || !current.isRegularFile || current.size != bytes ||
+                current.lastModifiedAtMillis != metadata.lastModifiedAtMillis)
+                return ReaderPreparedArtifacts(null, null, preview)
+            ReaderDimensionCache.put(key, dimensions)
+            return ReaderPreparedArtifacts(true, bytes, preview, stamp)
         }
-        val present = bytes != null && bytes > 0L && readerImageDimensions(loader, page,
-            diskCacheKey ?: readerPageCacheKey(page, headers, source), refresh = true,
-            runtime = ExperiencePolicyStore.get(context).state.value.runtime) != null
-        ReaderPreparedArtifacts(present, bytes?.takeIf { present }, preview)
+        val local = readerFilePath(page.url)
+        if (local != null) inspect(FileSystem.SYSTEM, StorageFile(local).nativePath)
+        else loader.diskCache?.let { cache -> cache.openSnapshot(key)?.use { inspect(cache.fileSystem, it.data) } }
+            ?: ReaderPreparedArtifacts(false, null, preview)
     } catch (cancelled: CancellationException) { throw cancelled }
     // Header/EXIF inspection is optional evidence, not permission to kill the
     // chapter scheduler or declare an existing original missing under pressure.

@@ -178,7 +178,8 @@ private fun DownloadConnectionSettings(
             if (number == null || number !in 1..65535) throw DownloadRouteException("端口需为 1–65535")
             if (platformKind == PlatformKind.IOS && type == DownloadProxyType.HTTP)
                 throw DownloadRouteException("当前平台请使用 SOCKS5")
-            val using = useAfterSave || store.state.value.defaultMode == DownloadRouteMode.PROXY
+            val using = useAfterSave || (settings.proxyProvider == DownloadProxyProvider.CUSTOM &&
+                settings.defaultMode == DownloadRouteMode.PROXY)
             store.setProxy(DownloadProxyEndpoint(host.trim(), number, type), useAsDefault = useAfterSave)
             overviewNotice = if (using) "已使用指定代理" else "代理地址已保存"
             finishEditing()
@@ -381,7 +382,7 @@ private fun DownloadConnectionSettings(
 /** Per-source drafts stay private until an explicit save; running tasks retain their route snapshot. */
 @Composable
 internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = true,
-    category: DownloadCategory? = null, title: String = "连接线路") {
+    category: DownloadCategory? = null, title: String = "连接线路", showChapterDownload: Boolean = false) {
     val context = LocalMangaContext.current
     val store = remember(context) { DownloadRoutingStore.get(context) }
     val settings by store.state.collectAsStateWithLifecycle()
@@ -412,11 +413,18 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
         notice = null
     }
     fun close() { expanded = false; focus.clearFocus(force = true); keyboard?.hide() }
-    val routeLabel = runCatching { store.sourceSnapshot(sourceId, category) }.fold(
-        onSuccess = { downloadRouteSummary(it.mode) },
-        onFailure = { "待配置" })
+    fun routeLabel(scope: DownloadCategory?): String = runCatching { store.sourceSnapshot(sourceId, scope) }
+        .fold(onSuccess = { downloadRouteLabel(it.mode) }, onFailure = { "待配置" })
+    val currentLabel = routeLabel(category)
+    val downloadLabel = if (showChapterDownload && saved == null) routeLabel(DownloadCategory.CHAPTERS) else currentLabel
+    val inheritsDifferentRoutes = showChapterDownload && saved == null && downloadLabel != currentLabel
     Column(Modifier.fillMaxWidth().motionInputGate(enabled), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        RouteDisclosure(title, (if (saved == null) "跟随 · " else "") + routeLabel, expanded) {
+        val summary = when {
+            inheritsDifferentRoutes -> "阅读 $currentLabel · 下载 $downloadLabel"
+            saved == null -> "跟随 · $currentLabel"
+            else -> currentLabel
+        }
+        RouteDisclosure(title, summary, expanded) {
             if (expanded) { resetDraft(); close() } else { resetDraft(); expanded = true }
         }
         // This lazy source-details row owns its single retained editor expansion.
@@ -459,7 +467,8 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
                     (mode == DownloadRouteMode.PROXY && relaySelected))
                     Text(if (relayProxy || mode == DownloadRouteMode.DIRECT) "使用全局 Relay · 无需端口" else "全局 Relay 尚未就绪", style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant)
-                Text("用于该源后续请求与新下载；本次下载显式线路优先。网页认证仍遵循系统网络。",
+                Text(if (showChapterDownload) "单独设置后，此源的浏览、阅读与新下载会使用同一线路。本次下载的指定线路优先。"
+                    else "用于该源后续请求与新下载。网页认证仍遵循系统网络。",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                 if (!relaySelected) saved?.proxy?.let { Text("已保存 · " + proxyAddressLabel(it), style = MaterialTheme.typography.labelSmall,
                     color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis) }
@@ -796,7 +805,7 @@ internal fun downloadRouteSummary(mode: DownloadRouteMode): String =
     if (mode == DownloadRouteMode.SYSTEM) "线路" else downloadRouteLabel(mode)
 
 internal fun downloadCategoryLabel(category: DownloadCategory): String = when (category) {
-    DownloadCategory.CHAPTERS -> "漫画章节"
+    DownloadCategory.CHAPTERS -> "漫画章节下载"
     DownloadCategory.STEAM_WALLPAPERS -> "Steam 连接与壁纸"
     DownloadCategory.STEAM_COMPONENT -> "Steam 连接组件"
     DownloadCategory.FONTS -> "字体"

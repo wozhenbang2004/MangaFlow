@@ -263,6 +263,7 @@ fun DetailScreen(
     val resume = progress?.takeIf { it.manga.id == manga.id && it.chapterId.isNotBlank() }
     val copyProgress = cloudProgress?.takeIf { it.mangaId == current.id && it.owner != null }
     var section by rememberSaveable(manga.id) { mutableIntStateOf(0) }
+    var chapterLocateRevision by rememberSaveable(manga.id) { mutableIntStateOf(0) }
     var chapterDownloadMode by rememberSaveable(manga.id) { mutableStateOf(false) }
     val sections = rememberSaveableStateHolder()
     val activeSection = if (commentsAvailable) section.coerceIn(0, 1) else 0
@@ -394,6 +395,9 @@ fun DetailScreen(
                             mangaId = current.id, chapters = chapters, downloaded = downloaded,
                             repository = repository,
                             progress = resume, chapterPositions = chapterPositions,
+                            locateRevision = chapterLocateRevision,
+                            onLocate = { chapterLocateRevision++ },
+                            onLocateSources = onManageSources,
                             loading = loading, error = error,
                             active = active && targetSection == activeSection,
                             onScrollTarget = { catalogGrid = it },
@@ -543,6 +547,7 @@ fun DetailScreen(
             // chapter header; tapping its ordinary tab restores the prior hero.
             contentsRequestedWhileInComments = fromComments
             section = 0
+            if (resume != null) chapterLocateRevision++
             dockHidden = false
             contentsJump?.cancel()
             if (!desktopDetail && !fromComments) contentsJump = scope.launch {

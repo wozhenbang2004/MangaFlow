@@ -26,7 +26,7 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import kotlinx.coroutines.flow.MutableStateFlow
 
 private data class NetworkDirectorySource(val id: String, val name: String, val targetId: String,
-    val category: DownloadCategory? = null)
+    val category: DownloadCategory? = null, val chapterDownload: Boolean = false)
 
 /** Configuration inventory only. Opening a group never probes a site or enables a source. */
 @Composable
@@ -47,7 +47,7 @@ internal fun NetworkRouteDirectory(repository: UnifiedMangaRepository?, registry
     val mangaSources = (repository?.sources.orEmpty().map { it.id to it.name } +
         registryEntries.map { it.source.id to it.source.name } +
         packages.map { it.sourceId to it.metadata.optString("name").ifBlank { it.sourceId } })
-        .distinctBy { it.first }.map { (id, name) -> NetworkDirectorySource(id, name, "source.$id", DownloadCategory.CHAPTERS) }
+        .distinctBy { it.first }.map { (id, name) -> NetworkDirectorySource(id, name, "source.$id", chapterDownload = true) }
     val animeSources = (anime.providers.map { it.id to it.name } +
         animeEntries.filter { it.kind == LanercSourceKind.VIDEO || it.installed }.map { it.id to
             (it.name + if (!it.installed) " · 未安装" else if (!it.enabled) " · 未启用" else "") })
@@ -76,7 +76,8 @@ internal fun NetworkRouteDirectory(repository: UnifiedMangaRepository?, registry
         rows.forEach { item -> key(item.id) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 Box(Modifier.weight(1f)) {
-                    SourceNetworkSettingsControl(item.id, active, item.category, item.name)
+                    SourceNetworkSettingsControl(item.id, active, item.category, item.name,
+                        showChapterDownload = item.chapterDownload)
                 }
                 lock(item.targetId)
             }
@@ -97,7 +98,7 @@ internal fun NetworkRouteDirectory(repository: UnifiedMangaRepository?, registry
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         SettingsDisclosure("漫画来源", "${mangaSources.size} 源", Icons.Outlined.AutoStories,
             expanded == "manga", { if (active) expanded = if (expanded == "manga") null else "manga" }, compact = true) {
-            category(DownloadCategory.CHAPTERS)
+            category(DownloadCategory.CHAPTERS, "章节下载默认线路")
             sources(mangaSources)
         }
         SettingsDisclosure("动漫来源", "${animeSources.size} 源", Icons.Outlined.Movie,

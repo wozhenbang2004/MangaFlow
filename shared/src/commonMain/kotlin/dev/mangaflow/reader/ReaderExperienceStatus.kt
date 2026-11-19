@@ -565,7 +565,7 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
     StatusExplanation("底栏依次为预读、任务、补页、内存、磁盘。数字是已备页数、活动任务数与可用源数；99+ 只缩写显示，不限制配置。? 表示尚有未核实项。")
     when (section) {
         ReaderStatusSection.PREPARATION -> {
-            StatusExplanation("已备 / 目标只统计当前窗口已核实的本地原图，不是内存预览数或整章缓存总数。绿点表示原图备齐；? 待核实。页码下方是任务阶段，完成不保证缓存此刻仍在。")
+            StatusExplanation("已备 / 目标显示当前前读或回看范围内已核实的原图。自动模式按阅读速度逐步派发；? 表示待核实。内存预览和任务完成单独显示。")
             FlowRow(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 StatusToken(Icons.Outlined.KeyboardDoubleArrowRight, "前读配置", "${budget.prefetchAhead} 页")

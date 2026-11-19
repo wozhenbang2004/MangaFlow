@@ -664,7 +664,7 @@ private fun AnimeEpisodeCell(
                 }
             },
         ) {
-            AnimeQuietLabel(if (matched == 0) "尚未匹配播放来源" else "已匹配 $matched 个来源",
+            AnimeQuietLabel(if (matched == 0) "尚未匹配播放线路" else "$matched 条已匹配线路",
                 Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
             CompactMenuAction(
                 if (completed) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
