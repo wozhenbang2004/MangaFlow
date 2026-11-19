@@ -241,8 +241,12 @@ internal fun AnimeEnhancementFrames(policy: EnhancementPolicy, inventory: Engine
     if (policy.frameMode == FrameMode.CUSTOM) customFps()
     val ready = inventory.engines.filter { it.isFrameInterpolationEngine() &&
         it.readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.READY_FOR_TRIAL) }
+    val missingDesktopRuntime = platformKind == PlatformKind.DESKTOP &&
+        inventory.engines.any { it.id == EnhancementEngineIds.DESKTOP_REALTIME_RIFE &&
+            it.readiness == EngineReadiness.NOT_INSTALLED }
     EnhancementQuiet(when {
         policy.frameMode == FrameMode.ORIGINAL -> "按文件原始帧率播放。"
+        missingDesktopRuntime -> "安装实时播放器组件后，重新打开漫流即可使用当前补帧目标。"
         ready.isEmpty() -> "补帧组件尚未就绪，目标已保留。"
         ready.none { it.realtime && it.videoOutput == null } -> "当前支持离线补帧，可从离线任务打开处理后的版本。"
         policy.frameQuality != FrameQuality.BALANCED -> "实时补帧仅在均衡档开启；当前所选质量用于离线处理。"
@@ -259,8 +263,10 @@ internal fun AnimeEnhancementFrames(policy: EnhancementPolicy, inventory: Engine
     Spacer(Modifier.height(8.dp))
     AnimeEnhancementNavigation(Icons.Outlined.Tune, "补帧质量", policy.frameQuality.label,
         onClick = onOpenQuality)
-    AnimeEnhancementNavigation(Icons.Outlined.Memory, "补帧组件",
-        if (ready.isEmpty()) "查看安装与支持情况" else ready.joinToString(" · ") { it.title },
+    AnimeEnhancementNavigation(Icons.Outlined.Memory,
+        if (missingDesktopRuntime) "安装实时补帧组件" else "补帧组件",
+        if (missingDesktopRuntime) "AnimeJaNai 播放内核与 RIFE"
+        else if (ready.isEmpty()) "查看安装与支持情况" else ready.joinToString(" · ") { it.title },
         onClick = onOpenEngines)
 }
 

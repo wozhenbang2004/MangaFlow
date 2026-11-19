@@ -19,7 +19,20 @@ internal object DesktopArtCnn {
         require(bytes.size.toLong() == model.bytes && sha256(bytes).joinToString("") { "%02x".format(it.toInt() and 255) } == model.sha256) {
             "ArtCNN 模型完整性校验失败"
         }
-        return model.path.substringAfterLast('/') to bytes
+        val source = bytes.decodeToString()
+        val finalPass = source.lastIndexOf("//!DESC ${model.title} (Depth-To-Space)")
+        check(finalPass >= 0) { "找不到 ArtCNN 的亮度输出阶段" }
+        val output = source.substring(finalPass)
+        check(output.lineSequence().any { it.trim() == "//!HOOK LUMA" } &&
+            output.lineSequence().none { it.startsWith("//!SAVE ") }) {
+            "ArtCNN 的最终阶段必须输出到亮度平面"
+        }
+        // The intermediate feature textures still need four components. The final
+        // hook replaces LUMA, and libmpv combines it with the chroma planes.
+        val component = Regex("(?m)^//!COMPONENTS 4(?=\\r?$)")
+        check(component.findAll(output).count() == 1) { "无法确认 ArtCNN 的亮度输出格式" }
+        val compatible = source.substring(0, finalPass) + component.replaceFirst(output, "//!COMPONENTS 1")
+        return model.path.substringAfterLast('/') to compatible.encodeToByteArray()
     }
 
     private fun model(name: String, size: Long, digest: String) =

@@ -15,6 +15,8 @@ import dev.mangaflow.enhancement.EnhancementMetric
 import dev.mangaflow.enhancement.EnhancementPolicy
 import dev.mangaflow.enhancement.QualityTier
 import dev.mangaflow.enhancement.animeEnhancementSessionKey
+import dev.mangaflow.enhancement.engine.EnhancementEngineIds
+import dev.mangaflow.enhancement.engine.EngineReadiness
 import dev.mangaflow.experience.ExperienceResources
 import dev.mangaflow.enhancement.ui.EnhancementReadout
 import dev.mangaflow.enhancement.ui.EnhancementReadouts
@@ -42,6 +44,7 @@ internal fun AnimePlaybackStatus(
     val sessions by center.settings.sessions.collectAsStateWithLifecycle()
     val telemetry by center.telemetry.state.collectAsStateWithLifecycle()
     val usage by center.resources.usage.collectAsStateWithLifecycle()
+    val inventory by center.inventory.collectAsStateWithLifecycle()
     val metrics = preferences.getValue(EnhancementContent.ANIME)
     val current = playback?.takeIf { it.assetKey != null &&
         it.phase !in setOf(AnimePlayerPhase.IDLE, AnimePlayerPhase.RELEASED) }
@@ -49,14 +52,19 @@ internal fun AnimePlaybackStatus(
     val policy = key?.let { sessions[it]?.takeIf { value -> value.content == EnhancementContent.ANIME }?.policy }
         ?: defaults.getValue(EnhancementContent.ANIME)
     val reason = key?.let { telemetry.sessions[it]?.takeIf { value -> value.content == EnhancementContent.ANIME }?.reason }
-    val readouts = animeEnhancementReadouts(current, metrics, policy, usage.resources, reason, nextPreparation, nextPreparationEnabled) +
+    val liveMotionReadiness = if (platformKind == PlatformKind.DESKTOP) inventory.engines.firstOrNull {
+        it.id == EnhancementEngineIds.DESKTOP_REALTIME_RIFE
+    }?.readiness else null
+    val readouts = animeEnhancementReadouts(current, metrics, policy, usage.resources, reason, nextPreparation,
+        nextPreparationEnabled, liveMotionReadiness) +
         enhancementResourceReadouts(metrics, center.resources, observing)
     EnhancementReadouts(readouts, quiet, modifier)
 }
 
 private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<EnhancementMetric>,
     policy: EnhancementPolicy, resources: ExperienceResources, reason: String?,
-    nextPreparation: AnimeNextEpisodePreparation?, nextPreparationEnabled: Boolean): List<EnhancementReadout> = buildList {
+    nextPreparation: AnimeNextEpisodePreparation?, nextPreparationEnabled: Boolean,
+    liveMotionReadiness: EngineReadiness?): List<EnhancementReadout> = buildList {
     val flowing = playback?.let { it.isPlaying && !it.isBuffering && !it.playbackSuppressed &&
         it.hasVideoTracks != false && it.firstFrameRendered != false } == true
     val effect = playback?.videoEnhancement
@@ -78,7 +86,9 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
                     resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2 -> "原画 · 设备保护"
                     else -> "原画 · 增强未运行"
                 }
-                AnimeVideoEnhancementPhase.WAITING, AnimeVideoEnhancementPhase.CONFIGURED -> "增强待运行"
+                AnimeVideoEnhancementPhase.WAITING -> "增强 · 等待画面"
+                AnimeVideoEnhancementPhase.CONFIGURED -> if (platformKind == PlatformKind.DESKTOP)
+                    "增强已加载" else "增强 · 等待输出"
                 AnimeVideoEnhancementPhase.ACTIVE -> when {
                     flowing && observation?.recentlySubmitting == true -> "增强处理中"
                     flowing && platformKind == PlatformKind.DESKTOP -> "增强运行中"
@@ -153,6 +163,9 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
         val value = when {
             playback == null -> "补帧 —"
             !policy.realtimeInterpolationEnabled -> "补帧已关闭"
+            policy.frameMode == dev.mangaflow.enhancement.FrameMode.ORIGINAL -> "原始帧率"
+            motion == null && liveMotionReadiness == EngineReadiness.NOT_INSTALLED -> "补帧 · 需装实时组件"
+            motion == null && resources.memoryPressure == true -> "补帧 · 内存保护"
             motion?.phase == AnimeVideoEnhancementPhase.FAILED || motion?.phase == AnimeVideoEnhancementPhase.UNAVAILABLE ->
                 motionProblemLabel(motion?.detail)
             motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && flowing && platformKind == PlatformKind.DESKTOP ->

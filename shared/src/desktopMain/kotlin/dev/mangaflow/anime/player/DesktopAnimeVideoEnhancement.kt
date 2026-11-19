@@ -83,7 +83,7 @@ internal class DesktopAnimeVideoEnhancement(
                 while (isCurrentSession(handle, generation, mode)) {
                     // get_property synchronizes with mpv's engine and may wait behind GPU work.
                     // In particular vo-passes can require hundreds of native calls per observation.
-                    val observed = withContext(Dispatchers.IO) { readObservation(handle, anime4kSize, model, scale) }
+                    val observed = withContext(Dispatchers.IO) { readObservation(handle, anime4kSize, model) }
                     if (!isCurrentSession(handle, generation, mode) || this@DesktopAnimeVideoEnhancement.handle !== handle)
                         return@launch
                     val width = observed.width
@@ -127,17 +127,16 @@ internal class DesktopAnimeVideoEnhancement(
                         check(shaderList == expectedList) {
                             "The renderer did not confirm the complete shader list"
                         }
-                        val sample = observed.shaderPassNanos
+                        val sample = observed.shaderPasses
                         if (sample == null) {
                             update(generation, state(mode, AnimeVideoEnhancementPhase.CONFIGURED,
-                                if (model == null) "播放器未反馈增强结果，尚不能确认是否生效"
-                                else "模型已加载，等待渲染器报告实际计算", width, height))
+                                "着色器已加载。当前渲染器未提供可读的增强计数。", width, height))
                         } else {
                             val frameTime = observed.videoPts
                             val sourceFps = observed.sourceFps
                             if (frameTime != null && frameTime != lastSampleTime && sourceFps != null) {
                                 lastSampleTime = frameTime
-                                budgetOverruns = if (sample > 1_000_000_000.0 / sourceFps * .85) budgetOverruns + 1 else 0
+                                budgetOverruns = if (sample.nanos > 1_000_000_000.0 / sourceFps * .85) budgetOverruns + 1 else 0
                             }
                             if (budgetOverruns >= 3) {
                                 check(clearOwnedShaders()) { "无法关闭已超出预算的模型" }
@@ -145,9 +144,14 @@ internal class DesktopAnimeVideoEnhancement(
                                     "实际 GPU pass 耗时超过帧预算，原画继续播放", width, height))
                                 return@launch
                             }
+                            val effect = when {
+                                anime4kSize == null -> "ArtCNN 2× 亮度超分"
+                                sample.upscaled -> "Anime4K 2× 放大"
+                                scale == 2 -> "Anime4K 修复运行 · 当前画面尺寸未触发放大"
+                                else -> "Anime4K 1× 修复"
+                            }
                             update(generation, state(mode, AnimeVideoEnhancementPhase.ACTIVE,
-                                (if (anime4kSize == null) "2× 亮度超分 · 8 个 GPU pass" else "${scale}× Anime4K · GPU pass") +
-                                    " ${(sample / 10_000L) / 100.0}ms", width, height)
+                                "$effect · ${(sample.nanos / 10_000L) / 100.0} ms", width, height)
                                 .copy(modelName = model?.title))
                         }
                     }
@@ -201,12 +205,14 @@ internal class DesktopAnimeVideoEnhancement(
     private fun positiveDimension(handle: MPVHandle, property: String): Int? =
         handle.getPropertyLongOrNull(property)?.takeIf { it in 1..Int.MAX_VALUE.toLong() }?.toInt()
 
+    private data class ShaderPasses(val nanos: Long, val upscaled: Boolean)
+
     private data class Observation(
         val width: Int?, val height: Int?, val gamma: String?, val output: String?,
-        val shaderList: String?, val shaderPassNanos: Long?, val videoPts: Double?, val sourceFps: Double?,
+        val shaderList: String?, val shaderPasses: ShaderPasses?, val videoPts: Double?, val sourceFps: Double?,
     )
 
-    private fun readObservation(handle: MPVHandle, anime4kSize: String?, model: EngineModel?, scale: Int): Observation {
+    private fun readObservation(handle: MPVHandle, anime4kSize: String?, model: EngineModel?): Observation {
         val width = positiveDimension(handle, "video-params/w")
         val height = positiveDimension(handle, "video-params/h")
         val gamma = handle.getPropertyString("video-params/gamma")?.lowercase()
@@ -214,8 +220,8 @@ internal class DesktopAnimeVideoEnhancement(
         val shaderList = handle.getPropertyString("glsl-shaders")
         val passes = if (width != null && height != null &&
             gamma in SDR_TRANSFERS && output == "libmpv" && !shaderList.isNullOrBlank()) {
-            if (anime4kSize != null) readAnime4KPasses(handle, anime4kSize, scale)
-            else model?.let { readArtCnnPasses(handle, it.title) }
+            if (anime4kSize != null) readAnime4KPasses(handle, anime4kSize)
+            else model?.let { readArtCnnPasses(handle, it.title)?.let { nanos -> ShaderPasses(nanos, upscaled = true) } }
         } else null
         return Observation(width, height, gamma, output, shaderList, passes,
             if (passes != null) handle.getPropertyDoubleOrNull("video-pts")?.takeIf(Double::isFinite) else null,
@@ -238,7 +244,7 @@ internal class DesktopAnimeVideoEnhancement(
         return timings.values.sum().takeIf { timings.size == 8 && "Depth-To-Space" in timings }
     }
 
-    private fun readAnime4KPasses(handle: MPVHandle, size: String, scale: Int): Long? {
+    private fun readAnime4KPasses(handle: MPVHandle, size: String): ShaderPasses? {
         val prefix = "vo-passes/fresh"
         val count = handle.getPropertyLongOrNull("$prefix/count")?.takeIf { it in 1..128 }?.toInt() ?: return null
         var elapsed = 0L
@@ -252,7 +258,7 @@ internal class DesktopAnimeVideoEnhancement(
             restores = restores || "Restore-CNN" in description
             upscales = upscales || "Upscale-CNN" in description
         }
-        return elapsed.takeIf { restores && (scale == 1 || upscales) }
+        return ShaderPasses(elapsed, upscaled = upscales).takeIf { restores || upscales }
     }
 
     private fun state(

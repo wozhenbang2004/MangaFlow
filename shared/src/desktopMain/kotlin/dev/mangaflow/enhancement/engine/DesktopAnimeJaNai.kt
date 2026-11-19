@@ -39,17 +39,42 @@ internal class DesktopAnimeJaNai(private val root: File) {
         realtime = true, downloadBytes = portable.bytes,
     )
 
-    fun frameDescriptor(supported: Boolean) = EngineDescriptor(
-        EnhancementEngineIds.DESKTOP_REALTIME_RIFE, "RIFE v4.22 实时补帧 · DirectML", VERSION,
-        "上游 RIFE 权重许可", SOURCE, readiness(supported, frames().isNotEmpty() && models().isNotEmpty()),
-        "当前支持均衡档。即使画质选原画也可单独试用；60/120 FPS 由实际源帧率和设备决定。",
-        setOf(1), setOf(EngineContent.VIDEO), canInstall = supported && frames().isEmpty(),
-        supportsInterpolation = true, realtime = true, downloadBytes = rifePack.bytes,
-    )
+    fun frameDescriptor(supported: Boolean): EngineDescriptor {
+        val hostInstalled = models().isNotEmpty()
+        val weightInstalled = frames().isNotEmpty()
+        return EngineDescriptor(
+            EnhancementEngineIds.DESKTOP_REALTIME_RIFE, "RIFE v4.22 实时补帧 · DirectML", VERSION,
+            "上游 RIFE 权重许可", SOURCE, readiness(supported, hostInstalled && weightInstalled),
+            "实时均衡补帧需要已安装的 AnimeJaNai 播放内核。首次启用组件后重新打开应用。",
+            setOf(1), setOf(EngineContent.VIDEO), canInstall = supported && (!hostInstalled || !weightInstalled),
+            supportsInterpolation = true, realtime = true,
+            downloadBytes = (if (hostInstalled) 0L else portable.bytes) + (if (weightInstalled) 0L else rifePack.bytes),
+        )
+    }
 
     suspend fun install(withRife: Boolean, progress: (EngineProgress) -> Unit): Unit = installLock.withLock {
         installPack(portable, native, runtimeFiles, "mpv-upscale-2x_animejanai-v$VERSION/", progress)
-        if (withRife) installPack(rifePack, rife, mapOf(rifeWeight.path to rifeWeight.sha256), "", progress)
+        if (withRife && !reuseOfflineRife(progress))
+            installPack(rifePack, rife, mapOf(rifeWeight.path to rifeWeight.sha256), "", progress)
+    }
+
+    private suspend fun reuseOfflineRife(progress: (EngineProgress) -> Unit): Boolean {
+        if (rife.exists()) return false
+        val offline = DesktopEngineRuntime(root).folder(DesktopEnginePackages.video)
+        val weight = offline.resolve(rifeWeight.path)
+        if (!weight.isFile || !weight.canonicalFile.toPath().startsWith(offline.canonicalFile.toPath()) ||
+            engineSha256(weight) != rifeWeight.sha256) return false
+        val staging = Files.createTempDirectory(root.toPath(), "rife-weight-").toFile()
+        try {
+            val output = staging.resolve(rifeWeight.path)
+            check(output.parentFile.mkdirs())
+            Files.copy(weight.toPath(), output.toPath())
+            check(engineSha256(output) == rifeWeight.sha256) { "补帧权重校验失败" }
+            currentCoroutineContext().ensureActive()
+            Files.move(staging.toPath(), rife.toPath(), StandardCopyOption.ATOMIC_MOVE)
+            progress(EngineProgress(EngineStage.COMPLETE, detail = "复用已校验的 RIFE v4.22 权重"))
+            return true
+        } finally { staging.deleteRecursively() }
     }
 
     /** Mediamp loads this process-wide before its first player. A failed launch returns to stock on the next boot. */
@@ -63,7 +88,9 @@ internal class DesktopAnimeJaNai(private val root: File) {
             processIssue = "上次原生内核未取得首帧，本次使用原有播放内核"
             return@synchronized
         }
-        if (!requestAlternate) return@synchronized
+        // A user-installed live RIFE bundle can be enabled after playback starts.
+        // The DLL must already be selected before Mediamp creates its first player.
+        if (!requestAlternate && frames().isEmpty()) return@synchronized
         try {
             require(available(native, runtimeFiles, verifyContents = true)) { "组件完整性校验未通过" }
             require(root.isDirectory || root.mkdirs())
@@ -209,7 +236,7 @@ internal class DesktopAnimeJaNai(private val root: File) {
         checkNotNull(MPVHandle::class.java.classLoader.getResourceAsStream("mpv-natives-windows-x64.txt"))
             .bufferedReader().useLines { lines ->
                 lines.map(String::trim).filter { it.isNotEmpty() }.onEach {
-                    check(Regex("[A-Za-z0-9_.-]+\\.dll").matches(it))
+                    check(Regex("[A-Za-z0-9_.+-]+\\.dll").matches(it))
                 }.filter { it != "libmpv-2.dll" }.toList()
             }.also { check("mediampv.dll" in it) }
 
