@@ -3162,9 +3162,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 policy.customFps.toDouble().takeIf { it in 1.0..(if (platformKind == PlatformKind.ANDROID) 120.0 else 240.0) }
                     ?: return null
             dev.mangaflow.enhancement.FrameMode.DOUBLE -> null
-            else -> return null
+            dev.mangaflow.enhancement.FrameMode.AUTO -> null
+            dev.mangaflow.enhancement.FrameMode.ORIGINAL -> return null
         }
-        return dev.mangaflow.anime.player.AnimeRealtimeFrameRequest(model, target)
+        return dev.mangaflow.anime.player.AnimeRealtimeFrameRequest(
+            model, target, automatic = policy.frameMode == dev.mangaflow.enhancement.FrameMode.AUTO,
+        )
     }
 
     private fun preferredOnlineModel(policy: EnhancementPolicy, mode: AnimeVideoEnhancementMode): EngineModel? {
@@ -3290,7 +3293,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             dev.mangaflow.anime.player.AnimeVideoEnhancementMode.MODEL -> effect.modelName
         }
         center.telemetry.recordVideo(key, model, snapshot.sourceFps,
-            policy.targetFps(snapshot.sourceFps, null),
+            policy.targetFps(snapshot.sourceFps, snapshot.displayRefreshHz),
             if (usingPrepared) preparedWindow?.outputWidth else if (snapshot.preEnhanced) snapshot.videoWidth else effect.outputWidth,
             if (usingPrepared) preparedWindow?.outputHeight else if (snapshot.preEnhanced) snapshot.videoHeight else effect.outputHeight,
             observation?.submittedFrames, observation?.submitThreadCpuNanos,

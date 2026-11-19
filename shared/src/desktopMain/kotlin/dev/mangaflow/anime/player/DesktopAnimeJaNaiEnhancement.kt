@@ -17,6 +17,7 @@ import kotlin.math.roundToInt
 internal class DesktopAnimeJaNaiEnhancement(
     private val runtime: DesktopAnimeJaNai,
     private val scope: CoroutineScope,
+    private val refreshHz: () -> Double?,
     private val update: (Long, AnimeVideoEnhancementState) -> Unit,
 ) {
     private data class Target(
@@ -84,7 +85,11 @@ internal class DesktopAnimeJaNaiEnhancement(
                     }
                     val frames = next.frames
                     val ratio = frames?.let { request ->
-                        if (request.targetFps == null) 2 to 1 else rationalFactor(request.targetFps, sourceFps)
+                        when {
+                            request.automatic -> refreshHz()?.let { rationalFactor(minOf(sourceFps * 2, it, 240.0), sourceFps) }
+                            request.targetFps == null -> 2 to 1
+                            else -> rationalFactor(request.targetFps, sourceFps)
+                        }
                     }
                     if (frames != null && ratio == null && next.model == null) {
                         state(AnimeVideoEnhancementPhase.UNAVAILABLE, "目标帧率未落在当前源帧率的可补帧范围")

@@ -29,7 +29,9 @@ private class DesktopAnimePlayer(
     private var videoBeforeBackground: String? = null
     private var enhancementMediaReady = false
     private val animeJaNai = DesktopAnimeJaNai(File(context.dataRoot, "enhancement/engines"))
-    private val nativeEnhancement = DesktopAnimeJaNaiEnhancement(animeJaNai, playerScope) { generation, value ->
+    private val nativeEnhancement = DesktopAnimeJaNaiEnhancement(
+        animeJaNai, playerScope, { context.playbackDisplayRefreshHz?.invoke() },
+    ) { generation, value ->
         publish(generation) { it.copy(videoEnhancement = value) }
     }
     private val wantsNativeModel: Boolean
@@ -122,7 +124,8 @@ private class DesktopAnimePlayer(
             }
             val fps = handle.getPropertyString("container-fps")?.toDoubleOrNull()?.takeIf { it.isFinite() && it > 0 }
             val dropped = handle.getPropertyLongOrNull("frame-drop-count")?.takeIf { it >= 0 }
-            mutableState.value = state.value.copy(sourceFps = fps, droppedFrames = dropped)
+            mutableState.value = state.value.copy(sourceFps = fps, droppedFrames = dropped,
+                displayRefreshHz = context.playbackDisplayRefreshHz?.invoke())
         }
         if (warming && state.value.phase == AnimePlayerPhase.READY && !state.value.isBuffering) {
             warming = false

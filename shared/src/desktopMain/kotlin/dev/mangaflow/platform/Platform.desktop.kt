@@ -14,7 +14,9 @@ import java.util.UUID
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
-actual abstract class PlatformContext(val dataRoot: String, val cacheRoot: String)
+actual abstract class PlatformContext(val dataRoot: String, val cacheRoot: String) {
+    var playbackDisplayRefreshHz: (() -> Double?)? = null
+}
 actual fun applicationContext(context: PlatformContext): PlatformContext = context
 actual fun imagePlatformContext(context: PlatformContext): ImagePlatformContext = ImagePlatformContext.INSTANCE
 actual fun monotonicTimeMillis(): Long = System.nanoTime() / 1_000_000

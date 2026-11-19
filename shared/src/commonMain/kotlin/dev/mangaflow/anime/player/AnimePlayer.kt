@@ -71,7 +71,7 @@ data class AnimePlayerTrack(
     val selected: Boolean = false,
 )
 
-data class AnimeRealtimeFrameRequest(val model: EngineModel, val targetFps: Double?)
+data class AnimeRealtimeFrameRequest(val model: EngineModel, val targetFps: Double?, val automatic: Boolean = false)
 
 data class AnimeRealtimeMotionState(
     val modelName: String,
@@ -152,6 +152,7 @@ data class AnimePlayerState(
     val playbackSuppressed: Boolean = false,
     val preEnhanced: Boolean = false,
     val sourceFps: Double? = null,
+    val displayRefreshHz: Double? = null,
     /** Native decoder output is not a display presentation acknowledgement. */
     val decoderOutputFrames: Long? = null,
     val droppedFrames: Long? = null,

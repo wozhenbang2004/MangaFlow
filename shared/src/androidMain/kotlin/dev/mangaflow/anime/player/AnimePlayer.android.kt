@@ -812,7 +812,11 @@ internal class AndroidAnimePlayer(
                 val width = checkNotNull(video.videoWidth)
                 val height = checkNotNull(video.videoHeight)
                 val sourceRate = video.sourceFps
-                val target = wanted.targetFps
+                val target = if (wanted.automatic) {
+                    val source = sourceRate ?: error("尚未取得片源帧率，请选择明确的补帧目标")
+                    val display = displayRefreshHz() ?: error("尚未取得当前屏幕刷新率，请选择明确的补帧目标")
+                    minOf(source * 2, display, 120.0)
+                } else wanted.targetFps
                 require(width.toLong() * height <= AndroidLiveRifeProgram.MAX_PIXELS) { "实时补帧试用支持最高 720p" }
                 require(sourceRate == null || sourceRate <= 60.0 && (target == null || target > sourceRate)) {
                     "实时补帧需要高于当前源帧率的目标，并支持最高 60 FPS 的片源"
@@ -1179,6 +1183,7 @@ internal class AndroidAnimePlayer(
                 videoWidth = exo.videoFormat?.width?.takeIf { it > 0 },
                 videoHeight = exo.videoFormat?.height?.takeIf { it > 0 },
                 sourceFps = exo.videoFormat?.frameRate?.takeIf { it.isFinite() && it > 0 }?.toDouble(),
+                displayRefreshHz = displayRefreshHz(),
                 decoderOutputFrames = exo.videoDecoderCounters?.also { it.ensureUpdated() }?.renderedOutputBufferCount?.toLong(),
                 droppedFrames = exo.videoDecoderCounters?.droppedBufferCount?.toLong(),
                 videoEnhancement = previous.videoEnhancement.let { last ->
@@ -1195,6 +1200,9 @@ internal class AndroidAnimePlayer(
         }
         if (exo.playbackState == Player.STATE_READY) recoveryNotice = null
     }
+
+    private fun displayRefreshHz(): Double? =
+        activity?.window?.decorView?.display?.refreshRate?.toDouble()?.takeIf { it.isFinite() && it in 20.0..480.0 }
 
     private fun recoverOrFail(generation: Long, exo: ExoPlayer, error: PlaybackException) {
         if (!isCurrent(generation) || engine.value !== exo || lastPlaybackError === error) return

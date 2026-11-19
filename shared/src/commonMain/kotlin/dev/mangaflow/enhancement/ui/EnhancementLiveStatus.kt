@@ -191,6 +191,9 @@ private fun AnimeEnhancementStatus(
                     "前方缓冲" to animeSeconds(playback?.bufferedAheadMs?.takeIf { hasSession && it >= 0 }?.div(1000.0)),
                 ))
                 EnhancementDivider()
+                playback?.displayRefreshHz?.takeIf { hasSession }?.let {
+                    AnimeMetricRow("播放屏幕刷新率", formatDecimal(it, 1) + " Hz")
+                }
                 AnimeMetricRow(if (playback?.preEnhanced == true) "增强文件尺寸" else "视频输入尺寸", inputSize ?: "—")
                 if (playback?.preEnhanced != true) AnimeMetricRow("已提交帧尺寸", submittedSize ?: "—")
                 AnimeMetricRow("已呈现帧 · 累计", animeCount(playback?.presentedFrames.takeIf { hasSession }))

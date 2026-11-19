@@ -120,7 +120,11 @@ fun main() {
                 icon = painterResource("mangaflow.png")) {
                 DisposableEffect(window) {
                     window.minimumSize = java.awt.Dimension(320, 320)
-                    onDispose { }
+                    context.playbackDisplayRefreshHz = {
+                        window.graphicsConfiguration?.device?.displayMode?.refreshRate
+                            ?.takeIf { window.isShowing && it in 20..480 }?.toDouble()
+                    }
+                    onDispose { context.playbackDisplayRefreshHz = null }
                 }
                 CompositionLocalProvider(LocalMangaContext provides context) {
                     MangaFlowTheme {
