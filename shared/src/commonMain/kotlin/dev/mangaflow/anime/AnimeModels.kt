@@ -287,6 +287,23 @@ data class AnimeNextEpisodePreparation(
     val startupFramePrepared: Boolean = false,
 )
 
+enum class AnimeSourceMeasurementPhase { QUEUED, RUNNING, COMPLETE, UNAVAILABLE, CANCELLED }
+
+data class AnimeSourceMeasurementProgress(
+    val episodeId: String?,
+    val phase: AnimeSourceMeasurementPhase,
+    val reason: String? = null,
+    val lines: List<AnimeEpisodeOption> = emptyList(),
+)
+
+data class AnimeSourceMeasurementBatch(
+    val subjectId: String,
+    /** Null measures one confirmed episode per source across the work. */
+    val episodeId: String?,
+    val running: Boolean,
+    val sources: Map<String, AnimeSourceMeasurementProgress>,
+)
+
 data class AnimeScreenState(
     val libraryReadUnavailable: Boolean = false,
     val discoveryTab: AnimeDiscoveryTab = AnimeDiscoveryTab.HOME,
@@ -316,7 +333,7 @@ data class AnimeScreenState(
     val episodeOptions: Map<String, List<AnimeEpisodeOption>> = emptyMap(),
     val selectedEpisodeId: String? = null,
     val selectedPlaybackOption: AnimeEpisodeOption? = null,
-    val measuringEpisodeSourcesId: String? = null,
+    val sourceMeasurements: AnimeSourceMeasurementBatch? = null,
     val playbackMeasurementsRevision: Long = 0,
     val playbackFirstFrameMs: Long? = null,
     val playbackRouteMode: DownloadRouteMode? = null,

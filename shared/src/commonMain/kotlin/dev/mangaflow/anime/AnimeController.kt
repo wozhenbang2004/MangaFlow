@@ -198,6 +198,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val candidate: String, val route: DownloadRouteSnapshot)
     private data class PlaybackFailureReceipt(val failure: AnimePlaybackFailure, val observedAt: Long)
     private data class PlaybackMeasurementReceipt(val option: AnimeEpisodeOption, val measurements: AnimePlaybackMeasurements)
+    private data class SourceMeasurementTarget(val episodeId: String, val lines: List<AnimeEpisodeOption>)
     private data class PlaybackProbe(
         val addressObservedAt: Long,
         val addressMs: Long?,
@@ -327,7 +328,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             nativeMetadataSearch = null, relatedSubjects = emptyList(),
                             detailError = if (it.detail != null) "本机记录已恢复，请重新打开番剧以读取恢复后的关联。" else null) }
                     }
-                    if (sourceHeightChanged) cancelEpisodeSourceMeasurements()
+                    if (sourceHeightChanged) cancelEpisodeSourceMeasurements(clearProgress = true)
                     mutableState.update { it.copy(
                         libraryReadUnavailable = stored.readUnavailable,
                         library = stored.entries.values.sortedWith(compareByDescending<AnimeLibraryEntry> { entry -> entry.pinned }
@@ -396,7 +397,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         scope.launch {
             routing.state.collect {
-                cancelEpisodeSourceMeasurements()
+                cancelEpisodeSourceMeasurements(clearProgress = true)
                 projectRoutes()
                 mutableState.value.detail?.let { startSourceAggregation(it) }
                 unifiedSearch.reconcile()
@@ -1782,14 +1783,23 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val episodes = detail.episodes.associateBy { it.id }
         val confirmedByEpisode = mutableMapOf<String, List<AnimeEpisodeOption>>()
         val samples = mutableMapOf<String, AnimeWorkPlaybackMeasurements>()
-        val order = compareBy<AnimePlaybackMeasurements> { it.playbackObservedAt != null }
-            .thenBy { it.mediaVerified == true }.thenBy { it.mediaFailure == null }
+        val batch = snapshot.sourceMeasurements?.takeIf {
+            it.subjectId == detail.subject.id && it.episodeId == null
+        }
+        val order = compareBy<AnimePlaybackMeasurements> {
+            val playedAt = it.playbackObservedAt ?: 0L
+            val mediaAt = it.mediaObservedAt ?: 0L
+            if (playedAt > mediaAt) true else mediaAt > 0L && it.mediaVerified == true
+        }.thenBy { it.playbackObservedAt != null }.thenBy { it.mediaFailure == null }
             .thenBy { it.mediaObservedAt ?: it.addressObservedAt ?: 0L }.thenBy { it.updatedAt }
         for ((key, receipt) in playbackMeasurements) {
             if (key.subjectId != detail.subject.id) continue
             val episode = episodes[key.episodeId] ?: continue
             val measurements = currentPlaybackMeasurements(key) ?: continue
             val sourceId = receipt.option.sourceId
+            val progress = batch?.sources?.get(sourceId)
+            if (progress != null && (episode.id != progress.episodeId ||
+                    progress.lines.none { samePlaybackLine(it, receipt.option) })) continue
             val selected = samples[sourceId]
             if (selected != null && order.compare(measurements, selected.measurements) <= 0) continue
             val option = confirmedByEpisode.getOrPut(episode.id) { confirmedPlaybackLines(episode.id, snapshot) }
@@ -1903,9 +1913,19 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     /** A source sheet can read bounded headers/manifest data without opening the player.
      * A failed HTTP request is evidence for this exact episode and route, never proof that a whole site is offline. */
     internal fun measureEpisodeSources(episodeId: String, force: Boolean = false, onlyLine: AnimeEpisodeOption? = null) {
-        val detail = mutableState.value.detail ?: return
+        measureSources(episodeId, force, onlyLine)
+    }
+
+    internal fun measureWorkSources(force: Boolean = false) {
+        measureSources(episodeId = null, force = force)
+    }
+
+    private fun measureSources(episodeId: String?, force: Boolean, onlyLine: AnimeEpisodeOption? = null) {
+        val snapshot = mutableState.value
+        val detail = snapshot.detail ?: return
         if (sourceMeasurementsJob?.isActive == true) {
-            if (mutableState.value.measuringEpisodeSourcesId == episodeId && onlyLine == null) {
+            if (snapshot.sourceMeasurements?.episodeId == episodeId &&
+                snapshot.sourceMeasurements?.subjectId == detail.subject.id && onlyLine == null) {
                 // A newly linked source may appear while an older probe batch runs.
                 sourceMeasurementsRescan = true
                 return
@@ -1913,46 +1933,99 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             cancelEpisodeSourceMeasurements()
         }
         if (playbackBusy()) {
-            if (force) notice("正在加载视频，缓冲后可测本集线路。")
+            if (force) notice("正在加载视频，缓冲后可重新测速。")
             return
         }
-        // Probe up to two CDNs per source; one failed route must not hide a working alternate.
-        val options = fairPlaybackOptions(detail.subject.id, episodeId, confirmedPlaybackLines(episodeId))
-            .filter { onlyLine == null || samePlaybackLine(it, onlyLine) }
-            .groupBy { it.sourceId }.values.flatMap { lines ->
-                if (force) lines.take(2)
-                else lines.sortedByDescending { playbackMeasurements(episodeId, it)?.mediaObservedAt != null }.take(2)
-            }.take(20)
-        if (options.isEmpty()) return
-        val pending = options.filter { option ->
-            val key = playbackHistoryKey(detail.subject.id, episodeId, option)
-            val previous = key?.let { currentPlaybackMeasurements(it, option) }
-            force || previous?.mediaObservedAt == null
+        val sourceIds = if (onlyLine != null) listOf(onlyLine.sourceId) else snapshot.sourceBindings
+            .filter { it.subjectId == detail.subject.id }.map { it.catalog.sourceId }.distinct()
+        // Work-level sources need not share the same first confirmed episode.
+        val targets = linkedMapOf<String, SourceMeasurementTarget>()
+        val episodes = if (episodeId != null) detail.episodes.filter { it.id == episodeId }
+            else detail.episodes.sortedBy { it.kind != AnimeEpisodeKind.MAIN }
+        for (episode in episodes) {
+            if (targets.keys.containsAll(sourceIds)) break
+            val options = confirmedPlaybackLines(episode.id, snapshot).filter {
+                it.sourceId in sourceIds && it.sourceId !in targets &&
+                    (onlyLine == null || samePlaybackLine(it, onlyLine))
+            }
+            fairPlaybackOptions(detail.subject.id, episode.id, options).groupBy { it.sourceId }.forEach { (id, lines) ->
+                val ordered = if (force) lines else lines.sortedByDescending {
+                    playbackMeasurements(episode.id, it)?.mediaObservedAt != null
+                }
+                targets[id] = SourceMeasurementTarget(episode.id, ordered.take(2))
+            }
         }
+        val pending = targets.mapValues { (_, target) -> target.copy(lines = target.lines.filter {
+            force || playbackMeasurements(target.episodeId, it)?.mediaObservedAt == null
+        }) }.filterValues { it.lines.isNotEmpty() }
+        val progress = sourceIds.associateWith { id ->
+            val target = targets[id]
+            val extension = snapshot.sourceExtensions.firstOrNull { it.id == id }
+            val reason = when {
+                target != null -> null
+                extension != null && (!extension.installed || !extension.enabled) -> "来源已停用，启用后可测速。"
+                snapshot.sourceCatalogErrors[id] != null -> "来源目录读取失败，展开来源可重试。"
+                snapshot.sourceCatalogs.none { it.title.sourceId == id } -> "来源目录尚未就绪，读取完成后继续。"
+                episodeId == null -> "尚无已确认对应的剧集，不能用其他作品代测。"
+                else -> "本集尚无已确认的线路，不能用其他集代测。"
+            }
+            AnimeSourceMeasurementProgress(target?.episodeId, when {
+                target == null -> AnimeSourceMeasurementPhase.UNAVAILABLE
+                id in pending -> AnimeSourceMeasurementPhase.QUEUED
+                else -> AnimeSourceMeasurementPhase.COMPLETE
+            }, reason, target?.lines.orEmpty())
+        }
+        mutableState.update { it.copy(sourceMeasurements = AnimeSourceMeasurementBatch(
+            detail.subject.id, episodeId, pending.isNotEmpty(), progress)) }
         if (pending.isEmpty()) return
         val detailOwner = detailGeneration
         val generation = ++sourceMeasurementsGeneration
-        mutableState.update { it.copy(measuringEpisodeSourcesId = episodeId) }
         sourceMeasurementsJob = scope.launch(start = CoroutineStart.LAZY) {
             fun current() = currentDetail(detailOwner, detail.subject.id) && sourceMeasurementsGeneration == generation
+            fun report(sourceId: String, phase: AnimeSourceMeasurementPhase, reason: String? = null) {
+                if (!current()) return
+                mutableState.update { state ->
+                    val batch = state.sourceMeasurements ?: return@update state
+                    val previous = batch.sources[sourceId] ?: return@update state
+                    state.copy(sourceMeasurements = batch.copy(sources = batch.sources +
+                        (sourceId to previous.copy(phase = phase, reason = reason))))
+                }
+            }
+            suspend fun measureLine(target: SourceMeasurementTarget, option: AnimeEpisodeOption): String? {
+                val line = currentPlaybackLine(target.episodeId, option) ?: return "对应线路已变化，请重新测速。"
+                val provider = sources.provider(line.sourceId) ?: return "来源已停用或移除。"
+                val revision = discoverySourceRevision(line.sourceId) ?: return "来源版本已变化，请重新测速。"
+                val key = playbackHistoryKey(detail.subject.id, target.episodeId, line) ?: return "网络线路配置不可用。"
+                val catalog = mutableState.value.sourceCatalogs.firstOrNull {
+                    it.title.sourceId == line.sourceId && it.title.id == line.catalog.id && it.title.url == line.catalog.url
+                } ?: return "来源目录已变化，请重新测速。"
+                val probe = probePlaybackLine(provider, catalog, line, revision, key.route) {
+                    current() && discoverySourceRevision(line.sourceId) == revision &&
+                        playbackHistoryRoute(line.sourceId) == key.route && currentPlaybackLine(target.episodeId, line) != null
+                } ?: return "线路或画质设置已变化，请重新测速。"
+                storePlaybackProbe(key, line, probe)
+                return null
+            }
             try {
                 val permits = Semaphore(2)
                 coroutineScope {
-                    pending.forEach { option -> launch {
+                    pending.forEach { (sourceId, target) -> launch {
                         permits.withPermit {
                             if (!current()) return@withPermit
-                            val line = currentPlaybackLine(episodeId, option) ?: return@withPermit
-                            val provider = sources.provider(line.sourceId) ?: return@withPermit
-                            val revision = discoverySourceRevision(line.sourceId) ?: return@withPermit
-                            val key = playbackHistoryKey(detail.subject.id, episodeId, line) ?: return@withPermit
-                            val catalog = mutableState.value.sourceCatalogs.firstOrNull {
-                                it.title.sourceId == line.sourceId && it.title.id == line.catalog.id && it.title.url == line.catalog.url
-                            } ?: return@withPermit
-                            val probe = probePlaybackLine(provider, catalog, line, revision, key.route) {
-                                current() && discoverySourceRevision(line.sourceId) == revision &&
-                                    playbackHistoryRoute(line.sourceId) == key.route && currentPlaybackLine(episodeId, line) != null
-                            } ?: return@withPermit
-                            storePlaybackProbe(key, line, probe)
+                            report(sourceId, AnimeSourceMeasurementPhase.RUNNING)
+                            var completed = false
+                            var failure: String? = null
+                            for (option in target.lines) {
+                                if (!current()) return@withPermit
+                                val reason = try { measureLine(target, option) }
+                                    catch (cancel: CancellationException) {
+                                        currentCoroutineContext().ensureActive()
+                                        "此线路检查已中止，可重新测速。"
+                                    } catch (_: Exception) { "此线路检查未完成，可重新测速。" }
+                                if (reason == null) completed = true else failure = reason
+                            }
+                            report(sourceId, if (completed) AnimeSourceMeasurementPhase.COMPLETE
+                                else AnimeSourceMeasurementPhase.UNAVAILABLE, failure)
                         }
                     } }
                 }
@@ -1961,21 +2034,29 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     sourceMeasurementsJob = null
                     val rescan = sourceMeasurementsRescan
                     sourceMeasurementsRescan = false
-                    mutableState.update { it.copy(measuringEpisodeSourcesId = null) }
-                    if (rescan) measureEpisodeSources(episodeId)
+                    mutableState.update { it.copy(sourceMeasurements = it.sourceMeasurements?.copy(running = false)) }
+                    if (rescan) measureSources(episodeId, force = false)
                 }
             }
         }
         sourceMeasurementsJob?.start()
     }
 
-    internal fun cancelEpisodeSourceMeasurements() {
-        val job = sourceMeasurementsJob ?: return
+    internal fun cancelEpisodeSourceMeasurements(clearProgress: Boolean = false) {
+        val job = sourceMeasurementsJob
+        if (job == null && !clearProgress) return
         ++sourceMeasurementsGeneration
         sourceMeasurementsRescan = false
         sourceMeasurementsJob = null
-        job.cancel()
-        mutableState.update { it.copy(measuringEpisodeSourcesId = null) }
+        job?.cancel()
+        mutableState.update { state -> state.copy(sourceMeasurements = if (clearProgress) null else
+            state.sourceMeasurements?.let { batch -> batch.copy(running = false,
+                sources = batch.sources.mapValues { (_, progress) ->
+                    if (progress.phase == AnimeSourceMeasurementPhase.QUEUED ||
+                        progress.phase == AnimeSourceMeasurementPhase.RUNNING)
+                        progress.copy(phase = AnimeSourceMeasurementPhase.CANCELLED, reason = "已停止；已完成的结果保留，可重新测速。")
+                    else progress
+                }) }) }
     }
 
     private fun declaredPlaybackQuality(asset: AnimePlaybackAsset): String? = asset.resolutions
