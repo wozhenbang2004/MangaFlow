@@ -37,6 +37,9 @@ internal fun enhancementPrimaryPages(content: EnhancementContent): List<Enhancem
     listOfNotNull(EnhancementPage.QUALITY, EnhancementPage.FRAME.takeIf { content == EnhancementContent.ANIME },
         EnhancementPage.PREPARATION, EnhancementPage.STATUS)
 
+internal fun EnhancementPage.titleFor(hasSession: Boolean): String =
+    if (this == EnhancementPage.STATUS && !hasSession) "显示" else title
+
 /** Remember the actual parent, including model → component → import journeys. */
 @Stable
 internal class EnhancementNavigation(initial: EnhancementPage = EnhancementPage.QUALITY) {

@@ -33,6 +33,7 @@ import dev.mangaflow.enhancement.ui.EnhancementPage
 import dev.mangaflow.enhancement.ui.EnhancementNavigation
 import dev.mangaflow.enhancement.ui.EnhancementPanelHost
 import dev.mangaflow.enhancement.ui.EnhancementSettingsContent
+import dev.mangaflow.enhancement.ui.titleFor
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
@@ -116,7 +117,7 @@ internal fun AnimePlayerSettings(
     val enhancementParent = enhancementNavigation.parent
     val backLabel = when {
         section == AnimePlayerPanel.VIDEO_SOURCE -> "返回画质"
-        section == AnimePlayerPanel.VIDEO && enhancementParent != null -> "返回${enhancementParent.title}"
+        section == AnimePlayerPanel.VIDEO && enhancementParent != null -> "返回${enhancementParent.titleFor(enhancementSessionKey != null)}"
         section in setOf(AnimePlayerPanel.DANMAKU_SEARCH, AnimePlayerPanel.DANMAKU_DISPLAY,
             AnimePlayerPanel.DANMAKU_ACCESS) -> "返回弹幕设置"
         else -> "返回播放设置"
@@ -173,7 +174,7 @@ internal fun AnimePlayerSettings(
                     }
                 }
                 if (section == AnimePlayerPanel.VIDEO && enhancementPage in enhancementTabs) {
-                    AnimeChoiceStrip(listOf("画质", "补帧", "预处理", "状态"), enhancementTabs.indexOf(enhancementPage),
+                    AnimeChoiceStrip(enhancementTabs.map { it.titleFor(enhancementSessionKey != null) }, enhancementTabs.indexOf(enhancementPage),
                         onSelect = { navigateEnhancement(enhancementTabs[it]) },
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp), active = visible)
                 }

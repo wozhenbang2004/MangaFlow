@@ -911,7 +911,7 @@ fun DownloadsScreen(
         },
     )
     EnhancementCenterPanel(visible = showEnhancement && active, backdrop = backdrop,
-        initialContent = enhancementContent, onDismiss = { showEnhancement = false }, onClosed = {
+        initialContent = enhancementContent, allowMediaSwitch = false, onDismiss = { showEnhancement = false }, onClosed = {
             val returnId = qualityReturnTaskId
             qualityReturnTaskId = null
             if (active && returnId != null && manageableEntries.any { it.id == returnId }) inspectedTaskId = returnId

@@ -20,7 +20,7 @@ import dev.mangaflow.ui.motion.MotionTextButton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
-/** These choices belong to the content namespace, including when opened from a session editor. */
+/** Manga shares display choices across its content namespaces, including session editors. */
 @Composable
 internal fun EnhancementDisplayControls(content: EnhancementContent) {
     val context = LocalMangaContext.current

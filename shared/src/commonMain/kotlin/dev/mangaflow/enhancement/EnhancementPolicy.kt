@@ -18,7 +18,11 @@ import kotlinx.coroutines.withContext
 
 /** These namespaces are identities, never inferred from a title, URL or image pixels. */
 enum class EnhancementContent(val label: String, val directory: String) {
-    MANGA("普通漫画", "manga"), ADULT_MANGA("成人漫画", "adult_manga"), ANIME("番剧", "anime")
+    MANGA("普通漫画", "manga"), ADULT_MANGA("成人漫画", "adult_manga"), ANIME("番剧", "anime");
+
+    /** Settings follow media capabilities; storage and session identities keep their original namespace. */
+    val settingsOwner: EnhancementContent get() = if (this == ADULT_MANGA) MANGA else this
+    val settingsLabel: String get() = if (this == ANIME) "番剧" else "漫画"
 }
 enum class QualityTier(val label: String) {
     ORIGINAL("原画"), AUTO("自动"), LIGHT("轻量"), BALANCED("均衡"), FINE("精细"), ULTRA("极致")
@@ -73,18 +77,14 @@ class EnhancementSettingsStore(context: PlatformContext) {
     private val sessionLock = StorageLock()
     /** Removing a token retires every accepted write which still carries that session identity. */
     private val sessionTokens = mutableMapOf<String, Any>()
-    private val mutableState = MutableStateFlow(EnhancementContent.entries.associateWith { content ->
-        decode(disk.getString(content.directory))
-    })
+    private val mutableState = MutableStateFlow(readPolicies())
     val state: StateFlow<Map<EnhancementContent, EnhancementPolicy>> = mutableState.asStateFlow()
     private val mutableSessions = MutableStateFlow<Map<String, EnhancementSessionPolicy>>(emptyMap())
     val sessions: StateFlow<Map<String, EnhancementSessionPolicy>> = mutableSessions.asStateFlow()
-    private val mutableVisibleMetrics = MutableStateFlow(EnhancementContent.entries.associateWith { content ->
-        decodeVisibleMetrics(content, disk.getString(displayKey(content)))
-    })
+    private val mutableVisibleMetrics = MutableStateFlow(readVisibleMetrics())
     val visibleMetrics: StateFlow<Map<EnhancementContent, Set<EnhancementMetric>>> = mutableVisibleMetrics.asStateFlow()
 
-    fun isConfigured(content: EnhancementContent): Boolean = disk.contains(content.directory)
+    fun isConfigured(content: EnhancementContent): Boolean = policyKeys(content).any(disk::contains)
 
     fun policy(content: EnhancementContent, sessionKey: String? = null): EnhancementPolicy =
         sessionKey?.let { mutableSessions.value[it]?.takeIf { value -> value.content == content }?.policy }
@@ -93,14 +93,17 @@ class EnhancementSettingsStore(context: PlatformContext) {
     suspend fun update(content: EnhancementContent, policy: EnhancementPolicy): Boolean = withContext(Dispatchers.IO) {
         policy.checked()
         writer.withLock {
-            val before = disk.getString(content.directory)
+            val key = policyKeys(content).first()
+            val before = disk.getString(key)
             val value = encode(policy)
-            if (!disk.edit().putString(content.directory, value).commit()) {
+            if (!runCatching { disk.edit().putString(key, value).commit() }.getOrDefault(false)) {
                 // Android preferences can update memory even when commit reports failure.
-                disk.edit().putString(content.directory, before).commit()
+                runCatching { disk.edit().apply { if (before == null) remove(key) else putString(key, before) }.commit() }
                 return@withLock false
             }
-            mutableState.value = mutableState.value + (content to policy)
+            mutableState.value = mutableState.value.mapValues { (identity, current) ->
+                if (identity.settingsOwner == content.settingsOwner) policy else current
+            }
             true
         }
     }
@@ -111,7 +114,7 @@ class EnhancementSettingsStore(context: PlatformContext) {
             require(metrics.all { it.supports(content) }) { "显示项不适用于当前内容" }
             val selected = metrics.toSet()
             writer.withLock {
-                val key = displayKey(content)
+                val key = displayKeys(content).first()
                 val before = disk.getString(key)
                 val value = JSONObject().put("version", 1).put("metrics", JSONArray().apply {
                     selected.sortedBy { it.ordinal }.forEach { put(it.name) }
@@ -120,15 +123,42 @@ class EnhancementSettingsStore(context: PlatformContext) {
                     runCatching { disk.edit().apply { if (before == null) remove(key) else putString(key, before) }.commit() }
                     return@withLock false
                 }
-                mutableVisibleMetrics.value = mutableVisibleMetrics.value + (content to selected)
+                mutableVisibleMetrics.value = mutableVisibleMetrics.value.mapValues { (identity, current) ->
+                    if (identity.settingsOwner == content.settingsOwner) selected else current
+                }
                 true
             }
         }
 
-    private fun displayKey(content: EnhancementContent): String = "overlay_${content.directory}"
+    // Keep legacy values intact. With no timestamps, ordinary manga is the deterministic fallback;
+    // an adult-only configuration is retained, including an explicitly empty set of display items.
+    private fun policyKeys(content: EnhancementContent): List<String> = if (content.settingsOwner == EnhancementContent.MANGA)
+        listOf("shared_manga", EnhancementContent.MANGA.directory, EnhancementContent.ADULT_MANGA.directory)
+        else listOf(content.directory)
 
-    private fun decodeVisibleMetrics(content: EnhancementContent, raw: String?): Set<EnhancementMetric> = runCatching {
-        if (raw == null) return@runCatching EnhancementMetric.defaults(content)
+    private fun displayKeys(content: EnhancementContent): List<String> = if (content.settingsOwner == EnhancementContent.MANGA)
+        listOf("overlay_shared_manga", "overlay_manga", "overlay_adult_manga") else listOf("overlay_${content.directory}")
+
+    private fun readPolicies(): Map<EnhancementContent, EnhancementPolicy> {
+        fun read(content: EnhancementContent) = policyKeys(content).firstNotNullOfOrNull {
+            decode(disk.getString(it))
+        } ?: EnhancementPolicy()
+        val manga = read(EnhancementContent.MANGA)
+        return mapOf(EnhancementContent.MANGA to manga, EnhancementContent.ADULT_MANGA to manga,
+            EnhancementContent.ANIME to read(EnhancementContent.ANIME))
+    }
+
+    private fun readVisibleMetrics(): Map<EnhancementContent, Set<EnhancementMetric>> {
+        fun read(content: EnhancementContent) = displayKeys(content).firstNotNullOfOrNull {
+            decodeVisibleMetrics(content, disk.getString(it))
+        } ?: EnhancementMetric.defaults(content)
+        val manga = read(EnhancementContent.MANGA)
+        return mapOf(EnhancementContent.MANGA to manga, EnhancementContent.ADULT_MANGA to manga,
+            EnhancementContent.ANIME to read(EnhancementContent.ANIME))
+    }
+
+    private fun decodeVisibleMetrics(content: EnhancementContent, raw: String?): Set<EnhancementMetric>? = runCatching {
+        if (raw.isNullOrBlank()) return@runCatching null
         val value = JSONObject(raw)
         require(value.optInt("version") == 1)
         val metrics = requireNotNull(value.optJSONArray("metrics"))
@@ -136,7 +166,7 @@ class EnhancementSettingsStore(context: PlatformContext) {
         (0 until metrics.length()).mapNotNull { index -> EnhancementMetric.entries.firstOrNull {
             it.name == metrics.optString(index) && it.supports(content)
         } }.toSet()
-    }.getOrElse { EnhancementMetric.defaults(content) }
+    }.getOrNull()
 
     fun setSessionOverride(sessionKey: String, content: EnhancementContent, policy: EnhancementPolicy?) {
         require(sessionKey.isNotBlank())
@@ -174,8 +204,8 @@ class EnhancementSettingsStore(context: PlatformContext) {
         .put("customFps", p.customFps).put("detectScenes", p.detectScenes)
         .put("enhanceAfterDownload", p.enhanceAfterDownload).put("cacheMiB", p.cacheMiB).toString()
 
-    private fun decode(raw: String?): EnhancementPolicy = runCatching {
-        if (raw.isNullOrBlank()) return@runCatching EnhancementPolicy()
+    private fun decode(raw: String?): EnhancementPolicy? = runCatching {
+        if (raw.isNullOrBlank()) return@runCatching null
         val j = JSONObject(raw)
         require(j.optInt("version") == 1)
         val prep = j.optJSONArray("preparation")
@@ -192,5 +222,5 @@ class EnhancementSettingsStore(context: PlatformContext) {
             customFps = j.optInt("customFps", 60), detectScenes = j.optBoolean("detectScenes", true),
             enhanceAfterDownload = j.optBoolean("enhanceAfterDownload"), cacheMiB = j.optInt("cacheMiB", 1024),
         ).checked()
-    }.getOrDefault(EnhancementPolicy())
+    }.getOrNull()
 }

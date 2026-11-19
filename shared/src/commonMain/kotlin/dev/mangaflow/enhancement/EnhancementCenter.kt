@@ -156,9 +156,11 @@ class EnhancementCenter private constructor(context: PlatformContext) {
         writes.trySend {
             try {
                 val activeTrial = telemetry.state.value.activeTrial
-                val changesTrial = activeTrial?.takeIf { it.content == content }?.let { trial ->
-                    (sessionKey == trial.sessionKey || sessionKey == null && settings.sessions.value[trial.sessionKey] == null) &&
-                        settings.policy(content, trial.sessionKey) != policy
+                val changesTrial = activeTrial?.let { trial ->
+                    val changesScope = if (sessionKey == null)
+                        trial.content.settingsOwner == content.settingsOwner && settings.sessions.value[trial.sessionKey] == null
+                    else trial.content == content && trial.sessionKey == sessionKey
+                    changesScope && settings.policy(trial.content, trial.sessionKey) != policy
                 } == true
                 if (changesTrial && activeTrial != null) telemetry.finishTrial(activeTrial.id, "试用设置已改变")
                 val saved = if (sessionKey == null) settings.update(content, policy)

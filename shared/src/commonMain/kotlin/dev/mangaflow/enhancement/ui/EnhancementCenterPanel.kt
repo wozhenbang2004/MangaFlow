@@ -33,18 +33,23 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** A contextual entry cannot switch into another content namespace. */
+/** Defaults have two media categories; contextual records retain their actual content identity. */
 @Composable
 internal fun EnhancementCenterPanel(
     visible: Boolean,
     backdrop: HazeState?,
     initialContent: EnhancementContent = EnhancementContent.MANGA,
     sessionKey: String? = null,
+    allowMediaSwitch: Boolean = true,
     onDismiss: () -> Unit,
     onClosed: (() -> Unit)? = null,
     onCompare: (() -> Unit)? = null,
 ) {
-    var content by remember(initialContent, sessionKey) { mutableStateOf(initialContent) }
+    val canSwitchMedia = allowMediaSwitch && sessionKey == null
+    val mediaCategories = listOf(EnhancementContent.MANGA, EnhancementContent.ANIME)
+    var content by remember(initialContent, sessionKey, canSwitchMedia) {
+        mutableStateOf(if (canSwitchMedia) initialContent.settingsOwner else initialContent)
+    }
     val navigation = remember(content, sessionKey) { EnhancementNavigation() }
     val primaryPages = enhancementPrimaryPages(content)
     val editorState = rememberSaveableStateHolder()
@@ -69,26 +74,33 @@ internal fun EnhancementCenterPanel(
             Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 6.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 navigation.parent?.let { parent ->
-                    MotionIconButton({ navigation.back() }, Modifier.size(44.dp), tooltip = "返回${parent.title}") {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回${parent.title}", Modifier.size(20.dp))
+                    val backLabel = "返回${parent.titleFor(sessionKey != null)}"
+                    MotionIconButton({ navigation.back() }, Modifier.size(44.dp), tooltip = backLabel) {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, backLabel, Modifier.size(20.dp))
                     }
                 }
                 Column(Modifier.weight(1f).padding(start = if (navigation.parent == null) 8.dp else 0.dp)) {
-                    Text(if (navigation.page.isPrimary) "画质与性能" else navigation.page.title,
-                        style = MaterialTheme.typography.titleMedium)
-                    Text(content.label, style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val title = when {
+                        navigation.page.isPrimary -> "画质与性能"
+                        canSwitchMedia && content.settingsOwner == EnhancementContent.MANGA &&
+                            navigation.page == EnhancementPage.CACHE -> "缓存预算"
+                        else -> navigation.page.title
+                    }
+                    Text(title, style = MaterialTheme.typography.titleMedium)
+                    if (!canSwitchMedia || !navigation.page.isPrimary)
+                        Text(content.settingsLabel, style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 MotionIconButton(onDismiss, Modifier.size(44.dp), tooltip = "关闭画质与性能") {
                     Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                 }
             }
             if (navigation.page.isPrimary) {
-                if (sessionKey == null) MotionTabs(content.ordinal, EnhancementContent.entries.map { it.label },
-                    onSelect = { content = EnhancementContent.entries[it] },
+                if (canSwitchMedia) MotionTabs(mediaCategories.indexOf(content.settingsOwner), mediaCategories.map { it.settingsLabel },
+                    onSelect = { content = mediaCategories[it] },
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
                     controlHeight = 44.dp, treatment = MotionTabTreatment.Soft)
-                MotionTabs(primaryPages.indexOf(navigation.page), primaryPages.map { it.title },
+                MotionTabs(primaryPages.indexOf(navigation.page), primaryPages.map { it.titleFor(sessionKey != null) },
                     onSelect = { navigate(primaryPages[it]) },
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
                     controlHeight = 44.dp, treatment = MotionTabTreatment.Soft)
@@ -97,6 +109,7 @@ internal fun EnhancementCenterPanel(
                 .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 20.dp)) {
                 editorState.SaveableStateProvider(editorKey) {
                     EnhancementSettingsContent(content, sessionKey, page = navigation.page, onPageChange = ::navigate,
+                        showContentRecords = !canSwitchMedia,
                         onCompare = onCompare?.let { { compareAfterClose = true; onDismiss() } })
                 }
             }
@@ -114,6 +127,7 @@ internal fun EnhancementSettingsContent(
     page: EnhancementPage,
     onPageChange: (EnhancementPage) -> Unit,
     qualityFooter: (@Composable () -> Unit)? = null,
+    showContentRecords: Boolean = true,
 ) {
     val context = LocalMangaContext.current
     val center = remember(context) { EnhancementCenter.get(context) }
@@ -151,12 +165,16 @@ internal fun EnhancementSettingsContent(
         (content == EnhancementContent.ANIME || sessionKey == null || it.sessionKey == sessionKey) }
     val activeTasks = scopedTasks.filter { it.phase in setOf(EnhancementTaskPhase.QUEUED, EnhancementTaskPhase.WAITING,
         EnhancementTaskPhase.RUNNING, EnhancementTaskPhase.PAUSED) }
-    DisposableEffect(center) { val release = center.resources.startObserving(); onDispose(release) }
+    DisposableEffect(center, sessionKey, showContentRecords) {
+        val release = if (sessionKey != null && showContentRecords) center.resources.startObserving() else null
+        onDispose { release?.invoke() }
+    }
     LaunchedEffect(saved, sessions, activeKey) {
         if (pending == 0) draft = center.settings.policy(content, activeKey)
     }
-    LaunchedEffect(content, scopedTasks.count { it.phase == EnhancementTaskPhase.COMPLETED }, videoPreparation,
+    LaunchedEffect(content, showContentRecords, scopedTasks.count { it.phase == EnhancementTaskPhase.COMPLETED }, videoPreparation,
         videoState?.entries?.count { it.phase == EnhancementTaskPhase.COMPLETED }, videoState?.entries?.size, videoState?.loading) {
+        if (!showContentRecords) { cacheUsage = null; return@LaunchedEffect }
         try { cacheUsage = readEnhancementUsage(context, content, videoPreparation) }
         catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { cacheUsage = null }
@@ -188,7 +206,7 @@ internal fun EnhancementSettingsContent(
         else if (page in setOf(EnhancementPage.QUALITY_OPTIONS, EnhancementPage.FRAME_OPTIONS,
                 EnhancementPage.MODELS, EnhancementPage.MODEL_DETAIL))
             EnhancementQuiet(if (activeKey != null) if (anime) "应用于本次播放" else "应用于本次阅读"
-                else "应用于${content.label}默认设置")
+                else "应用于${content.settingsLabel}默认设置")
         when (page) {
             EnhancementPage.QUALITY -> {
                 EnhancementQuality(content, draft, inventory, ::change,
@@ -228,25 +246,36 @@ internal fun EnhancementSettingsContent(
                 } else AnimeEnhancementNavigation(Icons.Outlined.Download, "下载后自动增强",
                     if (saved.getValue(content).enhanceAfterDownload) "已开启 · 使用默认设置" else "已关闭 · 在默认设置中调整",
                     onClick = { editSession = false; notice = null })
-                EnhancementDivider()
-                AnimeEnhancementNavigation(Icons.Outlined.Layers, "增强任务",
-                    if (activeTasks.isEmpty()) "查看处理记录" else "${activeTasks.size} 项未完成",
-                    onClick = { onPageChange(EnhancementPage.TASKS) })
-                AnimeEnhancementNavigation(Icons.Outlined.Storage, "增强缓存",
-                    cacheUsage?.let { "${enhancementBytes(it.completedBytes)} · ${it.entries} 份" } ?: "查看用量与清理",
-                    onClick = { onPageChange(EnhancementPage.CACHE) })
+                if (showContentRecords) {
+                    EnhancementDivider()
+                    AnimeEnhancementNavigation(Icons.Outlined.Layers, "增强任务",
+                        if (activeTasks.isEmpty()) "查看处理记录" else "${activeTasks.size} 项未完成",
+                        onClick = { onPageChange(EnhancementPage.TASKS) })
+                    AnimeEnhancementNavigation(Icons.Outlined.Storage, "增强缓存",
+                        cacheUsage?.let { "${enhancementBytes(it.completedBytes)} · ${it.entries} 份" } ?: "查看用量与清理",
+                        onClick = { onPageChange(EnhancementPage.CACHE) })
+                    if (sessionKey == null) AnimeEnhancementNavigation(Icons.Outlined.QueryStats, "性能记录",
+                        "查看已保存的性能记录", onClick = { onPageChange(EnhancementPage.TRIALS) })
+                } else if (!anime) {
+                    EnhancementDivider()
+                    AnimeEnhancementNavigation(Icons.Outlined.Storage, "缓存预算", "${draft.cacheMiB} MiB",
+                        onClick = { onPageChange(EnhancementPage.CACHE) })
+                }
             }
             EnhancementPage.STATUS -> {
-                val count = visibleMetrics.getValue(content).size
-                AnimeEnhancementNavigation(Icons.Outlined.Visibility, "观看时显示",
-                    if (count == 0) "增强读数已隐藏" else "已选 $count 项 · ${if (anime) "画面" else "阅读状态栏"}中直接显示",
-                    onClick = { onPageChange(EnhancementPage.DISPLAY) })
-                EnhancementDivider()
-                EnhancementLiveStatus(content, observed, animePlayback, usage.resources, activeTasks.size,
-                    onOpenTasks = { onPageChange(EnhancementPage.TASKS) }, showHeading = false,
-                    animeScope = animeStatusScope, onAnimeScopeChange = { animeStatusScope = it })
-                AnimeEnhancementNavigation(Icons.Outlined.QueryStats, "性能记录", "记录当前档位的实际表现",
-                    onClick = { onPageChange(EnhancementPage.TRIALS) })
+                if (sessionKey == null) EnhancementDisplayControls(content)
+                else {
+                    val count = visibleMetrics.getValue(content).size
+                    AnimeEnhancementNavigation(Icons.Outlined.Visibility, "观看时显示",
+                        if (count == 0) "增强读数已隐藏" else "已选 $count 项 · ${if (anime) "画面" else "阅读状态栏"}中直接显示",
+                        onClick = { onPageChange(EnhancementPage.DISPLAY) })
+                    EnhancementDivider()
+                    EnhancementLiveStatus(content, observed, animePlayback, usage.resources, activeTasks.size,
+                        onOpenTasks = { onPageChange(EnhancementPage.TASKS) }, showHeading = false,
+                        animeScope = animeStatusScope, onAnimeScopeChange = { animeStatusScope = it })
+                    if (showContentRecords) AnimeEnhancementNavigation(Icons.Outlined.QueryStats, "性能记录", "记录当前档位的实际表现",
+                        onClick = { onPageChange(EnhancementPage.TRIALS) })
+                }
             }
             EnhancementPage.DISPLAY -> EnhancementDisplayControls(content)
             EnhancementPage.MODELS -> EnhancementModelList(inventory, progress, content, draft.modelId,
@@ -263,13 +292,15 @@ internal fun EnhancementSettingsContent(
                 onInstall = { center.installEngine(it) }, onImport = { onPageChange(EnhancementPage.IMPORT) })
             EnhancementPage.IMPORT -> EnhancementModelImport(center, video = anime)
             EnhancementPage.CACHE -> {
-                EnhancementValue("增强结果", cacheUsage?.let { "${enhancementBytes(it.completedBytes)} · ${it.entries} 份" } ?: "—")
-                EnhancementValue("临时工作文件", cacheUsage?.let { enhancementBytes(it.temporaryBytes) } ?: "—")
-                EnhancementValue("模型文件", inventory.modelBytes.takeIf { inventory.engines.isNotEmpty() }
-                    ?.let(::enhancementBytes) ?: "—")
-                if ((cacheUsage?.leasedEntries ?: 0) > 0) EnhancementQuiet("${cacheUsage?.leasedEntries} 份正在使用，清理时保留。")
-                if (cacheUsage == null) EnhancementQuiet("尚未取得缓存用量。")
-                EnhancementDivider()
+                if (showContentRecords) {
+                    EnhancementValue("增强结果", cacheUsage?.let { "${enhancementBytes(it.completedBytes)} · ${it.entries} 份" } ?: "—")
+                    EnhancementValue("临时工作文件", cacheUsage?.let { enhancementBytes(it.temporaryBytes) } ?: "—")
+                    EnhancementValue("模型文件", inventory.modelBytes.takeIf { inventory.engines.isNotEmpty() }
+                        ?.let(::enhancementBytes) ?: "—")
+                    if ((cacheUsage?.leasedEntries ?: 0) > 0) EnhancementQuiet("${cacheUsage?.leasedEntries} 份正在使用，清理时保留。")
+                    if (cacheUsage == null) EnhancementQuiet("尚未取得缓存用量。")
+                    EnhancementDivider()
+                }
                 if (anime) {
                     EnhancementValue("缓存预算", "跟随共享磁盘预算")
                     EnhancementQuiet("在设置 → 体验策略 → 缓存中调整。")
@@ -284,29 +315,31 @@ internal fun EnhancementSettingsContent(
                         }) { Text("保存") }
                     }
                 }
-                Spacer(Modifier.height(8.dp))
-                MotionOutlinedButton(onClick = {
-                    if (!cacheBusy) {
-                        cacheBusy = true
-                        scope.launch {
-                            try {
-                                val freed = withContext(NonCancellable) {
-                                    EnhancedAssetCache.get(context).clear(content.directory) +
-                                        if (anime) checkNotNull(videoPreparation) { "视频增强缓存尚未就绪，请重新打开设置" }.clear() else 0L
-                                }
-                                cacheUsage = readEnhancementUsage(context, content, videoPreparation)
-                                notice = "已释放 ${enhancementBytes(freed)}。"
-                            } catch (cancel: CancellationException) { throw cancel }
-                            catch (error: Exception) { notice = error.message ?: "清理未完成。" }
-                            finally { cacheBusy = false }
+                if (showContentRecords) {
+                    Spacer(Modifier.height(8.dp))
+                    MotionOutlinedButton(onClick = {
+                        if (!cacheBusy) {
+                            cacheBusy = true
+                            scope.launch {
+                                try {
+                                    val freed = withContext(NonCancellable) {
+                                        EnhancedAssetCache.get(context).clear(content.directory) +
+                                            if (anime) checkNotNull(videoPreparation) { "视频增强缓存尚未就绪，请重新打开设置" }.clear() else 0L
+                                    }
+                                    cacheUsage = readEnhancementUsage(context, content, videoPreparation)
+                                    notice = "已释放 ${enhancementBytes(freed)}。"
+                                } catch (cancel: CancellationException) { throw cancel }
+                                catch (error: Exception) { notice = error.message ?: "清理未完成。" }
+                                finally { cacheBusy = false }
+                            }
                         }
+                    }, enabled = !cacheBusy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                        Icon(Icons.Outlined.CleaningServices, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (cacheBusy) "正在清理" else "清理增强结果")
                     }
-                }, enabled = !cacheBusy, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Icon(Icons.Outlined.CleaningServices, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text(if (cacheBusy) "正在清理" else "清理增强结果")
+                    EnhancementQuiet("保留原始下载、模型和正在使用的结果。")
                 }
-                EnhancementQuiet("保留原始下载、模型和正在使用的结果。")
             }
             EnhancementPage.TASKS -> {
                 if (anime) EnhancementQuiet("全部番剧的增强任务，包含下载后的离线处理。")
