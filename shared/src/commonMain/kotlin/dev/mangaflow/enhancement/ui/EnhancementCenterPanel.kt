@@ -243,7 +243,7 @@ internal fun EnhancementSettingsContent(
                         effect.phase in setOf(AnimeVideoEnhancementPhase.UNAVAILABLE, AnimeVideoEnhancementPhase.FAILED) -> effect.detail
                         currentPolicy.tier == QualityTier.ORIGINAL -> null
                         effect.phase == AnimeVideoEnhancementPhase.OFF -> when {
-                            PreparationMode.IMMEDIATE !in currentPolicy.preparation -> "即时增强已关闭，尚未匹配到提前处理的画面。"
+                            PreparationMode.IMMEDIATE !in currentPolicy.preparation -> "播放时增强已关闭，尚未匹配到提前处理的画面。"
                             usage.resources.memoryPressure == true || (usage.resources.thermalPressure ?: 0) >= 2 ->
                                 "设备保护暂缓了增强，所选档位保留。"
                             else -> observed?.reason ?: "所选增强尚未运行，正在等待播放器应用。"
@@ -278,14 +278,26 @@ internal fun EnhancementSettingsContent(
             }
             EnhancementPage.FRAME_OPTIONS -> EnhancementFrameOptions(draft, ::change)
             EnhancementPage.PREPARATION -> {
-                EnhancementPreparation(content, draft, ::change)
+                val currentIssue = animePlayback?.takeIf { activeKey != null &&
+                    activeKey == animeEnhancementSessionKey(it) }?.preparedVideoIssue
+                EnhancementPreparation(content, draft, inventory, ::change, currentIssue)
                 EnhancementDivider()
+                Text("下载后", style = MaterialTheme.typography.titleSmall)
                 if (activeKey == null) {
-                    SettingsToggle("下载完成后增强", draft.enhanceAfterDownload, Icons.Outlined.Download,
+                    SettingsToggle("新下载完成后自动增强", draft.enhanceAfterDownload, Icons.Outlined.Download,
                         onCheckedChange = { change(draft.copy(enhanceAfterDownload = it)) })
-                    EnhancementQuiet("使用默认设置处理之后完成的下载。")
-                } else AnimeEnhancementNavigation(Icons.Outlined.Download, "下载后自动增强",
-                    if (saved.getValue(content).enhanceAfterDownload) "已开启 · 使用默认设置" else "已关闭 · 在默认设置中调整",
+                    EnhancementQuiet(when {
+                        !draft.enhanceAfterDownload -> if (anime) "已下载的整集可在下载中心手动增强。"
+                            else "已下载的整章可在下载中心手动增强。"
+                        draft.tier == QualityTier.ORIGINAL && (!anime || draft.frameMode == FrameMode.ORIGINAL) ->
+                            if (anime) "当前使用原画和原始帧率；先选择画质增强或补帧目标。"
+                            else "当前使用原图；选择增强档位后才会自动处理新下载的整章。"
+                        anime && draft.frameMode == FrameMode.AUTO -> "离线补帧需要 2× 或固定帧率；自动跟随屏幕用于实时播放。"
+                        anime -> "之后下载完成的整集按默认画质和补帧设置处理；已有下载保持不变。"
+                        else -> "之后下载完成的整章按默认画质设置处理；已有下载保持不变。"
+                    })
+                } else AnimeEnhancementNavigation(Icons.Outlined.Download, "新下载完成后自动增强",
+                    if (saved.getValue(content).enhanceAfterDownload) "已开启 · 点此调整默认设置" else "已关闭 · 点此调整默认设置",
                     onClick = { editSession = false; notice = null })
                 if (showContentRecords) {
                     EnhancementDivider()

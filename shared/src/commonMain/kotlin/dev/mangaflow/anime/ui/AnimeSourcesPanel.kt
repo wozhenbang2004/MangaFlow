@@ -178,9 +178,9 @@ internal fun AnimeSourcesPanel(
     LaunchedEffect(visible, subjectId, focusEpisode?.id, state.episodeOptions, state.sourceRoutes,
         state.sourceBindings, state.sourceCatalogs, state.sourceCatalogErrors, state.sourceAggregationRunning,
         state.sourceExtensions, state.resolving, state.autoMatching, state.settings.preferredSourceHeight, recovering) {
-        if (visible && subjectId != null &&
-            !state.resolving && !state.autoMatching && !recovering)
-            measureSources()
+        // The controller admits new rows into a manual batch even while playback is recovering.
+        // Background samples still yield to opening/buffering there.
+        if (visible && subjectId != null) measureSources()
     }
     LaunchedEffect(visible, subjectId, manageExpanded) {
         if (visible && manageExpanded && subjectId != null && state.sourceResults.isEmpty()) controller.searchSources()
@@ -238,12 +238,12 @@ internal fun AnimeSourcesPanel(
                             contentAlignment = Alignment.Center) { MotionBusyIndicator(Modifier.size(17.dp), strokeWidth = 1.5.dp) }
                         else MotionIconButton(onClick = {
                             // First refresh incomplete associations; only validated per-episode lines are probed.
-                            if (state.sourceAggregation.values.any { it.phase != AnimeAssociationPhase.LINKED &&
+                            if (state.sourceAggregation.isEmpty() || state.sourceAggregation.values.any { it.phase != AnimeAssociationPhase.LINKED &&
                                     it.phase != AnimeAssociationPhase.EXCLUDED })
                                 controller.verifyEpisodeSources(focusEpisode?.id, retry = true)
                             measureSources(force = true)
                         },
-                            enabled = visible && state.sourceMeasurements?.running != true && !state.resolving && !state.autoMatching,
+                            enabled = visible && state.sourceMeasurements?.running != true,
                             modifier = Modifier.size(44.dp), tooltip = "重新探测画质与网络") {
                             Icon(Icons.Outlined.Speed, "重新探测画质与网络", Modifier.size(20.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant)

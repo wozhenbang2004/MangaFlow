@@ -33,9 +33,10 @@ internal class AndroidRifeVulkanModels(context: Context) {
         }, when {
             !hardware -> "当前应用架构或设备未报告 Vulkan 硬件能力"
             ready.pendingRemoval -> "Vulkan 组件将在重启后移除"
+            ready.requiresUpdate -> "组件需要更新至 1.2.0；已下载的 RIFE 权重保留，更新后支持原尺寸 1080p SDR 输入"
             !ready.installed -> "先安装签名 ncnn Vulkan 组件，再准备 RIFE 4.6 权重"
             model == null -> "下载并校验官方 RIFE 4.6 ncnn 参数和权重"
-            else -> "移动端 Vulkan 独立型号；画面、实际耗时和可用帧率由播放验证"
+            else -> "支持最高 1080p SDR 原尺寸输入；按实际画面申请资源，推理超预算时恢复源帧率，4K 输入暂不支持"
         }, setOf(1), setOf(EngineContent.VIDEO), canInstall = hardware && !ready.pendingRemoval &&
             (!ready.installed || model == null), supportsInterpolation = true, realtime = true,
         downloadBytes = MODEL_BYTES.takeIf { ready.installed && model == null },
@@ -63,7 +64,7 @@ internal class AndroidRifeVulkanModels(context: Context) {
 
     companion object {
         private const val UPSTREAM = "a7532fc3f9f8f008cd6eecd6f2ffe2a9698e0cf7"
-        private const val VERSION = "ncnn-20261020 / RIFE 4.6 a7532fc / 1"
+        private const val VERSION = "ncnn-20261020 / RIFE 4.6 a7532fc / 2"
         private const val SOURCE = "https://github.com/nihui/rife-ncnn-vulkan/tree/$UPSTREAM"
         private const val MODEL_URL = "https://raw.githubusercontent.com/nihui/rife-ncnn-vulkan/$UPSTREAM/models/rife-v4.6"
         private const val MODEL_BYTES = 10_630_852L
@@ -76,11 +77,30 @@ internal class AndroidRifeVulkanModels(context: Context) {
 }
 
 /** The player retains this session until its GL program retires; close and inference cannot overlap. */
-internal class AndroidLiveRifeVulkan private constructor(private var handle: Long, private val releaseBudget: () -> Unit) : AutoCloseable {
+internal class AndroidLiveRifeVulkan private constructor(
+    private var handle: Long,
+    private val resources: ExperiencePolicyStore,
+    private var reservedBytes: Long,
+    private var releaseBudget: () -> Unit,
+) : AutoCloseable {
+    @Synchronized
+    fun prepareFrameSize(width: Int, height: Int) {
+        check(handle != 0L) { "RIFE Vulkan 会话已关闭" }
+        val needed = memoryBudget(width, height)
+        if (needed > reservedBytes) {
+            // Keep the old reservation until a larger frame has secured its replacement.
+            val release = resources.tryAcquireEnhancement(0, needed, sharedRealtimeOwner = "anime-player")
+                ?: error("当前资源不足以处理此尺寸的实时补帧")
+            val previousRelease = releaseBudget
+            releaseBudget = release
+            reservedBytes = needed
+            previousRelease()
+        }
+    }
+
     @Synchronized
     fun infer(previous: IntArray, next: IntArray, width: Int, height: Int, timestep: Float, destination: IntArray) {
-        check(handle != 0L) { "RIFE Vulkan 会话已关闭" }
-        require(width in 1..1920 && height in 1..1920 && width.toLong() * height <= 1280L * 720L) { "RIFE Vulkan 画面尺寸超出本机预算" }
+        prepareFrameSize(width, height)
         require(timestep > 0f && timestep < 1f && previous.size == width * height &&
             next.size == previous.size && destination.size == previous.size) { "RIFE Vulkan 帧对或时间参数不匹配" }
         val result = AndroidRifeVulkanJni.infer(handle, previous, next, width, height, timestep, destination)
@@ -100,15 +120,30 @@ internal class AndroidLiveRifeVulkan private constructor(private var handle: Lon
     }
 
     companion object {
-        suspend fun open(context: Context, model: EngineModel): AndroidLiveRifeVulkan {
-            val release = ExperiencePolicyStore.get(context)
-                .tryAcquireEnhancement(0, 128L * 1024 * 1024, sharedRealtimeOwner = "anime-player")
+        // The graph accepts dynamic shapes. These are the same bounded native limits,
+        // not a resize: original frames and generated frames retain the input dimensions.
+        const val MAX_SIDE = 1920
+        const val MAX_PIXELS = 1920 * 1080
+
+        fun memoryBudget(width: Int, height: Int): Long {
+            val pixels = width.toLong() * height
+            require(width in 1..MAX_SIDE && height in 1..MAX_SIDE && pixels <= MAX_PIXELS) {
+                "实时补帧支持最高 1080p 输入，当前 ${width}×${height} 保持源帧率"
+            }
+            // Scale the existing admission estimate; this is not observed process/GPU memory.
+            return maxOf(128L * 1024 * 1024, (128L * 1024 * 1024 * pixels + 1280 * 720 - 1) / (1280 * 720))
+        }
+
+        suspend fun open(context: Context, model: EngineModel, width: Int, height: Int): AndroidLiveRifeVulkan {
+            val resources = ExperiencePolicyStore.get(context)
+            val bytes = memoryBudget(width, height)
+            val release = resources.tryAcquireEnhancement(0, bytes, sharedRealtimeOwner = "anime-player")
                 ?: error("当前资源不足以开启实时补帧")
             var pointer = 0L
             try {
                 pointer = AndroidRifeVulkanModels(context).open(model)
                 currentCoroutineContext().ensureActive()
-                return AndroidLiveRifeVulkan(pointer, release)
+                return AndroidLiveRifeVulkan(pointer, resources, bytes, release)
             } catch (failure: Throwable) {
                 try { if (pointer != 0L) AndroidRifeVulkanJni.close(pointer) } finally { release() }
                 throw failure

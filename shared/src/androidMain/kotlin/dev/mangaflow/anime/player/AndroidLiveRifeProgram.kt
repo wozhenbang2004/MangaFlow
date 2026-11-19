@@ -80,7 +80,11 @@ internal class AndroidLiveRifeProgram(
             width = input.width
             height = input.height
             val count = Math.multiplyExact(width, height)
-            require(count in 1..MAX_PIXELS) { "切换后的画面高于实时补帧试用分辨率" }
+            model.prepareFrameSize(width, height)
+            val maximumTexture = IntArray(1)
+            GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, maximumTexture, 0)
+            GlUtil.checkGlError()
+            require(width <= maximumTexture[0] && height <= maximumTexture[0]) { "当前画面超过设备纹理尺寸限制" }
             previous = IntArray(count)
             current = IntArray(count)
             generated = IntArray(count)
@@ -317,7 +321,6 @@ internal class AndroidLiveRifeProgram(
         val inferenceNanos: Long?, val failure: String?)
 
     companion object {
-        const val MAX_PIXELS = 1280 * 720
         private const val MAX_INTERVAL_US = 150_000L
         private const val NONE = Long.MIN_VALUE
     }

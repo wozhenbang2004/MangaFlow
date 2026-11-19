@@ -33,7 +33,7 @@ actual class PanelRuntimeStore private constructor() {
         PanelRuntimeId.LITERT -> PanelRuntimeSpec(id, "轻量 AI 运行库", "1.4.2", "当前平台尚未提供；可使用传统分镜", "Apache-2.0")
         PanelRuntimeId.ONNX -> PanelRuntimeSpec(id, "高精度与排序运行库", "1.31.1", "当前平台尚未提供；可使用传统分镜", "MIT")
         PanelRuntimeId.QUICKJS -> PanelRuntimeSpec(id, "漫画源脚本引擎", "1.0.18", "当前平台尚未提供此脚本运行时", "Apache-2.0 / MIT")
-        PanelRuntimeId.CUGAN -> PanelRuntimeSpec(id, "Real-CUGAN Vulkan 组件", "1.1.0-ncnn20261020", "Android 可选图像增强组件", "BSD-3-Clause / MIT")
+        PanelRuntimeId.CUGAN -> PanelRuntimeSpec(id, "Real-CUGAN Vulkan 组件", "1.2.0-ncnn20261020", "Android 可选图像增强组件", "BSD-3-Clause / MIT")
     }
     actual suspend fun download(id: PanelRuntimeId): Unit = error("当前平台尚未提供经过校验的可选运行组件")
     actual fun cancel(id: PanelRuntimeId) { /* This platform never starts an unavailable runtime transfer. */ }

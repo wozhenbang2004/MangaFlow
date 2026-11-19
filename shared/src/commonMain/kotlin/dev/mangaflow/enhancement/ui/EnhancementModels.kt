@@ -326,6 +326,12 @@ internal fun EnhancementModelDetail(
     }
 }
 
+/** Video enhancement pipelines can chain RIFE without being interpolation models themselves. */
+internal fun EngineDescriptor.isFrameInterpolationEngine(): Boolean = supportsInterpolation && id in setOf(
+    EnhancementEngineIds.ANDROID_RIFE, EnhancementEngineIds.ANDROID_RIFE_VULKAN,
+    EnhancementEngineIds.DESKTOP_REALTIME_RIFE, EnhancementEngineIds.VIDEOJANAI,
+)
+
 @Composable
 internal fun EnhancementEngineList(
     inventory: EngineInventory,
@@ -337,7 +343,7 @@ internal fun EnhancementEngineList(
     onRefresh: () -> Unit,
 ) {
     val engines = inventory.engines.filter { engine -> engine.matches(content) &&
-        (if (frames) engine.supportsInterpolation else !engine.supportsInterpolation ||
+        (if (frames) engine.isFrameInterpolationEngine() else !engine.supportsInterpolation ||
             engine.supportedScales.any { it > 1 } || inventory.models.any { it.engineId == engine.id }) }
     ModelListTools("可用组件", onImport, onRefresh)
     if (engines.isEmpty()) EnhancementQuiet(if (frames) "当前没有可用的补帧组件信息。" else "尚未取得运行组件信息。")
@@ -371,7 +377,8 @@ internal fun EnhancementEngineDetail(
     EnhancementQuiet(engineReadinessLabel(engine.readiness))
     if (engine.canInstall || busy) MotionButton({ onInstall(engine.id) }, modifier = Modifier.fillMaxWidth(), enabled = engine.canInstall && !busy) {
         Icon(Icons.Outlined.Download, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
-        Text(if (busy) pending?.shortProgress() ?: "正在安装" else if (pending?.failed == true) "重试安装" else "安装组件")
+        Text(if (busy) pending?.shortProgress() ?: "正在安装" else if (pending?.failed == true) "重试安装"
+            else if (engine.detail.startsWith("组件需要更新")) "更新组件" else "安装组件")
     }
     pending?.let { value ->
         if (value.detail != null) EnhancementQuiet(value.detail, error = value.failed)
@@ -392,7 +399,7 @@ internal fun EnhancementEngineDetail(
     if (engine.sourceUrl.isNotBlank()) MotionTextButton({ uriHandler.openUri(engine.sourceUrl) }, contentPadding = PaddingValues(horizontal = 0.dp)) {
         Icon(Icons.Outlined.Link, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("官方来源")
     }
-    if (engine.supportsInterpolation) {
+    if (engine.isFrameInterpolationEngine()) {
         val models = inventory.frameModels.filter { it.engineId == engine.id }
         EnhancementDivider()
         Text("已安装的补帧模型", style = MaterialTheme.typography.titleSmall)

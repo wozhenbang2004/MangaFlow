@@ -444,9 +444,9 @@ internal fun AnimePlayerSettings(
                                     ?: if (state.settings.prepareNextEpisode) "播放接近结尾时准备" else "已关闭") {
                                 show(AnimePlayerPanel.NEXT_PREPARATION)
                             } }
-                            item { AnimePlayerSettingLink(Icons.Outlined.Layers, "增强片段",
+                            item { AnimePlayerSettingLink(Icons.Outlined.Layers, "提前增强后续片段",
                                 currentMedia?.preparedVideoWindow?.let { "已备 ${animeTime(it.endMs - it.startMs)}" }
-                                    ?: currentMedia?.preparedVideoIssue ?: "画质模型与预处理状态") {
+                                    ?: currentMedia?.preparedVideoIssue ?: "选择播放时处理方式") {
                                 enhancementNavigation.reset(EnhancementPage.PREPARATION)
                                 show(AnimePlayerPanel.VIDEO)
                             } }

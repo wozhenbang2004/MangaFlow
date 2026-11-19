@@ -49,7 +49,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
-import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -76,6 +76,7 @@ import kotlin.time.Instant
 private val SOURCE_HEIGHT = Regex("""(?<!\d)([1-8]\d{2,3})\s*[pP](?!\d)""")
 private const val ONLINE_ANIME_SOURCE_BYTES = 24L * 1024 * 1024
 private const val ONLINE_ANIME_RESULT_BYTES = 64L * 1024 * 1024
+private const val ANIME_SOURCE_PARALLELISM = 4
 
 /** Application-owned data and playback. Screens keep only disclosure, drafts and scroll state. */
 class AnimeController(private val context: PlatformContext, private val scope: CoroutineScope,
@@ -198,6 +199,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private var resumeRequest: Pair<String, String>? = null
     private var restoreEpoch = 0L
     private val recoveryOptions = mutableSetOf<String>()
+    private val playbackAddressRetries = mutableSetOf<PlaybackHistoryKey>()
     private data class PlaybackHistoryKey(val subjectId: String, val episodeId: String,
         val candidate: String, val route: DownloadRouteSnapshot)
     private data class PlaybackFailureReceipt(val failure: AnimePlaybackFailure, val observedAt: Long)
@@ -215,7 +217,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private val playbackFailures = mutableMapOf<PlaybackHistoryKey, PlaybackFailureReceipt>()
     private val playbackMeasurements = mutableMapOf<PlaybackHistoryKey, PlaybackMeasurementReceipt>()
     private var sourceMeasurementsJob: Job? = null
-    private var sourceMeasurementsRescan = false
+    private var sourceMeasurementsUserRequested = false
+    private var sourceMeasurementsEnqueue: (() -> Unit)? = null
     private var sourceMeasurementsGeneration = 0L
     private val playbackAttemptOrder = mutableMapOf<PlaybackHistoryKey, Long>()
     private val playbackSourceAttemptOrder = mutableMapOf<PlaybackHistoryKey, Long>()
@@ -265,6 +268,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val useSourceStart: Boolean = true,
         val automaticIntent: Boolean = false,
         val bypassMediaCache: Boolean = false,
+        val preferredHeight: Int? = null,
     )
     private data class PlaybackSourceReceipt(
         val sourceId: String, val revision: String, val route: DownloadRouteSnapshot, val observedAt: Long,
@@ -284,7 +288,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         var decoderAsset: AnimePlaybackAsset? = null,
         var cacheAsset: AnimePlaybackAsset? = null,
     )
-    private data class ResolvedPlaybackOption(val option: AnimeEpisodeOption, val asset: AnimePlaybackAsset, val revision: String?)
+    private data class ResolvedPlaybackOption(val option: AnimeEpisodeOption, val asset: AnimePlaybackAsset,
+        val revision: String?, val mediaVerified: Boolean? = null)
 
     private data class PlaybackReceipt(val playback: ActivePlayback, val positionMs: Long, val playWhenReady: Boolean)
     private data class ReviewContext(val detail: AnimeDetail, val remote: AnimeTrackingSnapshot)
@@ -1309,6 +1314,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private fun resetPlaybackRecoveryWindow() {
         autoPlaybackDeadline = monotonicTimeMillis() + 45_000L
         recoveryOptions.clear()
+        playbackAddressRetries.clear()
         sourceRecoveryWindowStarted = false
         playbackDiscoveryRetried = false
         playbackStartupRefreshUsed = false
@@ -1686,8 +1692,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
     }
 
-    /** The chooser and the automatic player share the exact same eligible episode lines.
-     * Explicit selection plays only that line. Manual non-number mappings stay exact. */
+    /** The chooser and automatic recovery share the same exact episode lines.
+     * A manual choice is tried first; manual non-number mappings stay exact. */
     internal fun confirmedPlaybackLines(episodeId: String,
         snapshot: AnimeScreenState = mutableState.value): List<AnimeEpisodeOption> {
         val offered = snapshot.episodeOptions[episodeId].orEmpty().filter { it.confirmed }
@@ -1943,117 +1949,143 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val detail = snapshot.detail ?: return
         if (sourceMeasurementsJob?.isActive == true) {
             if (snapshot.sourceMeasurements?.episodeId == episodeId &&
-                snapshot.sourceMeasurements?.subjectId == detail.subject.id && onlyLine == null) {
-                // A newly linked source may appear while an older probe batch runs.
-                sourceMeasurementsRescan = true
+                snapshot.sourceMeasurements?.subjectId == detail.subject.id && onlyLine == null &&
+                (!force || sourceMeasurementsUserRequested)) {
+                sourceMeasurementsEnqueue?.invoke()
                 return
             }
             cancelEpisodeSourceMeasurements()
         }
-        if (playbackBusy()) {
-            if (force) notice("正在加载视频，缓冲后可重新测速。")
-            return
-        }
-        val sourceIds = if (onlyLine != null) listOf(onlyLine.sourceId) else snapshot.sourceBindings
-            .filter { it.subjectId == detail.subject.id }.map { it.catalog.sourceId }.distinct()
-        // Work-level sources need not share the same first confirmed episode.
-        val targets = linkedMapOf<String, SourceMeasurementTarget>()
-        val episodes = if (episodeId != null) detail.episodes.filter { it.id == episodeId }
-            else detail.episodes.sortedBy { it.kind != AnimeEpisodeKind.MAIN }
-        for (episode in episodes) {
-            if (targets.keys.containsAll(sourceIds)) break
-            val options = confirmedPlaybackLines(episode.id, snapshot).filter {
-                it.sourceId in sourceIds && it.sourceId !in targets &&
-                    (onlyLine == null || samePlaybackLine(it, onlyLine))
-            }
-            fairPlaybackOptions(detail.subject.id, episode.id, options).groupBy { it.sourceId }.forEach { (id, lines) ->
-                val ordered = if (force) lines else lines.sortedByDescending {
-                    playbackMeasurements(episode.id, it)?.mediaObservedAt != null
-                }
-                targets[id] = SourceMeasurementTarget(episode.id, ordered.take(2))
-            }
-        }
-        val pending = targets.mapValues { (_, target) -> target.copy(lines = target.lines.filter {
-            force || playbackMeasurements(target.episodeId, it)?.mediaObservedAt == null
-        }) }.filterValues { it.lines.isNotEmpty() }
-        val progress = sourceIds.associateWith { id ->
-            val target = targets[id]
-            val extension = snapshot.sourceExtensions.firstOrNull { it.id == id }
-            val reason = when {
-                target != null -> null
-                extension != null && (!extension.installed || !extension.enabled) -> "来源已停用，启用后可测速。"
-                snapshot.sourceCatalogErrors[id] != null -> "来源目录读取失败，展开来源可重试。"
-                snapshot.sourceCatalogs.none { it.title.sourceId == id } -> "来源目录尚未就绪，读取完成后继续。"
-                episodeId == null -> "尚无已确认对应的剧集，不能用其他作品代测。"
-                else -> "本集尚无已确认的线路，不能用其他集代测。"
-            }
-            AnimeSourceMeasurementProgress(target?.episodeId, when {
-                target == null -> AnimeSourceMeasurementPhase.UNAVAILABLE
-                id in pending -> AnimeSourceMeasurementPhase.QUEUED
-                else -> AnimeSourceMeasurementPhase.COMPLETE
-            }, reason, target?.lines.orEmpty())
-        }
-        mutableState.update { it.copy(sourceMeasurements = AnimeSourceMeasurementBatch(
-            detail.subject.id, episodeId, pending.isNotEmpty(), progress)) }
-        if (pending.isEmpty()) return
+        if (!force && (playbackBusy() || snapshot.autoMatching)) return
         val detailOwner = detailGeneration
         val generation = ++sourceMeasurementsGeneration
+        sourceMeasurementsUserRequested = force
+        mutableState.update { it.copy(sourceMeasurements = AnimeSourceMeasurementBatch(
+            detail.subject.id, episodeId, running = true, sources = emptyMap())) }
         sourceMeasurementsJob = scope.launch(start = CoroutineStart.LAZY) {
             fun current() = currentDetail(detailOwner, detail.subject.id) && sourceMeasurementsGeneration == generation
-            fun report(sourceId: String, phase: AnimeSourceMeasurementPhase, reason: String? = null) {
+            fun report(sourceId: String, phase: AnimeSourceMeasurementPhase, reason: String? = null,
+                lines: List<AnimeEpisodeOption>? = null) {
                 if (!current()) return
                 mutableState.update { state ->
                     val batch = state.sourceMeasurements ?: return@update state
                     val previous = batch.sources[sourceId] ?: return@update state
                     state.copy(sourceMeasurements = batch.copy(sources = batch.sources +
-                        (sourceId to previous.copy(phase = phase, reason = reason))))
+                        (sourceId to previous.copy(phase = phase, reason = reason, lines = lines ?: previous.lines))))
                 }
             }
-            suspend fun measureLine(target: SourceMeasurementTarget, option: AnimeEpisodeOption): String? {
-                val line = currentPlaybackLine(target.episodeId, option) ?: return "对应线路已变化，请重新测速。"
-                val provider = sources.provider(line.sourceId) ?: return "来源已停用或移除。"
-                val revision = discoverySourceRevision(line.sourceId) ?: return "来源版本已变化，请重新测速。"
-                val key = playbackHistoryKey(detail.subject.id, target.episodeId, line) ?: return "网络线路配置不可用。"
+            suspend fun measureLine(target: SourceMeasurementTarget, option: AnimeEpisodeOption): Pair<PlaybackProbe?, String?> {
+                val line = currentPlaybackLine(target.episodeId, option) ?: return null to "对应线路已变化，请重新测速。"
+                val provider = sources.provider(line.sourceId) ?: return null to "来源已停用或移除。"
+                val revision = discoverySourceRevision(line.sourceId) ?: return null to "来源版本已变化，请重新测速。"
+                val key = playbackHistoryKey(detail.subject.id, target.episodeId, line) ?: return null to "网络线路配置不可用。"
                 val catalog = mutableState.value.sourceCatalogs.firstOrNull {
                     it.title.sourceId == line.sourceId && it.title.id == line.catalog.id && it.title.url == line.catalog.url
-                } ?: return "来源目录已变化，请重新测速。"
+                } ?: return null to "来源目录已变化，请重新测速。"
                 val probe = probePlaybackLine(provider, catalog, line, revision, key.route) {
                     current() && discoverySourceRevision(line.sourceId) == revision &&
                         playbackHistoryRoute(line.sourceId) == key.route && currentPlaybackLine(target.episodeId, line) != null
-                } ?: return "线路或画质设置已变化，请重新测速。"
+                } ?: return null to "线路或画质设置已变化，请重新测速。"
                 storePlaybackProbe(key, line, probe)
-                return null
+                return probe to null
             }
             try {
-                val permits = Semaphore(2)
                 coroutineScope {
-                    pending.forEach { (sourceId, target) -> launch {
-                        permits.withPermit {
-                            if (!current()) return@withPermit
-                            report(sourceId, AnimeSourceMeasurementPhase.RUNNING)
-                            var completed = false
-                            var failure: String? = null
-                            for (option in target.lines) {
-                                if (!current()) return@withPermit
-                                val reason = try { measureLine(target, option) }
-                                    catch (cancel: CancellationException) {
-                                        currentCoroutineContext().ensureActive()
-                                        "此线路检查已中止，可重新测速。"
-                                    } catch (_: Exception) { "此线路检查未完成，可重新测速。" }
-                                if (reason == null) completed = true else failure = reason
+                    val permits = Semaphore(ANIME_SOURCE_PARALLELISM)
+                    val scheduled = mutableSetOf<String>()
+                    fun enqueue() {
+                        if (!current()) return
+                        val latest = mutableState.value
+                        if (!sourceMeasurementsUserRequested && (playbackBusy() || latest.autoMatching)) return
+                        val sourceIds = if (onlyLine != null) listOf(onlyLine.sourceId) else latest.sourceBindings
+                            .filter { it.subjectId == detail.subject.id }.map { it.catalog.sourceId }.distinct()
+                        // Work samples remain source-specific; an episode request never borrows another episode.
+                        val targets = linkedMapOf<String, SourceMeasurementTarget>()
+                        val episodes = if (episodeId != null) latest.detail?.episodes.orEmpty().filter { it.id == episodeId }
+                            else latest.detail?.episodes.orEmpty().sortedBy { it.kind != AnimeEpisodeKind.MAIN }
+                        for (episode in episodes) {
+                            if (targets.keys.containsAll(sourceIds)) break
+                            val options = confirmedPlaybackLines(episode.id, latest).filter {
+                                it.sourceId in sourceIds && it.sourceId !in targets &&
+                                    (onlyLine == null || samePlaybackLine(it, onlyLine))
                             }
-                            report(sourceId, if (completed) AnimeSourceMeasurementPhase.COMPLETE
-                                else AnimeSourceMeasurementPhase.UNAVAILABLE, failure)
+                            fairPlaybackOptions(detail.subject.id, episode.id, options).groupBy { it.sourceId }.forEach { (id, lines) ->
+                                val ordered = if (sourceMeasurementsUserRequested) lines else lines.sortedByDescending {
+                                    playbackMeasurements(episode.id, it)?.mediaObservedAt != null
+                                }
+                                targets[id] = SourceMeasurementTarget(episode.id, ordered.take(2))
+                            }
                         }
-                    } }
+                        val pending = targets.filterKeys { it !in scheduled }.mapValues { (_, target) ->
+                            val cachedSuccess = !sourceMeasurementsUserRequested && target.lines.any {
+                                playbackMeasurements(target.episodeId, it)?.mediaVerified == true
+                            }
+                            target.copy(lines = if (cachedSuccess) emptyList() else target.lines.filter {
+                                sourceMeasurementsUserRequested || playbackMeasurements(target.episodeId, it)?.mediaObservedAt == null
+                            })
+                        }.filterValues { it.lines.isNotEmpty() }
+                        val previous = latest.sourceMeasurements?.sources.orEmpty()
+                        val progress = sourceIds.associateWith { id ->
+                            previous[id]?.takeIf { id in scheduled } ?: run {
+                                val target = targets[id]
+                                val extension = latest.sourceExtensions.firstOrNull { it.id == id }
+                                val reason = when {
+                                    target != null -> null
+                                    extension != null && (!extension.installed || !extension.enabled) -> "来源已停用，启用后可测速。"
+                                    latest.sourceCatalogErrors[id] != null -> "来源目录读取失败，展开来源可重试。"
+                                    latest.sourceCatalogs.none { it.title.sourceId == id } -> "来源目录尚未就绪，读取完成后继续。"
+                                    episodeId == null -> "尚无已确认对应的剧集，不能用其他作品代测。"
+                                    else -> "本集尚无已确认的线路，不能用其他集代测。"
+                                }
+                                AnimeSourceMeasurementProgress(target?.episodeId, when {
+                                    target == null -> AnimeSourceMeasurementPhase.UNAVAILABLE
+                                    id in pending -> AnimeSourceMeasurementPhase.QUEUED
+                                    else -> AnimeSourceMeasurementPhase.COMPLETE
+                                }, reason, target?.lines.orEmpty())
+                            }
+                        }
+                        mutableState.update { it.copy(sourceMeasurements = AnimeSourceMeasurementBatch(
+                            detail.subject.id, episodeId, running = true, sources = progress)) }
+                        pending.forEach { (sourceId, target) ->
+                            scheduled += sourceId
+                            launch {
+                                val measured = mutableListOf<AnimeEpisodeOption>()
+                                var failure: String? = null
+                                for (option in target.lines) {
+                                    if (!current()) return@launch
+                                    // Release between lines so queued sources get their first sample before a fallback.
+                                    val (probe, reason) = permits.withPermit {
+                                        if (!current()) return@withPermit null to "此线路检查已停止。"
+                                        report(sourceId, AnimeSourceMeasurementPhase.RUNNING)
+                                        try { measureLine(target, option) }
+                                        catch (cancel: CancellationException) {
+                                            currentCoroutineContext().ensureActive()
+                                            null to "此线路检查已中止，可重新测速。"
+                                        } catch (_: Exception) { null to "此线路检查未完成，可重新测速。" }
+                                    }
+                                    if (probe != null) { measured += option; failure = null } else failure = reason
+                                    if (probe?.media?.verified == true) break
+                                }
+                                report(sourceId, if (measured.isNotEmpty()) AnimeSourceMeasurementPhase.COMPLETE
+                                    else AnimeSourceMeasurementPhase.UNAVAILABLE, failure,
+                                    lines = measured.takeIf { it.isNotEmpty() })
+                            }
+                        }
+                    }
+                    sourceMeasurementsEnqueue = ::enqueue
+                    enqueue()
+                    // A manual click also owns sources that finish associating during this batch.
+                    if (sourceMeasurementsUserRequested && mutableState.value.sourceAggregationRunning) {
+                        mutableState.first { !current() || !it.sourceAggregationRunning }
+                        enqueue()
+                    }
                 }
             } finally {
                 if (current()) {
                     sourceMeasurementsJob = null
-                    val rescan = sourceMeasurementsRescan
-                    sourceMeasurementsRescan = false
+                    sourceMeasurementsEnqueue = null
+                    sourceMeasurementsUserRequested = false
                     mutableState.update { it.copy(sourceMeasurements = it.sourceMeasurements?.copy(running = false)) }
-                    if (rescan) measureSources(episodeId, force = false)
                 }
             }
         }
@@ -2064,7 +2096,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val job = sourceMeasurementsJob
         if (job == null && !clearProgress) return
         ++sourceMeasurementsGeneration
-        sourceMeasurementsRescan = false
+        sourceMeasurementsEnqueue = null
+        sourceMeasurementsUserRequested = false
         sourceMeasurementsJob = null
         job?.cancel()
         mutableState.update { state -> state.copy(sourceMeasurements = if (clearProgress) null else
@@ -2260,16 +2293,16 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         attempted: Set<String> = emptySet(), startupRefresh: ActivePlayback? = null) {
         val detail = mutableState.value.detail ?: return
         val episode = detail.episodes.firstOrNull { it.id == episodeId } ?: return
-        cancelEpisodeSourceMeasurements()
-        val offered = (if (option == null) automaticPlaybackLines(episodeId) else confirmedPlaybackLines(episodeId))
-            .filterNot { optionKey(it) in attempted }
-        val options = if (option == null) fairPlaybackOptions(detail.subject.id, episodeId, offered,
-            preferContinuity = attempted.isEmpty()) else offered
+        if (!sourceMeasurementsUserRequested) cancelEpisodeSourceMeasurements()
+        val offered = automaticPlaybackLines(episodeId).filterNot { optionKey(it) in attempted }
+        val options = fairPlaybackOptions(detail.subject.id, episodeId, offered,
+            preferContinuity = attempted.isEmpty())
         val settings = mutableState.value.settings
+        val preferredHeight = settings.preferredSourceHeight
         val automaticIntent = option == null || startupRefresh?.automaticIntent == true
         val manualOption = if (automaticIntent) null else option
-        val bounded = option == null || startupRefresh != null
-        val canFallback = automaticIntent && settings.automaticSourceRecovery && settings.automaticRecoveryAttempts > 0
+        val canFallback = settings.automaticSourceRecovery && settings.automaticRecoveryAttempts > 0
+        val bounded = option == null || startupRefresh != null || canFallback
         val refreshSnapshot = startupRefresh?.let { owner ->
             playerInstance?.state?.value?.takeIf { belongsTo(owner, it) }
         }
@@ -2277,9 +2310,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val selected = if (option == null) options.firstOrNull() else currentPlaybackLine(episodeId, option)
             ?.takeIf { canAttemptPlaybackLine(episodeId, it) }
         if (selected == null) {
-            if (startupRefresh != null && canFallback) {
-                autoAssociateAndPlay(episodeId, attempted = attempted, lastFailure = refreshSnapshot?.error?.let {
-                    AnimePlaybackFailure(startupRefresh.option.sourceId, startupRefresh.option.sourceName, "播放视频", it)
+            if (canFallback) {
+                autoAssociateAndPlay(episodeId, attempted = attempted, lastFailure = startupRefresh?.let { previous ->
+                    refreshSnapshot?.error?.let {
+                        AnimePlaybackFailure(previous.option.sourceId, previous.option.sourceName, "播放视频", it)
+                    }
                 })
                 return
             }
@@ -2301,16 +2336,26 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             playbackTarget = AnimePlaybackTarget(episode, manualOption, selected.sourceName)) }
         resolveJob = scope.launch {
             var resolutionCompleted = false
+            var manualFailed = false
+            var preparedAdopted = false
             val tried = attempted.toMutableSet()
             val rejected = mutableSetOf<String>()
             try {
                 library.awaitLoaded()
                 fun current() = generation == resolveGeneration && currentDetail(owner, detail.subject.id)
+                fun recoveryEnabled() = library.state.value.settings.let {
+                    it.automaticSourceRecovery && it.automaticRecoveryAttempts > 0
+                }
                 suspend fun attempt(candidate: AnimeEpisodeOption): Result<ResolvedPlaybackOption> {
                     var admissionKey: PlaybackHistoryKey? = null
                     var admissionStillCurrent: (() -> Boolean)? = null
                     val key = optionKey(candidate)
-                    fun refreshAllowed() = startupRefresh == null || library.state.value.settings.automaticRecoveryAttempts > 0
+                    val refreshing = startupRefresh != null && samePlaybackLine(candidate, startupRefresh.option)
+                    fun refreshAllowed() = when {
+                        refreshing -> library.state.value.settings.automaticRecoveryAttempts > 0
+                        candidate != selected || attempted.isNotEmpty() || startupRefresh != null -> recoveryEnabled()
+                        else -> true
+                    }
                     fun checkRefreshPermission() {
                         if (!refreshAllowed()) throw AnimeSourceException(candidate.sourceId, AnimeSourceStage.RESOLVE,
                             "已关闭自动恢复，可手动重试本集。")
@@ -2332,13 +2377,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         // Only admitted attempts count; exhausted-budget candidates remain untried.
                         val historyKey = playbackHistoryKey(detail.subject.id, episodeId, candidate)
                             ?: error("此来源的网络线路不可用，请检查来源设置。")
-                        if (startupRefresh != null && (active !== startupRefresh || startupRefresh.sourceRevision != revision ||
+                        if (refreshing && startupRefresh != null && (active !== startupRefresh || startupRefresh.sourceRevision != revision ||
                                 startupRefresh.asset.sourceRevision != discoveryRevision || startupRefresh.asset.route != historyKey.route)) {
                             throw DownloadRouteException("原播放线路或来源已变化，请手动重试。")
                         }
                         admissionKey = historyKey
                         admissionStillCurrent = {
                             current() && refreshAllowed() &&
+                                mutableState.value.settings.preferredSourceHeight == preferredHeight &&
                                 revision == sourceRevision(candidate.sourceId) &&
                                 discoveryRevision == discoverySourceRevision(candidate.sourceId) &&
                                 historyKey.route == playbackHistoryRoute(candidate.sourceId) &&
@@ -2364,8 +2410,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         }
                         val confirmed = currentPlaybackLine(episodeId, line)
                             ?: error("本集来源关联已变化，请重新选集。")
-                        val asset = if (refreshResolutionId == null) {
-                            preferredSourceAsset(resolved, confirmed.episode, mutableState.value.settings.preferredSourceHeight)
+                        val asset = if (!refreshing || refreshResolutionId == null) {
+                            preferredSourceAsset(resolved, confirmed.episode, preferredHeight)
                         } else {
                             val resolution = resolved.resolutions.singleOrNull { it.id == refreshResolutionId }
                                 ?: throw AnimeSourceException(candidate.sourceId, AnimeSourceStage.RESOLVE,
@@ -2377,13 +2423,34 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             storePlaybackMeasurements(historyKey, confirmed) { it.copy(addressMs = elapsed,
                                 declaredQuality = declaredPlaybackQuality(resolved), addressObservedAt = wallTimeMillis()) }
                         }
-                        return ResolvedPlaybackOption(confirmed, asset, revision)
+                        // A fresh, matching decoder already produced the startup frame. Do not
+                        // delay its adoption with another request or fabricate a network sample.
+                        if (available != null && freshPreparation(available) &&
+                            available.decoderAsset?.copy(title = asset.title, resolutions = asset.resolutions) == asset) {
+                            check(admissionStillCurrent?.invoke() == true) { "播放请求、画质或来源已变化。" }
+                            return ResolvedPlaybackOption(confirmed, asset, revision, mediaVerified = true)
+                        }
+                        val media = inspectAnimeMediaBeforePlayback(asset)
+                        check(admissionStillCurrent?.invoke() == true) { "播放请求、画质或来源已变化。" }
+                        if (!refreshing || refreshResolutionId == null) {
+                            storePlaybackMeasurements(historyKey, confirmed) { it.copy(
+                                mediaObservedAt = media.observedAt, mediaPreferredHeight = preferredHeight,
+                                mediaHttpStatus = media.httpStatus, mediaVerified = media.verified,
+                                mediaFailure = media.failure, mediaQuality = media.quality,
+                                mediaSampleBytesPerSecond = media.sampleBytesPerSecond, mediaSampleMs = media.elapsedMs) }
+                        }
+                        if (media.verified == false) {
+                            val incident = AnimePlaybackFailure(candidate.sourceId, candidate.sourceName,
+                                "检查媒体", media.failure ?: "当前地址未提供可读取的视频。")
+                            throw PlaybackResolutionException(incident, IllegalStateException(incident.reason))
+                        }
+                        return ResolvedPlaybackOption(confirmed, asset, revision, media.verified)
                     }
                     suspend fun resolveOnCurrentRoute(): ResolvedPlaybackOption {
                         try { return resolveOption() }
                         catch (failure: Exception) {
                             currentCoroutineContext().ensureActive()
-                            if (startupRefresh != null) throw failure
+                            if (refreshing) throw failure
                             val previousRoute = admissionKey?.route ?: throw failure
                             val currentRoute = playbackHistoryRoute(candidate.sourceId) ?: throw failure
                             if (!current() || previousRoute == currentRoute) throw failure
@@ -2412,7 +2479,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 failure.message ?: "未能取得本集播放地址。"
                             else -> "未能取得本集播放地址。"
                         }
-                        val incident = AnimePlaybackFailure(candidate.sourceId, candidate.sourceName,
+                        val incident = (failure as? PlaybackResolutionException)?.failure ?: AnimePlaybackFailure(candidate.sourceId, candidate.sourceName,
                             (failure as? TvtFunPlaybackException)?.playbackPhase?.label ?: "取播放地址",
                             diagnostic, unsupported = failure is LanercMediaSniffingUnsupported)
                         if (current()) {
@@ -2426,39 +2493,90 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         Result.failure(PlaybackResolutionException(incident, failure))
                     }
                 }
-                val choices = (if (canFallback && startupRefresh == null) options else listOf(selected)).toMutableList()
-                var resolvedChoice: Result<ResolvedPlaybackOption>? = null
-                val backup = choices.firstOrNull { it.sourceId != selected.sourceId }
-                    ?: choices.firstOrNull { it.sourceId == "anime-age" && it.episode.group != selected.episode.group &&
-                        it.catalog.id == selected.catalog.id && it.catalog.url == selected.catalog.url }
-                if (backup != null && available == null) {
-                    choices.remove(selected)
-                    resolvedChoice = coroutineScope {
-                        val primary = async { attempt(selected) }
-                        val early = withTimeoutOrNull(1_500L) { primary.await() }
-                        if (early != null) return@coroutineScope early
-                        if (!current() || monotonicTimeMillis() >= autoPlaybackDeadline) return@coroutineScope primary.await()
-                        choices.remove(backup)
-                        mutableState.update { it.copy(playbackTarget = it.playbackTarget?.copy(sourceName = null)) }
-                        val standby = async { attempt(backup) }
-                        select<Result<ResolvedPlaybackOption>> {
-                            primary.onAwait { result ->
-                                if (result.isSuccess) { standby.cancel(); result } else standby.await()
-                            }
-                            standby.onAwait { result ->
-                                if (result.isSuccess) { primary.cancel(); result } else primary.await()
-                            }
+                val resolvedSelection = coroutineScope<Result<ResolvedPlaybackOption>> {
+                    val results = Channel<Pair<AnimeEpisodeOption, Result<ResolvedPlaybackOption>>>(Channel.UNLIMITED)
+                    val jobs = mutableListOf<Job>()
+                    val queued = mutableListOf<AnimeEpisodeOption>()
+                    val scheduled = attempted.toMutableSet()
+                    val runningSources = mutableSetOf<String>()
+                    val manualFirst = manualOption != null && startupRefresh == null || available != null
+                    var lastFailure: Result<ResolvedPlaybackOption>? = null
+                    var unchecked: ResolvedPlaybackOption? = null
+                    var uncheckedUntil = 0L
+                    fun enqueue(candidate: AnimeEpisodeOption, retry: Boolean = false) {
+                        if (retry || scheduled.add(optionKey(candidate))) queued += candidate
+                    }
+                    fun addAvailableSources() {
+                        if (!canFallback || !recoveryEnabled() || manualFirst && !manualFailed) return
+                        fairPlaybackOptions(detail.subject.id, episodeId, automaticPlaybackLines(episodeId),
+                            preferContinuity = attempted.isEmpty()).forEach { enqueue(it) }
+                    }
+                    fun startAvailable() {
+                        while (current() && runningSources.size < ANIME_SOURCE_PARALLELISM &&
+                            (!bounded || monotonicTimeMillis() < autoPlaybackDeadline)) {
+                            val index = queued.indexOfFirst { it.sourceId !in runningSources }
+                            if (index < 0) break
+                            val candidate = queued.removeAt(index)
+                            runningSources += candidate.sourceId
+                            jobs += launch { results.send(candidate to attempt(candidate)) }
+                        }
+                        if (runningSources.size > 1 || manualFailed) {
+                            resolvingSourceId = null
+                            mutableState.update { it.copy(playbackTarget = it.playbackTarget?.copy(sourceName = null)) }
                         }
                     }
-                }
-                for (candidate in choices) {
-                    if (!current()) return@launch
-                    if (resolvedChoice?.isSuccess == true || (bounded && monotonicTimeMillis() >= autoPlaybackDeadline)) break
-                    resolvingSourceId = candidate.sourceId
-                    mutableState.update { it.copy(playbackTarget = it.playbackTarget?.copy(sourceName = candidate.sourceName)) }
-                    resolvedChoice = attempt(candidate)
-                }
-                val resolvedSelection = resolvedChoice?.getOrThrow() ?: error("对应片源暂不可用。")
+                    fun retryable(failure: Throwable?): Boolean {
+                        val incident = failure as? PlaybackResolutionException ?: return false
+                        if (incident.failure.unsupported || incident.failure.stage == "检查媒体") return false
+                        val cause = incident.cause
+                        if (cause is DownloadRouteException || cause is LanercCapabilityException ||
+                            cause is CancellationException) return false
+                        return if (cause is AnimeSourceException) cause.retryAfterSeconds == 0L &&
+                            (cause.httpStatus == null || cause.httpStatus in 500..599) else cause is IllegalStateException
+                    }
+                    // A deliberate selection or an already prepared episode gets the first
+                    // attempt. A failure then joins the bounded race with other sources.
+                    enqueue(selected, retry = startupRefresh != null)
+                    if (!manualFirst && canFallback && recoveryEnabled()) options.forEach { enqueue(it) }
+                    try {
+                        startAvailable()
+                        while (runningSources.isNotEmpty() && current()) {
+                            val now = monotonicTimeMillis()
+                            val remaining = if (bounded) autoPlaybackDeadline - now else Long.MAX_VALUE
+                            val wait = if (unchecked != null) minOf(remaining, uncheckedUntil - now) else remaining
+                            if (wait <= 0L) break
+                            val completed = if (wait == Long.MAX_VALUE) results.receive()
+                                else withTimeoutOrNull(wait) { results.receive() } ?: break
+                            val (candidate, result) = completed
+                            runningSources -= candidate.sourceId
+                            val value = result.getOrNull()
+                            if (value != null) {
+                                if (value.mediaVerified == true || manualFirst && !manualFailed) return@coroutineScope result
+                                // Servers which do not expose a bounded range remain eligible.
+                                // Briefly prefer a readable media sample, never wait for the slowest site.
+                                if (unchecked == null) {
+                                    unchecked = value
+                                    uncheckedUntil = monotonicTimeMillis() + 600L
+                                }
+                            } else {
+                                lastFailure = result
+                                if (manualFirst && samePlaybackLine(candidate, selected)) manualFailed = true
+                            }
+                            addAvailableSources()
+                            if (value == null && canFallback && recoveryEnabled() && startupRefresh == null &&
+                                retryable(result.exceptionOrNull())) {
+                                val key = playbackHistoryKey(detail.subject.id, episodeId, candidate)
+                                if (key != null && playbackAddressRetries.add(key)) enqueue(candidate, retry = true)
+                            }
+                            startAvailable()
+                        }
+                        unchecked?.let { Result.success(it) } ?: lastFailure
+                            ?: Result.failure(IllegalStateException("对应片源暂不可用。"))
+                    } finally {
+                        jobs.forEach { it.cancel() }
+                        results.cancel()
+                    }
+                }.getOrThrow()
                 val (resolvedOption, resolved, revision) = resolvedSelection
                 resolutionCompleted = true
                 if (!current()) return@launch
@@ -2475,15 +2593,21 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 val choice = PendingPlayback(detail, episode, resolvedOption, resolved, position, generation, revision,
                     playWhenReady = refreshSnapshot?.playWhenReady
                         ?: liveSnapshot?.takeIf { it.phase == AnimePlayerPhase.READY }?.playWhenReady ?: true,
-                    resolutionId = refreshResolutionId, useSourceStart = startupRefresh == null,
-                    automaticIntent = automaticIntent, bypassMediaCache = startupRefresh != null)
+                    resolutionId = refreshResolutionId.takeIf { startupRefresh != null &&
+                        samePlaybackLine(resolvedOption, startupRefresh.option) }, useSourceStart = startupRefresh == null,
+                    automaticIntent = automaticIntent || manualFailed,
+                    bypassMediaCache = startupRefresh != null && samePlaybackLine(resolvedOption, startupRefresh.option),
+                    preferredHeight = preferredHeight)
                 // Default same-episode candidates have already passed work/edition/episode checks.
                 // Keep the logical episode position on a best-effort basis; only an explicit line change needs a choice.
-                if (manualOption != null && startupRefresh == null && position > 0L && previousAsset != null && previousAsset != resolved.id) {
+                if (manualOption != null && !manualFailed && startupRefresh == null && position > 0L && previousAsset != null && previousAsset != resolved.id) {
                     pending = choice
                     mutableState.update { it.copy(resolving = false, pendingPlayback = AnimePlaybackChoice(
                         episode, resolvedOption, position, live?.asset?.sourceId ?: previous?.sourceId.orEmpty())) }
                 } else startPlayback(choice)
+                preparedAdopted = listOfNotNull(available?.decoderAsset, available?.cacheAsset).any {
+                    it.copy(title = resolved.title, resolutions = resolved.resolutions) == resolved
+                }
             } catch (cancel: CancellationException) {
                 if (generation == resolveGeneration && currentDetail(owner, detail.subject.id)) {
                     failPlaybackTarget("播放准备中断，请重试。")
@@ -2493,17 +2617,22 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 if (generation == resolveGeneration && currentDetail(owner, detail.subject.id)) {
                     val incident = (failure as? PlaybackResolutionException)?.failure
                     val latestSettings = library.state.value.settings
-                    val stillCanFallback = startupRefresh == null ||
-                        latestSettings.automaticSourceRecovery && latestSettings.automaticRecoveryAttempts > 0
+                    val stillCanFallback = latestSettings.automaticSourceRecovery && latestSettings.automaticRecoveryAttempts > 0
                     if (!resolutionCompleted && canFallback && stillCanFallback) {
-                        // Default playback can recover from a previously associated but now unavailable
-                        // source. Explicit user-selected options never silently switch sources.
+                        // Continue progressive same-episode discovery after this batch, including
+                        // a failed one-time manual choice. Explicit recovery opt-outs still apply.
                         autoAssociateAndPlay(episodeId, attempted = tried + rejected, lastFailure = incident)
                         return@launch
                     }
                     failPlaybackTarget(failure.message ?: "未能取得本集播放地址。", failure = incident)
                 }
-            } finally { if (generation == resolveGeneration) resolvingSourceId = null }
+            } finally {
+                if (!preparedAdopted && available != null) {
+                    listOfNotNull(available.decoderAsset, available.cacheAsset).distinctBy { it.id }
+                        .forEach { playerInstance?.discardStartup(it) }
+                }
+                if (generation == resolveGeneration) resolvingSourceId = null
+            }
         }
     }
 
@@ -2559,6 +2688,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private fun validCandidate(choice: PendingPlayback): Boolean =
         choice.localMedia != null || sources.provider(choice.option.sourceId) != null && sourceRevision(choice.option.sourceId) == choice.sourceRevision &&
             (!choice.bypassMediaCache || library.state.value.settings.automaticRecoveryAttempts > 0) &&
+            (choice.preferredHeight == null || choice.preferredHeight == library.state.value.settings.preferredSourceHeight) &&
             choice.asset.sourceRevision == discoverySourceRevision(choice.option.sourceId) &&
             (choice.asset.expiresAt == null || choice.asset.expiresAt > wallTimeMillis()) &&
             choice.asset.route == playbackHistoryRoute(choice.option.sourceId) &&
@@ -2567,7 +2697,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private suspend fun startPlayback(choice: PendingPlayback, rememberPrevious: Boolean = true) {
         check(validCandidate(choice)) { "来源、网络路线或集数对应已变化，请重新解析。" }
         if (choice.generation != resolveGeneration) return
-        cancelEpisodeSourceMeasurements()
+        if (!sourceMeasurementsUserRequested) cancelEpisodeSourceMeasurements()
         try { saveCurrentPlayback() }
         catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) {
@@ -2810,7 +2940,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 prepareOnlineVideo(owner, snapshot, stableFor)
                 if (preparationTarget?.timelineGeneration?.let { it != snapshot.timelineGeneration } == true)
                     clearPreparation()
-                if (snapshot.isBuffering && sourceMeasurementsJob != null) cancelEpisodeSourceMeasurements()
+                if (snapshot.isBuffering && sourceMeasurementsJob != null && !sourceMeasurementsUserRequested)
+                    cancelEpisodeSourceMeasurements()
                 observePlaybackMeasurements(owner, snapshot, now, stableFor)
                 if (!owner.sourceReceiptSaved && owner.localMedia == null && snapshot.hasVideoTracks != false && stableFor >= 2_000L) {
                     rememberWorkingSource(owner, now)
@@ -2818,6 +2949,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 if (!owner.stableRecoveryReset && stableFor >= 30_000L && mutableState.value.playbackTarget == null) {
                     owner.stableRecoveryReset = true
                     sourceRecoveryWindowStarted = false
+                    playbackAddressRetries.clear()
                     playbackDiscoveryRetried = false
                     recoveryOptions.clear()
                 }
@@ -3108,7 +3240,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         // The saved count bounds retries of one media request in the player, not how many
         // independently verified same-episode candidates may be tried. Zero still opts out.
         if (settings.automaticRecoveryAttempts == 0) return
-        val canSwitchSource = owner.automaticIntent && settings.automaticSourceRecovery
+        val canSwitchSource = settings.automaticSourceRecovery
         val canRefreshLine = !playbackStartupRefreshUsed && playback.refreshSourceOnStartupFailure &&
             playback.firstFrameRendered == false && owner.asset.route == playbackHistoryRoute(owner.option.sourceId) &&
             owner.asset.sourceRevision == discoverySourceRevision(owner.option.sourceId) &&
@@ -3127,9 +3259,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         recoveryOptions += optionKey(owner.option)
         if (canRefreshLine) {
-            // A redeemed media URL can fail before the first frame and succeed on a fresh
-            // resolution. Retry exactly this line once, without converting a locked line
-            // into automatic source selection or renewing the recovery deadline.
+            // Refresh the original line once alongside available alternatives. Keep its
+            // exact quality only for that line; all work shares the same recovery deadline.
             playbackStartupRefreshUsed = true
             ++autoPlayGeneration
             autoPlayJob?.cancel()

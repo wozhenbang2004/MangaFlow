@@ -23,7 +23,7 @@ import dev.mangaflow.ui.motion.*
 
 /** Destinations share one retained surface and one policy editor. */
 internal enum class EnhancementPage(val title: String) {
-    QUALITY("画质"), FRAME("补帧"), PREPARATION("预处理"), STATUS("状态"),
+    QUALITY("画质"), FRAME("补帧"), PREPARATION("处理方式"), STATUS("状态"),
     QUALITY_OPTIONS("输出与策略"), FRAME_OPTIONS("补帧质量"), DISPLAY("观看时显示"),
     MODELS("画质模型"), MODEL_DETAIL("模型详情"), ENGINES("运行组件"),
     FRAME_ENGINES("补帧组件"), ENGINE_DETAIL("组件详情"), IMPORT("导入模型"),
@@ -136,11 +136,11 @@ internal fun EnhancementQuality(content: EnhancementContent, policy: Enhancement
             onChange(policy.copy(tier = tier,
                 preparation = if (anime && tier != QualityTier.ORIGINAL)
                     policy.preparation + PreparationMode.IMMEDIATE else policy.preparation))
-        }, description = if (anime) "画质档位，选择增强档位即启用即时增强" else "画质档位")
+        }, description = if (anime) "画质档位，选择增强档位即开启播放时增强" else "画质档位")
     EnhancementQuiet(when {
-        policy.tier == QualityTier.ORIGINAL -> if (anime) "保留片源画面，选择增强档位即可开启即时增强。" else "保留原图。"
+        policy.tier == QualityTier.ORIGINAL -> if (anime) "保留片源画面，选择增强档位即可开启播放时增强。" else "保留原图。"
         selectedTitle == null && policy.modelId != null -> "所选模型不可用，可重新选择；你的档位会保留。"
-        anime && PreparationMode.IMMEDIATE !in policy.preparation -> "即时增强已关闭，当前只使用提前处理的结果。"
+        anime && PreparationMode.IMMEDIATE !in policy.preparation -> "播放时增强已关闭，当前只使用提前处理的结果。"
         anime && selectedTitle != null -> "手动选用 $selectedTitle；输出倍率与补帧单独设置。"
         policy.tier == QualityTier.AUTO -> "依据已有测量和设备负载选择档位。"
         policy.tier == QualityTier.LIGHT -> "优先降低处理开销。"
@@ -148,7 +148,7 @@ internal fun EnhancementQuality(content: EnhancementContent, policy: Enhancement
         else -> "需要兼容的高质量模型，运行效果以实际观测为准。"
     })
     if (anime && policy.tier != QualityTier.ORIGINAL && PreparationMode.IMMEDIATE !in policy.preparation)
-        AnimeEnhancementNavigation(Icons.Outlined.PlayArrow, "开启即时增强", "使用当前${policy.tier.label}档位",
+        AnimeEnhancementNavigation(Icons.Outlined.PlayArrow, "开启播放时增强", "使用当前${policy.tier.label}档位",
             onClick = { onChange(policy.copy(preparation = policy.preparation + PreparationMode.IMMEDIATE)) })
     Spacer(Modifier.height(8.dp))
     AnimeEnhancementNavigation(Icons.Outlined.Memory, "画质模型",
@@ -206,19 +206,25 @@ internal fun AnimeEnhancementFrames(policy: EnhancementPolicy, inventory: Engine
     Text("目标帧率", style = MaterialTheme.typography.titleSmall)
     EnhancementChoices(FrameMode.entries, policy.frameMode,
         label = { if (it == FrameMode.ORIGINAL) "原始帧率" else it.label },
-        onSelect = { onChange(policy.copy(frameMode = it, detectScenes = true)) }, description = "补帧目标")
+        onSelect = { mode -> onChange(policy.copy(frameMode = mode, detectScenes = true,
+            preparation = if (mode != FrameMode.ORIGINAL) policy.preparation + PreparationMode.IMMEDIATE
+                else policy.preparation)) }, description = "补帧目标")
     if (policy.frameMode == FrameMode.CUSTOM) customFps()
-    val ready = inventory.engines.filter { it.supportsInterpolation &&
+    val ready = inventory.engines.filter { it.isFrameInterpolationEngine() &&
         it.readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.READY_FOR_TRIAL) }
     EnhancementQuiet(when {
         policy.frameMode == FrameMode.ORIGINAL -> "按文件原始帧率播放。"
         ready.isEmpty() -> "补帧组件尚未就绪，目标已保留。"
         ready.none { it.realtime && it.videoOutput == null } -> "当前支持离线补帧，可从离线任务打开处理后的版本。"
         policy.frameQuality != FrameQuality.BALANCED -> "实时补帧仅在均衡档开启；当前所选质量用于离线处理。"
-        PreparationMode.IMMEDIATE !in policy.preparation -> "在预处理中开启边播边增强，可使用实时补帧。"
+        PreparationMode.IMMEDIATE !in policy.preparation -> "播放时处理已关闭，补帧目标保留。"
         policy.frameMode == FrameMode.AUTO -> "按屏幕刷新率与片源帧率选择目标。"
         else -> "目标已保存，实际呈现帧率可在观看时显示。"
     })
+    if (policy.frameMode != FrameMode.ORIGINAL && policy.frameQuality == FrameQuality.BALANCED &&
+        PreparationMode.IMMEDIATE !in policy.preparation)
+        AnimeEnhancementNavigation(Icons.Outlined.PlayArrow, "开启播放时增强与补帧", "使用已选补帧目标",
+            onClick = { onChange(policy.copy(preparation = policy.preparation + PreparationMode.IMMEDIATE)) })
     Spacer(Modifier.height(8.dp))
     AnimeEnhancementNavigation(Icons.Outlined.Tune, "补帧质量", policy.frameQuality.label,
         onClick = onOpenQuality)
@@ -240,30 +246,66 @@ internal fun EnhancementFrameOptions(policy: EnhancementPolicy, onChange: (Enhan
 
 @Composable
 internal fun EnhancementPreparation(content: EnhancementContent, policy: EnhancementPolicy,
-    onChange: (EnhancementPolicy) -> Unit) {
+    inventory: EngineInventory, onChange: (EnhancementPolicy) -> Unit, currentIssue: String? = null) {
     val anime = content == EnhancementContent.ANIME
-    PreparationMode.entries.forEach { mode ->
-        val label = when (mode) {
-            PreparationMode.IMMEDIATE -> if (anime) "边播边增强" else "当前页即时增强"
-            PreparationMode.SMART -> "智能预处理"
-            PreparationMode.COMPLETE -> "完整预处理"
-        }
-        val icon = when (mode) {
-            PreparationMode.IMMEDIATE -> Icons.Outlined.PlayCircleOutline
-            PreparationMode.SMART -> Icons.Outlined.AutoAwesome
-            PreparationMode.COMPLETE -> Icons.Outlined.DownloadForOffline
-        }
-        SettingsToggle(label, mode in policy.preparation, icon, onCheckedChange = { enabled ->
-            onChange(policy.copy(preparation = if (enabled) policy.preparation + mode else policy.preparation - mode))
-        })
-        Text(when (mode) {
-            PreparationMode.IMMEDIATE -> if (anime) "使用兼容的实时画质增强与补帧。" else "原图先显示，增强完成后复用结果。"
-            PreparationMode.SMART -> if (!anime) "优先准备即将阅读的页面。"
-                else if (platformKind == PlatformKind.ANDROID) "兼容片源可提前准备 5–15 秒画面。"
-                else "优先使用已准备的增强版本。"
-            PreparationMode.COMPLETE -> if (anime) "使用完整增强版本；在离线任务中发起处理。"
-                else "按当前资源预算准备整章增强结果。"
-        }, Modifier.padding(start = 34.dp, bottom = 8.dp), style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    fun setMode(mode: PreparationMode, enabled: Boolean) {
+        onChange(policy.copy(preparation = if (enabled) policy.preparation + mode else policy.preparation - mode))
     }
+    if (!anime) {
+        val selected = when {
+            PreparationMode.SMART in policy.preparation -> PreparationMode.SMART
+            PreparationMode.IMMEDIATE in policy.preparation -> PreparationMode.IMMEDIATE
+            else -> null
+        }
+        Text("阅读时增强", style = MaterialTheme.typography.titleSmall)
+        EnhancementChoices(listOf(null, PreparationMode.IMMEDIATE, PreparationMode.SMART), selected,
+            label = { when (it) {
+                PreparationMode.IMMEDIATE -> "当前页"
+                PreparationMode.SMART -> "提前增强"
+                else -> "仅用已备"
+            } }, onSelect = { mode ->
+                val preparation = policy.preparation - PreparationMode.IMMEDIATE - PreparationMode.SMART
+                onChange(policy.copy(preparation = if (mode == null) preparation else preparation + mode))
+            }, description = "阅读时的增强处理方式")
+        EnhancementQuiet(if (policy.tier == QualityTier.ORIGINAL) "当前使用原图；选择增强档位后按此方式处理。"
+            else when (selected) {
+                PreparationMode.IMMEDIATE -> "原图先显示，只处理正在阅读的页面。"
+                PreparationMode.SMART -> "先增强当前页，再准备接下来要看的页面；原图先显示。"
+                else -> "不生成新的增强图片；已有增强结果仍可直接显示。"
+            })
+        return
+    }
+
+    Text("播放过程中", style = MaterialTheme.typography.titleSmall)
+    if (platformKind !in setOf(PlatformKind.ANDROID, PlatformKind.DESKTOP)) {
+        EnhancementQuiet("当前平台尚未接入播放时增强与提前处理。")
+        return
+    }
+    SettingsToggle("播放时增强与补帧", PreparationMode.IMMEDIATE in policy.preparation,
+        Icons.Outlined.PlayCircleOutline, onCheckedChange = { setMode(PreparationMode.IMMEDIATE, it) })
+    EnhancementQuiet(when {
+        policy.tier == QualityTier.ORIGINAL && policy.frameMode == FrameMode.ORIGINAL ->
+            "先在画质或补帧页选择目标，开启后处理正在播放的画面。"
+        PreparationMode.IMMEDIATE !in policy.preparation -> "已关闭实时处理；仍可使用提前准备或离线增强的结果。"
+        else -> "按画质和补帧页的选择处理当前画面，使用兼容的实时组件。"
+    })
+
+    Spacer(Modifier.height(8.dp))
+    SettingsToggle("提前增强后续片段", PreparationMode.SMART in policy.preparation,
+        Icons.Outlined.AutoAwesome, onCheckedChange = { setMode(PreparationMode.SMART, it) })
+    val onlineEngines = if (platformKind == PlatformKind.ANDROID)
+        setOf(EnhancementEngineIds.ANDROID_CUGAN_VIDEO, EnhancementEngineIds.ANDROID_VIDEO_ONNX)
+        else setOf(EnhancementEngineIds.VIDEOJANAI)
+    val compatible = inventory.models.any { model ->
+        model.engineId in onlineEngines && EngineContent.VIDEO in model.contents &&
+            model.nativeScale == policy.scale && (policy.modelId == null || model.id == policy.modelId)
+    }
+    EnhancementQuiet(when {
+        policy.tier == QualityTier.ORIGINAL -> "当前使用原画；选择增强档位后才会准备增强片段。"
+        PreparationMode.SMART !in policy.preparation -> "已关闭提前处理；实时增强仍按上方设置运行。"
+        currentIssue != null -> "当前：$currentIssue"
+        !compatible -> if (policy.modelId == null) "尚无兼容的已安装模型；可在画质模型中选择，当前继续实时处理或原画。"
+            else "所选模型不提供此倍率的在线片段处理；可更换模型，或使用实时／离线增强。"
+        else -> "播放稳定后提前增强后续片段，准备好后自动使用；缓冲或设备负载较高时暂缓。"
+    })
 }

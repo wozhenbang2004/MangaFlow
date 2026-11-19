@@ -881,23 +881,33 @@ internal class AndroidAnimePlayer(
             var opening: AndroidLiveRifeVulkan? = null
             try {
                 publishMotion(AnimeVideoEnhancementPhase.WAITING, "原帧率可播，正在确认 Vulkan 和当前片源")
-                val video = withTimeoutOrNull(10_000L) {
+                val dimensions = withTimeoutOrNull(10_000L) {
                     state.first { it.videoWidth != null && it.videoHeight != null && it.firstFrameRendered == true }
                 }
                     ?: error("尚未取得解码尺寸")
+                if (!current()) return@launch
+                AndroidLiveRifeVulkan.memoryBudget(checkNotNull(dimensions.videoWidth), checkNotNull(dimensions.videoHeight))
+                // Some streams publish their format rate after the first decoded frame.
+                // Keep the original video playing while the same live request waits for it.
+                val video = if (wanted.automatic && dimensions.sourceFps?.let { it.isFinite() && it > 0.0 } != true) {
+                    publishMotion(AnimeVideoEnhancementPhase.WAITING, "等待片源帧率，原帧率继续播放")
+                    state.first { !current() || it.firstFrameRendered == true &&
+                        it.videoWidth != null && it.videoHeight != null &&
+                        it.sourceFps?.let { rate -> rate.isFinite() && rate > 0.0 } == true }
+                } else dimensions
+                if (!current()) return@launch
                 val width = checkNotNull(video.videoWidth)
                 val height = checkNotNull(video.videoHeight)
-                val sourceRate = video.sourceFps
+                val sourceRate = video.sourceFps?.takeIf { it.isFinite() && it > 0.0 }
                 val target = if (wanted.automatic) {
                     val source = sourceRate ?: error("尚未取得片源帧率，请选择明确的补帧目标")
                     val display = displayRefreshHz() ?: error("尚未取得当前屏幕刷新率，请选择明确的补帧目标")
                     minOf(source * 2, display, 120.0)
                 } else wanted.targetFps
-                require(width.toLong() * height <= AndroidLiveRifeProgram.MAX_PIXELS) { "实时补帧试用支持最高 720p" }
                 require(sourceRate == null || sourceRate <= 60.0 && (target == null || target > sourceRate)) {
                     "实时补帧需要高于当前源帧率的目标，并支持最高 60 FPS 的片源"
                 }
-                withContext(Dispatchers.IO) { opening = AndroidLiveRifeVulkan.open(context, wanted.model) }
+                withContext(Dispatchers.IO) { opening = AndroidLiveRifeVulkan.open(context, wanted.model, width, height) }
                 if (!current()) return@launch
                 val active = checkNotNull(opening)
                 motionModel = active

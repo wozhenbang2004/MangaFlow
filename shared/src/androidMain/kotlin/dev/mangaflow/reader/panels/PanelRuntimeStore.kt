@@ -924,7 +924,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
             PanelRuntimeId.ONNX to PanelRuntimeSpec(PanelRuntimeId.ONNX, "高精度与排序运行库", "1.31.1", "运行 Koharu 和 Inkwell，两个模型共用此运行库", "MIT"),
             PanelRuntimeId.QUICKJS to PanelRuntimeSpec(PanelRuntimeId.QUICKJS, "来源脚本引擎", "1.0.18",
                 "供漫画和动漫来源脚本使用，已随应用提供，无需单独下载", "Apache-2.0 / MIT", bundled = true),
-            PanelRuntimeId.CUGAN to PanelRuntimeSpec(PanelRuntimeId.CUGAN, "ncnn Vulkan 组件", "1.1.0-ncnn20261020",
+            PanelRuntimeId.CUGAN to PanelRuntimeSpec(PanelRuntimeId.CUGAN, "ncnn Vulkan 组件", "1.2.0-ncnn20261020",
                 "供 Real-CUGAN 和移动端 RIFE 使用，仅下载当前应用架构", "BSD-3-Clause / MIT"),
         )
         private fun libraryNames(id: PanelRuntimeId): Set<String> = when (id) {

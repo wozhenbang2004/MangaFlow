@@ -35,7 +35,9 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
     private val lock = SynchronizedObject()
     private val sourceLocks = mutableMapOf<String, Mutex>()
     private val running = mutableMapOf<String, () -> Unit>()
-    private val slots = Semaphore(2)
+    private val slots = Semaphore(4)
+    // Catalogue work cannot occupy every slot needed to resolve a playback candidate.
+    private val backgroundSlots = Semaphore(2)
 
     fun invalidate(id: String) {
         val cancel = synchronized(lock) { running[id] }
@@ -62,7 +64,10 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
     private suspend fun execute(bundle: LanercInstalledPackage, descriptor: LanercSourceDescriptor,
         method: String, args: JSONArray, networkAllowed: Boolean): LanercInvocation = withContext(Dispatchers.Default) {
         try {
-            withTimeout(60_000L) { slots.withPermit {
+            withTimeout(60_000L) {
+                val background = method != "play"
+                if (background) backgroundSlots.acquire()
+                try { slots.withPermit {
                 prepareJavascriptEngine(context)
                 val operationContext = currentCoroutineContext()
                 operationContext.ensureActive()
@@ -200,7 +205,8 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                     runCatching { if (!js.isClosed) js.interruptEvaluation() }
                     js.close()
                 }
-            } }
+                } } finally { if (background) backgroundSlots.release() }
+            }
         } catch (_: TimeoutCancellationException) {
             throw LanercCapabilityException("来源响应超时，已停止本次请求，可重试或切换来源。")
         } catch (cancelled: CancellationException) { throw cancelled }

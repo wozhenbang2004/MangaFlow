@@ -36,7 +36,7 @@ SPECS = (
         "licenses": ("Tapline-MPL-2.0.txt", "Steam-Component-ThirdPartyNotices.txt"),
     },
     {
-        "id": "CUGAN", "version": "1.1.0-ncnn20261020", "aar": "mangaflow-cugan-1.1.0.aar",
+        "id": "CUGAN", "version": "1.2.0-ncnn20261020", "aar": "mangaflow-cugan-1.2.0.aar",
         "libraries": ("libmangaflow_cugan.so",),
         "licenses": ("ncnn-BSD-3-Clause.txt", "Real-CUGAN-ncnn-MIT.txt", "Real-CUGAN-MIT.txt",
                      "RIFE-ncnn-MIT.txt", "RIFE-MIT.txt"),

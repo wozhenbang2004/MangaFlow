@@ -126,9 +126,11 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
     if (EnhancementMetric.MOTION_STATUS in metrics) {
         val value = when {
             playback == null -> "补帧 —"
-            motion?.phase == AnimeVideoEnhancementPhase.FAILED -> "补帧异常"
-            motion?.phase == AnimeVideoEnhancementPhase.UNAVAILABLE -> "补帧不可用"
+            motion?.phase == AnimeVideoEnhancementPhase.FAILED || motion?.phase == AnimeVideoEnhancementPhase.UNAVAILABLE ->
+                motionProblemLabel(motion?.detail)
             motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && flowing && motion.synthesizedFrames > 0L -> "补帧处理中"
+            motion?.phase == AnimeVideoEnhancementPhase.WAITING && motion.detail?.contains("等待片源帧率") == true -> "补帧 · 等待源帧率"
+            motion?.phase == AnimeVideoEnhancementPhase.CONFIGURED -> "补帧 · 等待输出"
             motion != null && motion.phase != AnimeVideoEnhancementPhase.OFF -> "补帧待运行"
             else -> "未实时补帧"
         }
@@ -186,4 +188,17 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
         add(EnhancementReadout(EnhancementMetric.PREPARED, value,
             listOfNotNull("前方预处理片段，$value；与播放缓冲分别计量", playback?.preparedVideoIssue).joinToString("，")))
     }
+}
+
+private fun motionProblemLabel(detail: String?): String = "补帧 · " + when {
+    detail.isNullOrBlank() -> "暂不可用"
+    detail.contains("1080p") -> "输入超过 1080p"
+    detail.contains("纹理尺寸") -> "超出纹理上限"
+    detail.contains("资源不足") -> "资源暂不足"
+    detail.contains("推理超过帧预算") -> "超出帧预算"
+    detail.contains("HDR") -> "HDR 暂不支持"
+    detail.contains("屏幕刷新率") -> "等待屏幕信息"
+    detail.contains("源帧率的目标") -> "目标或源帧率不支持"
+    detail.contains("实际帧间距已达到目标") -> "已达目标帧率"
+    else -> detail.substringBefore('，').take(24)
 }

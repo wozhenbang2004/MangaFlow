@@ -23,7 +23,7 @@ def build():
     strip = ndk / "toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
     source = ROOT / "native/enhancement"
     scratch = source / "build"
-    destination = ROOT / "app/build/outputs/inference-aars/mangaflow-cugan-1.1.0.aar"
+    destination = ROOT / "app/build/outputs/inference-aars/mangaflow-cugan-1.2.0.aar"
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(".tmp")
     try:

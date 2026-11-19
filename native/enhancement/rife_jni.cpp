@@ -17,7 +17,9 @@
 const ncnn::VulkanDevice* mangaflow_vulkan_device();
 
 namespace {
-constexpr int kMaximumPixels = 1280 * 720;
+// RIFE's inputs are padded dynamically; retain full source pixels within the
+// admitted 1080p envelope shared with AndroidLiveRifeVulkan.
+constexpr int kMaximumPixels = 1920 * 1080;
 constexpr int kMaximumSide = 1920;
 
 class Warp final : public ncnn::Layer {
@@ -166,7 +168,8 @@ Java_dev_mangaflow_enhancement_engine_AndroidRifeVulkanJni_infer(
     auto* model = reinterpret_cast<Model*>(handle);
     const int padded_width = (width + 31) / 32 * 32;
     const int padded_height = (height + 31) / 32 * 32;
-    model->pixels.resize(pixels);
+    try { model->pixels.resize(pixels); }
+    catch (const std::bad_alloc&) { return -2; }
     if (!load_input(env, previous, width, height, padded_width, padded_height, model->pixels, model->first) ||
         !load_input(env, next, width, height, padded_width, padded_height, model->pixels, model->second)) return -2;
     model->timestep.create(padded_width, padded_height, 1);
