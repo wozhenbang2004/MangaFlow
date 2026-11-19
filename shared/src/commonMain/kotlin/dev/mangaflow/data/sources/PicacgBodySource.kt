@@ -14,7 +14,6 @@ import dev.mangaflow.data.normalizedBodySourceTitle
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrl
-import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.net.MediaType.Companion.toMediaType
 import dev.mangaflow.net.Request
 import dev.mangaflow.net.RequestBody.Companion.toRequestBody
@@ -359,19 +358,7 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
         }
     }
 
-    private fun mediaUrl(media: JSONObject): String {
-        val path = media.bodyText("path")
-        val server = media.bodyText("fileServer").trimEnd('/')
-        require(server.isNotBlank() && path.isNotBlank() && !path.contains("..")) { "图片没有有效文件位置。" }
-        val prefix = when {
-            path.startsWith("tobs/") -> "/static/" + path.removePrefix("tobs/")
-            path.startsWith("tobeimg/") -> "/" + path.removePrefix("tobeimg/")
-            else -> "/static/" + path.trimStart('/')
-        }
-        val host = server.toHttpUrlOrNull()?.takeIf { it.isHttps && it.username.isEmpty() && it.password.isEmpty() }
-            ?: throw SourceException("图片服务器不是可信的 HTTPS 地址。")
-        return checkedBodyUrl(host.toString().trimEnd('/') + prefix).toString()
-    }
+    private fun mediaUrl(media: JSONObject): String = picacgMediaUrl(media.bodyText("fileServer"), media.bodyText("path"))
 
     private suspend fun call(
         path: String, method: String = "GET", body: JSONObject? = null,

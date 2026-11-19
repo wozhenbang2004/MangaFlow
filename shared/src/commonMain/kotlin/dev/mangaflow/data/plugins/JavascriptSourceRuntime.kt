@@ -135,14 +135,14 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                     val native = hostFailure
                     if (native is CancellationException) throw native
                     if (native is DownloadRouteException) throw native
-                    val status = (native as? SourceException)?.httpStatus ?: responseStatus
+                    val status = ((native as? SourceException)?.httpStatus ?: responseStatus)?.takeIf { it in 400..599 }
                     val unsupported = Regex("Unsupported source (?:capability|host API): ([A-Za-z][A-Za-z0-9 ._-]{0,99})")
                         .find(failure.message.orEmpty())?.groupValues?.get(1)
                     val message = when {
                         packageChanged || !currentPackage() -> "来源脚本已更新或移除，请刷新后重试。"
                         failure.message.orEmpty().contains("Source cursor expired") -> "列表分页已失效，请刷新后继续。"
                         status == 429 -> "来源请求受限，请稍后重试。"
-                        status == 401 || Regex("(?i)not[ _-]?logged|login required|login expired|session expired|需要登录|未登录")
+                        status == 401 || Regex("(?i)not[ _-]?logged|login required|authentication required|please (?:log|sign)[ _-]?in again|login expired|session expired|需要登录|未登录")
                             .containsMatchIn(failure.message.orEmpty()) -> "此来源需要登录，请先设置来源账号。"
                         unsupported != null -> when {
                             unsupported.contains("image", ignoreCase = true) -> "此来源使用了当前宿主不支持的图片处理。"

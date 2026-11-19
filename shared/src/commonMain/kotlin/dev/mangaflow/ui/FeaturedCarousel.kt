@@ -132,10 +132,11 @@ import kotlin.math.floor
 @Composable
 internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, visible: Boolean,
     onOpen: (Manga) -> Unit, onRatings: ((Manga) -> Unit)? = null, loading: Boolean = false,
+    showSource: Boolean = false,
     desktopActions: ((Manga) -> List<DesktopMenuAction>)? = null) {
     if (manga.isEmpty() && !loading) return
     if (platformKind == PlatformKind.DESKTOP) {
-        DesktopFeaturedRecommendations(manga, repository, visible, onOpen, onRatings, loading, desktopActions)
+        DesktopFeaturedRecommendations(manga, repository, visible, onOpen, onRatings, loading, showSource, desktopActions)
         return
     }
     BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -224,7 +225,7 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                         if (motion) state.animateScrollToPage(index,
                             animationSpec = spring(MangaMotion.GestureDamping, MangaMotion.GestureStiffness))
                         else state.scrollToPage(index)
-                    } }, enabled = visible, onOpen = onOpen, onRatings = onRatings)
+                    } }, enabled = visible, onOpen = onOpen, onRatings = onRatings, showSource = showSource)
             }
             Box(Modifier.fillMaxWidth().height(4.dp), contentAlignment = Alignment.Center) {
                 val color = MaterialTheme.colorScheme.onSurface
@@ -255,6 +256,7 @@ private fun DesktopFeaturedRecommendations(
     onOpen: (Manga) -> Unit,
     onRatings: ((Manga) -> Unit)?,
     loading: Boolean,
+    showSource: Boolean,
     desktopActions: ((Manga) -> List<DesktopMenuAction>)?,
 ) {
     val window = LocalMangaWindow.current
@@ -336,7 +338,7 @@ private fun DesktopFeaturedRecommendations(
                                         onColor = { extracted[entry.coverUrl] = it }, onReady = {},
                                         modifier = Modifier.fillMaxSize().mangaCoverCard(22.dp),
                                         emphasis = { 1f }, offset = { 0f }, onPreview = {},
-                                        enabled = visible, onOpen = onOpen, onRatings = onRatings)
+                                        enabled = visible, onOpen = onOpen, onRatings = onRatings, showSource = showSource)
                                 }
                             }
                         }
@@ -386,6 +388,7 @@ private fun FeaturedManga(
     enabled: Boolean,
     onOpen: (Manga) -> Unit,
     onRatings: ((Manga) -> Unit)?,
+    showSource: Boolean,
 ) {
     val context = LocalContext.current
     val motion = LocalMotionEnabled.current
@@ -413,7 +416,7 @@ private fun FeaturedManga(
     }
     val identity = mangaCoverIdentity(manga, repository)
     val request = remember(context, manga.id, manga.coverUrl, manga.sourceUrl, repository, identity, imageWidthPx, imageHeightPx, motion) {
-        ImageRequest.Builder(imagePlatformContext(context)).data(manga.coverUrl)
+        ImageRequest.Builder(imagePlatformContext(context)).data(identity.url)
             .sourceNetwork(dev.mangaflow.data.SourceKeys.decodeManga(manga.id).sourceId).softwareBitmap()
             .size(imageWidthPx, imageHeightPx)
             .memoryCacheKey("featured-cover:" + identity.cacheKey)
@@ -531,7 +534,8 @@ private fun FeaturedManga(
                                 Offset(0f, 1f), 3f)), fontSize = 14.sp, lineHeight = 20.sp,
                         fontWeight = FontWeight.Medium, minLines = if (inlineInformation) 1 else titleLines,
                         maxLines = if (inlineInformation) 3 else titleLines, overflow = TextOverflow.Ellipsis)
-                    MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = ink, compact = true, plain = true,
+                    if (showSource) MangaBrowseSource(manga, foreground = ink.copy(alpha = .80f))
+                    else MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = ink, compact = true, plain = true,
                         onExpand = if (enabled && information() >= .98f && onRatings != null) ({ onRatings(manga) }) else null)
                 }
             }

@@ -35,7 +35,6 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -75,10 +74,8 @@ import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
-import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -170,14 +167,12 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
-import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.MotionTabContent
-import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionPress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -322,19 +317,23 @@ fun DetailScreen(
     var measuredDockHeight by remember(current.id, dockDensity) { mutableIntStateOf(0) }
     val window = LocalMangaWindow.current
     val coverDecodeWidth = with(dockDensity) { (window.width * .5f).roundToPx() }.coerceIn(320, 1024)
-    val coverRequest = remember(context, current.coverUrl, current.sourceUrl, current.id, coverRetry, motion, coverDecodeWidth) {
-        ImageRequest.Builder(imagePlatformContext(context)).data(current.coverUrl)
+    val coverIdentity = repository?.let { mangaCoverIdentity(current, it) }
+    val coverKey = coverIdentity?.cacheKey ?: current.coverUrl
+    val coverRequest = remember(context, current.coverUrl, current.sourceUrl, current.id, coverIdentity, coverRetry, coverDecodeWidth) {
+        ImageRequest.Builder(imagePlatformContext(context)).data(coverIdentity?.url ?: current.coverUrl)
             .sourceNetwork(dev.mangaflow.data.SourceKeys.decodeManga(current.id).sourceId)
             .softwareBitmap()
             .size(coverDecodeWidth, coverDecodeWidth * 3 / 2)
-            .httpHeaders(NetworkHeaders.Builder().set("User-Agent", "Mozilla/5.0")
-                .set("Referer", current.sourceUrl.ifBlank { "https://www.copy3000.com/comic/" + current.id }).build())
+            .httpHeaders(NetworkHeaders.Builder().apply {
+                coverIdentity?.headers?.forEach { (name, value) -> set(name, value) }
+            }.build())
             .crossfade(0)
-            .placeholderMemoryCacheKey("manga-cover:" + current.coverUrl)
-            .memoryCacheKey("detail-cover:" + current.coverUrl + ":" + coverRetry).build()
+            .diskCacheKey(coverKey)
+            .placeholderMemoryCacheKey("manga-cover:" + coverKey)
+            .memoryCacheKey("detail-cover:$coverKey:$coverRetry").build()
     }
     // The sharp poster and blurred atmosphere share one request and one decoded image.
-    val coverPainter = if (adultProfile) ColorPainter(DetailSurface) else rememberAsyncImagePainter(coverRequest, contentScale = ContentScale.Fit,
+    val coverPainter = if (current.coverUrl.isBlank()) ColorPainter(DetailSurface) else rememberAsyncImagePainter(coverRequest, contentScale = ContentScale.Fit,
         onError = { if (current.coverUrl.isNotBlank()) coverFailed = true }, onSuccess = { result ->
             coverFailed = false
             coverBitmap = result.result.image
@@ -453,49 +452,6 @@ fun DetailScreen(
         }
     }
 
-    if (adultProfile) {
-        val first = chapters.firstOrNull()
-        BoxWithConstraints(Modifier.fillMaxSize().background(DetailBackground).screenFitViewport().imePadding()
-            .mangaHazeSource(readingBackdrop)) {
-            val bottom = screenFitContentInsets().asPaddingValues().calculateBottomPadding()
-            val wide = maxWidth >= 840.dp && maxHeight >= 400.dp
-            val compact = !wide && maxHeight < 530.dp
-            val summary: @Composable () -> Unit = {
-                AdultBookOpening(current, repository, resume, first, active, compact,
-                    onContinue = onContinue, onRead = onRead, onRestart = onRestart)
-            }
-            Column(Modifier.align(Alignment.TopCenter).widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
-                .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    MotionIconButton(onClick = onBack, enabled = active, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(21.dp))
-                    }
-                    Text("作品详情", Modifier.weight(1f).padding(start = 6.dp),
-                        style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    MotionIconButton(onClick = { fullIntroduction = true }, enabled = active, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Outlined.Info, "作品简介与标签", Modifier.size(20.dp))
-                    }
-                    MotionIconButton(onClick = {
-                        feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm)
-                        onToggleFavorite()
-                    }, enabled = active, modifier = Modifier.size(44.dp)) {
-                        Icon(if (isFavorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-                            if (isFavorite) "移出成人书架" else "加入成人书架", Modifier.size(21.dp),
-                            tint = if (isFavorite) MaterialTheme.colorScheme.primary else DetailForeground)
-                    }
-                }
-                HorizontalDivider(color = DetailLine)
-                if (wide) Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Column(Modifier.width(320.dp).verticalScroll(rememberScrollState())) { summary() }
-                    sectionPane(Modifier.weight(1f).fillMaxHeight(), 12.dp + bottom)
-                } else {
-                    summary()
-                    HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = DetailLine)
-                    sectionPane(Modifier.weight(1f).fillMaxWidth(), 12.dp + bottom)
-                }
-            }
-        }
-    } else {
     Box(Modifier.fillMaxSize().background(informationTone)) {
     BoxWithConstraints(
         Modifier.fillMaxSize().align(Alignment.TopCenter)
@@ -622,7 +578,7 @@ fun DetailScreen(
                                 HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
                                     compact = true, artworkHeadroom = 0.dp,
                                     onIntroduction = { fullIntroduction = true },
-                                    onRatings = { fullRatings = true },
+                                    onRatings = if (adultProfile) null else ({ fullRatings = true }),
                                     onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
                                     onTag = onTag?.let { action -> { tag -> action(current, tag) } }, collapse = { 0f })
                             }
@@ -703,7 +659,7 @@ fun DetailScreen(
                                 HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
                                     compact = compactHero, artworkHeadroom = artworkHeadroom,
                                     onIntroduction = { fullIntroduction = true },
-                                    onRatings = { fullRatings = true },
+                                    onRatings = if (adultProfile) null else ({ fullRatings = true }),
                                     onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
                                     onTag = onTag?.let { action -> { tag -> action(current, tag) } },
                                     collapse = { header.collapsedFraction })
@@ -814,13 +770,12 @@ fun DetailScreen(
             onRetryCloudProgress = onRetryCloudProgress)
     }
     }
-    }
     if (fullIntroduction) DetailIntroduction(current, backdrop = readingBackdrop,
         onAuthor = onAuthor?.let { action -> { name -> fullIntroduction = false; action(current, name) } },
         onTag = onTag?.let { action -> { tag -> fullIntroduction = false; action(current, tag) } },
         onOriginal = { original -> if (active) { fullIntroduction = false; onOriginal(original) } },
         onDismiss = { fullIntroduction = false })
-    if (fullRatings) DetailRatingSheet(current, backdrop = readingBackdrop) { fullRatings = false }
+    if (!adultProfile && fullRatings) DetailRatingSheet(current, backdrop = readingBackdrop) { fullRatings = false }
     pendingDownload?.takeIf { active }?.let { pending ->
         key(current.id, pending.logicalId, pending.id) {
             ChapterDownloadSourceSheet(current, pending, downloadSourceEntries, readingBackdrop,
@@ -833,55 +788,6 @@ fun DetailScreen(
                 },
                 onDismiss = { if (pendingDownload == pending) { pendingDownload = null; pendingDownloadAnchor = null } },
                 anchor = pendingDownloadAnchor, repository = repository)
-        }
-    }
-}
-
-@Composable
-private fun AdultBookOpening(
-    manga: Manga, repository: MangaRepository?, resume: ReadingProgress?, first: Chapter?,
-    active: Boolean, compact: Boolean, onContinue: (ReadingProgress) -> Unit,
-    onRead: (Chapter) -> Unit, onRestart: (Chapter) -> Unit,
-) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = if (compact) 8.dp else 14.dp),
-        verticalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 10.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(13.dp)) {
-            if (!compact && repository != null) MangaCover(manga, repository,
-                Modifier.width(66.dp).height(96.dp).mangaCoverCard(9.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(manga.title, style = if (compact) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
-                    fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontWeight = FontWeight.SemiBold,
-                    maxLines = if (compact) 1 else 3, overflow = TextOverflow.Ellipsis)
-                if (!compact && manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
-                    style = MaterialTheme.typography.bodySmall, color = DetailSecondary,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                MangaBrowseSource(manga)
-            }
-        }
-        if (resume != null || first != null) {
-            val location = resume?.let { progress ->
-                listOfNotNull(progress.chapterTitle.takeIf(String::isNotBlank),
-                    "第 ${progress.pageIndex + 1} 页".takeIf { progress.pageCount > 0 }).joinToString(" · ")
-            }.orEmpty()
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MotionButton(onClick = { if (resume != null) onContinue(resume) else first?.let(onRead) },
-                    enabled = active, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp)) {
-                    Icon(Icons.Outlined.PlayArrow, null, Modifier.size(18.dp))
-                    Column(Modifier.weight(1f).padding(start = 5.dp)) {
-                        Text(if (resume != null) "继续阅读" else "开始阅读",
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (!compact && location.isNotBlank()) Text(mangaNumberText(location),
-                            style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                }
-                if (resume != null && first != null) MotionTextButton(onClick = { onRestart(first) }, enabled = active,
-                    contentPadding = PaddingValues(horizontal = 8.dp)) {
-                    Text("从头读", style = MaterialTheme.typography.labelMedium, maxLines = 1)
-                }
-            }
         }
     }
 }
@@ -984,7 +890,7 @@ private fun HeroBookInformation(
     compact: Boolean,
     artworkHeadroom: Dp,
     onIntroduction: () -> Unit,
-    onRatings: () -> Unit,
+    onRatings: (() -> Unit)?,
     onAuthor: ((String) -> Unit)?,
     onTag: ((String) -> Unit)?,
     collapse: () -> Float,
@@ -1066,8 +972,9 @@ private fun HeroBookInformation(
             }
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
                 DetailTags(manga, includeState = false, enabled = infoVisible, onTag = onTag)
-                DetailRatingStrip(manga, ink.copy(alpha = .86f), enabled = infoVisible,
+                if (onRatings != null) DetailRatingStrip(manga, ink.copy(alpha = .86f), enabled = infoVisible,
                     compact = true, onExpand = onRatings)
+                else MangaBrowseSource(manga, Modifier.padding(top = 6.dp), foreground = ink.copy(alpha = .80f))
             }
         }
     }

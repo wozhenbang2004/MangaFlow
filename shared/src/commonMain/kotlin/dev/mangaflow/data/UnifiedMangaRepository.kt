@@ -1287,6 +1287,7 @@ class UnifiedMangaRepository(
             if (cover.sourceId == "copy") return copy.imageHeaders(cover.mangaId, "")
             val installed = adapters[cover.sourceId] ?: return emptyMap()
             (installed as? ScriptBodySource)?.let { return it.imageHeaders(mangaId, "") }
+            if (installed is PicacgBodySource) return installed.imageHeaders(mangaId, "")
             return mapOf(
                 "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
                 "Referer" to installed.info.homeUrl.trimEnd('/') + "/",

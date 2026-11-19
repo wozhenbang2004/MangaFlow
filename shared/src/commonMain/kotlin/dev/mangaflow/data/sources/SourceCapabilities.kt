@@ -15,9 +15,18 @@ data class SourceCapabilities(
     val credentialLabel: String = "Cookie",
     val websiteLoginDeclared: Boolean = false,
     val registrationFields: List<SourceRegistrationField> = emptyList(),
+    val browserAccount: SourceBrowserAccount? = null,
 ) {
     fun supports(feature: SourceFeature): Boolean = feature in features
 }
+
+/** Reviewed destinations. Opening these pages does not transfer a website session. */
+data class SourceBrowserAccount(
+    val loginUrl: String,
+    val registerUrl: String? = null,
+    val registrationHelpUrl: String? = null,
+    val credentialSettingsUrl: String? = null,
+)
 
 enum class SourceFeedKind { LATEST, EXPLORE, CATEGORY, RANKING }
 data class SourceChoice(val id: String, val title: String)

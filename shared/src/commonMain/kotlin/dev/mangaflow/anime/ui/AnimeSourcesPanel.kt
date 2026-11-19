@@ -165,14 +165,16 @@ internal fun AnimeSourcesPanel(
                         if (focusEpisode != null) {
                             val currentOption = state.playbackTarget?.takeIf { it.episode.id == focusEpisode.id }?.manualOption
                                 ?: state.selectedPlaybackOption.takeIf { state.selectedEpisodeId == focusEpisode.id }
+                            fun isCurrentLine(option: AnimeEpisodeOption) =
+                                currentOption?.let { controller.samePlaybackLine(option, it) } == true
                             val choices = controller.confirmedPlaybackLines(focusEpisode.id, state)
-                                .sortedBy { if (recovering) it == currentOption else it != currentOption }
+                                .sortedBy { if (recovering) isCurrentLine(it) else !isCurrentLine(it) }
                             if (choices.isEmpty()) item(key = "no-matched-line") {
                                 AnimeQuietLabel(if (state.autoMatching) "正在查找本集线路"
                                     else "本集暂无已匹配的线路")
                             }
                             items(choices, key = { "choice:" + it.sourceId + ":" + it.episode.group + ":" + it.episode.id }) { option ->
-                                val current = option == currentOption
+                                val current = isCurrentLine(option)
                                 val lineState = when {
                                     current && recovering -> "上次使用"
                                     current -> "当前线路"

@@ -3,6 +3,8 @@ package dev.mangaflow.ui
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -13,6 +15,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -30,27 +36,45 @@ import dev.mangaflow.data.sources.SourceAccountState
 import dev.mangaflow.data.sources.SourceCapabilities
 import dev.mangaflow.data.sources.SourceRegistrationRequest
 import dev.mangaflow.ui.motion.MotionButton
+import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionTextButton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
-/** Reuses the source-account page's fields and Motion controls in the source's own sheet. */
+private enum class SourceAccountPanel { LOGIN, REGISTER }
+
+@Composable
+internal fun SourceAccountLoading(message: String) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
+        Text(message, Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** One account form for the account destination and source settings. */
 @Composable
 internal fun SourceAccountControls(
     source: BodySourceInfo, repository: UnifiedMangaRepository, capabilities: SourceCapabilities,
     account: SourceAccountState, enabled: Boolean, onBusy: (Boolean) -> Unit,
     onAccountChanged: (SourceAccountState) -> Unit,
-) = key(source.id) {
+    onOpenShelf: (() -> Unit)? = null,
+    initiallyShowLogin: Boolean = false,
+    active: Boolean = true,
+) = key(source.id, source.revision) {
     val scope = rememberCoroutineScope()
     val colors = MaterialTheme.colorScheme
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    var expanded by remember { mutableStateOf(false) }
+    val uriHandler = LocalUriHandler.current
+    var panel by remember { mutableStateOf(SourceAccountPanel.LOGIN) }
+    var expanded by remember { mutableStateOf(initiallyShowLogin && !account.signedIn &&
+        (capabilities.passwordLogin || capabilities.cookieFields.isNotEmpty())) }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var values by remember { mutableStateOf<List<String>>(emptyList()) }
     var cookieMode by remember { mutableStateOf(!capabilities.passwordLogin) }
-    var registerMode by remember { mutableStateOf(false) }
     var registerStage by remember { mutableIntStateOf(0) }
     var registerValues by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var registerConsent by remember { mutableStateOf(false) }
@@ -63,6 +87,8 @@ internal fun SourceAccountControls(
     var generation by remember { mutableLongStateOf(0L) }
     val currentAccountChanged by rememberUpdatedState(onAccountChanged)
     val currentBusy by rememberUpdatedState(onBusy)
+    val canLogin = capabilities.passwordLogin || capabilities.cookieFields.isNotEmpty()
+    val web = capabilities.browserAccount
     fun clearInput() {
         password = ""; values = emptyList()
         registerValues = emptyMap(); registerConsent = false; registerStage = 0
@@ -104,9 +130,18 @@ internal fun SourceAccountControls(
             running = false; cancelling = false
         }
     }
-    LaunchedEffect(source.revision) { clearInput(); expanded = false; registerMode = false }
+    LaunchedEffect(active) { if (!active) { cancel(); expanded = false } }
+    fun selectPanel(next: SourceAccountPanel) {
+        clearInput(); message = null; messageIsSuccess = false
+        expanded = !expanded || panel != next
+        panel = next
+    }
+    fun openWebsite(url: String) {
+        try { uriHandler.openUri(url) }
+        catch (_: Exception) { message = "无法打开浏览器，请稍后重试。"; messageIsSuccess = false }
+    }
     fun operate(successNotice: String? = null, action: suspend () -> Unit) {
-        if (running || !enabled || !present) return
+        if (running || !enabled || !present || !active) return
         running = true; currentBusy(true); message = null; messageIsSuccess = false
         val expected = ++generation
         job = scope.launch {
@@ -116,7 +151,7 @@ internal fun SourceAccountControls(
                 succeeded = true
                 val refreshed = repository.sourceAccountState(source.id)
                 if (present && generation == expected) {
-                    currentAccountChanged(refreshed); expanded = false; registerMode = false
+                    currentAccountChanged(refreshed); expanded = false
                     if (successNotice != null) { message = successNotice; messageIsSuccess = true }
                 }
             } catch (cancel: CancellationException) { throw cancel }
@@ -129,11 +164,15 @@ internal fun SourceAccountControls(
                     "请填写有效的邮箱地址。", "密码至少9个字符，且两次输入需一致。",
                     "请选择有效性别选项。", "请填写三组安全问题及答案。"
                 )
+                val jmValidation = setOf("用户名需要2至80个字符。", "请填写有效邮箱地址。",
+                    "两次密码不一致或密码过短。", "请选择站点支持的性别字段。",
+                    "禁漫未接受注册请求，请核对资料和站点提示。", "禁漫注册响应无法确认，请勿连续重复提交。")
                 val failureMessage = when {
                     failure is SourceAccountCleanupException -> failure.message.orEmpty()
                     source.id == "picacg" && failure is SourceException &&
                         (original.startsWith("哔咔注册：") || original.startsWith("哔咔登录：")) -> original
                     source.id == "picacg" && original in knownValidation -> original
+                    source.id == "jmcomic" && original in jmValidation -> original
                     else -> repository.sourceHealth.value[source.id]?.message ?: "验证未完成，请稍后重试。"
                 }
                 // An unsuccessful logout may still have cleared its local credential in finally.
@@ -160,37 +199,57 @@ internal fun SourceAccountControls(
             }
         }
     }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("账号", style = MaterialTheme.typography.titleSmall)
-                Text(if (account.signedIn) account.displayName.ifBlank { "已验证登录" }
-                    else if (account.hasCredentials) "有已保存凭据，尚未验证账号"
-                    else if (capabilities.loginRequired) "此来源需要登录" else "匿名浏览 · 登录可用账号功能",
+                Text(when {
+                    account.signedIn -> account.displayName.ifBlank { "已登录" }
+                    account.hasCredentials -> "已保存凭据，需重新验证"
+                    capabilities.loginRequired -> "浏览和阅读需要登录"
+                    else -> "未登录"
+                },
                     fontSize = 11.sp, color = colors.onSurfaceVariant)
             }
             if (running) MotionTextButton(onClick = ::cancel, enabled = !cancelling) { Text(if (cancelling) "正在取消…" else "取消", fontSize = 12.sp) }
-            else {
-                MotionTextButton(onClick = {
-                    if (account.signedIn || account.hasCredentials) operate { repository.sourceLogout(source.id) }
-                    else { expanded = !expanded; registerMode = false; clearInput(); message = null }
-                }, enabled = enabled) {
-                    Text(if (account.signedIn) "退出" else if (account.hasCredentials) "清除凭据"
-                        else if (expanded && !registerMode) "收起" else "登录", fontSize = 12.sp)
+            else if (account.signedIn) {
+                if (onOpenShelf != null) MotionTextButton(onClick = onOpenShelf, enabled = enabled) {
+                    Text("站点收藏", fontSize = 12.sp)
                 }
-                if (!account.signedIn && !account.hasCredentials && capabilities.registrationFields.isNotEmpty()) {
-                    MotionTextButton(onClick = {
-                        registerMode = !registerMode || !expanded
-                        expanded = registerMode
-                        clearInput(); message = null
-                    }, enabled = enabled) {
-                        Text(if (registerMode && expanded) "收起注册" else "注册", fontSize = 12.sp)
+                MotionTextButton(onClick = { operate { repository.sourceLogout(source.id) } }, enabled = enabled) {
+                    Text("退出", fontSize = 12.sp)
+                }
+            }
+        }
+        if (!running && !account.signedIn) {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (canLogin) MotionTextButton(onClick = { selectPanel(SourceAccountPanel.LOGIN) }, enabled = enabled) {
+                    val label = when {
+                        expanded && panel == SourceAccountPanel.LOGIN -> "收起登录"
+                        account.hasCredentials -> "重新登录"
+                        else -> "登录"
                     }
+                    Text(label, fontSize = 12.sp)
+                } else if (web != null) MotionTextButton(onClick = { openWebsite(web.loginUrl) }, enabled = enabled) {
+                    Text("网页登录", fontSize = 12.sp)
+                }
+                if (capabilities.registrationFields.isNotEmpty()) {
+                    MotionTextButton(onClick = { selectPanel(SourceAccountPanel.REGISTER) }, enabled = enabled) {
+                        Text(if (expanded && panel == SourceAccountPanel.REGISTER) "收起注册" else "注册", fontSize = 12.sp)
+                    }
+                } else web?.registerUrl?.let { url ->
+                    MotionTextButton(onClick = { openWebsite(url) }, enabled = enabled) { Text("网页注册", fontSize = 12.sp) }
+                } ?: web?.registrationHelpUrl?.let { url ->
+                    MotionTextButton(onClick = { openWebsite(url) }, enabled = enabled) { Text("注册说明", fontSize = 12.sp) }
+                }
+                if (account.hasCredentials) MotionTextButton(onClick = { operate { repository.sourceLogout(source.id) } }, enabled = enabled) {
+                    Text("清除凭据", fontSize = 12.sp)
                 }
             }
         }
         AnimatedVisibility(expanded && !account.signedIn) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val registerMode = panel == SourceAccountPanel.REGISTER
                 if (!registerMode && capabilities.passwordLogin && capabilities.cookieFields.isNotEmpty()) Row {
                     MotionTextButton(onClick = { cookieMode = false; clearInput() }, enabled = enabled && !running) { Text("账号密码", fontSize = 12.sp) }
                     MotionTextButton(onClick = { cookieMode = true; clearInput() }, enabled = enabled && !running) { Text(capabilities.credentialLabel, fontSize = 12.sp) }
@@ -254,6 +313,18 @@ internal fun SourceAccountControls(
                         }
                     }
                 } else if (credentialMode) {
+                    web?.let { links ->
+                        Row(Modifier.horizontalScroll(rememberScrollState())) {
+                            MotionTextButton(onClick = { openWebsite(links.loginUrl) }, enabled = enabled && !running) {
+                                Text("网页登录", fontSize = 12.sp)
+                            }
+                            links.credentialSettingsUrl?.let { url ->
+                                MotionTextButton(onClick = { openWebsite(url) }, enabled = enabled && !running) {
+                                    Text("获取 ${capabilities.credentialLabel}", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
                     Text("仅向此来源验证你的 ${capabilities.credentialLabel}；通过后保存在本机安全存储，退出时移除。",
                         fontSize = 11.sp, color = colors.onSurfaceVariant)
                     capabilities.cookieFields.forEachIndexed { index, name ->

@@ -91,7 +91,6 @@ internal fun ReaderExperienceStatus(
     topClearance: Dp,
     bottomClearance: Dp,
     onInspectingChange: (Boolean) -> Unit,
-    inspectRequest: Int? = null,
     bottomEndClearance: Dp = 0.dp,
     preparation: ReaderPreparationState = ReaderPreparationState(),
     nextChapterPreparation: ReaderNextChapterPreparation? = null,
@@ -115,7 +114,6 @@ internal fun ReaderExperienceStatus(
     val window = LocalMangaWindow.current
     val placement = custom.readerStatusPlacement
     val shown = visible && placement != ReaderStatusPlacement.HIDDEN
-    val compact = inspectRequest != null
     var selected by remember(sessionKey) { mutableStateOf<ReaderStatusSection?>(null) }
     var retainedSection by remember(sessionKey) { mutableStateOf(ReaderStatusSection.PREPARATION) }
     val sectionHeader = remember(sessionKey) { BringIntoViewRequester() }
@@ -134,14 +132,6 @@ internal fun ReaderExperienceStatus(
     val alignPage by rememberUpdatedState(onAlignPage)
     val undoPage by rememberUpdatedState(onUndoPage)
     val undoSourceSwitch by rememberUpdatedState(onUndoSourceSwitch)
-    var lastInspectRequest by remember(sessionKey) { mutableStateOf(inspectRequest) }
-    LaunchedEffect(inspectRequest) {
-        if (inspectRequest != null && inspectRequest != lastInspectRequest && shown) {
-            selected = ReaderStatusSection.WORK
-            retainedSection = ReaderStatusSection.WORK
-        }
-        lastInspectRequest = inspectRequest
-    }
     SideEffect { reportInspection(popoverPresent || selected != null || showPolicy || pendingPolicy || pendingSources || pendingStandby != null) }
     DisposableEffect(Unit) { onDispose { reportInspection(false) } }
     LaunchedEffect(visible) {
@@ -180,9 +170,8 @@ internal fun ReaderExperienceStatus(
         }
     }
     // Local cache sampling follows this indicator's presence; hidden readers do not poll it.
-    val observeCache = shown && (!compact || selected != null)
-    LaunchedEffect(observeCache) {
-        if (!observeCache) return@LaunchedEffect
+    LaunchedEffect(shown) {
+        if (!shown) return@LaunchedEffect
         while (true) { store.refreshCacheUsage(); delay(store.state.value.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L) }
     }
     val top = placement == ReaderStatusPlacement.TOP
@@ -263,8 +252,7 @@ internal fun ReaderExperienceStatus(
                 top = if (top) clearance + 2.dp else 0.dp,
                 bottom = if (top) 0.dp else clearance + 2.dp)
             .widthIn(max = 304.dp)) {
-            if (compact) Spacer(Modifier.fillMaxWidth())
-            AnimatedVisibility(shown && !compact,
+            AnimatedVisibility(shown,
                 enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)),
                 exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
                 Box(Modifier.fillMaxWidth().height(44.dp)) {
@@ -307,7 +295,7 @@ internal fun ReaderExperienceStatus(
                 onDismiss = { selected = null }, onPresenceChange = { popoverPresent = it }) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)) {
                     Row(Modifier.fillMaxWidth().bringIntoViewRequester(sectionHeader), verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (compact) "阅读状态" else retainedSection.title, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall,
+                        Text(retainedSection.title, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         MotionIconButton(onClick = { scopeHelp[retainedSection] = scopeHelp[retainedSection] != true }, modifier = Modifier.size(44.dp),
                             enabled = selected != null, tooltip = "图标与当前范围说明") {
@@ -361,7 +349,7 @@ internal fun ReaderExperienceStatus(
                                         WorkDisclosure(work.icon, work.title, counts.active.toLong(), workMaximum,
                                             workSummary(preparation, work), expandedWork == work, bodyEnabled, counts.failed > 0,
                                             counts.queued.toLong(), counts.complete.toLong(), counts.deferred.toLong(), counts.failed.toLong(),
-                                            known = preparation.pages.isNotEmpty(), compact = compact) { toggle(work) }
+                                            known = preparation.pages.isNotEmpty()) { toggle(work) }
                                         StatusReveal(expandedWork == work) { PreparationDetails(preparation, work) }
                                     }
                                     nextChapterPreparation?.let { next ->
@@ -717,7 +705,7 @@ private fun StatusMetricSlots(reserve: String, modifier: Modifier = Modifier, co
 private fun WorkDisclosure(icon: ImageVector, title: String, active: Long, maximum: Long, summary: String,
     expanded: Boolean, enabled: Boolean, hasFailure: Boolean, queued: Long, completed: Long?, deferred: Long,
     failed: Long, known: Boolean = true, completedLabel: String = "阶段完成",
-    phaseDeferred: Boolean = false, compact: Boolean = false, onToggle: () -> Unit) {
+    phaseDeferred: Boolean = false, onToggle: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val status = mangaStatusColors()
     val reserve = "8".repeat(maximum.coerceAtLeast(1L).toString().length)
@@ -736,22 +724,15 @@ private fun WorkDisclosure(icon: ImageVector, title: String, active: Long, maxim
                     StatusToken(Icons.Outlined.Pause, "准备阶段", "暂缓", status.waiting)
                     Spacer(Modifier.width(8.dp))
                 }
-                if (compact) {
-                    Text(summary, Modifier.weight(1.4f), textAlign = TextAlign.End,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (hasFailure) status.error else colors.onSurfaceVariant,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis)
-                } else {
-                    StatusCounter(Icons.Outlined.PlayArrow, active.takeIf { known }, "进行中的任务，不是线程数",
-                        reserve = reserve, iconColor = if (known && active > 0L) status.activity else status.neutral)
-                    Box(Modifier.width(19.dp), contentAlignment = Alignment.CenterEnd) {
-                        if (hasFailure && failed == 0L) Icon(Icons.Outlined.ErrorOutline, "准备失败", Modifier.size(13.dp), tint = colors.error)
-                    }
+                StatusCounter(Icons.Outlined.PlayArrow, active.takeIf { known }, "进行中的任务，不是线程数",
+                    reserve = reserve, iconColor = if (known && active > 0L) status.activity else status.neutral)
+                Box(Modifier.width(19.dp), contentAlignment = Alignment.CenterEnd) {
+                    if (hasFailure && failed == 0L) Icon(Icons.Outlined.ErrorOutline, "准备失败", Modifier.size(13.dp), tint = colors.error)
                 }
                 Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
                     Modifier.padding(start = 6.dp).size(16.dp), tint = colors.onSurfaceVariant)
             }
-            if (!compact || expanded) StatusMetricSlots(reserve, Modifier.padding(start = 25.dp)) { index ->
+            StatusMetricSlots(reserve, Modifier.padding(start = 25.dp)) { index ->
                 when (index) {
                     0 -> StatusCounter(Icons.Outlined.Schedule, queued.takeIf { known }, "排队任务", reserve = reserve,
                         iconColor = if (known && queued > 0L) status.waiting else status.neutral)

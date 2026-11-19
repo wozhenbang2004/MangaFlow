@@ -27,6 +27,8 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.hoverable
@@ -67,6 +69,7 @@ import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.AccountCircle
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.ChevronRight
@@ -81,6 +84,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -119,7 +123,8 @@ import dev.mangaflow.account.JmShelfSyncState
 import dev.mangaflow.account.CopyShelfMetadata
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.Manga
-import dev.mangaflow.data.MangaRepository
+import dev.mangaflow.data.UnifiedMangaRepository
+import dev.mangaflow.data.sources.BodySourceInfo
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.SavedResumeTarget
 import dev.mangaflow.storage.LibraryStore
@@ -142,14 +147,14 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private enum class LibraryToolDestination { HISTORY, COLLECTIONS, STATS, COPY_SYNC, JM_SYNC, ACCOUNT }
-private enum class UnifiedShelfScope(val title: String) { LOCAL("本机"), COPY("拷贝") }
+private enum class LibraryToolDestination { HISTORY, COLLECTIONS, STATS, COPY_SYNC, ACCOUNT }
+private enum class UnifiedShelfScope { LOCAL, COPY, SITE }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LibraryScreen(
     favorites: List<Manga>, history: List<ReadingProgress>,
-    repository: MangaRepository, libraryStore: LibraryStore, opening: LibraryOpenState?, active: Boolean,
+    repository: UnifiedMangaRepository, libraryStore: LibraryStore, opening: LibraryOpenState?, active: Boolean,
     onOpen: (Manga) -> Unit, onDetails: (Manga) -> Unit,
     onContinue: (ReadingProgress) -> Unit, onOpenPageCollection: (PageCollection) -> Unit, onDiscover: () -> Unit,
     onRetryOpen: () -> Unit, onCancelOpen: () -> Unit,
@@ -177,6 +182,12 @@ fun LibraryScreen(
     onOpenAccount: (() -> Unit)? = null,
     copyShelfAvailable: Boolean = true,
     adultProfile: Boolean = false,
+    siteSources: List<BodySourceInfo> = emptyList(),
+    siteAccountRevision: Int = 0,
+    requestedSite: String? = null,
+    onSiteRequestHandled: () -> Unit = {},
+    onOpenSiteAccount: ((String) -> Unit)? = null,
+    onAddSiteFavorite: ((Manga) -> Unit)? = null,
 ) {
     fun sourceIncluded(sourceId: String): Boolean =
         (includedSourceIds == null || sourceId in includedSourceIds) && sourceId !in excludedSourceIds
@@ -199,15 +210,46 @@ fun LibraryScreen(
     val headerPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var scopeName by rememberSaveable { mutableStateOf(UnifiedShelfScope.LOCAL.name) }
-    val shelfScope = if (!copyShelfAvailable) UnifiedShelfScope.LOCAL else
-        UnifiedShelfScope.entries.firstOrNull { it.name == scopeName } ?: UnifiedShelfScope.LOCAL
+    val siteSource = siteSources.firstOrNull { it.id == scopeName }
+    val shelfScope = when {
+        siteSource != null -> UnifiedShelfScope.SITE
+        copyShelfAvailable && scopeName == UnifiedShelfScope.COPY.name -> UnifiedShelfScope.COPY
+        else -> UnifiedShelfScope.LOCAL
+    }
+    val siteShelves = siteSources.associate { source -> key(source.id) {
+        source.id to remember(source, repository, siteAccountRevision) { ProfileSiteShelf(source, repository) }
+    } }
+    val siteShelf = siteSource?.let { siteShelves[it.id] }
+    }
+    val siteVisible = active && !showHistory && siteShelf != null
+    val siteJobs = rememberCoroutineScope()
+    var siteJob by remember(siteShelf) { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    DisposableEffect(siteShelf, siteVisible) { onDispose { siteJob?.cancel() } }
+    LaunchedEffect(siteShelf, siteVisible) { if (siteVisible) siteShelf?.activate() }
+    fun runSiteAction(action: suspend ProfileSiteShelf.() -> Unit) {
+        if (siteVisible && siteShelf != null && !siteShelf.busy && siteJob?.isActive != true) {
+            siteJob = siteJobs.launch { siteShelf.action() }
+        }
+    }
+    LaunchedEffect(requestedSite, siteSources, active) {
+        if (active && requestedSite != null && siteSources.any { it.id == requestedSite }) {
+            scopeName = requestedSite
+            showHistory = false
+            onSiteRequestHandled()
+        }
+    }
     var showCollections by rememberSaveable { mutableStateOf(false) }
     var showStats by rememberSaveable { mutableStateOf(false) }
     var libraryActionsOpen by remember { mutableStateOf(false) }
     var pendingLibraryTool by remember { mutableStateOf<LibraryToolDestination?>(null) }
-    val shelfLabels = remember(copyShelfAvailable) {
-        if (copyShelfAvailable) listOf("本机", "拷贝") else listOf("本机")
-    }
+    val shelfOptions = remember(copyShelfAvailable, siteSources) { buildList {
+        add(UnifiedShelfScope.LOCAL.name to "本机")
+        if (copyShelfAvailable) add(UnifiedShelfScope.COPY.name to "拷贝")
+        siteSources.forEach { add(it.id to it.name) }
+    } }
+    val shelfLabels = shelfOptions.map { it.second }
+    val selectedShelfIndex = shelfOptions.indexOfFirst { it.first == scopeName }.coerceAtLeast(0)
+    val hasShelfTabs = shelfOptions.size > 1
     val storedCollections by libraryStore.pageCollections.collectAsStateWithLifecycle()
     val collections = remember(storedCollections, includedSourceIds, excludedSourceIds) {
         storedCollections.filter { sourceIncluded(it.manga.sourceId) }
@@ -234,11 +276,22 @@ fun LibraryScreen(
     LaunchedEffect(trashArmed) { if (trashArmed) haptics.perform(FeelEvent.Threshold) }
     val localBooksPosition = rememberLazyGridState()
     val copyBooksPosition = rememberLazyGridState()
-    val favoritesPosition = if (shelfScope == UnifiedShelfScope.LOCAL) localBooksPosition else copyBooksPosition
+    val siteBookPositions = siteSources.associate { source -> key(source.id) {
+        source.id to rememberLazyGridState()
+    } }
+    val siteBooksPosition = siteSource?.let { siteBookPositions[it.id] }
+    val favoritesPosition = when (shelfScope) {
+        UnifiedShelfScope.LOCAL -> localBooksPosition
+        UnifiedShelfScope.COPY -> copyBooksPosition
+        UnifiedShelfScope.SITE -> siteBooksPosition ?: localBooksPosition
+    }
     val historyPosition = rememberLazyListState()
-    LaunchedEffect(active, showHistory, shelfScope) {
+    LaunchedEffect(active, showHistory, shelfScope, siteSource?.id) {
         if (!active || showHistory || shelfScope != UnifiedShelfScope.LOCAL) localBooksPosition.stopScroll()
         if (!active || showHistory || shelfScope != UnifiedShelfScope.COPY) copyBooksPosition.stopScroll()
+        for ((id, position) in siteBookPositions) {
+            if (!active || showHistory || id != siteSource?.id) position.stopScroll()
+        }
         if (!active || !showHistory) historyPosition.stopScroll()
     }
     val progressById = remember(scopedHistory) { scopedHistory.associateBy { it.manga.id } }
@@ -260,13 +313,14 @@ fun LibraryScreen(
             cloudFavorites.filter { it.sourceId == "copy" && !SourceKeys.isEncoded(it.id) &&
                 sourceIncluded(it.sourceId) }).distinctBy { it.sourceId to it.id }
     }
-    val visibleFavorites = remember(unifiedBooks, localKeys, cloudKeys,
+    val localAndCopyFavorites = remember(unifiedBooks, localKeys, cloudKeys,
         shelfScope, scopedHistory, cloudMetadata, libraryStore) {
         val filtered = unifiedBooks.filter { book ->
             val key = book.sourceId to book.id
             when (shelfScope) {
                 UnifiedShelfScope.LOCAL -> key in localKeys
                 UnifiedShelfScope.COPY -> key in cloudKeys
+                UnifiedShelfScope.SITE -> false
             }
         }
         val stable = unifiedBooks.withIndex().associate { (index, manga) -> (manga.sourceId to manga.id) to index }
@@ -281,13 +335,11 @@ fun LibraryScreen(
                     .thenBy { cloudMetadata[it.id]?.readOrder ?: Int.MAX_VALUE }
                     .thenByDescending { cloudMetadata[it.id]?.joinedAt ?: 0L }
                     .thenBy(::stableIndex))
+            UnifiedShelfScope.SITE -> emptyList()
         }
     }
+    val visibleFavorites = siteShelf?.books ?: localAndCopyFavorites
     val visibleHistory = remember(scopedHistory, pendingHistory) { scopedHistory.filterNot { it.manga.id in pendingHistory } }
-    val adultResume = remember(adultProfile, visibleHistory) {
-        if (adultProfile) visibleHistory.asSequence().filter { it.chapterId.isNotBlank() }.maxByOrNull { it.updatedAt }
-        else null
-    }
     val copyNotice = copySyncState?.takeIf {
         it.owner != null && (it.differences.isNotEmpty() || it.favoritesError != null || it.progressError != null)
     }
@@ -354,20 +406,8 @@ fun LibraryScreen(
     chapterHistoryManga?.takeIf { sourceIncluded(it.sourceId) }?.let { manga ->
         ChapterHistorySheet(manga, libraryStore, onDismiss = { chapterHistoryManga = null }, onContinue = onContinue)
     }
-    val adultShelfTabs: @Composable (Modifier) -> Unit = { modifier ->
-        MotionTabs(if (showHistory) 1 else 0, listOf("本地书架", historyTitle),
-            onSelect = { index ->
-                val historySelected = index == 1
-                if (active && showHistory != historySelected) {
-                    onCancelOpen()
-                    managedId = null
-                    showHistory = historySelected
-                }
-            }, modifier = modifier, treatment = MotionTabTreatment.Underline, controlHeight = 44.dp,
-            compact = true)
-    }
     BoxWithConstraints(Modifier.fillMaxSize()) {
-    val shelfWidth = (maxWidth - 140.dp).coerceAtMost(196.dp).coerceAtLeast(112.dp)
+    val shelfWidth = (maxWidth - 140.dp).coerceAtMost((if (adultProfile) 284 else 196).dp).coerceAtLeast(112.dp)
     val historyInset = 16.dp + ((maxWidth - if (desktop) 1040.dp else MangaLayout.ListWidth) / 2f).coerceAtLeast(0.dp)
     Box(Modifier.fillMaxSize().mangaHazeSource(backdrop)
         .background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)) {
@@ -439,20 +479,29 @@ fun LibraryScreen(
                             horizontalArrangement = Arrangement.spacedBy(gap),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            if (adultResume != null) item(key = "adult-continue", span = {
+                            if (siteShelf != null && siteShelf.accountAvailable == true) item(
+                                key = "site-collection-controls", span = {
+                                    androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
+                                }) {
+                                SiteShelfControls(siteShelf, siteVisible,
+                                    onFolder = { id -> runSiteAction { load(id) } },
+                                    onRefresh = { runSiteAction { load(refreshFolders = true) } },
+                                    onSync = onJmSync.takeIf { siteShelf.source.id == "jmcomic" },
+                                    syncCount = jmSyncState?.differences?.size ?: 0)
+                            }
+                            if (siteShelf != null && visibleFavorites.isEmpty()) item(key = "site-collection-state", span = {
                                 androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                             }) {
-                                Column(Modifier.widthIn(max = 520.dp).fillMaxWidth()
-                                    .background(MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(14.dp))
-                                    .padding(horizontal = 12.dp, vertical = 8.dp)) {
-                                    Text("继续阅读", style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.primary)
-                                    ContinueRow(adultResume, repository, onContinue = { progress ->
-                                        if (active) {
-                                            onCancelOpen()
-                                            onContinue(progress)
-                                        }
-                                    })
+                                when {
+                                    siteShelf.busy || siteShelf.accountAvailable == null && siteShelf.message == null ->
+                                        Text("正在读取站点书架…", Modifier.padding(horizontal = 4.dp, vertical = 18.dp),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                                    siteShelf.accountAvailable == false -> EmptyMessage("登录${siteShelf.source.name}",
+                                        "登录后可查看站点收藏。", "去登录", { onOpenSiteAccount?.invoke(siteShelf.source.id) })
+                                    siteShelf.message != null -> EmptyMessage("站点书架暂不可用", siteShelf.message.orEmpty(),
+                                        "重试", { runSiteAction { load() } })
+                                    else -> EmptyMessage("这个收藏夹还是空的", "在${siteShelf.source.name}收藏的作品会显示在这里。",
+                                        "去发现", onDiscover)
                                 }
                             }
                             if (shelfScope == UnifiedShelfScope.COPY && copyNotice != null && importCopy != null) item(key = "copy-new-favorites", span = {
@@ -479,14 +528,12 @@ fun LibraryScreen(
                                     }, Modifier.padding(start = 7.dp), style = MaterialTheme.typography.labelSmall)
                                 }
                             }
-                            if (visibleFavorites.isEmpty() &&
+                            if (siteShelf == null && visibleFavorites.isEmpty() &&
                                 (shelfScope == UnifiedShelfScope.LOCAL || !cloudLoading && cloudComplete)) item(
                                 key = "empty-collection", span = {
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                                 }) {
                                 when {
-                                    adultProfile -> EmptyMessage("成人书架还是空的", "收藏的成人漫画会出现在这里。",
-                                        "去发现", onDiscover)
                                     shelfScope == UnifiedShelfScope.LOCAL -> EmptyBookshelf(onDiscover)
                                     onAddCloudFavorite == null && onOpenAccount != null ->
                                         EmptyMessage("登录拷贝账号", "登录后，这里显示拷贝收藏。", "去登录", onOpenAccount)
@@ -497,6 +544,9 @@ fun LibraryScreen(
                                 contentType = { "shelf-book" }) { manga ->
                                 val local = (manga.sourceId to manga.id) in localKeys
                                 val fromCopy = (manga.sourceId to manga.id) in cloudKeys
+                                val remote = siteShelf != null
+                                val allowLocalRemoval = local && !remote
+                                val addBook = if (remote) onAddSiteFavorite else onAddCloudFavorite
                                 val saved = progressById[manga.id]
                                 val preferred = preferredResumeTargets[manga.id]?.takeIf { it.mangaId == manga.id }
                                 val hasContinuation = preferred != null || saved != null
@@ -509,8 +559,13 @@ fun LibraryScreen(
                                     DesktopMenuAction(if (hasContinuation) "继续阅读" else "开始阅读") { onOpen(manga) },
                                     DesktopMenuAction("详情与目录") { onCancelOpen(); onDetails(manga) },
                                     DesktopMenuAction("章节记录") { onCancelOpen(); chapterHistoryManga = manga },
-                                    if (local) DesktopMenuAction("移出本机收藏") { removeFavoriteWithUndo(manga) }
-                                    else DesktopMenuAction("加入本机收藏") { onAddCloudFavorite?.invoke(manga) })
+                                    when {
+                                        allowLocalRemoval -> DesktopMenuAction("移出本机收藏") { removeFavoriteWithUndo(manga) }
+                                        !local && addBook != null -> DesktopMenuAction("加入本机收藏") { addBook(manga) }
+                                        else -> null
+                                    },
+                                    if (remote) DesktopMenuAction("移出站点收藏") { runSiteAction { remove(manga) } } else null,
+                                ).filterNotNull()
                                 DesktopContextMenuArea(bookActions) {
                                 Column(Modifier.fillMaxWidth().then(if (desktop) Modifier
                                     .hoverable(interaction).onFocusChanged { cardFocused = it.hasFocus }.focusGroup()
@@ -520,25 +575,25 @@ fun LibraryScreen(
                                     fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null).zIndex(if (dragged) 8f else 0f)) {
                                     Box(Modifier.fillMaxWidth()) {
                                     SwipeToRemove(onRemove = { removeFavoriteWithUndo(manga) },
-                                        label = "移出本机收藏", enabled = local && !dragged && !desktop) {
+                                        label = "移出本机收藏", enabled = allowLocalRemoval && !dragged && !desktop) {
                                         BookshelfBook(
                                             manga, repository, saved,
                                             resumeTarget = preferred,
                                             opening = opening?.let { it.manga.id == manga.id && it.loading } == true,
                                             onOpen = { onOpen(manga) },
-                                            dragging = dragged, dragEnabled = local,
+                                            dragging = dragged, dragEnabled = allowLocalRemoval,
                                             deleteArmed = dragged && trashArmed,
                                             onDragStart = { point ->
                                                 onCancelOpen()
                                                 managedId = null
-                                                if (local) { draggedFavorite = manga; dragPoint = point }
+                                                if (allowLocalRemoval) { draggedFavorite = manga; dragPoint = point }
                                             },
                                             onDragMove = { dragPoint = it },
                                             onDragEnd = { point ->
                                                 val shouldRemove = draggedFavorite?.id == manga.id && isTrashDrop(point)
                                                 draggedFavorite = null
                                                 dragPoint = Offset.Unspecified
-                                                if (shouldRemove && local) removeFavoriteWithUndo(manga)
+                                                if (shouldRemove && allowLocalRemoval) removeFavoriteWithUndo(manga)
                                             },
                                             onDragCancel = {
                                                 draggedFavorite = null
@@ -556,11 +611,11 @@ fun LibraryScreen(
                                         if (local) Icon(Icons.Outlined.Bookmarks, "本机与拷贝", Modifier.size(13.dp))
                                         ChapterSourceLogo("copy", "拷贝", Modifier.size(15.dp))
                                     }
-                                    if (fromCopy && !local && onAddCloudFavorite != null) {
+                                    if ((fromCopy || remote) && !local && addBook != null) {
                                         Surface(Modifier.align(Alignment.TopEnd).padding(6.dp),
                                             shape = RoundedCornerShape(10.dp),
                                             color = MaterialTheme.colorScheme.surface.copy(alpha = .9f)) {
-                                            MotionIconButton(onClick = { onAddCloudFavorite(manga) },
+                                            MotionIconButton(onClick = { addBook(manga) },
                                                 enabled = active, modifier = Modifier.size(30.dp),
                                                 tooltip = "加入本机书架") {
                                                 Icon(Icons.Outlined.BookmarkAdd, "加入本机书架", Modifier.size(16.dp))
@@ -600,16 +655,33 @@ fun LibraryScreen(
                                                     if (it.pageCount > 0) " · ${it.pageIndex + 1}/${it.pageCount}" else ""
                                             } ?: cloudMetadata[manga.id]?.chapterTitle
                                                 ?.takeIf { fromCopy && it.isNotBlank() }?.let { "拷贝 · $it" } ?: "未读"
-                                            if (adultProfile && !hasContinuation) MangaBrowseSource(manga, Modifier.padding(top = 2.dp))
-                                            else Text(mangaNumberText(progressText), modifier = Modifier.padding(top = 2.dp),
+                                            Text(mangaNumberText(progressText), modifier = Modifier.padding(top = 2.dp),
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
                                                 lineHeight = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
-                                        RecordActionsMenu(managedId == manga.id,
+                                        if (remote) CloudFavoriteActionsMenu(managedId == manga.id,
+                                            onDismiss = { managedId = null }, onDetails = { onDetails(manga) },
+                                            onRemove = { runSiteAction { remove(manga) } },
+                                            removeEnabled = siteVisible && siteShelf?.busy == false, removeLabel = "移出站点收藏")
+                                        else RecordActionsMenu(managedId == manga.id,
                                             onDismiss = { managedId = null },
                                             onDetails = { onDetails(manga) })
                                     }
                                 }
+                                }
+                            }
+                            if (siteShelf != null && visibleFavorites.isNotEmpty() &&
+                                (siteShelf.nextPage != null || siteShelf.message != null)) item(key = "site-collection-more", span = {
+                                androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
+                            }) {
+                                val failed = siteShelf.message
+                                TextButton(onClick = { runSiteAction { load(append = failed == null, refreshFolders = failed != null) } },
+                                    enabled = siteVisible && !siteShelf.busy, modifier = Modifier.fillMaxWidth()) {
+                                    Text(when {
+                                        siteShelf.busy -> "正在读取…"
+                                        failed != null -> "$failed 刷新收藏"
+                                        else -> "加载更多收藏"
+                                    })
                                 }
                             }
                         }
@@ -627,44 +699,45 @@ fun LibraryScreen(
         }
     }
         val selectShelf: (Int) -> Unit = { index ->
-            val destination = if (index == 1 && copyShelfAvailable) UnifiedShelfScope.COPY else UnifiedShelfScope.LOCAL
-            if (destination != shelfScope || showHistory) {
+            val destination = shelfOptions.getOrNull(index)?.first ?: UnifiedShelfScope.LOCAL.name
+            if (active && (destination != scopeName || showHistory)) {
                 onCancelOpen()
-                scopeName = destination.name
+                managedId = null
+                scopeName = destination
                 showHistory = false
             }
         }
+        val scopeTabs: @Composable (Modifier, Dp) -> Unit = { modifier, height ->
+            val scrollTabs = shelfLabels.size > 3
+            MotionTabs(selectedShelfIndex, shelfLabels, selectShelf,
+                modifier = modifier.then(if (scrollTabs) Modifier.horizontalScroll(rememberScrollState()) else Modifier),
+                treatment = MotionTabTreatment.Soft, compact = scrollTabs, controlHeight = height)
+        }
         if (desktop) {
             val stackedTools = maxWidth < 680.dp * density.fontScale.coerceAtLeast(1f)
-            DesktopManagementToolbar(if (showHistory && !adultProfile) historyTitle else shelfTitle, Modifier.align(Alignment.TopCenter)
+            DesktopManagementToolbar(if (showHistory) historyTitle else shelfTitle, Modifier.align(Alignment.TopCenter)
                 .onSizeChanged { headerHeightPx = it.height },
                 navigation = navigation, minimumToolsWidth = 680.dp) {
-                if (adultProfile) adultShelfTabs(Modifier.width(176.dp * density.fontScale.coerceIn(1f, 1.5f)))
-                else if (showHistory) MotionIconButton(onClick = { showHistory = false },
+                if (showHistory) MotionIconButton(onClick = { showHistory = false },
                     modifier = Modifier.size(36.dp), tooltip = "返回书架") {
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回书架", Modifier.size(19.dp))
-                } else if (copyShelfAvailable) MotionTabs(if (shelfScope == UnifiedShelfScope.LOCAL) 0 else 1, shelfLabels, selectShelf,
-                    modifier = if (stackedTools) Modifier.width(240.dp * density.fontScale.coerceAtLeast(1f))
-                        else Modifier.widthIn(max = 280.dp).weight(1f, fill = false),
-                    treatment = MotionTabTreatment.Soft, controlHeight = 36.dp)
+                } else if (hasShelfTabs) scopeTabs(if (stackedTools) Modifier.width(240.dp * density.fontScale.coerceIn(1f, 1.5f))
+                    else Modifier.widthIn(max = 280.dp).weight(1f, fill = false), 36.dp)
                 if (!stackedTools) Spacer(Modifier.weight(1f))
-                if (!showHistory && !adultProfile) {
+                if (!showHistory) {
                     MotionIconButton(onClick = { onCancelOpen(); showHistory = true },
                         modifier = Modifier.size(36.dp), tooltip = historyTitle) {
                         Icon(Icons.Outlined.History, historyTitle, Modifier.size(19.dp))
                     }
                 }
+                val accountLabel = if (adultProfile) "来源账号" else "拷贝账号"
                 if (onOpenAccount != null) MotionIconButton(onClick = onOpenAccount,
-                    modifier = Modifier.size(36.dp), tooltip = "拷贝账号") {
-                    Icon(Icons.Outlined.AccountCircle, "拷贝账号", Modifier.size(19.dp))
+                    modifier = Modifier.size(36.dp), tooltip = accountLabel) {
+                    Icon(Icons.Outlined.AccountCircle, accountLabel, Modifier.size(19.dp))
                 }
                 if (onCopySync != null) MotionIconButton(onClick = onCopySync, enabled = active,
                     modifier = Modifier.size(36.dp), tooltip = "查看拷贝差异") {
                     Icon(Icons.Outlined.Sync, "查看拷贝差异", Modifier.size(19.dp))
-                }
-                if (onJmSync != null) MotionIconButton(onClick = onJmSync, enabled = active,
-                    modifier = Modifier.size(36.dp), tooltip = "查看禁漫收藏差异") {
-                    Icon(Icons.Outlined.Sync, "查看禁漫收藏差异", Modifier.size(19.dp))
                 }
                 MotionIconButton(onClick = { showCollections = true }, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Outlined.Collections, "画面收藏", Modifier.size(19.dp))
@@ -676,8 +749,8 @@ fun LibraryScreen(
         } else Column(Modifier.align(Alignment.TopCenter).onSizeChanged { headerHeightPx = it.height }
             .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
             .padding(horizontal = 8.dp, vertical = 2.dp)) {
-            val hasLeading = !adultProfile && (showHistory || copyShelfAvailable)
-            PageTitleHeader(if (showHistory && !adultProfile) historyTitle else shelfTitle, backdrop, navigation,
+            val hasLeading = showHistory || hasShelfTabs
+            PageTitleHeader(if (showHistory) historyTitle else shelfTitle, backdrop, navigation,
                 leadingWidth = if (hasLeading) shelfWidth else 0.dp,
                 leading = if (hasLeading) ({
                     if (showHistory) Row(Modifier.width(shelfWidth),
@@ -689,9 +762,7 @@ fun LibraryScreen(
                         Text(historyTitle, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     } else LiquidGlassSurface(backdrop, Modifier.width(shelfWidth), cornerRadius = 22.dp,
                         role = GlassSurfaceRole.NAVIGATION, trackPointer = true) {
-                        MotionTabs(if (shelfScope == UnifiedShelfScope.LOCAL) 0 else 1,
-                            shelfLabels, selectShelf, modifier = Modifier.fillMaxWidth(),
-                            treatment = MotionTabTreatment.Soft, controlHeight = 40.dp)
+                        scopeTabs(Modifier.fillMaxWidth(), 40.dp)
                     }
                 }) else null,
                 summary = if (hasLeading) null else ({
@@ -719,13 +790,12 @@ fun LibraryScreen(
                                             LibraryToolDestination.COLLECTIONS -> showCollections = true
                                             LibraryToolDestination.STATS -> showStats = true
                                             LibraryToolDestination.COPY_SYNC -> onCopySync?.invoke()
-                                             LibraryToolDestination.JM_SYNC -> onJmSync?.invoke()
                                             LibraryToolDestination.ACCOUNT -> onOpenAccount?.invoke()
                                             null -> Unit
                                         }
                                     }
                                 }) {
-                                if (!showHistory && !adultProfile) LibraryToolAction(Icons.Outlined.History, historyTitle,
+                                if (!showHistory) LibraryToolAction(Icons.Outlined.History, historyTitle,
                                     visibleHistory.size.toString()) {
                                     pendingLibraryTool = LibraryToolDestination.HISTORY
                                     libraryActionsOpen = false
@@ -743,12 +813,8 @@ fun LibraryScreen(
                                     pendingLibraryTool = LibraryToolDestination.COPY_SYNC
                                     libraryActionsOpen = false
                                 }
-                                if (onJmSync != null) LibraryToolAction(Icons.Outlined.Sync, "禁漫同步",
-                                    jmSyncState?.differences?.size?.takeIf { it > 0 }?.toString()) {
-                                    pendingLibraryTool = LibraryToolDestination.JM_SYNC
-                                    libraryActionsOpen = false
-                                }
-                                if (onOpenAccount != null) LibraryToolAction(Icons.Outlined.AccountCircle, "拷贝账号") {
+                                if (onOpenAccount != null) LibraryToolAction(Icons.Outlined.AccountCircle,
+                                    if (adultProfile) "来源账号" else "拷贝账号") {
                                     pendingLibraryTool = LibraryToolDestination.ACCOUNT
                                     libraryActionsOpen = false
                                 }
@@ -756,8 +822,6 @@ fun LibraryScreen(
                         }
                     }
                 })
-            if (adultProfile) adultShelfTabs(Modifier.padding(horizontal = 8.dp)
-                .widthIn(max = 284.dp).fillMaxWidth())
         }
         AnimatedVisibility(
             visible = draggedFavorite != null,
@@ -841,6 +905,35 @@ private fun LibraryToolAction(icon: ImageVector, label: String, count: String? =
     }
 }
 
+
+@Composable
+private fun SiteShelfControls(
+    shelf: ProfileSiteShelf,
+    active: Boolean,
+    onFolder: (String) -> Unit,
+    onRefresh: () -> Unit,
+    onSync: (() -> Unit)?,
+    syncCount: Int,
+) {
+    val canEdit = active && !shelf.busy
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        if (shelf.folders.size > 1) Box(Modifier.weight(1f)) {
+            val folders = shelf.folders
+            MotionTabs(folders.indexOfFirst { it.id == shelf.folderId }.coerceAtLeast(0), folders.map { it.title },
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                onSelect = { index -> if (canEdit && folders[index].id != shelf.folderId) onFolder(folders[index].id) },
+                compact = true, treatment = MotionTabTreatment.Soft, controlHeight = 38.dp)
+        } else Spacer(Modifier.weight(1f))
+        if (onSync != null) MotionIconButton(onClick = onSync, enabled = active,
+            modifier = Modifier.size(44.dp), tooltip = if (syncCount > 0) "查看 $syncCount 项禁漫收藏差异" else "禁漫同步") {
+            Icon(Icons.Outlined.Sync, "禁漫同步", Modifier.size(18.dp))
+        }
+        MotionIconButton(onClick = onRefresh, enabled = canEdit,
+            modifier = Modifier.size(44.dp), tooltip = "刷新站点收藏") {
+            Icon(Icons.Outlined.Refresh, "刷新站点收藏", Modifier.size(18.dp))
+        }
+    }
+}
 
 @Composable
 private fun EmptyBookshelf(onDiscover: () -> Unit) {

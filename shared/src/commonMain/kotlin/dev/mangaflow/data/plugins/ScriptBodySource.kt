@@ -77,7 +77,24 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
                 require(fields.length() <= 16) { "来源登录字段过多。" }
                 (0 until fields.length()).map { fields.getString(it).also { name -> require(name.length in 1..160) } }
             }.orEmpty(), value.optString("credentialLabel", "Cookie").take(40),
-            value.optBoolean("websiteLoginDeclared", false)).also { declaredCapabilities = it }
+            value.optBoolean("websiteLoginDeclared", false), browserAccount = reviewedBrowserAccount())
+            .also { declaredCapabilities = it }
+    }
+
+    private fun reviewedBrowserAccount(): SourceBrowserAccount? {
+        if (!hasReviewedVeneraBase(bundle.metadata)) return null
+        return when (bundle.metadata.optString("key")) {
+            "nhentai" -> SourceBrowserAccount(
+                loginUrl = "https://nhentai.net/login/",
+                registerUrl = "https://nhentai.net/register/",
+                credentialSettingsUrl = "https://nhentai.net/user/settings#apikeys",
+            )
+            "ehentai" -> SourceBrowserAccount(
+                loginUrl = "https://forums.e-hentai.org/index.php?act=Login&CODE=00",
+                registrationHelpUrl = "https://ehwiki.org/wiki/Forums#Signing_Up",
+            )
+            else -> null
+        }
     }
 
     override suspend fun feeds(): List<SourceFeed> {

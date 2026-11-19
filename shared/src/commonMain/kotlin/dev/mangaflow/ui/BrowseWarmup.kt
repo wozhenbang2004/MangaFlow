@@ -19,6 +19,7 @@ import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.UnifiedMangaRepository
+import dev.mangaflow.data.sources.repairPicacgCoverUrl
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.PrefetchByteBudget
 import dev.mangaflow.experience.prefetchOriginalPage
@@ -35,7 +36,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** The visible cover and its optional disk warm must use the same URL-bound credentials. */
-internal data class MangaCoverIdentity(val headers: Map<String, String>, val cacheKey: String)
+internal data class MangaCoverIdentity(val url: String, val headers: Map<String, String>, val cacheKey: String)
+
+private fun Manga.requestCoverUrl(): String = if (sourceId == "picacg") repairPicacgCoverUrl(coverUrl) else coverUrl
 
 internal val LocalBrowseWarmupEnabled = staticCompositionLocalOf { false }
 
@@ -43,7 +46,8 @@ internal val LocalBrowseWarmupEnabled = staticCompositionLocalOf { false }
 internal fun mangaCoverIdentity(manga: Manga, repository: MangaRepository): MangaCoverIdentity {
     val headers = if (manga.coverUrl.isBlank()) emptyMap() else repository.imageHeaders(manga.id, "")
     return remember(manga.coverUrl, manga.sourceId, headers) {
-        MangaCoverIdentity(headers, readerPageCacheKey(Page(0, manga.coverUrl), headers, manga.sourceId))
+        val url = manga.requestCoverUrl()
+        MangaCoverIdentity(url, headers, readerPageCacheKey(Page(0, url), headers, manga.sourceId))
     }
 }
 
@@ -141,12 +145,13 @@ private fun BrowseCoverWarmup(
                 for (index in indexes.take(count.coerceIn(1, 4))) {
                     if (!policy.state.value.browseWarmup || bytes.remaining <= 0L) break
                     val manga = items[index]
-                    if (!manga.coverUrl.startsWith("https:") || !warmed.add(manga.id + "\u0000" + manga.coverUrl)) continue
+                    val url = manga.requestCoverUrl()
+                    if (!url.startsWith("https:") || !warmed.add(manga.id + "\u0000" + url)) continue
                     while (warmed.size > 24) warmed.remove(warmed.first())
                     try {
                         withTimeoutOrNull(2_500L) {
                             val headers = repository.imageHeaders(manga.id, "")
-                            prefetchOriginalPage(context, Page(0, manga.coverUrl), headers, manga.sourceId, bytes)
+                            prefetchOriginalPage(context, Page(0, url), headers, manga.sourceId, bytes)
                         }
                     } catch (cancel: CancellationException) {
                         throw cancel

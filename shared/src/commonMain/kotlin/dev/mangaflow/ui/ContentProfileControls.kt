@@ -105,16 +105,20 @@ internal fun ContentProfileSourceSheet(
     unavailableReasons: Map<String, String> = emptyMap(),
     onAccount: (() -> Unit)? = null,
     onInspect: ((String) -> Unit)? = null,
+    accountRequiredIds: Set<String> = emptySet(),
+    onOpenSourceAccount: ((String) -> Unit)? = null,
 ) {
     val sources = remember(entries) { entries.distinctBy { it.source.id } }
     val colors = MaterialTheme.colorScheme
     var pendingSource by remember { mutableStateOf<String?>(null) }
     var manageAfterDismiss by remember { mutableStateOf(false) }
     var accountAfterDismiss by remember { mutableStateOf(false) }
+    var pendingAccount by remember { mutableStateOf<String?>(null) }
     var pendingInspect by remember { mutableStateOf<String?>(null) }
     var delivered by remember { mutableStateOf(false) }
-    val choosing = pendingSource != null || pendingInspect != null || manageAfterDismiss || accountAfterDismiss
-    fun canChoose() = !delivered && pendingSource == null && pendingInspect == null &&
+    val choosing = pendingSource != null || pendingInspect != null || pendingAccount != null ||
+        manageAfterDismiss || accountAfterDismiss
+    fun canChoose() = !delivered && pendingSource == null && pendingInspect == null && pendingAccount == null &&
         !manageAfterDismiss && !accountAfterDismiss
     MotionBottomSheet(
         backdrop = backdrop,
@@ -122,11 +126,16 @@ internal fun ContentProfileSourceSheet(
             if (!delivered) {
                 delivered = true
                 onDismiss()
-                if (pendingInspect != null) onInspect?.invoke(pendingInspect!!)
+                if (pendingAccount != null) pendingAccount?.let { id ->
+                    if (onOpenSourceAccount != null) onOpenSourceAccount(id)
+                    else if (onInspect != null) onInspect(id)
+                    else onAccount?.invoke()
+                }
+                else if (pendingInspect != null) pendingInspect?.let { onInspect?.invoke(it) }
                 else if (accountAfterDismiss) onAccount?.invoke()
                 else if (manageAfterDismiss) onManage()
                 else pendingSource?.let { id ->
-                    if (id == "*" || id !in unavailableReasons &&
+                    if (id == "*" || id !in unavailableReasons && id !in accountRequiredIds &&
                         sources.any { it.source.id == id && it.enabled && it.isInstalled && !it.removed })
                         onSelect(id)
                 }
@@ -140,13 +149,13 @@ internal fun ContentProfileSourceSheet(
         ) {
             item(key = "profile-source-header") {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("当前分区来源", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    Text("漫画来源", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                     MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
                 }
             }
-            if (sources.any { it.enabled && it.isInstalled && !it.removed }) item(key = "all-sources") {
+            if (sources.any { it.enabled && it.isInstalled && !it.removed && it.source.id !in accountRequiredIds }) item(key = "all-sources") {
                 MotionTextButton(onClick = {
                     if (canChoose()) { pendingSource = "*"; dismiss() }
                 }, enabled = !choosing,
@@ -176,13 +185,17 @@ internal fun ContentProfileSourceSheet(
             items(sources, key = { "profile-source:" + it.source.id }) { entry ->
                 val hasReason = entry.source.id in unavailableReasons
                 val reason = unavailableReasons[entry.source.id]?.ifBlank { "暂不可用" }
-                val available = !hasReason && entry.enabled && entry.isInstalled && !entry.removed
+                val usable = entry.enabled && entry.isInstalled && !entry.removed
+                val requiresAccount = usable && entry.source.id in accountRequiredIds
+                val canOpenAccount = requiresAccount && (onOpenSourceAccount != null || onInspect != null || onAccount != null)
+                val available = !hasReason && usable && !requiresAccount
                 val isSelected = entry.source.id == selectedId
                 val status = when {
-                    hasReason -> reason.orEmpty()
-                    !entry.isInstalled -> "未安装"
                     entry.removed -> "已移除"
+                    !entry.isInstalled -> "未安装"
                     !entry.enabled -> "已停用"
+                    requiresAccount -> "浏览需要登录"
+                    hasReason -> reason.orEmpty()
                     isSelected -> "当前"
                     else -> "已启用"
                 }
@@ -191,12 +204,12 @@ internal fun ContentProfileSourceSheet(
                         RoundedCornerShape(14.dp)), verticalAlignment = Alignment.CenterVertically) {
                     MotionTextButton(
                         onClick = {
-                            if (canChoose() && available) {
-                                pendingSource = entry.source.id
+                            if (canChoose() && (available || canOpenAccount)) {
+                                if (canOpenAccount) pendingAccount = entry.source.id else pendingSource = entry.source.id
                                 dismiss()
                             }
                         },
-                        enabled = available && !choosing,
+                        enabled = (available || canOpenAccount) && !choosing,
                         modifier = Modifier.weight(1f).heightIn(min = 56.dp)
                             .semantics { selected = isSelected; stateDescription = status },
                         shape = RoundedCornerShape(14.dp),
@@ -204,7 +217,7 @@ internal fun ContentProfileSourceSheet(
                         contentPadding = PaddingValues(start = 12.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
                     ) {
                         ChapterSourceLogo(entry.source.id, entry.source.name,
-                            Modifier.size(24.dp).clearAndSetSemantics { }, muted = !available)
+                            Modifier.size(24.dp).clearAndSetSemantics { }, muted = !available && !canOpenAccount)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text(entry.source.name, maxLines = 2, overflow = TextOverflow.Ellipsis,
@@ -214,7 +227,8 @@ internal fun ContentProfileSourceSheet(
                                 style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                         }
                         Spacer(Modifier.width(8.dp))
-                        if (isSelected) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp),
+                        if (canOpenAccount) Text("登录", style = MaterialTheme.typography.labelMedium, color = colors.primary)
+                        else if (isSelected) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp),
                             tint = colors.onSurfaceVariant)
                         else Spacer(Modifier.size(18.dp))
                     }

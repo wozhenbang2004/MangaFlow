@@ -592,10 +592,10 @@ private fun WatchEpisodeCell(
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
-    val color = if (current) colors.onPrimaryContainer else if (watched) colors.onSurfaceVariant else colors.onSurface
+    val color = if (current) colors.onPrimary else if (watched) colors.onSurfaceVariant else colors.onSurface
     val stateLabel = if (current) "当前集" else if (watched) "已看完" else "未看完"
     Box(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(11.dp))
-        .background(if (current) colors.primaryContainer else colors.surfaceContainerHigh)
+        .background(if (current) colors.primary else colors.surfaceContainerHigh)
         .motionPress(interaction, enabled = enabled)
         .clickable(enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
         .semantics { selected = current; stateDescription = stateLabel }

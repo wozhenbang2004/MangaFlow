@@ -1,6 +1,7 @@
 package dev.mangaflow.data
 
 import dev.mangaflow.data.sources.SourceAccountCleanupException
+import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.platform.wallTimeMillis
 import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CancellationException
@@ -30,7 +31,10 @@ internal fun sourceFailureSummary(stage: SourceStage, failure: Exception): Sourc
         return SourceFailureSummary(SourceFailureKind.RESPONSE, safeMessage.take(210))
     }
     val type = when {
-        (failure as? SourceException)?.httpStatus == 401 || failure.message.orEmpty().contains("登录") -> SourceFailureKind.LOGIN
+        failure is DownloadRouteException -> SourceFailureKind.NETWORK
+        safeAccount?.httpStatus == 401 || safeMessage.startsWith("此来源需要登录") ||
+            safeMessage.contains("要求登录后访问") || safeMessage.contains("請先登入會員") ||
+            failure.message.orEmpty().startsWith("请先登录") -> SourceFailureKind.LOGIN
         failure is TimeoutCancellationException || Regex("(?i)timeout|connect|dns|network|超时|连接|网络").containsMatchIn(failure.message.orEmpty()) -> SourceFailureKind.NETWORK
         (failure as? SourceException)?.httpStatus != null -> SourceFailureKind.RESPONSE
         Regex("不支持|不兼容|能力").containsMatchIn(failure.message.orEmpty()) -> SourceFailureKind.UNSUPPORTED
