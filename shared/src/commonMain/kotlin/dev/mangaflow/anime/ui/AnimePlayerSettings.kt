@@ -40,7 +40,7 @@ import dev.mangaflow.ui.motion.*
 import kotlin.math.roundToInt
 
 internal enum class AnimePlayerPanel {
-    GENERAL, VIDEO, VIDEO_SOURCE, AUDIO, SUBTITLES, SPEED, SLEEP, SKIP, PREPARATION, BUFFER, NEXT_PREPARATION, DOWNLOADS,
+    GENERAL, VIDEO, VIDEO_SOURCE, VIDEO_PREFERENCE, AUDIO, SUBTITLES, SPEED, SLEEP, SKIP, PREPARATION, BUFFER, NEXT_PREPARATION, DOWNLOADS,
     DANMAKU, DANMAKU_SEARCH, DANMAKU_DISPLAY, DANMAKU_ACCESS,
 }
 
@@ -137,6 +137,7 @@ internal fun AnimePlayerSettings(
     val backLabel = when {
         section in setOf(AnimePlayerPanel.BUFFER, AnimePlayerPanel.NEXT_PREPARATION) -> "返回播放准备"
         section == AnimePlayerPanel.VIDEO_SOURCE -> "返回画质"
+        section == AnimePlayerPanel.VIDEO_PREFERENCE -> "返回片源与显示"
         section == AnimePlayerPanel.VIDEO && enhancementParent != null -> "返回${enhancementParent.titleFor(enhancementSessionKey != null)}"
         section == AnimePlayerPanel.VIDEO && videoReturnSection == AnimePlayerPanel.PREPARATION -> "返回播放准备"
         section in setOf(AnimePlayerPanel.DANMAKU_SEARCH, AnimePlayerPanel.DANMAKU_DISPLAY,
@@ -146,6 +147,7 @@ internal fun AnimePlayerSettings(
     fun back() {
         when {
             section in setOf(AnimePlayerPanel.BUFFER, AnimePlayerPanel.NEXT_PREPARATION) -> show(AnimePlayerPanel.PREPARATION)
+            section == AnimePlayerPanel.VIDEO_PREFERENCE -> show(AnimePlayerPanel.VIDEO_SOURCE)
             section == AnimePlayerPanel.VIDEO_SOURCE -> {
                 enhancementNavigation.reset(); show(AnimePlayerPanel.VIDEO)
             }
@@ -171,7 +173,7 @@ internal fun AnimePlayerSettings(
             MotionBackHandler(visible && section != AnimePlayerPanel.GENERAL, state = null, onBack = ::back)
             val panelHeight = LocalMangaWindow.current.panelHeight
             Column(Modifier.fillMaxWidth().heightIn(max = if (section in setOf(AnimePlayerPanel.VIDEO,
-                AnimePlayerPanel.VIDEO_SOURCE)) minOf(panelHeight, 560.dp) else panelHeight)) {
+                AnimePlayerPanel.VIDEO_SOURCE, AnimePlayerPanel.VIDEO_PREFERENCE)) minOf(panelHeight, 560.dp) else panelHeight)) {
                 Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     if (section != AnimePlayerPanel.GENERAL) MotionIconButton(onClick = ::back,
@@ -182,6 +184,7 @@ internal fun AnimePlayerSettings(
                         AnimePlayerPanel.GENERAL -> "播放设置"
                         AnimePlayerPanel.VIDEO -> if (enhancementPage in enhancementTabs) "画质与性能" else enhancementPage.title
                         AnimePlayerPanel.VIDEO_SOURCE -> "片源与显示"
+                        AnimePlayerPanel.VIDEO_PREFERENCE -> "开播清晰度偏好"
                         AnimePlayerPanel.AUDIO -> "声音"
                         AnimePlayerPanel.SUBTITLES -> "字幕"
                         AnimePlayerPanel.SPEED -> "播放速度"
@@ -292,31 +295,22 @@ internal fun AnimePlayerSettings(
                             }
                         }
                         AnimePlayerPanel.VIDEO_SOURCE -> {
-                            if (AnimePlayerCapability.VIDEO_SCALE in capabilities) item {
-                                AnimeSectionTitle("画面比例")
-                                AnimeChoiceStrip(listOf("适应", "拉伸", "填满"), playback.videoScale.ordinal,
-                                    onSelect = { controller.player.setVideoScale(AnimeVideoScale.entries[it]) },
-                                    modifier = Modifier.fillMaxWidth())
-                            }
                             item {
-                                AnimeSectionTitle("优先清晰度")
-                                val heights = listOf(0, 480, 720, 1080, 2160)
-                                AnimeChoiceStrip(heights.map { if (it == 0) "自动" else "${it}p" },
-                                    heights.indexOf(state.settings.preferredSourceHeight), onSelect = {
-                                        val height = heights[it]
-                                        controller.updatePlaybackSettings { it.copy(preferredSourceHeight = height) }
-                                    }, modifier = Modifier.fillMaxWidth())
-                                AnimeQuietLabel("重新开播时，从来源明确提供的选项中优先取不超过目标的最高档。")
-                            }
-                            item {
+                                AnimeSectionTitle("本集实际画质")
                                 val dimensions = currentMedia?.let { media ->
-                                    if (media.videoWidth != null && media.videoHeight != null)
-                                        "${media.videoWidth} × ${media.videoHeight}" else null
+                                    if ((media.videoWidth ?: 0) > 0 && (media.videoHeight ?: 0) > 0)
+                                        "${media.videoWidth} × ${media.videoHeight}（${media.videoHeight}p）" else null
                                 }
-                                AnimeQuietLabel("当前解码画质 · ${dimensions ?: "—"}")
+                                AnimeQuietLabel("${if (currentMedia?.preEnhanced == true) "增强文件解码" else "当前视频解码"} · ${dimensions ?: "—"}")
+                                val enhanced = currentMedia?.videoEnhancement?.takeIf {
+                                    (it.observation?.submittedFrames ?: 0L) > 0L &&
+                                        (it.outputWidth ?: 0) > 0 && (it.outputHeight ?: 0) > 0
+                                }
+                                if (enhanced != null) AnimeQuietLabel("最近增强提交 · ${enhanced.outputWidth} × ${enhanced.outputHeight}")
+                                AnimeQuietLabel("片源分辨率与本地增强分别显示；处理尺寸不代表已收到同等清晰度的片源。")
                             }
                             if (currentMedia != null && state.playbackResolutions.isNotEmpty()) {
-                                item { AnimeSectionTitle("来源画质") }
+                                item { AnimeSectionTitle("本集片源清晰度") }
                                 items(state.playbackResolutions, key = { "resolution:" + it.id }) { resolution ->
                                     AnimeSelection(resolution.label, selected = resolution.id == state.selectedResolutionId,
                                         onClick = { controller.selectResolution(resolution.id) })
@@ -324,7 +318,7 @@ internal fun AnimePlayerSettings(
                             }
                             val videoTracks = currentMedia?.tracks.orEmpty().filter { it.kind == AnimeTrackKind.VIDEO }
                             if (currentMedia != null && videoTracks.isNotEmpty() && AnimePlayerCapability.VIDEO_TRACKS in capabilities) {
-                                item { AnimeSectionTitle("视频轨道") }
+                                item { AnimeSectionTitle("当前媒体的视频轨道") }
                                 item { AnimeSelection("自动选择", selected = videoTracks.none { it.selected },
                                     onClick = { controller.player.selectTrack(AnimeTrackKind.VIDEO, null) }) }
                                 items(videoTracks, key = { "video:" + it.id }) { track ->
@@ -333,9 +327,37 @@ internal fun AnimePlayerSettings(
                                 }
                             }
                             if (currentMedia == null) item {
-                                AnimeQuietLabel("开播后显示本集实际清晰度与轨道；优先清晰度可提前设置。")
+                                AnimeQuietLabel("开播后显示本集实际清晰度与轨道；开播偏好可提前设置。")
                             } else if (state.playbackResolutions.isEmpty() && videoTracks.isEmpty()) item {
-                                AnimeQuietLabel("当前尚无其他清晰度可选；本地增强可在画质页调整。")
+                                AnimeQuietLabel("当前来源未提供其他可选清晰度；本地增强可在画质页调整。")
+                            }
+                            item {
+                                val preferred = state.settings.preferredSourceHeight
+                                AnimePlayerSettingLink(Icons.Outlined.HighQuality, "以后开播的清晰度偏好",
+                                    if (preferred == 0) "自动 · 按来源提供的选项选择" else "最高优先 ${preferred}p · 不代表本集实际画质") {
+                                    show(AnimePlayerPanel.VIDEO_PREFERENCE)
+                                }
+                            }
+                            if (AnimePlayerCapability.VIDEO_SCALE in capabilities) item {
+                                AnimeSectionTitle("画面适配")
+                                AnimeChoiceStrip(listOf("适应", "拉伸", "填满"), playback.videoScale.ordinal,
+                                    onSelect = { controller.player.setVideoScale(AnimeVideoScale.entries[it]) },
+                                    modifier = Modifier.fillMaxWidth())
+                                AnimeQuietLabel("只调整画面在播放区域中的显示方式，片源像素和增强倍率保持原设置。")
+                            }
+                        }
+                        AnimePlayerPanel.VIDEO_PREFERENCE -> {
+                            item {
+                                AnimeSectionTitle("以后开播优先选择")
+                                val heights = listOf(0, 480, 720, 1080, 2160)
+                                AnimeChoiceStrip(heights.map { if (it == 0) "自动" else "${it}p" },
+                                    heights.indexOf(state.settings.preferredSourceHeight), onSelect = {
+                                        val height = heights[it]
+                                        controller.updatePlaybackSettings { it.copy(preferredSourceHeight = height) }
+                                    }, modifier = Modifier.fillMaxWidth())
+                                AnimeQuietLabel("重新开播时，从来源明确提供的选项中优先取不超过此高度的最高档；来源没有该档时使用可用选项。")
+                                AnimeQuietLabel("1080p 通常为 1920×1080；2160p 通常为 3840×2160。p 表示画面高度，FPS 才表示每秒帧数。")
+                                AnimeQuietLabel("这个偏好不会把 1080p 片源变成 4K；分辨率增强请在画质的输出倍率中设置。")
                             }
                         }
                         AnimePlayerPanel.AUDIO, AnimePlayerPanel.SUBTITLES -> {
@@ -496,8 +518,10 @@ internal fun AnimePlayerSettings(
                                 val firstFrame = state.playbackFirstFrameMs.takeIf { currentMedia != null }?.let { "$it ms" }
                                 val buffered = currentMedia?.bufferedAheadMs?.takeIf { it >= 0 }?.let { animeTime(it) }
                                 val speed = currentMedia?.downloadBytesPerSecond?.takeIf { it >= 0 }?.let(::animeSourceRate)
-                                AnimeQuietLabel("打开至首帧 ${firstFrame ?: "—"} · 已缓冲 ${buffered ?: "—"}")
+                                AnimeQuietLabel("打开至首帧 ${firstFrame ?: "—"} · 前方已缓冲 ${buffered ?: "—"}")
                                 AnimeQuietLabel("实播传输速率 · ${speed ?: "—"}")
+                                AnimeQuietLabel("已保存时长目标 · ${bufferSeconds(state.settings.bufferMinMs)}–${bufferSeconds(state.settings.bufferMaxMs)} 秒")
+                                AnimeQuietLabel("达到上限后暂停预读，播放消耗至补充阈值后继续；容量先满或临近片尾时，实际时长可能更少。")
                                 currentMedia?.bufferMetrics?.let { metrics ->
                                     AnimeQuietLabel("已分配缓冲 · ${metrics.allocatedBytes?.let(::animeBytes) ?: "—"}")
                                     if (metrics.forwardBytes != null || metrics.backBytes != null)
@@ -516,10 +540,10 @@ internal fun AnimePlayerSettings(
                                 currentMedia == null || playback.phase in setOf(AnimePlayerPhase.OPENING, AnimePlayerPhase.ERROR)
                             if (configureBuffer) {
                                 item { AnimeQuietLabel("缓冲目标会保存，实际缓存量随内核、媒体与可用预算变化。") }
-                                item { AnimeTextField(minimumDraft, { minimumDraft = it; error = null }, "最小缓冲（秒）") }
-                                item { AnimeTextField(maximumDraft, { maximumDraft = it; error = null }, "最大缓冲（秒）") }
-                                item { AnimeTextField(startDraft, { startDraft = it; error = null }, "起播缓冲（秒）") }
-                                item { AnimeTextField(rebufferDraft, { rebufferDraft = it; error = null }, "恢复缓冲（秒）") }
+                                item { AnimeTextField(minimumDraft, { minimumDraft = it; error = null }, "继续预读的补充阈值（秒）") }
+                                item { AnimeTextField(maximumDraft, { maximumDraft = it; error = null }, "前方缓冲目标上限（秒）") }
+                                item { AnimeTextField(startDraft, { startDraft = it; error = null }, "起播需要的缓冲（秒）") }
+                                item { AnimeTextField(rebufferDraft, { rebufferDraft = it; error = null }, "卡顿后恢复需要（秒）") }
                                 item { AnimeTextField(forwardDraft, { forwardDraft = it; error = null }, "前方缓冲容量（MiB）",
                                     emptyHint = "自动 · ${preparationBudget.forwardBytes / (1024L * 1024L)}") }
                                 item { AnimeTextField(backDraft, { backDraft = it; error = null }, "回看缓冲容量（MiB）",

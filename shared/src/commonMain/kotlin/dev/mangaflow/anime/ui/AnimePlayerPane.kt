@@ -41,6 +41,7 @@ import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
@@ -118,6 +119,7 @@ internal fun AnimePlayerPane(
     else optionCount > 0 || target == null && currentOption == null && playback.phase == AnimePlayerPhase.ERROR
     val focus = remember { FocusRequester() }
     val chromeFocus = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
     val touchExploration = LocalTouchExplorationEnabled.current
     var controlsVisible by remember { mutableStateOf(true) }
     var controlsHeld by remember { mutableStateOf(false) }
@@ -133,11 +135,12 @@ internal fun AnimePlayerPane(
     var settingsEnhancementPage by remember { mutableStateOf(EnhancementPage.QUALITY) }
     var interactionEpoch by remember { mutableIntStateOf(0) }
     val awaitingVideo = playback.firstFrameRendered == false && playback.hasVideoTracks != false
-    val forceControls = state.resolving || failure != null || awaitingVideo ||
+    val requiredControls = state.resolving || failure != null || awaitingVideo ||
         playback.phase != AnimePlayerPhase.READY || !playback.playWhenReady || obscured || settingsPresent ||
-        state.notice != null || touchExploration || headerFocused || transportFocused || centerFocused
+        state.notice != null || touchExploration
+    val forceControls = requiredControls || headerFocused || transportFocused || centerFocused
     val showChrome = !playback.inPictureInPicture && (!locked || touchExploration) &&
-        (!fullscreen || controlsVisible || forceControls)
+        (controlsVisible || forceControls)
     val motion = LocalMotionEnabled.current
     val reveal by animateFloatAsState(if (showChrome) 1f else 0f,
         if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
@@ -221,7 +224,7 @@ internal fun AnimePlayerPane(
       CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
         BoxWithConstraints(modifier.fillMaxSize().focusRequester(focus)
             .onPreviewKeyEvent { event ->
-                if (active && fullscreen && !showChrome && !locked && !obscured && !settingsPresent &&
+                if (active && !showChrome && !locked && !obscured && !settingsPresent &&
                     !playback.inPictureInPicture && event.key == Key.Tab && event.type == KeyEventType.KeyDown) {
                     focusChromeOnReveal = true
                     interact()
@@ -241,11 +244,14 @@ internal fun AnimePlayerPane(
                     Key.Escape -> if (fullscreen) { onFullscreenChange(false); true } else false
                     else -> false
                 }
-            }.pointerInput(fullscreen) {
+            }.pointerInput(fullscreen, active, locked, obscured, settingsPresent, playback.inPictureInPicture) {
+                if (!fullscreen || !active || locked || obscured || settingsPresent || playback.inPictureInPicture)
+                    return@pointerInput
                 awaitPointerEventScope {
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
-                        if (fullscreen && event.type == PointerEventType.Move) interact()
+                        if (event.type == PointerEventType.Move && event.changes.any { it.type == PointerType.Mouse } &&
+                            event.changes.none { it.pressed || it.previousPressed }) interact()
                     }
                 }
             }.focusable()) {
@@ -269,26 +275,28 @@ internal fun AnimePlayerPane(
             val videoTop = if (fillVideo) 0.dp else headerHeight
             val controlsTop = videoTop + videoHeight
             val episodeTop = controlsTop + transportHeight
+            val latestPlayback by rememberUpdatedState(playback)
+            val latestRequiredControls by rememberUpdatedState(requiredControls)
+            val latestChromeVisible by rememberUpdatedState(showChrome)
 
             // One native surface keeps its composition identity through fullscreen and size changes.
             Box(Modifier.padding(top = videoTop).width(videoWidth).height(videoHeight)
-                .background(Color.Black), contentAlignment = Alignment.Center) {
-                AnimePlayerSurface(controller.player, Modifier.fillMaxSize())
-                AnimeDanmakuOverlay(controller, playback,
-                    visible = active && !obscured && !settingsPresent && !state.resolving && failure == null,
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 12.dp))
-                if (!playback.inPictureInPicture && (state.resolving || failure != null)) Box(Modifier.fillMaxSize().background(Color.Black.copy(
-                    alpha = if (playback.firstFrameRendered == true || playback.phase == AnimePlayerPhase.READY) .45f else 1f)))
-                val latestPlayback by rememberUpdatedState(playback)
-                val latestForceControls by rememberUpdatedState(forceControls)
-                Box(Modifier.fillMaxSize().pointerInput(playback.sessionGeneration, locked, fullscreen, canControl,
+                .background(Color.Black).pointerInput(playback.sessionGeneration, active, locked, fullscreen, canControl,
                     state.settings.longPressSpeed, obscured, settingsPresent, playback.inPictureInPicture) {
-                    if (locked || obscured || settingsPresent || playback.inPictureInPicture) return@pointerInput
+                    if (!active || locked || obscured || settingsPresent || playback.inPictureInPicture) return@pointerInput
                     var accelerated = false
+                    // Children consume their own buttons; blank video and passive status layers
+                    // share this parent gesture instead of competing full-size sibling hit targets.
                     detectTapGestures(
                         onTap = {
                             if (!accelerated) {
-                                controlsVisible = if (!fullscreen || latestForceControls) true else !controlsVisible
+                                if (latestRequiredControls) controlsVisible = true
+                                else {
+                                    val revealControls = !latestChromeVisible
+                                    focusManager.clearFocus()
+                                    focus.requestFocus()
+                                    controlsVisible = revealControls
+                                }
                                 interactionEpoch++
                             }
                         },
@@ -325,7 +333,13 @@ internal fun AnimePlayerPane(
                             }
                         },
                     )
-                })
+                }, contentAlignment = Alignment.Center) {
+                AnimePlayerSurface(controller.player, Modifier.fillMaxSize())
+                AnimeDanmakuOverlay(controller, playback,
+                    visible = active && !obscured && !settingsPresent && !state.resolving && failure == null,
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 12.dp))
+                if (!playback.inPictureInPicture && (state.resolving || failure != null)) Box(Modifier.fillMaxSize().background(Color.Black.copy(
+                    alpha = if (playback.firstFrameRendered == true || playback.phase == AnimePlayerPhase.READY) .45f else 1f)))
                 val statusTop = if (fillVideo) headerHeight else 0.dp
                 val statusBottom = if (overlayTransport) footerHeight else 0.dp
                 if (!playback.inPictureInPicture) Box(Modifier.fillMaxSize()
@@ -447,14 +461,18 @@ internal fun AnimePlayerPane(
                             .then(if (fillVideo) Modifier.windowInsetsPadding(
                                 safeInsets.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)) else Modifier)
                             .padding(horizontal = 12.dp)) {
-                            CopyShelfReveal(showChrome && canControl) {
+                            // Inline playback retains its measured transport space when the user
+                            // hides controls. The native video and episode list do not jump.
+                            CopyShelfReveal(canControl && (showChrome || !overlayTransport)) {
                                 AnimePlayerControls(controller.player, playback,
                                     previous, next, onEpisode, onToggle = ::toggle,
                                     onInteraction = ::interact, onHoldControls = { controlsHeld = it },
                                     onSettings = ::showSettings, nextPreparation = state.nextEpisodePreparation,
                                     workspaceNotice = state.notice, onDismissNotice = controller::dismissNotice,
                                     centralTransport = centralTransport,
-                                    modifier = Modifier.fillMaxWidth().motionInputGate(active && showChrome && !obscured && !settingsPresent))
+                                    modifier = Modifier.fillMaxWidth()
+                                        .graphicsLayer { if (!overlayTransport) alpha = chromeReveal }
+                                        .motionInputGate(active && showChrome && !obscured && !settingsPresent))
                             }
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 AnimePlaybackStatus(playback.takeIf { target == null && it.assetKey != null &&
@@ -612,12 +630,16 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
     onSettings: (AnimePlayerPanel) -> Unit, nextPreparation: AnimeNextEpisodePreparation?,
     centralTransport: Boolean,
     modifier: Modifier = Modifier) {
-    var scrub by remember(state.sessionGeneration) { mutableStateOf<Long?>(null) }
+    var scrub by remember(state.sessionGeneration, state.timelineGeneration) { mutableStateOf<Long?>(null) }
     val duration = state.durationMs
     val canSeek = duration > 0L
+    val bufferedRange = state.bufferedMs.takeIf {
+        state.phase == AnimePlayerPhase.READY && state.assetKey != null &&
+            state.positionMs in 0L until duration && it > state.positionMs
+    }?.let { state.positionMs.toFloat()..it.coerceAtMost(duration).toFloat() }
     val releaseControls by rememberUpdatedState(onHoldControls)
-    DisposableEffect(canSeek, state.sessionGeneration) {
-        // Slider removal/session replacement may skip onValueChangeFinished mid-drag.
+    DisposableEffect(canSeek, state.sessionGeneration, state.timelineGeneration) {
+        // Slider removal or a changed playback timeline may skip onValueChangeFinished mid-drag.
         scrub = null
         releaseControls(false)
         onDispose {
@@ -643,6 +665,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
                     MotionSlider(value = (scrub ?: state.positionMs).toFloat(),
                         onValueChange = { onHoldControls(true); scrub = it.toLong() },
                         valueRange = 0f..duration.toFloat(),
+                        bufferedRange = bufferedRange,
                         onValueChangeFinished = { scrub?.let(player::seekTo); scrub = null; onHoldControls(false); onInteraction() },
                         formatValue = { animeTime(it.toLong()) }, modifier = Modifier.weight(1f))
                 }

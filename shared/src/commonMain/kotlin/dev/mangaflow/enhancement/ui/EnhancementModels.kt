@@ -25,6 +25,8 @@ import androidx.compose.ui.unit.dp
 import dev.mangaflow.anime.player.Anime4KOptionalModels
 import dev.mangaflow.enhancement.EnhancementCenter
 import dev.mangaflow.enhancement.EnhancementContent
+import dev.mangaflow.enhancement.EnhancementPolicy
+import dev.mangaflow.enhancement.enhancementModelSelectionPolicy
 import dev.mangaflow.enhancement.engine.*
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
@@ -114,28 +116,38 @@ internal fun EnhancementModelList(
     inventory: EngineInventory,
     progress: Map<String, EngineProgress>,
     content: EnhancementContent,
-    selectedModel: String?,
-    onSelectModel: (String?) -> Unit,
+    policy: EnhancementPolicy,
+    onSelectModel: (EnhancementPolicy) -> Unit,
     onOpenModel: (String) -> Unit,
     onOpenEngines: () -> Unit,
     onImport: () -> Unit,
     onRefresh: () -> Unit,
 ) {
     val choices = remember(inventory, content) { modelChoices(inventory, content) }
-    ModelChoiceRow("自动选择", "按当前档位匹配", selectedModel == null, true, { onSelectModel(null) })
+    val selectedModel = policy.modelId
+    val automatic = enhancementModelSelectionPolicy(content, policy, inventory, null)
+    ModelChoiceRow("自动选择", if (automatic != null) "按当前档位匹配已就绪的模型" else "当前档位暂无可用模型，查看运行组件",
+        selectedModel == null, automatic != null,
+        onClick = { if (automatic != null) onSelectModel(automatic) else onOpenEngines() },
+        actionLabel = automatic?.scale?.takeIf { it != policy.scale }?.let { "选用并改为 ${it}×" },
+        detailsOnly = automatic == null)
     ModelListTools("可选模型", onImport, onRefresh)
     if (choices.isEmpty()) EnhancementQuiet("还没有可选模型，可先准备运行组件或导入模型。")
     choices.forEach { choice ->
         val pending = choice.progressKey?.let { progress[it] }
         val selectionId = choice.selectionId
+        val selection = selectionId?.let { enhancementModelSelectionPolicy(content, policy, inventory, it) }
         val selected = selectionId != null && selectionId == selectedModel
-        val summary = listOfNotNull(choice.scaleLabel, choice.sizeLabel,
-            choice.stateLabel(selectedModel, pending)).joinToString(" · ")
+        val unavailable = selectionId != null && selection == null
+        val summary = listOfNotNull("当前不可选".takeIf { unavailable }, choice.scaleLabel, choice.sizeLabel,
+            choice.stateLabel(selectedModel, pending).takeUnless { unavailable }).joinToString(" · ")
         key(choice.key) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                ModelChoiceRow(choice.title, summary, selected, selectionId != null,
-                    onClick = { if (selectionId != null) onSelectModel(selectionId) else onOpenModel(choice.key) },
-                    modifier = Modifier.weight(1f), failed = pending?.failed == true && selectionId == null)
+                ModelChoiceRow(choice.title, summary, selected, selection != null,
+                    onClick = { if (selection != null) onSelectModel(selection) else onOpenModel(choice.key) },
+                    modifier = Modifier.weight(1f), failed = pending?.failed == true && selectionId == null,
+                    actionLabel = selection?.scale?.takeIf { it != policy.scale }?.let { "选用并改为 ${it}×" },
+                    detailsOnly = selectionId != null && selection == null)
                 MotionIconButton(onClick = { onOpenModel(choice.key) }, modifier = Modifier.size(44.dp),
                     tooltip = "${choice.title} · 详情") {
                     Icon(Icons.Outlined.Info, "${choice.title} · 详情", Modifier.size(19.dp),
@@ -174,6 +186,8 @@ private fun ModelChoiceRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     failed: Boolean = false,
+    actionLabel: String? = null,
+    detailsOnly: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
     MotionTextButton(onClick, modifier.fillMaxWidth().heightIn(min = 56.dp).semantics {
@@ -186,6 +200,7 @@ private fun ModelChoiceRow(
             selected -> Icons.Outlined.RadioButtonChecked
             selectable -> Icons.Outlined.RadioButtonUnchecked
             failed -> Icons.Outlined.ErrorOutline
+            detailsOnly -> Icons.Outlined.Info
             else -> Icons.Outlined.Download
         }, null, Modifier.size(19.dp), tint = when {
             selected -> colors.primary
@@ -200,6 +215,7 @@ private fun ModelChoiceRow(
             Text(summary, style = MaterialTheme.typography.labelSmall,
                 color = if (failed) colors.error else colors.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
+            actionLabel?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = colors.primary) }
         }
     }
 }
@@ -210,9 +226,8 @@ internal fun EnhancementModelDetail(
     progress: Map<String, EngineProgress>,
     content: EnhancementContent,
     modelKey: String?,
-    selectedModel: String?,
-    scale: Int,
-    onSelectModel: (String?) -> Unit,
+    policy: EnhancementPolicy,
+    onSelectModel: (EnhancementPolicy) -> Unit,
     center: EnhancementCenter,
     onOpenEngine: (String) -> Unit,
 ) {
@@ -226,6 +241,9 @@ internal fun EnhancementModelDetail(
     val engine = choice.profile ?: inventory.engines.firstOrNull { it.id == choice.engineId }
     val pending = choice.progressKey?.let { progress[it] }
     val selectionId = choice.selectionId
+    val selectedModel = policy.modelId
+    val selection = selectionId?.let { enhancementModelSelectionPolicy(content, policy, inventory, it) }
+    val selected = selectionId != null && selectionId == selectedModel && selection?.scale == policy.scale
     val scope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
     var downloading by remember(modelKey) { mutableStateOf(false) }
@@ -236,9 +254,15 @@ internal fun EnhancementModelDetail(
     EnhancementQuiet(listOfNotNull(choice.scaleLabel, choice.sizeLabel,
         choice.stateLabel(selectedModel, pending)).joinToString(" · "))
     if (selectionId != null) {
-        MotionButton({ onSelectModel(selectionId) }, modifier = Modifier.fillMaxWidth(), enabled = selectedModel != selectionId) {
-            Icon(if (selectedModel == selectionId) Icons.Outlined.Check else Icons.Outlined.RadioButtonUnchecked, null, Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp)); Text(if (selectedModel == selectionId) "已选用此模型" else "使用此模型")
+        MotionButton({ selection?.let(onSelectModel) }, modifier = Modifier.fillMaxWidth(), enabled = selection != null && !selected) {
+            Icon(if (selected) Icons.Outlined.Check else Icons.Outlined.RadioButtonUnchecked, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(when {
+                selection == null -> "当前无法选用"
+                selected -> "已选用此模型"
+                selection.scale != policy.scale -> "选用并改为 ${selection.scale}×"
+                else -> "使用此模型"
+            })
         }
     } else if (offer != null) {
         MotionButton(onClick = {
@@ -272,7 +296,14 @@ internal fun EnhancementModelDetail(
         }
     feedback?.let { EnhancementQuiet(it, error = pending?.failed == true || noticeFailed) }
     if (busy && pending?.detail != null && !pending.failed) EnhancementQuiet(pending.detail)
-    if (scale !in choice.scales) EnhancementQuiet("当前输出为 ${scale}×，此模型支持 ${choice.scaleLabel}；选用不会改变输出设置。")
+    when {
+        selectionId != null && selection == null ->
+            EnhancementQuiet("模型与当前内容或运行组件不兼容；请检查适用内容与运行组件，原设置会保留。")
+        selection != null && selection.scale != policy.scale ->
+            EnhancementQuiet("当前输出为 ${policy.scale}×；点击选用会同时保存此模型与 ${selection.scale}× 输出。")
+        policy.scale !in choice.scales ->
+            EnhancementQuiet("当前输出为 ${policy.scale}×，此模型支持 ${choice.scaleLabel}；安装就绪后可选用兼容倍率。")
+    }
     if (engine != null) AnimeEnhancementNavigation(Icons.Outlined.Memory, "运行组件",
         "${engine.title} · ${engineReadinessLabel(engine.readiness)}", onClick = { onOpenEngine(engine.id) })
     EnhancementDivider()

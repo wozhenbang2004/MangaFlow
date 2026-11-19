@@ -349,6 +349,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         } else if (current.phase == AnimePlayerPhase.ENDED) {
             mutableState.value = current.copy(phase = AnimePlayerPhase.READY, positionMs = 0L, playWhenReady = true,
                 timelineGeneration = current.timelineGeneration + 1,
+                bufferedMs = -1L, bufferMetrics = null, nativeVideoStatistics = null,
                 sourceFps = null, decoderOutputFrames = null, droppedFrames = null,
                 presentedFps = null, presentedFrames = null,
                 videoEnhancement = current.videoEnhancement.copy(observation = null))
@@ -373,6 +374,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         mutableState.value = current.copy(
             positionMs = target,
             timelineGeneration = current.timelineGeneration + 1,
+            bufferedMs = -1L, bufferMetrics = null, nativeVideoStatistics = null,
             sourceFps = null, decoderOutputFrames = null, droppedFrames = null,
             presentedFps = null, presentedFrames = null,
             videoEnhancement = current.videoEnhancement.copy(observation = null),

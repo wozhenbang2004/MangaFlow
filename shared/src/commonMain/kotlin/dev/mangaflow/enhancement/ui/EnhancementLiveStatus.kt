@@ -232,19 +232,22 @@ private fun AnimeEnhancementStatus(
                 AnimeMetricRow(if (playback?.preEnhanced == true) "增强文件尺寸" else "视频输入尺寸", inputSize ?: "—")
                 if (playback?.preEnhanced != true) AnimeMetricRow("已提交帧尺寸", submittedSize ?: "—")
                 AnimeMetricRow("已呈现帧 · 累计", animeCount(playback?.presentedFrames.takeIf { hasSession }))
-                AnimeMetricRow("丢帧 / 重复帧 · 累计", animeCount(playback?.droppedFrames.takeIf { hasSession }) +
-                    " / " + animeCount(metrics?.repeatedFrames))
+                if (playback?.nativeVideoStatistics == null) {
+                    AnimeMetricRow("解码/输出缓冲丢弃 · 原生计数", animeCount(playback?.droppedFrames.takeIf { hasSession }))
+                }
+                AnimeMetricRow("重复帧 · 累计", animeCount(metrics?.repeatedFrames))
                 AnimeMetricRow("接收速度", playback?.downloadBytesPerSecond?.takeIf { hasSession && it >= 0 }
                     ?.let { enhancementBytes(it) + "/s" } ?: "—")
                 playback?.nativeVideoStatistics?.takeIf { hasSession }?.let { native ->
                     AnimeMetricRow("解码器 / 视频输出", (native.hardwareDecoder ?: "—") + " / " + (native.videoOutput ?: "—"))
-                    AnimeMetricRow("解码 / 视频输出丢帧", animeCount(native.decoderDroppedFrames) + " / " +
+                    AnimeMetricRow("原生丢帧 · 解码 / 视频输出", animeCount(native.decoderDroppedFrames) + " / " +
                         animeCount(native.outputDroppedFrames))
                     AnimeMetricRow("滤镜输出估计", native.estimatedFilterFps?.takeIf { playing }
                         ?.let { formatDecimal(it, 1) + " FPS" } ?: "—")
                     AnimeMetricRow("输出延迟帧 · 估计", animeCount(native.estimatedDelayedFrames))
                     EnhancementQuiet("来源：mpv 原生属性。输出延迟帧是内核估计；滤镜输出不等于屏幕呈现。")
                 }
+                EnhancementQuiet("丢帧是播放器原生计数，定位或重建后可能重置；不是本集总计，也不是丢帧百分比。")
                 EnhancementQuiet(when {
                     !hasSession -> "尚无本集数据。— 表示未采集，不代表数值为零。"
                     !playing -> "播放未在进行，实时呈现帧率暂不显示；已收到的累计数据保留。"

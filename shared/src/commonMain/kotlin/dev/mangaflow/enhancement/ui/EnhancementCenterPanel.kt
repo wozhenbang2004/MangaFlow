@@ -209,10 +209,12 @@ internal fun EnhancementSettingsContent(
     fun openModel(key: String) { modelKey = key; onPageChange(EnhancementPage.MODEL_DETAIL) }
     fun openEngine(id: String) { engineId = id; onPageChange(EnhancementPage.ENGINE_DETAIL) }
     val anime = content == EnhancementContent.ANIME
-    fun selectModel(id: String?) {
-        change(draft.copy(modelId = id, preparation =
-            if (anime && draft.tier != QualityTier.ORIGINAL) draft.preparation + PreparationMode.IMMEDIATE
-            else draft.preparation))
+    fun selectModel(selection: EnhancementPolicy) {
+        if (selection.scale !in enhancementOutputScales(content, selection, center.inventory.value)) {
+            notice = "模型能力已更新，请重新选择模型与倍率。"
+            return
+        }
+        change(selection)
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (sessionKey != null && page in setOf(EnhancementPage.QUALITY, EnhancementPage.FRAME, EnhancementPage.PREPARATION))
@@ -319,12 +321,12 @@ internal fun EnhancementSettingsContent(
                 }
             }
             EnhancementPage.DISPLAY -> EnhancementDisplayControls(content)
-            EnhancementPage.MODELS -> EnhancementModelList(inventory, progress, content, draft.modelId,
+            EnhancementPage.MODELS -> EnhancementModelList(inventory, progress, content, draft,
                 onSelectModel = ::selectModel, onOpenModel = ::openModel,
                 onOpenEngines = { onPageChange(EnhancementPage.ENGINES) },
                 onImport = { onPageChange(EnhancementPage.IMPORT) }, onRefresh = { center.refreshInventory() })
             EnhancementPage.MODEL_DETAIL -> EnhancementModelDetail(inventory, progress, content, modelKey,
-                draft.modelId, draft.scale, onSelectModel = ::selectModel,
+                draft, onSelectModel = ::selectModel,
                 center = center, onOpenEngine = ::openEngine)
             EnhancementPage.ENGINES, EnhancementPage.FRAME_ENGINES -> EnhancementEngineList(inventory, progress, content,
                 frames = page == EnhancementPage.FRAME_ENGINES, onOpenEngine = ::openEngine,

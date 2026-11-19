@@ -31,6 +31,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,6 +39,7 @@ import org.openani.mediamp.MediaStatus
 import org.openani.mediamp.MediampPlayer
 import org.openani.mediamp.PlaybackException
 import org.openani.mediamp.PlaybackErrorCode
+import org.openani.mediamp.PlaybackEvent
 import org.openani.mediamp.compose.MediampPlayerSurface
 import org.openani.mediamp.features.Buffering
 import org.openani.mediamp.features.AudioLevelController
@@ -60,6 +62,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
     private var localBridge: AnimeLocalStreamBridge? = null
     private var localLease: AnimeLocalMediaLease? = null
     private var observers: CoroutineScope? = null
+    private var bufferSeekCompletion: Job? = null
     private var loadingNative: Any? = null
     private var recovery: Job? = null
     private var recoveryNotice: String? = null
@@ -324,6 +327,11 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
 
         child.launch(Dispatchers.Main.immediate) {
             native.state.collect { fact ->
+                if (!isCurrent(generation) || engine.value !== native) return@collect
+                if (fact.mediaStatus != MediaStatus.Ready && fact.mediaStatus != MediaStatus.Ended) {
+                    bufferSeekCompletion?.cancel()
+                    bufferSeekCompletion = null
+                }
                 if (fact.mediaStatus == MediaStatus.Idle || fact.mediaStatus == MediaStatus.Released) return@collect
                 val nativeError = fact.mediaStatus as? MediaStatus.Error
                 if (nativeError != null) {
@@ -382,6 +390,8 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
         native.features[Buffering]?.let { buffering ->
             child.launch(Dispatchers.Main.immediate) {
                 buffering.bufferedPositionMillis.collect { position ->
+                    if (!isCurrent(generation) || engine.value !== native || bufferSeekCompletion?.isActive == true)
+                        return@collect
                     publish(generation) { it.copy(bufferedMs = position.takeIf { value -> value >= 0 } ?: -1L) }
                 }
             }
@@ -510,7 +520,26 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
     override fun setPlayingNative(playing: Boolean) {
         engine.value?.let { if (playing) it.play() else it.pause() }
     }
-    override fun seekNative(positionMs: Long) { engine.value?.seekTo(positionMs) }
+    override fun seekNative(positionMs: Long) {
+        val native = engine.value ?: return
+        bufferSeekCompletion?.cancel()
+        // Opening only updates the requested start position and need not emit SeekCompleted.
+        // Subscribe before an actual seek; a replacement subscription cannot consume an older
+        // queued completion. Keep the buffer collector alive, without replaying its last value.
+        val pending = when (native.state.value.mediaStatus) {
+            MediaStatus.Ready, MediaStatus.Ended -> playerScope.launch(
+                Dispatchers.Main.immediate, start = CoroutineStart.UNDISPATCHED,
+            ) { native.events.first { it is PlaybackEvent.SeekCompleted } }
+            else -> null
+        }
+        bufferSeekCompletion = pending
+        try { native.seekTo(positionMs) }
+        catch (failure: Throwable) {
+            pending?.cancel()
+            if (bufferSeekCompletion === pending) bufferSeekCompletion = null
+            throw failure
+        }
+    }
     override fun setSpeedNative(speed: Float): Float {
         val native = engine.value ?: return speed
         val playbackSpeed = checkNotNull(native.features[PlaybackSpeed]) { "当前播放器不支持调整倍速" }
@@ -557,6 +586,8 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
         recovery = null
         recoveryNotice = null
         loadingNative = null
+        bufferSeekCompletion?.cancel()
+        bufferSeekCompletion = null
         audioTracks = emptyList()
         subtitleTracks = emptyList()
         observers?.cancel()

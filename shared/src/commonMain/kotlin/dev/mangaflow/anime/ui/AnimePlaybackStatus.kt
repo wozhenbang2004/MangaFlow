@@ -97,7 +97,7 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
                 dimensions(effect?.outputWidth, effect?.outputHeight) else null
         val value = when {
             playback?.preEnhanced == true -> "增强文件 ${input ?: "—"}"
-            submitted != null -> "提交 $submitted"
+            submitted != null -> "输入 ${input ?: "—"} · 提交 $submitted"
             else -> "输入 ${input ?: "—"}"
         }
         add(EnhancementReadout(EnhancementMetric.DIMENSIONS, value,
@@ -110,6 +110,18 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
             if (fps != null) "播放器实际呈现帧率 ${formatDecimal(fps, 1)} 帧每秒"
             else if (!flowing && playback != null) "播放未在进行，暂不显示实时呈现帧率"
             else "播放器尚无实际呈现帧率观测"))
+    }
+    if (EnhancementMetric.DROPPED_FRAMES in metrics) {
+        fun count(value: Long?) = value?.takeIf { it >= 0L }?.toString() ?: "—"
+        val native = playback?.nativeVideoStatistics
+        val value = if (native != null)
+            "丢帧 解码 ${count(native.decoderDroppedFrames)} · 输出 ${count(native.outputDroppedFrames)}"
+        else "丢帧 ${count(playback?.droppedFrames)}"
+        val description = if (native != null)
+            "原生解码丢帧 ${count(native.decoderDroppedFrames)}，原生视频输出丢帧 ${count(native.outputDroppedFrames)}"
+        else "原生解码／输出缓冲丢弃计数 ${count(playback?.droppedFrames)}"
+        add(EnhancementReadout(EnhancementMetric.DROPPED_FRAMES, value,
+            "$description；计数可能在定位或播放器重建后重置，不是本集总计；— 表示没有观测"))
     }
     if (EnhancementMetric.MOTION_STATUS in metrics) {
         val value = when {
@@ -143,7 +155,8 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
     if (EnhancementMetric.BUFFER in metrics) {
         val buffer = playback?.bufferedAheadMs?.takeIf { it >= 0L }
         val value = buffer?.let { formatDecimal(it / 1000.0, 1) + " s" } ?: "—"
-        add(EnhancementReadout(EnhancementMetric.BUFFER, "缓冲 $value", "播放器前方连续缓冲 $value"))
+        add(EnhancementReadout(EnhancementMetric.BUFFER, "前方缓冲 $value",
+            "播放点前方已连续缓冲 $value，播放时消耗、下载时补充；不是磁盘缓存总量"))
     }
     if (EnhancementMetric.BUFFER_BYTES in metrics) {
         val bytes = playback?.bufferMetrics?.allocatedBytes

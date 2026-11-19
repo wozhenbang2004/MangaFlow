@@ -128,6 +128,7 @@ internal fun EnhancementQuality(content: EnhancementContent, policy: Enhancement
         it.id in setOf(EnhancementEngineIds.ANIME4K_SMALL, EnhancementEngineIds.ANIME4K_MEDIUM) &&
         it.readiness == EngineReadiness.BUILT_IN }
     val selectedTitle = model?.title ?: builtIn?.title
+    val supportedScales = enhancementOutputScales(content, policy, inventory)
     Text("增强档位", style = MaterialTheme.typography.titleSmall)
     EnhancementChoices(QualityTier.entries, policy.tier,
         label = { if (!anime && it == QualityTier.ORIGINAL) "原图" else it.label },
@@ -153,7 +154,11 @@ internal fun EnhancementQuality(content: EnhancementContent, policy: Enhancement
     AnimeEnhancementNavigation(Icons.Outlined.Memory, "画质模型",
         selectedTitle ?: if (policy.modelId == null) "自动选择" else "所选模型不可用", onClick = onOpenModels)
     AnimeEnhancementNavigation(Icons.Outlined.Tune, "输出与策略",
-        listOfNotNull(if (policy.scale == 1) "1× 修复" else "${policy.scale}×",
+        listOfNotNull(when {
+            policy.scale !in supportedScales -> "${policy.scale}× · 当前不可用"
+            policy.scale == 1 -> "1× 原尺寸修复"
+            else -> "${policy.scale}×"
+        },
             policy.style.label.takeUnless { anime }, "锁定档位".takeIf { policy.locked }).joinToString(" · "),
         onClick = onOpenOptions)
 }
@@ -162,17 +167,25 @@ internal fun EnhancementQuality(content: EnhancementContent, policy: Enhancement
 internal fun EnhancementQualityOptions(content: EnhancementContent, policy: EnhancementPolicy,
     inventory: EngineInventory, onChange: (EnhancementPolicy) -> Unit) {
     val anime = content == EnhancementContent.ANIME
-    val engines = inventory.engines.filter { if (anime) EngineContent.VIDEO in it.contents
-        else it.contents.any { kind -> kind != EngineContent.VIDEO } }
-    val selectedEngine = inventory.models.firstOrNull { it.id == policy.modelId }
-        ?.let { choice -> engines.firstOrNull { it.id == choice.engineId } }
-        ?: engines.firstOrNull { it.id == policy.modelId &&
-            it.id in setOf(EnhancementEngineIds.ANIME4K_SMALL, EnhancementEngineIds.ANIME4K_MEDIUM) }
-    val supported = selectedEngine?.supportedScales ?: engines.flatMap { it.supportedScales }.toSet()
+    val supported = enhancementOutputScales(content, policy, inventory)
     Text("输出倍率", style = MaterialTheme.typography.titleSmall)
-    EnhancementChoices(listOf(1, 2, 4), policy.scale, label = { if (it == 1) "1× 修复" else "$it×" },
-        onSelect = { onChange(policy.copy(scale = it)) }, description = "增强输出倍率")
-    if (policy.scale !in supported) EnhancementQuiet("已选 ${policy.scale}× · 当前没有兼容组件，保持原画。")
+    if (supported.isNotEmpty()) EnhancementChoices(supported, policy.scale,
+        label = { if (it == 1) "1× 修复" else "$it×" },
+        onSelect = { onChange(policy.copy(scale = it)) }, description = "模型支持的输出倍率")
+    if (policy.scale !in supported) EnhancementQuiet(when {
+        supported.isEmpty() -> "已保留 ${policy.scale}× 设置；当前模型与运行组件没有可用倍率，请返回画质模型检查安装或重新选择。"
+        else -> "已保留 ${policy.scale}× 设置，当前不支持；请选择上方可用倍率。"
+    })
+    if (supported.isNotEmpty()) {
+        val enlarged = supported.firstOrNull { it > 1 }
+        EnhancementQuiet(listOfNotNull(
+            "1× 保持原宽高，只做修复。".takeIf { 1 in supported },
+            enlarged?.let { "${it}× 将宽和高各扩大 $it 倍，像素总量为 ${it.toLong() * it} 倍。" },
+            if (anime) "倍率改变输出分辨率，不改变帧率、播放速度或画面适应方式。" else "倍率改变输出分辨率。",
+        ).joinToString(""))
+    }
+    if (policy.tier == QualityTier.ORIGINAL) EnhancementQuiet(if (anime)
+        "当前仍播放原画；倍率会在选用增强档位后使用。" else "当前仍显示原图；倍率会在选用增强档位后使用。")
     if (!anime) {
         Spacer(Modifier.height(12.dp))
         Text("漫画类型", style = MaterialTheme.typography.titleSmall)

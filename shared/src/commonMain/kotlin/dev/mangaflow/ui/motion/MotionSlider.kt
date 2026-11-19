@@ -78,6 +78,7 @@ import kotlin.math.roundToInt
  * Material supplies input, cancellation, RTL, keyboard and progress semantics;
  * its default track, thumb, gaps and stop marker are never rendered here.
  * The tracking bubble draws outside the stable 48dp control; callers should not clip it.
+ * Optional buffering is an observed interval in valueRange units, independent of a dragged value.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -89,12 +90,18 @@ internal fun MotionSlider(
     valueRange: ClosedFloatingPointRange<Float> = 0f..1f,
     onValueChangeFinished: (() -> Unit)? = null,
     formatValue: (Float) -> String = { ((it * 100f).roundToInt() / 100f).toString() },
+    bufferedRange: ClosedFloatingPointRange<Float>? = null,
 ) {
     require(valueRange.start.isFinite() && valueRange.endInclusive.isFinite() &&
         valueRange.start <= valueRange.endInclusive) { "Slider range must be finite and ordered" }
     val current = if (value.isFinite()) value.coerceIn(valueRange) else valueRange.start
     val fraction = if (valueRange.start < valueRange.endInclusive)
         ((current - valueRange.start) / (valueRange.endInclusive - valueRange.start)).coerceIn(0f, 1f) else 0f
+    val buffered = bufferedRange?.takeIf {
+        it.start.isFinite() && it.endInclusive.isFinite() && it.start < it.endInclusive &&
+            valueRange.start < valueRange.endInclusive
+    }?.let { it.start.coerceIn(valueRange)..it.endInclusive.coerceIn(valueRange) }
+        ?.takeIf { it.start < it.endInclusive }
     val available = enabled && valueRange.start < valueRange.endInclusive
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -116,6 +123,9 @@ internal fun MotionSlider(
     val labelStyle = MaterialTheme.typography.labelMedium.copy(
         fontSize = 11.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = "tnum")
     val label = formatValue(current)
+    val accessibilityLabel = buffered?.let {
+        "$label，已缓冲 ${formatValue(it.start)} 至 ${formatValue(it.endInclusive)}"
+    } ?: label
 
     BoxWithConstraints(modifier.fillMaxWidth().heightIn(min = 48.dp)) {
         val sliderWidth = with(density) { maxWidth.toPx() }
@@ -128,7 +138,7 @@ internal fun MotionSlider(
             valueRange = valueRange, enabled = available,
             onValueChangeFinished = onValueChangeFinished,
             interactionSource = interaction,
-            modifier = Modifier.fillMaxWidth().semantics { stateDescription = label },
+            modifier = Modifier.fillMaxWidth().semantics { stateDescription = accessibilityLabel },
             thumb = { _ ->
                 Canvas(Modifier.size(28.dp)) {
                     val center = Offset(size.width / 2f, size.height / 2f)
@@ -198,6 +208,15 @@ internal fun MotionSlider(
                     val thumb = Offset(start.x + (end.x - start.x) * fraction, start.y)
                     drawLine(colors.onSurface.copy(alpha = if (available) .10f else .055f),
                         start, end, strokeWidth = size.height, cap = StrokeCap.Round)
+                    buffered?.let { range ->
+                        val extent = valueRange.endInclusive - valueRange.start
+                        val from = (range.start - valueRange.start) / extent
+                        val until = (range.endInclusive - valueRange.start) / extent
+                        drawLine(colors.onSurface.copy(alpha = if (available) .28f else .10f),
+                            Offset(start.x + (end.x - start.x) * from, start.y),
+                            Offset(start.x + (end.x - start.x) * until, start.y),
+                            strokeWidth = size.height, cap = StrokeCap.Round)
+                    }
                     drawLine(colors.onSurface.copy(alpha = if (available) .62f else .20f),
                         start, thumb, strokeWidth = size.height, cap = StrokeCap.Round)
                 }

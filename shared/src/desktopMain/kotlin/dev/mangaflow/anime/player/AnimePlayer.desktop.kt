@@ -210,6 +210,7 @@ private class DesktopAnimePlayer(
                 // video suspends on playback state, with no periodic native reads or timer.
                 if (!initialSample) videoRenderingActive.first { it }
                 initialSample = false
+                val timeline = state.value.timelineGeneration
                 val alternateRuntime = animeJaNai.usesNativeRuntime()
                 // The pinned native registry retains each read across teardown. A closed Kotlin
                 // handle is unavailable; it must not leave stale values on a replacement session.
@@ -240,6 +241,10 @@ private class DesktopAnimePlayer(
                     }.getOrNull()
                 }
                 if (!isCurrent(generation) || engine.value?.impl !== handle) break
+                if (state.value.timelineGeneration != timeline) {
+                    if (videoRenderingActive.value) delay(1_000L)
+                    continue
+                }
                 // The display provider reads AWT state and remains on Main, unlike native properties.
                 val refreshHz = context.playbackDisplayRefreshHz?.invoke()
                 if (sample != null) {

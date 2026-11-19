@@ -29,6 +29,7 @@ internal fun enhancementMetricIcon(metric: EnhancementMetric): ImageVector = whe
     EnhancementMetric.PAGE_LATENCY, EnhancementMetric.MOTION_LATENCY, EnhancementMetric.GPU_TIME -> Icons.Outlined.Timer
     EnhancementMetric.CACHE_HITS -> Icons.Outlined.Cached
     EnhancementMetric.PRESENTED_FPS, EnhancementMetric.MOTION_THROUGHPUT -> Icons.Outlined.Speed
+    EnhancementMetric.DROPPED_FRAMES -> Icons.Outlined.FilterNone
     EnhancementMetric.MOTION_STATUS -> Icons.Outlined.SlowMotionVideo
     EnhancementMetric.BUFFER, EnhancementMetric.BUFFER_BYTES -> Icons.Outlined.DataUsage
     EnhancementMetric.NEXT_EPISODE -> Icons.Outlined.SkipNext

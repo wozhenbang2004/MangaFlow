@@ -116,7 +116,7 @@ class EnhancementSettingsStore(context: PlatformContext) {
             writer.withLock {
                 val key = displayKeys(content).first()
                 val before = disk.getString(key)
-                val value = JSONObject().put("version", 1).put("metrics", JSONArray().apply {
+                val value = JSONObject().put("version", 2).put("metrics", JSONArray().apply {
                     selected.sortedBy { it.ordinal }.forEach { put(it.name) }
                 }).toString()
                 if (!runCatching { disk.edit().putString(key, value).commit() }.getOrDefault(false)) {
@@ -161,12 +161,17 @@ class EnhancementSettingsStore(context: PlatformContext) {
     private fun decodeVisibleMetrics(content: EnhancementContent, raw: String?): Set<EnhancementMetric>? = runCatching {
         if (raw.isNullOrBlank()) return@runCatching null
         val value = JSONObject(raw)
-        require(value.optInt("version") == 1)
+        val version = value.optInt("version")
+        require(version in 1..2)
         val metrics = requireNotNull(value.optJSONArray("metrics"))
         // An explicit empty array means hide all. Unknown future names do not invalidate known choices.
-        (0 until metrics.length()).mapNotNull { index -> EnhancementMetric.entries.firstOrNull {
+        val selected = (0 until metrics.length()).mapNotNull { index -> EnhancementMetric.entries.firstOrNull {
             it.name == metrics.optString(index) && it.supports(content)
         } }.toSet()
+        // Add the newly requested anime reading to existing visible overlays. Once edited, version 2
+        // preserves an explicit opt-out; a legacy hide-all choice stays hidden without a disk write.
+        if (version == 1 && content == EnhancementContent.ANIME && selected.isNotEmpty())
+            selected + EnhancementMetric.DROPPED_FRAMES else selected
     }.getOrNull()
 
     fun setSessionOverride(sessionKey: String, content: EnhancementContent, policy: EnhancementPolicy?) {
