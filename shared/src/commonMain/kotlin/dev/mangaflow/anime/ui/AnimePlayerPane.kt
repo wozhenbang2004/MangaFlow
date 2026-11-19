@@ -110,8 +110,6 @@ internal fun AnimePlayerPane(
     } }
     val error = incident?.reason ?: resolutionError ?: playerFailure
     val failure = error?.let { listOfNotNull(it, state.playbackRecoveryStopReason).joinToString("\n") }
-    val sourceNames = (listOfNotNull(currentOption.takeIf { failure == null }) + usableOptions)
-        .map { it.sourceId to it.sourceName }
     val hasAlternative = incident != null && usableOptions.any { it.sourceId != incident.sourceId }
     val canRetry = if (target?.manualOption != null && episode != null)
         controller.canAttemptPlaybackLine(episode.id, target.manualOption, state)
@@ -348,24 +346,21 @@ internal fun AnimePlayerPane(
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(detail?.subject?.title ?: "播放", style = MaterialTheme.typography.titleSmall,
                             modifier = Modifier.semantics { heading() }, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (episode != null) Text(animeEpisodeLabel(episode), style = MaterialTheme.typography.labelSmall,
+                        val caption = listOfNotNull(episode?.let(::animeEpisodeLabel),
+                            (target?.sourceName ?: currentOption?.sourceName)?.takeIf { it.isNotBlank() }).joinToString(" · ")
+                        if (caption.isNotBlank()) Text(caption, style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     if (fullscreen && canControl && !touchExploration) MotionIconButton(onClick = { locked = true }, modifier = Modifier.size(44.dp),
                         tooltip = "锁定触控") { Icon(Icons.Outlined.LockOpen, "锁定触控", Modifier.size(20.dp)) }
-                    if (episode != null && (state.resolving || failure == null)) {
-                        if (sourceNames.isNotEmpty() && !state.resolving) {
-                            AnimeSourceBadge(sourceNames, modifier = Modifier.widthIn(max = 90.dp), enabled = active,
-                                selectedId = currentOption?.sourceId, onClick = ::showSources)
-                        } else {
-                            MotionIconButton(onClick = ::showSources, modifier = Modifier.size(44.dp),
-                                tooltip = "查看来源与线路") {
-                                Icon(Icons.Outlined.SwapHoriz, "查看来源与线路", Modifier.size(21.dp))
-                            }
+                    if (episode != null) {
+                        MotionIconButton(onClick = ::showSources, modifier = Modifier.size(44.dp),
+                            tooltip = "来源与线路") {
+                            Icon(Icons.Outlined.SwapHoriz, "来源与线路", Modifier.size(20.dp))
                         }
                     }
-                    MotionIconButton(onClick = { showSettings(AnimePlayerPanel.GENERAL) },
-                        modifier = Modifier.size(44.dp), tooltip = "播放设置") {
+                    MotionIconButton(onClick = { showSettings(AnimePlayerPanel.GENERAL) }, modifier = Modifier.size(44.dp),
+                        tooltip = "播放设置") {
                         Icon(Icons.Outlined.Settings, "播放设置", Modifier.size(20.dp))
                     }
                     if (canControl || fullscreen) MotionIconButton(onClick = ::toggleFullscreen, modifier = Modifier.size(44.dp),
@@ -591,6 +586,9 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
                 modifier = Modifier.widthIn(min = 44.dp, max = 80.dp).heightIn(min = 44.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
                 Text(animeSpeedLabel(state.speed), style = MaterialTheme.typography.labelLarge,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            MotionIconButton(onClick = { onSettings(AnimePlayerPanel.VIDEO) }, modifier = Modifier.size(44.dp), tooltip = "画质与性能") {
+                Icon(Icons.Outlined.AutoAwesome, "画质与性能", Modifier.size(20.dp))
             }
         }
     }
