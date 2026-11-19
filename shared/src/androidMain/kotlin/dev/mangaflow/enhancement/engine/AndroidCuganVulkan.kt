@@ -31,7 +31,7 @@ internal class AndroidCuganVulkan(context: Context, root: File) {
 
     fun descriptor(model: EngineModel?, video: Boolean = false) = EngineDescriptor(
         if (video) EnhancementEngineIds.ANDROID_CUGAN_VIDEO else EnhancementEngineIds.ANDROID_CUGAN,
-        if (video) "Real-CUGAN · Vulkan 番剧离线" else "Real-CUGAN · Vulkan 2×",
+        if (video) "Real-CUGAN · Vulkan 番剧 2×" else "Real-CUGAN · Vulkan 2×",
         if (video) VIDEO_VERSION else ENGINE_VERSION, "MIT / BSD-3-Clause",
         SOURCE_URL, when {
             !available -> EngineReadiness.UNSUPPORTED
@@ -44,11 +44,11 @@ internal class AndroidCuganVulkan(context: Context, root: File) {
             runtime.pendingRemoval -> "ncnn Vulkan 组件将在重启后移除"
             !runtime.installed -> "先下载签名 Vulkan 组件，再准备官方 NOSE 2× 模型"
             model == null -> "安装需下载并校验官方 NOSE 2× 权重与网络参数（约 2.6 MB）"
-            else -> if (video) "已下载的 SDR MP4 可用 Vulkan 逐帧执行 NOSE 2×，保留原音轨与时间轴"
+            else -> if (video) "兼容 SDR 视频可前方预处理、即时试用或离线增强。实时成功以实际处理回执为准。"
                 else "彩色漫画和条漫可选用原版 NOSE 2× 无降噪模型，实际设备兼容性在处理时确认"
         }, setOf(2), if (video) setOf(EngineContent.VIDEO) else CONTENTS, canInstall = available && !runtime.pendingRemoval && (!runtime.installed || model == null),
         downloadBytes = MODEL_BYTES.takeIf { runtime.installed && model == null },
-        videoOutput = EngineVideoContainer.MP4.takeIf { video }, supportsInterpolation = video,
+        videoOutput = EngineVideoContainer.MP4.takeIf { video }, supportsInterpolation = video, realtime = video,
     )
 
     fun model(): EngineModel? {

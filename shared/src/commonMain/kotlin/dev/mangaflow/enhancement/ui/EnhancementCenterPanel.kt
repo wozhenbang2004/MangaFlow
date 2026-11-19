@@ -513,10 +513,12 @@ private fun EnhancementModels(inventory: EngineInventory, progress: Map<String, 
                     }
                 }
             }
-            if (engine.id == EnhancementEngineIds.ANDROID_RIFE) {
+            if (engine.supportsInterpolation) {
                 inventory.frameModels.filter { it.engineId == engine.id }.forEach { model ->
                     EnhancementValue(model.title, "${enhancementBytes(model.bytes)} · ${model.sha256.take(12)}")
                 }
+            }
+            if (engine.id == EnhancementEngineIds.ANDROID_RIFE) {
                 MotionTextButton({ uriHandler.openUri(engine.sourceUrl) }, contentPadding = PaddingValues(horizontal = 0.dp)) {
                     Text("打开官方 RIFE 模型包")
                 }

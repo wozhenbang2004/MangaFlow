@@ -49,6 +49,8 @@ internal class AndroidLiveRifeProgram(
     private var sampleStart = NONE
     private var sampleFrames = 0L
     private var synthesized = 0L
+    private var sampledSynthesized = 0L
+    private var sampleWallTime = 0L
     private var slowFrames = 0
     private var emptyIntervals = 0
     private var detachReason: String? = null
@@ -134,6 +136,8 @@ internal class AndroidLiveRifeProgram(
         sampleStart = NONE
         sampleFrames = 0
         synthesized = 0
+        sampledSynthesized = 0
+        sampleWallTime = 0
         slowFrames = 0
         emptyIntervals = 0
         inputListener.onFlush()
@@ -242,15 +246,23 @@ internal class AndroidLiveRifeProgram(
         GlUtil.checkGlError()
         lastPts = pts
         inFlight = true
-        if (sampleStart == NONE) sampleStart = pts
+        val now = System.nanoTime()
+        if (sampleStart == NONE) {
+            sampleStart = pts
+            sampleWallTime = now
+        }
         if (interpolated) synthesized++
         sampleFrames++
         val span = pts - sampleStart
         if (detachReason != null || span >= 600_000) {
+            val wall = now - sampleWallTime
             report(RifeSample(synthesized, if (span > 0 && sampleFrames >= 2) (sampleFrames - 1) * 1_000_000.0 / span else null,
+                if (wall > 0L) (synthesized - sampledSynthesized) * 1_000_000_000.0 / wall else null,
                 lastInferenceNanos, detachReason))
             sampleStart = pts
             sampleFrames = 1
+            sampleWallTime = now
+            sampledSynthesized = synthesized
         }
         outputListener.onOutputFrameAvailable(texture, pts)
     }
@@ -301,7 +313,8 @@ internal class AndroidLiveRifeProgram(
         }
     }
 
-    data class RifeSample(val synthesized: Long, val graphFps: Double?, val inferenceNanos: Long?, val failure: String?)
+    data class RifeSample(val synthesized: Long, val graphFps: Double?, val generationFps: Double?,
+        val inferenceNanos: Long?, val failure: String?)
 
     companion object {
         const val MAX_PIXELS = 1280 * 720

@@ -3,6 +3,7 @@ package dev.mangaflow.enhancement.engine
 import android.content.Context
 import android.content.pm.PackageManager
 import dev.mangaflow.enhancement.EnhancedAssetIdentity
+import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.reader.panels.PanelRuntimeId
 import dev.mangaflow.reader.panels.PanelRuntimeStore
 import java.io.File
@@ -75,7 +76,7 @@ internal class AndroidRifeVulkanModels(context: Context) {
 }
 
 /** The player retains this session until its GL program retires; close and inference cannot overlap. */
-internal class AndroidLiveRifeVulkan private constructor(private var handle: Long) : AutoCloseable {
+internal class AndroidLiveRifeVulkan private constructor(private var handle: Long, private val releaseBudget: () -> Unit) : AutoCloseable {
     @Synchronized
     fun infer(previous: IntArray, next: IntArray, width: Int, height: Int, timestep: Float, destination: IntArray) {
         check(handle != 0L) { "RIFE Vulkan 会话已关闭" }
@@ -95,17 +96,21 @@ internal class AndroidLiveRifeVulkan private constructor(private var handle: Lon
     override fun close() {
         val current = handle
         handle = 0L
-        if (current != 0L) AndroidRifeVulkanJni.close(current)
+        if (current != 0L) try { AndroidRifeVulkanJni.close(current) } finally { releaseBudget() }
     }
 
     companion object {
         suspend fun open(context: Context, model: EngineModel): AndroidLiveRifeVulkan {
-            val pointer = AndroidRifeVulkanModels(context).open(model)
+            val release = ExperiencePolicyStore.get(context)
+                .tryAcquireEnhancement(0, 128L * 1024 * 1024, sharedRealtimeOwner = "anime-player")
+                ?: error("当前资源不足以开启实时补帧")
+            var pointer = 0L
             try {
+                pointer = AndroidRifeVulkanModels(context).open(model)
                 currentCoroutineContext().ensureActive()
-                return AndroidLiveRifeVulkan(pointer)
+                return AndroidLiveRifeVulkan(pointer, release)
             } catch (failure: Throwable) {
-                AndroidRifeVulkanJni.close(pointer)
+                try { if (pointer != 0L) AndroidRifeVulkanJni.close(pointer) } finally { release() }
                 throw failure
             }
         }

@@ -79,6 +79,7 @@ data class AnimeRealtimeMotionState(
     val detail: String,
     val synthesizedFrames: Long = 0L,
     val graphFps: Double? = null,
+    val generationFps: Double? = null,
     val inferenceNanos: Long? = null,
 )
 

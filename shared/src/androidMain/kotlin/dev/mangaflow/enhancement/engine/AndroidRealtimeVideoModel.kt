@@ -24,7 +24,8 @@ private const val REALTIME_MAX_INPUT_PIXELS = 1280L * 720L
 
 /** The renderer and its GL programs share one verified optional hardware session and admission. */
 internal class AndroidRealtimeVideoModel private constructor(
-    private val session: OrtSession,
+    private val session: OrtSession?,
+    private val cugan: AndroidCuganSession?,
     private val releaseBudget: () -> Unit,
     private val width: Int,
     private val height: Int,
@@ -43,7 +44,7 @@ internal class AndroidRealtimeVideoModel private constructor(
         }
         try {
             AndroidRgbVideoProgram(session, width, height, scale, REALTIME_WORKING_BYTES - bufferBytes,
-                checkActive = {}, onProcessed = onProcessed, onReleased = ::releaseProgram, onFrame = {})
+                checkActive = {}, onProcessed = onProcessed, onReleased = ::releaseProgram, cugan = cugan, onFrame = {})
         } catch (failure: Throwable) {
             releaseProgram()
             throw failure
@@ -63,13 +64,14 @@ internal class AndroidRealtimeVideoModel private constructor(
     }
 
     private fun dispose() {
-        try { session.close() } finally { releaseBudget() }
+        try { session?.close() ?: cugan?.close() } finally { releaseBudget() }
     }
 
     companion object {
         suspend fun open(context: Context, model: EngineModel, width: Int, height: Int): AndroidRealtimeVideoModel {
-            require(Build.VERSION.SDK_INT >= 29) { "此 Android 版本不支持仅硬件的 NNAPI 推理" }
-            require(model.engineId == EnhancementEngineIds.ANDROID_VIDEO_ONNX && EngineContent.VIDEO in model.contents &&
+            val vulkan = model.engineId == EnhancementEngineIds.ANDROID_CUGAN_VIDEO
+            require(vulkan || Build.VERSION.SDK_INT >= 29) { "此 Android 版本不支持仅硬件的 NNAPI 推理" }
+            require((vulkan || model.engineId == EnhancementEngineIds.ANDROID_VIDEO_ONNX) && EngineContent.VIDEO in model.contents &&
                 model.nativeScale in setOf(1, 2, 4)) { "请选择与倍率匹配的番剧模型" }
             val pixelCount = width.toLong() * height
             val buffers = pixelCount * (1 + model.nativeScale * model.nativeScale) * 4
@@ -80,7 +82,14 @@ internal class AndroidRealtimeVideoModel private constructor(
             val permit = resources.tryAcquireEnhancement(0, REALTIME_WORKING_BYTES, sharedRealtimeOwner = "anime-player")
                 ?: error("当前资源不足于启用实时模型，原画继续播放")
             var native: OrtSession? = null
+            var cugan: AndroidCuganSession? = null
             try {
+                if (vulkan) {
+                    val opened = AndroidCuganVulkan(context, File(context.noBackupFilesDir, "enhancement")).open(model)
+                    cugan = opened
+                    currentCoroutineContext().ensureActive()
+                    return AndroidRealtimeVideoModel(null, opened, permit, width, height, model.nativeScale, buffers)
+                }
                 check(engineSha256(File(model.path)) == model.sha256) { "视频模型已改变，请重新导入" }
                 PanelRuntimeStore.get(context).ensureLoaded(PanelRuntimeId.ONNX)
                 currentCoroutineContext().ensureActive()
@@ -99,9 +108,9 @@ internal class AndroidRealtimeVideoModel private constructor(
                     "该模型的输入与输出协议无法用于直接播放"
                 }
                 currentCoroutineContext().ensureActive()
-                return AndroidRealtimeVideoModel(created, permit, width, height, model.nativeScale, buffers)
+                return AndroidRealtimeVideoModel(created, null, permit, width, height, model.nativeScale, buffers)
             } catch (failure: Throwable) {
-                try { native?.close() } finally { permit() }
+                try { native?.close() ?: cugan?.close() } finally { permit() }
                 throw failure
             }
         }

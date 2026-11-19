@@ -75,6 +75,7 @@ import dev.mangaflow.anime.AnimePlaybackAsset
 import dev.mangaflow.anime.sources.animePublicUrl
 import dev.mangaflow.enhancement.engine.AndroidRealtimeVideoModel
 import dev.mangaflow.enhancement.engine.AndroidLiveRifeVulkan
+import dev.mangaflow.enhancement.engine.EnhancementEngineIds
 import dev.mangaflow.net.applyDownloadRoute
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
@@ -85,8 +86,10 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -763,8 +766,17 @@ internal class AndroidAnimePlayer(
     private fun clearRealtimeVideoModel() {
         realtimeLoading?.cancel()
         realtimeLoading = null
-        realtimeModel?.let { runCatching { it.close() } }
+        retireEnhancement(realtimeModel)
         realtimeModel = null
+    }
+
+    private fun retireEnhancement(owner: AutoCloseable?) {
+        if (owner == null) return
+        playerScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            // Vulkan retirement can wait for an in-flight GL submission. Release its
+            // permit after native cleanup even when this player scope is being closed.
+            withContext(NonCancellable + Dispatchers.IO) { runCatching { owner.close() } }
+        }
     }
 
     private fun updateVideoEffects(exo: ExoPlayer) {
@@ -775,7 +787,7 @@ internal class AndroidAnimePlayer(
         motionLoading?.cancel()
         motionLoading = null
         motionEffect = null
-        motionModel?.let { runCatching { it.close() } }
+        retireEnhancement(motionModel)
         motionModel = null
     }
 
@@ -787,7 +799,7 @@ internal class AndroidAnimePlayer(
             (foreground || state.value.inPictureInPicture)
         fun publishMotion(phase: AnimeVideoEnhancementPhase, detail: String, sample: AndroidLiveRifeProgram.RifeSample? = null) {
             publish(generation) { it.copy(realtimeMotion = AnimeRealtimeMotionState(wanted.model.title, phase, detail,
-                sample?.synthesized ?: 0L, sample?.graphFps, sample?.inferenceNanos)) }
+                sample?.synthesized ?: 0L, sample?.graphFps, sample?.generationFps, sample?.inferenceNanos)) }
         }
         motionLoading = playerScope.launch(Dispatchers.Main.immediate) {
             var opening: AndroidLiveRifeVulkan? = null
@@ -847,12 +859,12 @@ internal class AndroidAnimePlayer(
             } catch (failure: Exception) {
                 if (current()) {
                     motionEffect = null
-                    motionModel?.let { runCatching { it.close() } }
+                    retireEnhancement(motionModel)
                     motionModel = null
                     publishMotion(AnimeVideoEnhancementPhase.UNAVAILABLE,
                         failure.message?.take(100) ?: "实时补帧未能启用，原帧率继续播放")
                 }
-            } finally { opening?.let { runCatching { it.close() } } }
+            } finally { retireEnhancement(opening) }
         }
     }
 
@@ -860,14 +872,17 @@ internal class AndroidAnimePlayer(
         baseVideoEffects = emptyList()
         updateVideoEffects(exo)
         val model = checkNotNull(options.enhancementModel)
+        val backend = if (model.engineId == EnhancementEngineIds.ANDROID_CUGAN_VIDEO) "ncnn Vulkan" else "NNAPI 硬件"
         fun current() = isCurrent(generation) && engine.value === exo && enhancementRevision == revision &&
             options.enhancementModel == model && !nativeVideoOnly && !nativeVideoRecoveryPending
         realtimeLoading = playerScope.launch(Dispatchers.Main.immediate) {
             var opening: AndroidRealtimeVideoModel? = null
             try {
                 publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(AnimeVideoEnhancementMode.MODEL,
-                    AnimeVideoEnhancementPhase.WAITING, "原画可播，正在准备仅硬件 NNAPI 模型")) }
-                val video = withTimeoutOrNull(6_000L) { state.first { it.videoWidth != null && it.videoHeight != null } }
+                    AnimeVideoEnhancementPhase.WAITING, "原画可播，正在准备 $backend 模型")) }
+                val video = withTimeoutOrNull(10_000L) {
+                    state.first { it.videoWidth != null && it.videoHeight != null && it.firstFrameRendered == true }
+                }
                     ?: error("当前视频尺寸尚未确认")
                 val width = checkNotNull(video.videoWidth)
                 val height = checkNotNull(video.videoHeight)
@@ -877,7 +892,8 @@ internal class AndroidAnimePlayer(
                 realtimeModel = active
                 opening = null
                 val fps = video.sourceFps?.takeIf { it.isFinite() && it > 0 } ?: 30.0
-                val frameBudget = 1_000_000_000.0 / fps * .85
+                val motionTarget = options.realtimeFrames?.let { it.targetFps ?: fps * 2 } ?: fps
+                val frameBudget = 1_000_000_000.0 / motionTarget * .85
                 var submitted = 0L
                 var slow = 0
                 var lastReport = 0L
@@ -907,7 +923,7 @@ internal class AndroidAnimePlayer(
                                 val millis = elapsed / 1_000_000L
                                 publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(
                                     AnimeVideoEnhancementMode.MODEL, AnimeVideoEnhancementPhase.ACTIVE,
-                                    "NNAPI 硬件 · 本帧处理 ${millis}ms", width, height, width * model.nativeScale,
+                                    "$backend · 本帧处理 ${millis}ms", width, height, width * model.nativeScale,
                                     height * model.nativeScale, observation, model.title)) }
                             }
                         }
@@ -917,14 +933,15 @@ internal class AndroidAnimePlayer(
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 if (current()) {
-                    realtimeModel?.let { runCatching { it.close() } }; realtimeModel = null
+                    retireEnhancement(realtimeModel)
+                    realtimeModel = null
                     publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(AnimeVideoEnhancementMode.MODEL,
-                        AnimeVideoEnhancementPhase.UNAVAILABLE, "NNAPI 未能启用，原画继续播放。" + (failure.message?.take(140) ?: ""))) }
+                        AnimeVideoEnhancementPhase.UNAVAILABLE, "$backend 未能启用，原画继续播放。" + (failure.message?.take(140) ?: ""))) }
                 }
             } catch (_: LinkageError) {
                 if (current()) publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(AnimeVideoEnhancementMode.MODEL,
-                    AnimeVideoEnhancementPhase.UNAVAILABLE, "NNAPI 组件不可用，原画继续播放")) }
-            } finally { opening?.let { runCatching { it.close() } } }
+                    AnimeVideoEnhancementPhase.UNAVAILABLE, "$backend 组件不可用，原画继续播放")) }
+            } finally { retireEnhancement(opening) }
         }
     }
 
@@ -950,7 +967,7 @@ internal class AndroidAnimePlayer(
         publish(generation) { it.copy(
             phase = AnimePlayerPhase.OPENING, isBuffering = true, error = null, notice = recoveryNotice,
             realtimeMotion = it.realtimeMotion?.copy(phase = AnimeVideoEnhancementPhase.UNAVAILABLE,
-                detail = "图形处理已恢复原帧率", graphFps = null, inferenceNanos = null),
+                detail = "图形处理已恢复原帧率", graphFps = null, generationFps = null, inferenceNanos = null),
             videoEnhancement = AnimeVideoEnhancementState(options.videoEnhancement,
                 if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF) AnimeVideoEnhancementPhase.OFF else phase,
                 "正在恢复原生画面，等待首帧".takeIf { options.videoEnhancement != AnimeVideoEnhancementMode.OFF }),
@@ -1387,7 +1404,8 @@ internal class AndroidAnimePlayer(
             try { updateVideoEffects(exo) }
             catch (_: Exception) { recoverNativeVideo(nativeGeneration, exo) }
             publish(nativeGeneration) { it.copy(realtimeMotion = it.realtimeMotion?.copy(
-                phase = AnimeVideoEnhancementPhase.WAITING, detail = "离开画面后暂停补帧", graphFps = null, inferenceNanos = null)) }
+                phase = AnimeVideoEnhancementPhase.WAITING, detail = "离开画面后暂停补帧",
+                graphFps = null, generationFps = null, inferenceNanos = null)) }
         } else if (foreground && options.realtimeFrames != null && motionLoading == null && motionModel == null &&
             !nativeVideoOnly && !nativeVideoRecoveryPending) {
             applyRealtimeMotion(nativeGeneration, exo, enhancementRevision)

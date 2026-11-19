@@ -200,7 +200,7 @@ internal fun EnhancementFrameControls(policy: EnhancementPolicy, inventory: Engi
         if (policy.frameMode != FrameMode.ORIGINAL) {
             val interpolation = inventory.engines.filter { it.supportsInterpolation }
             val ready = interpolation.filter { it.readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.READY_FOR_TRIAL) }
-            if (ready.none { it.realtime }) EnhancementQuiet(if (ready.isNotEmpty())
+            if (ready.none { it.realtime && it.videoOutput == null }) EnhancementQuiet(if (ready.isNotEmpty())
                 "当前通过离线预处理补帧；实时播放保持文件帧率。" else "当前没有已就绪的补帧引擎，目标设置会保留。")
             if (ready.isEmpty()) MotionTextButton(onOpenModels, contentPadding = PaddingValues(horizontal = 0.dp)) { Text("查看补帧引擎") }
         }

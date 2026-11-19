@@ -3115,7 +3115,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 it.id == policy.modelId && dev.mangaflow.anime.player.Anime4KOptionalModels.supports(it.engineId)
             }?.let { return it.copy(nativeScale = policy.scale) }
         }
-        if (platformKind == PlatformKind.DESKTOP && policy.scale == 2) {
+        if (platformKind == PlatformKind.DESKTOP && policy.scale in 1..2) {
             val modelId = policy.modelId ?: when (policy.tier) {
                 QualityTier.FINE -> if (inventory.any { it.id == "animejanai-live:performance" })
                     "animejanai-live:performance" else "artcnn:C4F16"
@@ -3125,14 +3125,20 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             }
             return inventory.firstOrNull {
                 it.engineId in setOf(EnhancementEngineIds.DESKTOP_ARTCNN, EnhancementEngineIds.DESKTOP_REALTIME) &&
-                    it.id == modelId
+                    it.id == modelId && it.nativeScale == policy.scale
             }
         }
         val capabilities = snapshot?.capabilities ?: playerInstance?.state?.value?.capabilities.orEmpty()
         if (dev.mangaflow.anime.player.AnimePlayerCapability.MODEL_ENHANCEMENT !in capabilities || platformKind != PlatformKind.ANDROID)
             return null
-        return inventory.firstOrNull { it.engineId == EnhancementEngineIds.ANDROID_VIDEO_ONNX && it.id == policy.modelId &&
-            it.nativeScale == policy.scale && EngineContent.VIDEO in it.contents }
+        val androidModels = inventory.filter {
+            it.engineId in setOf(EnhancementEngineIds.ANDROID_VIDEO_ONNX, EnhancementEngineIds.ANDROID_CUGAN_VIDEO) &&
+                it.nativeScale == policy.scale && EngineContent.VIDEO in it.contents
+        }
+        if (policy.modelId != null) return androidModels.firstOrNull { it.id == policy.modelId }
+        if (policy.tier !in setOf(QualityTier.FINE, QualityTier.ULTRA)) return null
+        return androidModels.firstOrNull { it.engineId == EnhancementEngineIds.ANDROID_CUGAN_VIDEO }
+            ?: androidModels.firstOrNull()
     }
 
     private fun preferredRealtimeFrames(policy: EnhancementPolicy): dev.mangaflow.anime.player.AnimeRealtimeFrameRequest? {
@@ -3171,7 +3177,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         if (policy.modelId != null) return candidates.firstOrNull { it.id == policy.modelId }
         if (mode == AnimeVideoEnhancementMode.FAST ||
-            policy.tier !in setOf(QualityTier.AUTO, QualityTier.BALANCED)) return null
+            policy.tier !in setOf(QualityTier.AUTO, QualityTier.BALANCED, QualityTier.FINE, QualityTier.ULTRA)) return null
         return candidates.firstOrNull { it.engineId == EnhancementEngineIds.ANDROID_CUGAN_VIDEO }
             ?: candidates.firstOrNull()
     }

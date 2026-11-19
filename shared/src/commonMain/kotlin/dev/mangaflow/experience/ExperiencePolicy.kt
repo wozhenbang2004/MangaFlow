@@ -340,10 +340,15 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         }
     }
 
+    private var activeEnhancementSharedOwner: String? = null
+
     internal fun tryAcquireEnhancement(priority: Int, estimatedBytes: Long = 0L,
         sharedRealtimeOwner: String? = null): (() -> Unit)? = synchronized(lock) {
-        if (activeEnhancements > 0 || enhancementWaitReasonLocked(priority, estimatedBytes, sharedRealtimeOwner) != null)
+        val sameRealtimeSession = sharedRealtimeOwner != null && sharedRealtimeOwner == activeEnhancementSharedOwner
+        if (activeEnhancements > 0 && !sameRealtimeSession ||
+            enhancementWaitReasonLocked(priority, estimatedBytes, sharedRealtimeOwner) != null)
             return@synchronized null
+        if (activeEnhancements == 0) activeEnhancementSharedOwner = sharedRealtimeOwner
         activeEnhancements++
         enhancementReservedBytes += estimatedBytes.coerceAtLeast(0L)
         var released = false
@@ -352,6 +357,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                 if (!released) {
                     released = true
                     activeEnhancements--
+                    if (activeEnhancements == 0) activeEnhancementSharedOwner = null
                     enhancementReservedBytes = (enhancementReservedBytes - estimatedBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
                     revision.value++
                 }

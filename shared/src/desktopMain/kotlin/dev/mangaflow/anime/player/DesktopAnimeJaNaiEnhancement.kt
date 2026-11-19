@@ -123,11 +123,13 @@ internal class DesktopAnimeJaNaiEnhancement(
                     val position = backend.getPropertyDoubleOrNull("video-pts")
                     val filteredFps = backend.getPropertyDoubleOrNull("estimated-vf-fps")
                         ?.takeIf { it.isFinite() && it in 1.0..240.0 }
-                    val upscaled = native.weightName == null || (receipt?.contains("Applied Model: ${native.weightName};") == true &&
-                        outWidth == width * 2 && outHeight == height * 2)
+                    val modelReceipt = if (native.temporal) "Applied Temporal Model: ${native.weightName} ("
+                        else "Applied Model: ${native.weightName};"
+                    val modelApplied = native.weightName == null || (receipt?.contains(modelReceipt) == true &&
+                        outWidth == width * native.scale && outHeight == height * native.scale)
                     val interpolated = !native.interpolate || (receipt?.contains("applied RIFE v422", ignoreCase = true) == true &&
                         filteredFps != null && filteredFps > sourceFps * 1.07)
-                    val observed = upscaled && interpolated && position != null && position != initialPts
+                    val observed = modelApplied && interpolated && position != null && position != initialPts
                     if (observed) {
                         val dropped = backend.getPropertyLongOrNull("frame-drop-count")
                         val previousDrops = lastDropCount
@@ -139,7 +141,14 @@ internal class DesktopAnimeJaNaiEnhancement(
                             state(AnimeVideoEnhancementPhase.UNAVAILABLE, "连续观察到较多丢帧，已恢复原画与源帧率")
                             return@launch
                         }
-                        val detail = listOfNotNull("DirectML 已输出",
+                        val nativePasses = receipt?.lineSequence()?.any { "Native kernels:" in it } == true
+                        val directMlPasses = receipt?.contains("; using DirectML") == true
+                        val executedBackend = when {
+                            nativePasses && directMlPasses -> "原生 GPU Kernel / DirectML 已输出"
+                            nativePasses -> "原生 GPU Kernel 已输出"
+                            else -> "DirectML 已输出"
+                        }
+                        val detail = listOfNotNull(executedBackend,
                             if (native.weightName != null) "${outWidth}×$outHeight" else null,
                             if (native.interpolate && filteredFps != null) "滤镜输出估计 ${(filteredFps * 10).roundToInt() / 10.0} FPS" else null)
                         state(AnimeVideoEnhancementPhase.ACTIVE, detail.joinToString(" · "), outWidth, outHeight, filteredFps)

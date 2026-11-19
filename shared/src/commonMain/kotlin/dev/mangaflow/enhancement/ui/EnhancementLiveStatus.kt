@@ -229,7 +229,8 @@ private fun AnimeEnhancementStatus(
                     AnimeMetricRow("实时补帧 · ${motion.modelName}", motion.detail)
                     AnimeMetricGrid(listOf(
                         "实际生成帧" to animeCount(motion.synthesizedFrames),
-                        "处理链输出" to (motion.graphFps?.takeIf { playing }?.let { formatDecimal(it, 1) + " FPS" } ?: "—"),
+                        "输出时间轴" to (motion.graphFps?.takeIf { playing }?.let { formatDecimal(it, 1) + " FPS" } ?: "—"),
+                        "实际生成速度" to (motion.generationFps?.takeIf { playing }?.let { formatDecimal(it, 1) + " 帧/s" } ?: "—"),
                         "单帧端到端处理" to animeMillis(motion.inferenceNanos?.div(1_000_000.0)),
                     ))
                 }
