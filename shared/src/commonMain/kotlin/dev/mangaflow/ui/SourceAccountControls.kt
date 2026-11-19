@@ -47,6 +47,9 @@ import dev.mangaflow.data.sources.SourceRegistrationRequest
 import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionTextButton
+import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
+import dev.mangaflow.ui.motion.motionInputGate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -253,30 +256,58 @@ internal fun SourceAccountControls(
                 MotionTextButton(onClick = { operate { repository.sourceLogout(source.id) } }, enabled = enabled) {
                     Text("退出", fontSize = 12.sp)
                 }
+            } else if (expanded) {
+                MotionTextButton(onClick = { selectPanel(panel) }, enabled = enabled,
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant)) {
+                    Text("收起", style = MaterialTheme.typography.labelMedium)
+                }
             }
         }
         if (!running && !account.signedIn) {
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (canLogin) MotionTextButton(onClick = { selectPanel(SourceAccountPanel.LOGIN) }, enabled = enabled) {
-                    val label = when {
-                        expanded && panel == SourceAccountPanel.LOGIN -> "收起登录"
-                        account.hasCredentials -> "重新登录"
-                        else -> "登录"
-                    }
-                    Text(label, fontSize = 12.sp)
-                } else if (web != null) MotionTextButton(onClick = { openWebsite(web.loginUrl) }, enabled = enabled) {
+            val localPanels = buildList {
+                if (canLogin) add(SourceAccountPanel.LOGIN)
+                if (capabilities.registrationFields.isNotEmpty()) add(SourceAccountPanel.REGISTER)
+            }
+            val panelLabels = localPanels.map {
+                when (it) {
+                    SourceAccountPanel.LOGIN -> if (account.hasCredentials) "重新登录" else "登录"
+                    SourceAccountPanel.REGISTER -> "注册"
+                }
+            }
+            if (localPanels.size > 1) MotionTabs(
+                selected = localPanels.indexOf(panel).coerceAtLeast(0),
+                labels = panelLabels,
+                onSelect = { if (enabled && (!expanded || panel != localPanels[it])) selectPanel(localPanels[it]) },
+                modifier = Modifier.fillMaxWidth().motionInputGate(enabled),
+                controlHeight = 44.dp, treatment = MotionTabTreatment.Soft,
+                selectionVisible = expanded,
+            )
+            else if (localPanels.size == 1 && !expanded) MotionTextButton(
+                onClick = { selectPanel(localPanels.single()) }, enabled = enabled,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface,
+                    containerColor = colors.onSurface.copy(alpha = .055f))) {
+                Text(panelLabels.single(), style = MaterialTheme.typography.labelLarge)
+            }
+            val hasWebActions = (!canLogin && web != null) ||
+                capabilities.registrationFields.isEmpty() && (web?.registerUrl != null || web?.registrationHelpUrl != null)
+            if (hasWebActions || account.hasCredentials) Row(Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (!canLogin && web != null) MotionTextButton(onClick = { openWebsite(web.loginUrl) }, enabled = enabled,
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)) {
                     Text("网页登录", fontSize = 12.sp)
                 }
-                if (capabilities.registrationFields.isNotEmpty()) {
-                    MotionTextButton(onClick = { selectPanel(SourceAccountPanel.REGISTER) }, enabled = enabled) {
-                        Text(if (expanded && panel == SourceAccountPanel.REGISTER) "收起注册" else "注册", fontSize = 12.sp)
+                if (capabilities.registrationFields.isEmpty()) {
+                    web?.registerUrl?.let { url ->
+                        MotionTextButton(onClick = { openWebsite(url) }, enabled = enabled,
+                            colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)) { Text("网页注册", fontSize = 12.sp) }
+                    } ?: web?.registrationHelpUrl?.let { url ->
+                        MotionTextButton(onClick = { openWebsite(url) }, enabled = enabled,
+                            colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)) { Text("注册说明", fontSize = 12.sp) }
                     }
-                } else web?.registerUrl?.let { url ->
-                    MotionTextButton(onClick = { openWebsite(url) }, enabled = enabled) { Text("网页注册", fontSize = 12.sp) }
-                } ?: web?.registrationHelpUrl?.let { url ->
-                    MotionTextButton(onClick = { openWebsite(url) }, enabled = enabled) { Text("注册说明", fontSize = 12.sp) }
                 }
-                if (account.hasCredentials) MotionTextButton(onClick = { operate { repository.sourceLogout(source.id) } }, enabled = enabled) {
+                if (account.hasCredentials) MotionTextButton(onClick = { operate { repository.sourceLogout(source.id) } }, enabled = enabled,
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant)) {
                     Text("清除凭据", fontSize = 12.sp)
                 }
             }
@@ -287,12 +318,10 @@ internal fun SourceAccountControls(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 val registerMode = panel == SourceAccountPanel.REGISTER
                 if (!registerMode && capabilities.passwordLogin && capabilities.cookieFields.isNotEmpty()) {
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        SourceAccountChoice("账号密码", !cookieMode, enabled && !running) { selectLoginMethod(false) }
-                        SourceAccountChoice(capabilities.credentialLabel, cookieMode, enabled && !running) {
-                            selectLoginMethod(true)
-                        }
-                    }
+                    MotionTabs(if (cookieMode) 1 else 0, listOf("账号密码", capabilities.credentialLabel),
+                        onSelect = { if (enabled && !running) selectLoginMethod(it == 1) },
+                        modifier = Modifier.fillMaxWidth().motionInputGate(enabled && !running),
+                        treatment = MotionTabTreatment.Underline, controlHeight = 44.dp)
                 }
                 val credentialMode = capabilities.cookieFields.isNotEmpty() && (!capabilities.passwordLogin || cookieMode)
                 if (registerMode && capabilities.registrationFields.isNotEmpty()) {

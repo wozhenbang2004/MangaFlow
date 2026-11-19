@@ -1,7 +1,6 @@
 package dev.mangaflow.anime.ui
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -28,7 +27,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
@@ -53,7 +51,6 @@ import dev.mangaflow.anime.AnimeWatchStatus
 import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.CompactMenuAction
 import dev.mangaflow.ui.CommunityComment
-import dev.mangaflow.ui.FeaturedCoverColors
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.ReviewSourceMark
@@ -80,9 +77,10 @@ internal fun AnimeDetailPane(
     val currentDiscussion by controller.discussion.state.collectAsStateWithLifecycle()
     val discussion = currentDiscussion.takeIf { it.subjectId == subject.id && it.available }
     val uriHandler = LocalUriHandler.current
-    var selectedDetailTab by rememberSaveable(subject.id) { mutableIntStateOf(0) }
+    var selectedDetailTab by rememberSaveable(subject.id, "detail-sections") { mutableIntStateOf(0) }
     var discussionLinkError by remember(subject.id) { mutableStateOf(false) }
-    val commentsVisible = active && discussion != null && selectedDetailTab == 1
+    val detailTab = selectedDetailTab.takeIf { it < 2 || discussion != null } ?: 0
+    val commentsVisible = active && discussion != null && detailTab == 2
     DisposableEffect(controller, subject.id, commentsVisible) {
         if (commentsVisible) controller.discussion.setVisible(subject.id, true)
         onDispose { if (commentsVisible) controller.discussion.setVisible(subject.id, false) }
@@ -191,12 +189,25 @@ internal fun AnimeDetailPane(
                     detail = "本地追番记录未能读取，原收藏与观看记录已保留。",
                 )
             }
-            if (discussion != null) item(key = "detail-tabs") {
-                MotionTabs(selectedDetailTab, listOf("剧集", "评论"), onSelect = { selectedDetailTab = it },
-                    modifier = Modifier.widthIn(max = 232.dp).fillMaxWidth().motionInputGate(active),
-                    controlHeight = 44.dp, treatment = MotionTabTreatment.Underline)
+            item(key = "detail-tabs") {
+                val labels = if (discussion != null) listOf("剧集", "简介", "评论") else listOf("剧集", "简介")
+                AnimeChoiceStrip(labels, detailTab, onSelect = { selectedDetailTab = it },
+                    active = active, modifier = Modifier.widthIn(max = 400.dp).padding(vertical = 4.dp))
             }
-            if (discussion != null && selectedDetailTab == 1) {
+            if (detailTab == 1) {
+                item(key = "description") {
+                    if (subject.description.isNotBlank() || subject.tags.isNotEmpty()) AnimeDetailDescription(subject)
+                    else AnimeMessage("暂无简介", subject.originalTitle.takeIf { it != subject.title && it.isNotBlank() })
+                }
+                if (state.relatedSubjects.isNotEmpty()) {
+                    item(key = "related-heading") { AnimeSectionTitle("相关番剧", modifier = Modifier.semantics { heading() }) }
+                    items(state.relatedSubjects, key = { "related:" + it.id }) { related ->
+                        AnimeSubjectRow(related, animeSubjectSummary(related), onOpen = { onOpenRelated(related) })
+                    }
+                }
+                return@LazyColumn
+            }
+            if (discussion != null && detailTab == 2) {
                 item(key = "comments-heading") {
                     AnimeSectionTitle("Bangumi 讨论", discussion.total?.let { "$it 条评论" }) {
                         Row {
@@ -311,7 +322,7 @@ internal fun AnimeDetailPane(
                             selectedTab, listOf("正片", "特别篇等"),
                             onSelect = { episodeTab = it },
                             modifier = Modifier.widthIn(max = 280.dp).fillMaxWidth(),
-                            controlHeight = 44.dp, treatment = MotionTabTreatment.Underline,
+                            controlHeight = 44.dp, treatment = MotionTabTreatment.Soft,
                         )
                     }
                 }
@@ -390,17 +401,6 @@ internal fun AnimeDetailPane(
                     )
                 }
             }
-            if (subject.description.isNotBlank() || subject.tags.isNotEmpty()) item(key = "description") {
-                AnimeDetailDescription(subject)
-            }
-            if (state.relatedSubjects.isNotEmpty()) {
-                item(key = "related-heading") {
-                    AnimeSectionTitle("相关番剧", modifier = Modifier.semantics { heading() })
-                }
-                items(state.relatedSubjects, key = { "related:" + it.id }) { related ->
-                    AnimeSubjectRow(related, animeSubjectSummary(related), onOpen = { onOpenRelated(related) })
-                }
-            }
         }
     }
 }
@@ -428,7 +428,6 @@ private fun AnimeDetailHero(
     onRatingPresence: (Boolean) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    val atmosphere = FeaturedCoverColors.get(subject.coverUrl) ?: colors.primary
     val metadata = listOfNotNull(
         subject.year?.toString(),
         subject.episodeCount?.takeIf { it > 0 }?.let { "$it 集" },
@@ -440,11 +439,7 @@ private fun AnimeDetailHero(
         )
     }
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
-            .background(
-                Brush.linearGradient(listOf(atmosphere.copy(alpha = .19f), colors.surfaceContainerLow, colors.background)),
-            )
-            .padding(if (wide) 24.dp else 12.dp),
+        Modifier.fillMaxWidth().padding(vertical = if (wide) 20.dp else 10.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Row(
@@ -452,7 +447,7 @@ private fun AnimeDetailHero(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(if (wide) 25.dp else 14.dp),
         ) {
-            AnimePoster(subject, Modifier.width(if (wide) 146.dp else 88.dp).aspectRatio(2f / 3f))
+            AnimePoster(subject, Modifier.width(if (wide) 152.dp else 104.dp).aspectRatio(2f / 3f))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (wide) 8.dp else 5.dp)) {
                 Text(subject.title, Modifier.semantics { heading() },
                     style = if (wide) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleLarge,
@@ -490,6 +485,7 @@ private fun AnimeDetailRatingStrip(scores: List<AnimeSourceScore>, backdrop: Haz
                     modifier = Modifier.heightIn(min = 44.dp).semantics {
                         contentDescription = "$provider 评分 ${score.displayScore()}，查看各站评分"
                     },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
                     contentPadding = PaddingValues(horizontal = 5.dp)) {
                     ReviewSourceMark(score.provider.name.lowercase(), size = 14.dp)
                     Spacer(Modifier.width(5.dp))
@@ -634,7 +630,7 @@ private fun AnimeDetailFollow(
                     modifier = Modifier.size(44.dp),
                     tooltip = status?.let { "追番状态 · " + animeStatusLabel(it) } ?: "追番状态",
                 ) {
-                    Icon(Icons.Outlined.ExpandMore, status?.let { "追番状态 · " + animeStatusLabel(it) } ?: "追番状态",
+                    Icon(Icons.Outlined.MoreHoriz, status?.let { "追番状态 · " + animeStatusLabel(it) } ?: "追番状态",
                         Modifier.size(18.dp))
                 }
             }
@@ -666,40 +662,11 @@ private fun AnimeDetailFollow(
 
 @Composable
 private fun AnimeDetailDescription(subject: AnimeSubject) {
-    var expanded by rememberSaveable(subject.id) { mutableStateOf(false) }
-    var canExpand by remember(subject.description) { mutableStateOf(false) }
-    val motion = LocalMotionEnabled.current
-    val colors = MaterialTheme.colorScheme
-    Column(
-        Modifier.fillMaxWidth()
-            .then(if (motion) Modifier.animateContentSize(
-                tween(MangaMotion.Content, easing = MangaMotion.EnterEasing),
-            ) else Modifier),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        AnimeSectionTitle(
-            "简介", modifier = Modifier.semantics { heading() },
-            action = {
-                if (canExpand || expanded || subject.tags.size > 3) {
-                    val label = if (expanded) "收起简介" else "展开简介"
-                    MotionIconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(44.dp), tooltip = label) {
-                        Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, label, Modifier.size(20.dp))
-                    }
-                }
-            },
-        )
-        if (subject.description.isNotBlank()) {
-            Text(
-                subject.description, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant,
-                maxLines = if (expanded) Int.MAX_VALUE else 3, overflow = TextOverflow.Ellipsis,
-                onTextLayout = { if (!expanded) canExpand = it.hasVisualOverflow },
-            )
-        }
-        val tags = if (expanded || subject.description.isBlank()) subject.tags else subject.tags.take(3)
-        if (tags.isNotEmpty()) {
-            Text(tags.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                maxLines = if (expanded) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis)
-        }
+    Column(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        if (subject.description.isNotBlank()) Text(subject.description,
+            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+        if (subject.tags.isNotEmpty()) Text(subject.tags.joinToString("  ·  "),
+            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

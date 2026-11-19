@@ -403,8 +403,7 @@ private fun AnimeHomeSourcePanel(visible: Boolean, selection: AnimeHomeSourceSel
     MotionDialog(visible, onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 420.dp,
         onClosed = { onClosed(openWork) }) {
-        LiquidGlassSurface(backdrop, Modifier.padding(horizontal = 12.dp).fillMaxWidth(),
-            role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp, softCard = true) {
+        AnimePanelSurface(backdrop, Modifier.padding(horizontal = 12.dp).fillMaxWidth()) {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp)
                 .semantics { paneTitle = heading }) {
                 val title = selection.group.sources.first().title
@@ -702,7 +701,20 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
                         onClearTag.takeIf { active && feed.query.tag.isNotBlank() }, retryLabel = "清除题材", showIssue = false)
                 }
             }
-            else items(feed.items, key = { it.key }) { item ->
+            else if (feed.query.calendar && feed.query.weekday == null) {
+                feed.items.groupBy { it.airWeekday?.takeIf { day -> day in 1..7 } ?: 8 }
+                    .toList().sortedBy { it.first }.forEach { (day, shows) ->
+                        item(key = "weekday:$day", span = { GridItemSpan(maxLineSpan) }) {
+                            AnimeDiscoverySectionHeading(
+                                if (day in 1..7) listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")[day - 1]
+                                else "放送日未标注", "${shows.size} 部")
+                        }
+                        items(shows, key = { it.key }) { item ->
+                            AnimeDiscoveryCard(item, feed.query, list = columns == 1, onScores = onScores.takeIf { active },
+                                onOpen = { if (active) onOpen(item) })
+                        }
+                    }
+            } else items(feed.items, key = { it.key }) { item ->
                 AnimeDiscoveryCard(item, feed.query, list = columns == 1, onScores = onScores.takeIf { active },
                     onOpen = { if (active) onOpen(item) })
             }
@@ -742,8 +754,7 @@ private fun AnimeDiscoveryScorePanel(visible: Boolean, item: AnimeDiscoveryItem,
     val heading = if (item.sourceScores.isEmpty()) "资料来源" else "来源评分"
     MotionDialog(visible, onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 420.dp, onClosed = onClosed) {
-        LiquidGlassSurface(backdrop, Modifier.padding(horizontal = 12.dp).fillMaxWidth(),
-            role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp, softCard = true) {
+        AnimePanelSurface(backdrop, Modifier.padding(horizontal = 12.dp).fillMaxWidth()) {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp)
                 .semantics { paneTitle = heading }) {
                 AnimeSectionTitle(heading, item.title, action = {
@@ -787,16 +798,10 @@ private fun AnimeDiscoveryControls(tab: AnimeDiscoveryTab, query: AnimeDiscovery
     onOverlayPresence: (Boolean) -> Unit, rememberedOptions: (AnimeDiscoveryProvider) -> AnimeDiscoveryQuery?,
     onConfigure: (AnimeDiscoveryQuery) -> Unit) {
     if (tab == AnimeDiscoveryTab.CALENDAR) {
-        BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
-            val density = LocalDensity.current
-            val width = maxWidth.coerceAtLeast(44.dp * 8 * density.fontScale.coerceAtLeast(1f))
-            Box(Modifier.horizontalScroll(rememberScrollState())) {
-                MotionTabs(query.weekday ?: 0, listOf("全", "一", "二", "三", "四", "五", "六", "日"),
-                    onSelect = { if (active) onConfigure(query.copy(weekday = it.takeIf { day -> day > 0 })) },
-                    modifier = Modifier.width(width), controlHeight = 44.dp, treatment = MotionTabTreatment.Underline,
-                    tooltips = listOf("全周", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"))
-            }
-        }
+        AnimeChoiceStrip(listOf("全周", "周一", "周二", "周三", "周四", "周五", "周六", "周日"),
+            selected = query.weekday ?: 0, active = active,
+            onSelect = { onConfigure(query.copy(weekday = it.takeIf { day -> day > 0 })) },
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         return
     }
 
@@ -841,17 +846,30 @@ private fun AnimeDiscoveryControls(tab: AnimeDiscoveryTab, query: AnimeDiscovery
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
                 Icon(Icons.Outlined.Tune, null, Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("筛选与排序")
+                Text("筛选")
             }
+        }
+        if (tab == AnimeDiscoveryTab.RANKING) {
+            val rankingOrders = animeDiscoveryOrders(query.provider.takeUnless { query.combined })
+            AnimeChoiceStrip(rankingOrders.map(::animeDiscoveryOrderLabel), rankingOrders.indexOf(query.order),
+                active = controlsActive, onSelect = { index ->
+                    val nextOrder = rankingOrders[index]
+                    val aniList = (!query.combined && query.provider == AnimeDiscoveryProvider.ANILIST) ||
+                        (query.combined && nextOrder == AnimeDiscoveryOrder.TRENDING)
+                    val nextTag = if (aniList) query.tag.takeIf(animeDiscoveryGenreLabels::containsKey)
+                        ?: animeDiscoveryGenreLabels.entries.firstOrNull { it.value == query.tag }?.key.orEmpty()
+                    else animeDiscoveryGenreLabels[query.tag] ?: query.tag
+                    onConfigure(query.copy(order = nextOrder, tag = nextTag))
+                }, modifier = Modifier.padding(top = 5.dp))
         }
         if (seasonal) {
             val today = localToday()
             val currentQuarter = (today.monthNumber - 1) / 3
             FlowRow(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("本季", "下季").forEachIndexed { offset, label ->
-                    val quarter = currentQuarter + offset
-                    val year = today.year + quarter / AnimeSeason.entries.size
-                    val season = AnimeSeason.entries[quarter % AnimeSeason.entries.size]
+                listOf("上季", "本季", "下季").forEachIndexed { index, label ->
+                    val absoluteQuarter = today.year * AnimeSeason.entries.size + currentQuarter + index - 1
+                    val year = absoluteQuarter / AnimeSeason.entries.size
+                    val season = AnimeSeason.entries[absoluteQuarter % AnimeSeason.entries.size]
                     val selected = query.year == year && query.season == season
                     AnimeDiscoveryChoice(label, selected, controlsActive) {
                         if (!selected) onConfigure(query.copy(year = year, season = season))
@@ -940,10 +958,9 @@ private fun AnimeDiscoveryFilterPanel(visible: Boolean, tab: AnimeDiscoveryTab, 
     MotionDialog(visible, onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 500.dp, onClosed = onClosed) {
         BoxWithConstraints(Modifier.padding(horizontal = 12.dp)) {
-            LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().height(minOf(maxHeight, 580.dp)),
-                role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp, softCard = true) {
+            AnimePanelSurface(backdrop, Modifier.fillMaxWidth().height(minOf(maxHeight, 580.dp))) {
                 Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp)
-                    .semantics { paneTitle = "动漫筛选与排序" }) {
+                    .semantics { paneTitle = "番剧筛选与排序" }) {
                     AnimeSectionTitle("筛选与排序", when (tab) {
                         AnimeDiscoveryTab.SEASON -> "新番"
                         AnimeDiscoveryTab.RANKING -> "榜单"

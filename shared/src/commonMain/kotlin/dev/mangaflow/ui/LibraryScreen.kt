@@ -502,6 +502,26 @@ fun LibraryScreen(
                                     ContinueRow(lastReading, repository, onContinue = { if (active) onContinue(it) })
                                 }
                             }
+                            if (adultProfile && visibleFavorites.isNotEmpty()) item(
+                                key = "adult-shelf-section", span = {
+                                    androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
+                                }) {
+                                Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                    if (siteSource != null) ChapterSourceLogo(siteSource.id, siteSource.name, Modifier.size(19.dp))
+                                    Text(if (siteSource == null) "我的收藏" else "${siteSource.name}收藏",
+                                        Modifier.weight(1f), style = MaterialTheme.typography.titleSmall,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(visibleFavorites.size.toString() + if (siteShelf?.nextPage != null) "+" else "",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.semantics {
+                                            contentDescription = "已显示 ${visibleFavorites.size} 本收藏" +
+                                                if (siteShelf?.nextPage != null) "，仍有后续页面" else ""
+                                        })
+                                }
+                            }
                             if (siteShelf != null && siteShelf.accountAvailable == true) item(
                                 key = "site-collection-controls", span = {
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
@@ -691,6 +711,8 @@ fun LibraryScreen(
                                             Text(mangaNumberText(progressText), modifier = Modifier.padding(top = 2.dp),
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
                                                 lineHeight = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            if (adultProfile && !remote) MangaBrowseSource(manga,
+                                                Modifier.padding(top = 3.dp))
                                         }
                                         if (remote) CloudFavoriteActionsMenu(managedId == manga.id,
                                             onDismiss = { managedId = null }, onDetails = { onDetails(manga) },
@@ -745,7 +767,15 @@ fun LibraryScreen(
             val scrollTabs = shelfLabels.size > 3
             MotionTabs(selectedShelfIndex, shelfLabels, selectShelf,
                 modifier = modifier.then(if (scrollTabs) Modifier.horizontalScroll(rememberScrollState()) else Modifier),
-                treatment = MotionTabTreatment.Soft, compact = scrollTabs, controlHeight = height)
+                treatment = MotionTabTreatment.Soft, compact = scrollTabs, controlHeight = height,
+                itemContent = if (adultProfile) ({ index, _, color ->
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        val source = siteSources.firstOrNull { it.id == shelfOptions[index].first }
+                        if (source != null) ChapterSourceLogo(source.id, source.name, Modifier.size(16.dp))
+                        Text(shelfLabels[index], color = color, style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }) else null)
         }
         if (desktop) {
             val stackedTools = maxWidth < 680.dp * density.fontScale.coerceAtLeast(1f)
@@ -944,7 +974,7 @@ private fun SiteShelfControls(
             MotionTabs(folders.indexOfFirst { it.id == shelf.folderId }.coerceAtLeast(0), folders.map { it.title },
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 onSelect = { index -> if (canEdit && folders[index].id != shelf.folderId) onFolder(folders[index].id) },
-                compact = true, treatment = MotionTabTreatment.Soft, controlHeight = 38.dp)
+                compact = true, treatment = MotionTabTreatment.Soft, controlHeight = 44.dp)
         } else Spacer(Modifier.weight(1f))
         if (onSync != null) MotionIconButton(onClick = onSync, enabled = active,
             modifier = Modifier.size(44.dp), tooltip = if (syncCount > 0) "查看 $syncCount 项禁漫收藏差异" else "禁漫同步") {

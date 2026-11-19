@@ -94,12 +94,12 @@ internal fun SiteRankingFiltersDialog(
             LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().height(panelHeight),
                 cornerRadius = 24.dp, role = GlassSurfaceRole.PANEL, softCard = true) {
                 Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp)
-                    .semantics { paneTitle = "榜单组合筛选" }) {
+                    .semantics { paneTitle = "榜单筛选与排序" }) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         ReviewSourceMark(preview.site.id, size = 17.dp)
                         Column(Modifier.weight(1f).padding(start = 8.dp)) {
-                            Text("组合筛选", style = MaterialTheme.typography.titleSmall,
+                            Text("筛选与排序", style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Medium)
                             Text(preview.site.title + " · " + preview.kind.label,
                                 style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
@@ -112,6 +112,31 @@ internal fun SiteRankingFiltersDialog(
                     }
                     Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll)
                         .padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                            Text("排序", style = MaterialTheme.typography.labelMedium,
+                                color = colors.onSurfaceVariant)
+                            val kinds = preview.availableKinds
+                            RankingFilterTabs(kinds.map { it.label },
+                                selected = kinds.indexOf(preview.kind).coerceAtLeast(0), enabled = open,
+                                onSelect = { draft = draft.copy(kind = kinds[it]) })
+                            if (preview.site == RankingSite.BANGUMI && preview.filters.query.isNotBlank())
+                                Text("关键词结果按匹配程度排列；清空关键词后使用所选排序。",
+                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        }
+
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("范围", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                            val scopes = preview.availableScopes
+                            if (scopes.size > 1) RankingFilterTabs(scopes.map { it.label },
+                                selected = scopes.indexOf(preview.scope).coerceAtLeast(0), enabled = open,
+                                onSelect = { draft = draft.copy(scope = scopes[it]) })
+                            else Text(preview.scopeLabel, Modifier.padding(vertical = 8.dp),
+                                style = MaterialTheme.typography.bodyMedium)
+                            if (preview.site == RankingSite.BANGUMI && preview.usesBangumiSearch)
+                                Text("当前条件按漫画标签检索，不再限定系列或单行本",
+                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        }
+
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text("首发年份", style = MaterialTheme.typography.labelMedium,
                                 color = colors.onSurfaceVariant)
@@ -184,18 +209,6 @@ internal fun SiteRankingFiltersDialog(
                             }
                         }
 
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("范围", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                            val scopes = preview.availableScopes
-                            if (scopes.size > 1) RankingFilterTabs(scopes.map { it.label },
-                                selected = scopes.indexOf(preview.scope).coerceAtLeast(0), enabled = open,
-                                onSelect = { draft = draft.copy(scope = scopes[it]) })
-                            else Text(preview.scopeLabel, Modifier.padding(vertical = 8.dp),
-                                style = MaterialTheme.typography.bodyMedium)
-                            if (preview.site == RankingSite.BANGUMI && preview.usesBangumiSearch)
-                                Text("当前条件按漫画标签检索，不再限定系列或单行本",
-                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                        }
 
                         if (preview.supportsAdvancedFilters && preview.site.supportsQuery) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -324,7 +337,7 @@ internal fun SiteRankingFiltersDialog(
                                 containerColor = colors.onSurface.copy(alpha = .09f), contentColor = colors.onSurface),
                             contentPadding = PaddingValues(horizontal = 16.dp)) {
                             Icon(Icons.Outlined.Check, null, Modifier.size(18.dp))
-                            Text("应用", Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodyMedium,
+                            Text("查看结果", Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Medium)
                         }
                     }

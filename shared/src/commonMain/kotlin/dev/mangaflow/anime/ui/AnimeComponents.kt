@@ -2,6 +2,8 @@ package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,6 +22,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -27,6 +30,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
@@ -37,8 +41,15 @@ import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.ui.mangaCoverCard
+import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.ui.GlassSurfaceRole
+import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
+import dev.mangaflow.ui.motion.motionInputGate
+import dev.mangaflow.ui.motion.LocalMotionEnabled
 
 internal fun animeEpisodeNumber(value: Double): String =
     if (value % 1.0 == 0.0) value.toLong().toString() else value.toString()
@@ -130,22 +141,79 @@ internal fun AnimeSubjectRow(
     subtitle: String,
     modifier: Modifier = Modifier,
     onOpen: () -> Unit,
+    supporting: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
 ) {
     val interaction = remember(subject.id) { MutableInteractionSource() }
     Row(modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
         .motionPress(interaction, pressedScale = .99f)
         .clickable(interactionSource = interaction, indication = null, onClick = onOpen)
-        .padding(vertical = 10.dp, horizontal = 8.dp),
+        .padding(vertical = 8.dp, horizontal = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        AnimePoster(subject, Modifier.width(52.dp).height(72.dp))
+        AnimePoster(subject, Modifier.width(56.dp).height(80.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Text(subject.title, style = MaterialTheme.typography.titleSmall,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(subtitle, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            supporting?.invoke()
         }
         if (trailing != null) trailing()
+    }
+}
+
+/** The existing frosted shell stays, with a readable body over moving video and captions. */
+@Composable
+internal fun AnimePanelSurface(
+    backdrop: HazeState,
+    modifier: Modifier = Modifier,
+    cornerRadius: Dp = 24.dp,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val surface = MaterialTheme.colorScheme.surface
+    LiquidGlassSurface(backdrop, modifier, cornerRadius = cornerRadius,
+        role = GlassSurfaceRole.PANEL, softCard = true) {
+        Box(Modifier.fillMaxWidth().background(surface.copy(alpha = .94f), RoundedCornerShape(cornerRadius)),
+            propagateMinConstraints = true, content = content)
+    }
+}
+
+/** Ovio's stationary hit cells, kept readable when a source supplies many long category names. */
+@Composable
+internal fun AnimeChoiceStrip(
+    labels: List<String>,
+    selected: Int,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    active: Boolean = true,
+) {
+    if (labels.isEmpty()) return
+    val density = LocalDensity.current
+    val scroll = rememberScrollState()
+    val motion = LocalMotionEnabled.current
+    val index = selected.coerceIn(labels.indices)
+    BoxWithConstraints(modifier.fillMaxWidth().motionInputGate(active)) {
+        val viewport = maxWidth
+        val minimum = with(density) { 13.sp.toDp() * (labels.maxOf { it.length }.coerceIn(2, 8)) + 28.dp }
+            .coerceAtLeast(56.dp)
+        val width = maxOf(viewport, minimum * labels.size)
+        LaunchedEffect(index, labels, width, viewport, density, scroll.maxValue) {
+            val cell = with(density) { width.toPx() / labels.size }
+            val visible = with(density) { viewport.toPx() }
+            val start = index * cell
+            val end = start + cell
+            val target = when {
+                start < scroll.value -> start.toInt()
+                end > scroll.value + visible -> (end - visible).toInt()
+                else -> scroll.value
+            }.coerceIn(0, scroll.maxValue)
+            if (motion) scroll.animateScrollTo(target) else scroll.scrollTo(target)
+        }
+        Box(Modifier.horizontalScroll(scroll, enabled = active)) {
+            MotionTabs(index, labels, onSelect = onSelect, modifier = Modifier.width(width),
+                controlHeight = 44.dp, treatment = MotionTabTreatment.Soft,
+                fullWidthIndicator = true, selectionVisible = selected in labels.indices, tooltips = labels)
+        }
     }
 }
 
@@ -229,19 +297,21 @@ internal fun AnimeTextField(
     onSubmit: (() -> Unit)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
-    BasicTextField(value = value, onValueChange = onValueChange, enabled = enabled, singleLine = true,
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text(placeholder, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+        BasicTextField(value = value, onValueChange = onValueChange, enabled = enabled, singleLine = true,
         textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
         visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(imeAction = if (onSubmit != null) ImeAction.Search else ImeAction.Done),
         keyboardActions = KeyboardActions(onSearch = { onSubmit?.invoke() }, onDone = { onSubmit?.invoke() }),
         cursorBrush = androidx.compose.ui.graphics.SolidColor(colors.onSurface),
-        modifier = modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(12.dp))
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(12.dp))
             .background(colors.onSurface.copy(alpha = .045f)).padding(horizontal = 14.dp, vertical = 13.dp)
             .semantics { contentDescription = placeholder },
         decorationBox = { field ->
-            Box { if (value.isBlank()) Text(placeholder, style = MaterialTheme.typography.bodyMedium,
-                color = colors.onSurfaceVariant.copy(alpha = .7f)); field() }
+            Box { field() }
         })
+    }
 }
 
 @Composable

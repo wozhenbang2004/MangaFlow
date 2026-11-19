@@ -29,6 +29,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -72,17 +74,17 @@ internal fun AnimeLibrary(
     active: Boolean = true,
     contentBottomPadding: Dp = 24.dp,
 ) {
-    var filterOpen by remember { mutableStateOf(false) }
     var optionsOpen by remember { mutableStateOf(false) }
+    var optionsPresent by remember { mutableStateOf(false) }
     var selectedId by remember { mutableStateOf<String?>(null) }
-    val filterLabels = listOf("全部作品", "已追番", "观看历史")
+    var entryPresent by remember { mutableStateOf(false) }
+    val filterLabels = listOf("全部", "追番", "历史")
     val orderLabels = listOf("最近观看", "作品名称", "年份")
     val filter = viewState.filter.coerceIn(filterLabels.indices)
     val folder = viewState.folder
     val order = viewState.order.coerceIn(orderLabels.indices)
     LaunchedEffect(active) {
         if (!active) {
-            filterOpen = false
             optionsOpen = false
             selectedId = null
         }
@@ -101,34 +103,20 @@ internal fun AnimeLibrary(
         }
     }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            MotionTabs(filter, filterLabels, onSelect = { viewState.filter = it },
+                modifier = Modifier.weight(1f).motionInputGate(active && !optionsPresent && !entryPresent),
+                controlHeight = 44.dp, treatment = MotionTabTreatment.Soft,
+                fullWidthIndicator = true, tooltips = listOf("全部作品", "已追番", "观看历史"))
             Box {
-                MotionTextButton(onClick = { optionsOpen = false; filterOpen = true }, enabled = active,
-                    modifier = Modifier.heightIn(min = 44.dp)) {
-                    Text(filterLabels[filter], maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.width(4.dp))
-                    Icon(Icons.Outlined.ExpandMore, "筛选追番与历史", Modifier.size(17.dp))
-                }
-                CompactGlassPopover(filterOpen && active, backdrop, onDismiss = { filterOpen = false }, alignToStart = true) {
-                    filterLabels.forEachIndexed { index, label ->
-                        CompactMenuAction(if (filter == index) Icons.Outlined.Check else when (index) {
-                            1 -> Icons.Outlined.BookmarkBorder
-                            2 -> Icons.Outlined.History
-                            else -> Icons.Outlined.VideoLibrary
-                        }, label, onClick = { viewState.filter = index; filterOpen = false })
-                    }
-                }
-            }
-            Text(listOfNotNull(folder?.ifBlank { "未分组" }, orderLabels[order]).joinToString(" · "),
-                Modifier.weight(1f).padding(start = 4.dp, end = 6.dp), style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Box {
-                MotionIconButton(onClick = { filterOpen = false; optionsOpen = true }, enabled = active,
+                MotionIconButton(onClick = { optionsOpen = true }, enabled = active && !optionsPresent && !entryPresent,
                     modifier = Modifier.size(44.dp), tooltip = "文件夹与排序") {
                     Icon(if (folder == null) Icons.Outlined.FilterList else Icons.Outlined.Folder,
                         "文件夹与排序", Modifier.size(20.dp))
                 }
-                CompactGlassPopover(optionsOpen && active, backdrop, onDismiss = { optionsOpen = false }) {
+                CompactGlassPopover(optionsOpen && active, backdrop, onDismiss = { optionsOpen = false },
+                    onPresenceChange = { optionsPresent = it }) {
                     AnimeQuietLabel("文件夹", Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
                     CompactMenuAction(if (folder == null) Icons.Outlined.Check else Icons.Outlined.Folder, "全部文件夹",
                         onClick = { viewState.folder = null; optionsOpen = false })
@@ -146,7 +134,19 @@ internal fun AnimeLibrary(
                 }
             }
         }
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = scroll,
+        Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 12.dp, bottom = 3.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            AnimeQuietLabel(listOfNotNull(folder?.ifBlank { "未分组" }, orderLabels[order]).joinToString(" · "),
+                Modifier.weight(1f))
+            Text(if (state.libraryReadUnavailable) "— 部" else "${entries.size} 部",
+                style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (folder != null) MotionIconButton(onClick = { viewState.folder = null },
+                enabled = active && !optionsPresent && !entryPresent, modifier = Modifier.size(44.dp),
+                tooltip = "清除文件夹筛选") { Icon(Icons.Outlined.Close, "清除文件夹筛选", Modifier.size(16.dp)) }
+        }
+        LazyColumn(Modifier.weight(1f).fillMaxWidth().motionInputGate(active && !optionsPresent && !entryPresent),
+            state = scroll, userScrollEnabled = active && !optionsPresent && !entryPresent,
             contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 6.dp, bottom = contentBottomPadding)) {
             if (state.reviews.isNotEmpty()) item(key = "reviews") {
                 AnimeSelection("待核对 " + state.reviews.size + " 项", "状态与已看集数逐项选择", false, onReview)
@@ -172,19 +172,40 @@ internal fun AnimeLibrary(
                     "置顶".takeIf { entry.pinned },
                     animeStatusLabel(entry.status),
                     entry.folder.takeIf { it.isNotBlank() },
-                    entry.resume?.let { if (it.completed) "已看完本集" else "续看 " + animeTime(it.positionMs) },
+                    entry.resume?.let { if (it.completed) "已看完本集" else animeTime(it.positionMs) +
+                        (it.durationMs.takeIf { duration -> duration > 0L }?.let { duration -> " / " + animeTime(duration) } ?: "") },
                 ).joinToString(" · ")
-                AnimeSubjectRow(entry.subject, subtitle, onOpen = { onOpen(entry.subject) }, trailing = {
+                AnimeSubjectRow(entry.subject, subtitle, onOpen = { onOpen(entry.subject) }, supporting = {
+                    val resume = entry.resume
+                    if (resume != null && !resume.completed && resume.durationMs > 0L) {
+                        AnimeWatchProgressLine((resume.positionMs.toFloat() / resume.durationMs).coerceIn(0f, 1f),
+                            Modifier.padding(top = 3.dp))
+                    }
+                }, trailing = {
                     if (entry.resume?.completed == false) MotionIconButton(onClick = { onResume(entry) }, modifier = Modifier.size(44.dp),
                         tooltip = "继续观看") { Icon(Icons.Outlined.PlayArrow, "继续观看", Modifier.size(23.dp)) }
-                    MotionIconButton(onClick = { selectedId = entry.subject.id }, modifier = Modifier.size(44.dp),
+                    MotionIconButton(onClick = { entryPresent = true; selectedId = entry.subject.id }, modifier = Modifier.size(44.dp),
                         tooltip = "管理这部番剧") { Icon(Icons.Outlined.MoreHoriz, "管理番剧", Modifier.size(19.dp)) }
                 })
             }
         }
     }
     AnimeLibraryEntryPanel(selectedId?.takeIf { active }?.let { id -> state.library.firstOrNull { it.subject.id == id } },
-        controller, backdrop, folders, onDismiss = { selectedId = null })
+        controller, backdrop, folders, onDismiss = { selectedId = null }, onClosed = { entryPresent = false })
+}
+
+@Composable
+private fun AnimeWatchProgressLine(fraction: Float, modifier: Modifier = Modifier) {
+    val ink = MaterialTheme.colorScheme.onSurface
+    Canvas(modifier.fillMaxWidth().height(2.dp).semantics {
+        contentDescription = "本集观看进度"
+        progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
+    }) {
+        drawLine(ink.copy(alpha = .10f), androidx.compose.ui.geometry.Offset.Zero,
+            androidx.compose.ui.geometry.Offset(size.width, 0f), 2.dp.toPx(), StrokeCap.Round)
+        drawLine(ink.copy(alpha = .55f), androidx.compose.ui.geometry.Offset.Zero,
+            androidx.compose.ui.geometry.Offset(size.width * fraction, 0f), 2.dp.toPx(), StrokeCap.Round)
+    }
 }
 
 /** Adapted from DetailReadingDock's material, press, progress and compact geometry. */
@@ -231,14 +252,14 @@ internal fun AnimeContinueWatching(entry: AnimeLibraryEntry, onResume: () -> Uni
 
 @Composable
 private fun AnimeLibraryEntryPanel(entry: AnimeLibraryEntry?, controller: AnimeController,
-    backdrop: HazeState, folders: List<String>, onDismiss: () -> Unit) {
+    backdrop: HazeState, folders: List<String>, onDismiss: () -> Unit, onClosed: () -> Unit) {
     var retained by remember { mutableStateOf<AnimeLibraryEntry?>(null) }
     SideEffect { if (entry != null) retained = entry }
     val shown = entry ?: retained
     var section by remember(shown?.subject?.id) { mutableIntStateOf(0) }
     var folderDraft by remember(shown?.subject?.id) { mutableStateOf(shown?.folder.orEmpty()) }
-    MotionDialog(entry != null, onDismiss, maximumWidth = 480.dp, onClosed = { retained = null }) {
-        if (shown != null) LiquidGlassSurface(backdrop, role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp) {
+    MotionDialog(entry != null, onDismiss, maximumWidth = 480.dp, onClosed = { retained = null; onClosed() }) {
+        if (shown != null) AnimePanelSurface(backdrop) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight).padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (section != 0) MotionIconButton(onClick = { section = 0 }, modifier = Modifier.size(44.dp), tooltip = "返回管理") {

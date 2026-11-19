@@ -107,7 +107,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -746,17 +745,15 @@ private fun DiscoveryPane(
         if (candidates.size <= 6) candidates
         else (0 until 6).map { candidates[(rotationDay % candidates.size + it) % candidates.size] }
     }
-    // A reported catalogue hit does not establish that its cover is readable. Adult
-    // recommendation cards graduate from the grid's actual successful Coil draws.
-    val featuredCandidates = remember(displayedBooks, adultProfile, recommended) {
-        if (adultProfile && recommended) displayedBooks.asSequence()
-            .filter { it.coverUrl.isNotBlank() }.distinctBy(Manga::id).take(12).associateBy(Manga::id)
-        else emptyMap()
-    }
-    val readyCovers = remember(paneKey) { mutableStateMapOf<String, String>() }
-    val featured = if (adultProfile) featuredCandidates.values.filter { readyCovers[it.id] == it.coverUrl }.take(6)
-        else rankedFeatured
-    val showFeatured = recommended && (featured.isNotEmpty() || !adultProfile && state.loading)
+    // The directory owns the gallery's geometry. Coil keeps loading/error inside
+    // those frames; a later successful thumbnail must not insert a hero above a
+    // reader's current scroll position or reorder a deliberately selected feed.
+    val featured = if (adultProfile) remember(displayedBooks, aggregateAdult) {
+        if (aggregateAdult) displayedBooks.asSequence().filter { it.coverUrl.isNotBlank() }
+            .distinctBy(Manga::id).take(6).toList() else emptyList()
+    } else rankedFeatured
+    val showFeatured = recommended && (!adultProfile || aggregateAdult) &&
+        (featured.isNotEmpty() || state.loading)
     val mixedSources = adultProfile && state.items.asSequence().map(Manga::sourceId).distinct().take(2).count() > 1
     val desktop = platformKind == PlatformKind.DESKTOP
     val pull = rememberBottomPullLoadState(
@@ -803,7 +800,12 @@ private fun DiscoveryPane(
         }, onMore = onMore)
     val sectionControls: @Composable () -> Unit = {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            val title = if (state.mode == DiscoveryMode.LATEST) "最近更新" else "为你发现"
+            val title = when {
+                state.mode == DiscoveryMode.LATEST -> "最近更新"
+                adultProfile && !aggregateAdult -> "作品"
+                adultProfile && showFeatured -> "继续发现"
+                else -> "为你发现"
+            }
             val provider = state.items.firstOrNull()?.takeIf { aggregateAdult && !mixedSources }
                 ?.let { it.sourceName.ifBlank { sourceDisplayName(it.sourceId) } }
             Text(listOfNotNull(title, provider).joinToString(" · "),
@@ -841,15 +843,18 @@ private fun DiscoveryPane(
         }
         if (!ranking)
             item(span = { GridItemSpan(maxLineSpan) }, key = "section", contentType = "section-control") {
-                // Share the section's anchor so a newly decoded cover cannot move a
-                // scrolled reader back to the first page or replace their selected feed.
+                    // Keep the gallery and its section in one query-owned anchor.
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (adultProfile) gallery()
                     sectionControls()
                 }
             }
         if (state.loading && state.items.isEmpty()) {
-            if (!showFeatured) item(span = { GridItemSpan(maxLineSpan) }, key = "loading") {
+            if (adultProfile && !ranking && columns != 1) items(visibleColumns * 2,
+                key = { "loading-cover:$it" }, contentType = { "cover-placeholder" }) {
+                DiscoveryCoverPlaceholder()
+            }
+            else if (!showFeatured) item(span = { GridItemSpan(maxLineSpan) }, key = "loading") {
                 QuietLoading("正在翻开书页…")
             }
         } else if (state.items.isEmpty() && state.error != null) {
@@ -909,12 +914,6 @@ private fun DiscoveryPane(
                 }
             } else {
                 items(displayedBooks, key = Manga::id, contentType = { "browse-book" }) { manga ->
-                    val reportCover: (() -> Unit)? = if (manga.id in featuredCandidates) ({
-                        if (readyCovers.size >= 24 && manga.id !in readyCovers) {
-                            readyCovers.keys.firstOrNull { it !in featuredCandidates }?.let(readyCovers::remove)
-                        }
-                        readyCovers[manga.id] = manga.coverUrl
-                    }) else null
                     Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
                         placementSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap())) {
                         DesktopBrowseActions(if (desktop) desktopActions(manga) else emptyList(), active) {
@@ -923,10 +922,10 @@ private fun DiscoveryPane(
                                 val placement = "discovery-grid-$paneKey-" + if (list) "list" else "tile"
                                 if (list) BrowseListRow(manga, repository,
                                     showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
-                                    showSource = mixedSources, showMetrics = !adultProfile, onCoverReady = reportCover,
+                                    showSource = mixedSources, showMetrics = !adultProfile,
                                     onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
                                 else CoverTile(manga, repository, dense = true, narrow = visibleColumns >= 4,
-                                    showSource = mixedSources, showMetrics = !adultProfile, onCoverReady = reportCover,
+                                    showSource = mixedSources, showMetrics = !adultProfile,
                                     showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
                                     onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }) { onOpen(manga) }
                             }
@@ -961,6 +960,20 @@ private fun DiscoveryPane(
     if (desktop) DesktopVerticalScrollbar(grid,
         Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
     }
+    }
+}
+
+@Composable
+private fun DiscoveryCoverPlaceholder() {
+    val ink = MaterialTheme.colorScheme.onSurface
+    Column(Modifier.fillMaxWidth().semantics { contentDescription = "作品正在加载" },
+        verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(.7f).clip(RoundedCornerShape(10.dp))
+            .background(ink.copy(alpha = .055f)))
+        Box(Modifier.fillMaxWidth(.86f).height(9.dp).clip(RoundedCornerShape(4.dp))
+            .background(ink.copy(alpha = .075f)))
+        Box(Modifier.fillMaxWidth(.54f).height(8.dp).clip(RoundedCornerShape(4.dp))
+            .background(ink.copy(alpha = .035f)))
     }
 }
 
@@ -1295,29 +1308,29 @@ private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPerio
     modifier: Modifier = Modifier, showProvider: Boolean = true, onRatings: () -> Unit, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val transition = LocalMangaCoverTransition.current
+    val colors = MaterialTheme.colorScheme
     Row(modifier.fillMaxWidth().browseIntentWarmup(manga, repository, interaction)
         .clickable(interactionSource = interaction, indication = null, onClick = {
             transition?.select?.invoke(MangaCoverKey(manga.id, "ranking-$listKey"))
             onClick()
         })
         .motionPress(interaction, pressedScale = .985f)
-        .padding(vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(manga.rank?.toString()?.padStart(2, '0') ?: "—", fontSize = 18.sp,
-            style = mangaMetricValueStyle(18.sp, 24.sp),
+        .padding(vertical = 6.dp), verticalAlignment = Alignment.Top) {
+        Text(manga.rank?.toString()?.padStart(2, '0') ?: "—", fontSize = 20.sp,
+            style = mangaMetricValueStyle(20.sp, 26.sp),
             fontWeight = if ((manga.rank ?: 99) <= 3) FontWeight.SemiBold else FontWeight.Normal,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = if ((manga.rank ?: 99) <= 3) .82f else .38f),
-            maxLines = 1, modifier = Modifier.widthIn(min = 30.dp).padding(end = 4.dp))
-        MangaCover(manga, repository, Modifier.width(54.dp).height(78.dp)
-            .mangaSharedCover(manga.id, "ranking-$listKey").mangaCoverCard(6.dp))
-        Column(Modifier.weight(1f).padding(start = 10.dp,
-                end = if (platformKind == PlatformKind.DESKTOP) 44.dp else 0.dp).heightIn(min = 78.dp),
+            color = colors.onSurface.copy(alpha = if ((manga.rank ?: 99) <= 3) .84f else .38f),
+            maxLines = 1, modifier = Modifier.widthIn(min = 34.dp).padding(end = 6.dp, top = 5.dp))
+        MangaCover(manga, repository, Modifier.width(68.dp).height(98.dp)
+            .mangaSharedCover(manga.id, "ranking-$listKey").mangaCoverCard(9.dp))
+        Column(Modifier.weight(1f).padding(start = 12.dp,
+                end = if (platformKind == PlatformKind.DESKTOP) 44.dp else 0.dp).heightIn(min = 98.dp),
             verticalArrangement = Arrangement.SpaceBetween) {
-            Column {
-                Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 15.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium,
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 15.sp, lineHeight = 21.sp, fontWeight = FontWeight.Medium,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "), fontSize = 12.sp, lineHeight = 16.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .46f), maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+                    color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             if (manga.sourceId == "copy") {
                 RankingMetrics(manga, heatLabel = when (period) {
@@ -1326,9 +1339,13 @@ private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPerio
                     RankPeriod.MONTH -> "月热"
                     RankPeriod.TOTAL -> "总热"
                 }, onExpand = onRatings)
-            } else if (showProvider) {
-                Text(manga.sourceName.ifBlank { "来源榜单" }, fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                Column(Modifier.padding(top = 7.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    if (manga.latestChapter.isNotBlank()) Text(manga.latestChapter,
+                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (showProvider) MangaBrowseSource(manga)
+                }
             }
         }
     }
@@ -1366,9 +1383,8 @@ internal fun ContinueRow(
             }
         }
         if (onHistory == null) Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        else if (namedHistory) TextButton(onClick = onHistory, contentPadding = PaddingValues(horizontal = 8.dp)) {
-            Text("章节记录", style = MaterialTheme.typography.labelSmall, maxLines = 1)
-        } else MotionIconButton(onClick = onHistory, modifier = Modifier.size(44.dp)) {
+        else MotionIconButton(onClick = onHistory, modifier = Modifier.size(44.dp),
+            tooltip = if (namedHistory) "${progress.manga.title}的章节记录" else "章节阅读记录") {
             Icon(Icons.Outlined.History, "章节阅读记录", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }

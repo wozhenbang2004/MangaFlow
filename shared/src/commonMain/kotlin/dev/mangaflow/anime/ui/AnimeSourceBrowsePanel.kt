@@ -36,62 +36,63 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
     val state by owner.state.collectAsStateWithLifecycle()
     val source = state.sources.firstOrNull { it.id == state.sourceId && it.revision == state.sourceRevision }
     var sourceMenu by remember { mutableStateOf(false) }
-    var categoryMenu by remember { mutableStateOf(false) }
+    var sourcePresent by remember { mutableStateOf(false) }
+    var filtersPresent by remember { mutableStateOf(false) }
     var filtersVisible by remember { mutableStateOf(false) }
     val category = state.categories.firstOrNull { it.key == state.categoryKey }
     val defaultSection = if (source?.capabilities?.contains("latest") == true) "更新" else "推荐"
     LaunchedEffect(active, state.sourceId, state.sourceRevision) {
-        if (!active) { sourceMenu = false; categoryMenu = false; filtersVisible = false }
+        if (!active) { sourceMenu = false; filtersVisible = false }
     }
     LaunchedEffect(state.sourceId, state.sourceRevision, state.categoryKey) { filtersVisible = false }
+    val contentActive = active && !sourcePresent && !filtersPresent
     Column(Modifier.fillMaxSize().motionInputGate(active)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             Box(Modifier.weight(1f)) {
-                MotionTextButton(onClick = { sourceMenu = true }, modifier = Modifier.heightIn(min = 44.dp)) {
-                    Text(source?.name ?: "选择来源", Modifier.weight(1f, fill = false),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Icon(Icons.Outlined.ExpandMore, null, Modifier.size(17.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    source?.let { AnimeSourceMark(it.id, it.name, size = 22.dp) }
+                    Text(source?.name ?: "选择来源", Modifier.weight(1f),
+                        style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    MotionIconButton(onClick = { sourceMenu = true }, enabled = contentActive,
+                        modifier = Modifier.size(44.dp), tooltip = "切换浏览来源") {
+                        Icon(Icons.Outlined.SwapHoriz, "切换浏览来源", Modifier.size(20.dp))
+                    }
                 }
-                CompactGlassPopover(sourceMenu, backdrop, onDismiss = { sourceMenu = false }, alignToStart = true) {
+                CompactGlassPopover(sourceMenu && active, backdrop, onDismiss = { sourceMenu = false },
+                    onPresenceChange = { sourcePresent = it }, alignToStart = true) {
+                    AnimeQuietLabel("浏览来源", Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
                     state.sources.forEach { item ->
                         CompactMenuAction(if (source?.id == item.id) Icons.Outlined.Check else Icons.Outlined.Public,
                             item.name, onClick = { owner.selectSource(item.id); sourceMenu = false })
                     }
                 }
             }
-            if (state.selectedTitle == null && state.categories.isNotEmpty()) Box(Modifier.widthIn(max = 120.dp)) {
-                MotionTextButton(onClick = { categoryMenu = true }, modifier = Modifier.heightIn(min = 44.dp)) {
-                    Text(category?.title ?: defaultSection, Modifier.weight(1f, fill = false),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
-                }
-                CompactGlassPopover(categoryMenu, backdrop, onDismiss = { categoryMenu = false }) {
-                    if (source?.capabilities?.any { it == "homeSections" || it == "latest" } == true) CompactMenuAction(
-                        if (state.categoryKey == null) Icons.Outlined.Check else Icons.Outlined.Explore, defaultSection,
-                        onClick = { owner.selectCategory(null); categoryMenu = false })
-                    state.categories.forEach { item ->
-                        CompactMenuAction(if (state.categoryKey == item.key) Icons.Outlined.Check else Icons.Outlined.Category,
-                            item.title, onClick = { owner.selectCategory(item.key); categoryMenu = false })
-                    }
-                }
-            }
             if (state.selectedTitle == null && category?.filters?.isNotEmpty() == true) {
-                MotionIconButton(onClick = { filtersVisible = true }, modifier = Modifier.size(44.dp), tooltip = "来源筛选") {
+                MotionIconButton(onClick = { filtersPresent = true; filtersVisible = true }, enabled = contentActive, modifier = Modifier.size(44.dp), tooltip = "来源筛选") {
                     Icon(Icons.Outlined.FilterList, "来源筛选", Modifier.size(20.dp),
                         tint = if (state.filters.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             if (source != null && state.selectedTitle == null) MotionIconButton(onClick = owner::refresh,
-                enabled = !state.loading && !state.homeLoading && !state.categoriesLoading,
+                enabled = contentActive && !state.loading && !state.homeLoading && !state.categoriesLoading,
                 modifier = Modifier.size(44.dp), tooltip = "刷新当前来源") {
                 Icon(Icons.Outlined.Refresh, "刷新当前来源", Modifier.size(20.dp))
             }
         }
+        if (state.selectedTitle == null && state.categories.isNotEmpty()) {
+            val sections = buildList<Pair<String?, String>> {
+                if (source?.capabilities?.any { it == "homeSections" || it == "latest" } == true) add(null to defaultSection)
+                addAll(state.categories.map { it.key to it.title })
+            }
+            AnimeChoiceStrip(sections.map { it.second }, sections.indexOfFirst { it.first == state.categoryKey },
+                onSelect = { owner.selectCategory(sections[it].first) }, active = contentActive,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
+        }
         if (source == null) AnimeMessage("还没有可浏览的来源", "可在设置中管理动漫来源。")
         else MotionTabContent(source to state,
             contentKey = { (selected, snapshot) -> selected.id + ":" + selected.revision + ":" + (snapshot.selectedTitle?.id ?: "catalog") },
-            order = { (_, snapshot) -> if (snapshot.selectedTitle == null) 0 else 1 }, modifier = Modifier.weight(1f)) { (shownSource, snapshot) ->
+            order = { (_, snapshot) -> if (snapshot.selectedTitle == null) 0 else 1 }, modifier = Modifier.weight(1f).motionInputGate(contentActive)) { (shownSource, snapshot) ->
             val title = snapshot.selectedTitle
             if (title != null) AnimeSourcePreview(title, shownSource.name, shownSource.videoSource, snapshot,
                 columns, scrolls, contentBottomPadding, onChooseTitle, onOpen = owner::openTitle, onRetry = owner::retryRelated)
@@ -103,7 +104,7 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
         }
     }
     AnimeSourceFilters(filtersVisible, category, state.filters, backdrop,
-        onDismiss = { filtersVisible = false }, onSelect = owner::setFilter)
+        onDismiss = { filtersVisible = false }, onClosed = { filtersPresent = false }, onSelect = owner::setFilter)
 }
 
 @Composable
@@ -212,13 +213,13 @@ private fun AnimeSourcePreview(title: AnimeSourceTitle, sourceName: String, vide
 
 @Composable
 private fun AnimeSourceFilters(visible: Boolean, category: LanercCategory?, selected: Map<String, String>,
-    backdrop: HazeState, onDismiss: () -> Unit, onSelect: (String, String?) -> Unit) {
+    backdrop: HazeState, onDismiss: () -> Unit, onClosed: () -> Unit, onSelect: (String, String?) -> Unit) {
     var retained by remember { mutableStateOf<LanercCategory?>(null) }
     if (category != null && visible) SideEffect { retained = category }
     MotionDialog(visible && category != null, onDismissRequest = onDismiss, maximumWidth = 480.dp,
-        onClosed = { retained = null }) {
+        onClosed = { retained = null; onClosed() }) {
         val shown = category ?: retained
-        LiquidGlassSurface(backdrop, role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp) {
+        AnimePanelSurface(backdrop) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)
                 .verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 AnimeSectionTitle(shown?.title ?: "来源筛选", action = {
@@ -227,7 +228,7 @@ private fun AnimeSourceFilters(visible: Boolean, category: LanercCategory?, sele
                     }
                 })
                 shown?.filters?.forEach { filter ->
-                    AnimeBrowseFilter(filter, selected[filter.key], backdrop,
+                    AnimeBrowseFilter(filter, selected[filter.key],
                         onSelect = { onSelect(filter.key, it) })
                 }
                 MotionButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("完成") }
@@ -237,23 +238,15 @@ private fun AnimeSourceFilters(visible: Boolean, category: LanercCategory?, sele
 }
 
 @Composable
-private fun AnimeBrowseFilter(filter: LanercFilter, value: String?, backdrop: HazeState, onSelect: (String?) -> Unit) {
-    var menu by remember(filter.key) { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        AnimeQuietLabel(filter.title, Modifier.weight(1f))
-        Box {
-            MotionTextButton(onClick = { menu = true }, modifier = Modifier.heightIn(min = 44.dp)) {
-                Text(filter.options.firstOrNull { it.value == value }?.label ?: "默认")
-                Icon(Icons.Outlined.ExpandMore, null, Modifier.size(18.dp))
-            }
-            CompactGlassPopover(menu, backdrop, onDismiss = { menu = false }) {
-                CompactMenuAction(if (value == null) Icons.Outlined.Check else Icons.Outlined.FilterList, "来源默认",
-                    onClick = { onSelect(null); menu = false })
-                filter.options.distinctBy { it.value }.forEach { option ->
-                    CompactMenuAction(if (value == option.value) Icons.Outlined.Check else Icons.Outlined.FilterList,
-                        option.label.ifBlank { "不限" }, onClick = { onSelect(option.value); menu = false })
-                }
-            }
-        }
+private fun AnimeBrowseFilter(filter: LanercFilter, value: String?, onSelect: (String?) -> Unit) {
+    val options = buildList<Pair<String?, String>> {
+        add(null to "默认")
+        addAll(filter.options.distinctBy { it.value }.map { it.value to it.label.ifBlank { "不限" } })
+    }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        AnimeQuietLabel(filter.title)
+        AnimeChoiceStrip(options.map { it.second }, options.indexOfFirst { it.first == value },
+            onSelect = { onSelect(options[it].first) })
+        if (value != null && options.none { it.first == value }) AnimeQuietLabel("原筛选已不可用，请重新选择")
     }
 }

@@ -218,7 +218,7 @@ internal fun DetailCatalog(
     val showBusy = rememberDelayedBusy(loading)
     Column(Modifier.fillMaxSize()) {
         if (groups.size > 1 || progress != null) Row(
-            Modifier.fillMaxWidth().then(flow).heightIn(min = 36.dp).padding(horizontal = 16.dp),
+            Modifier.fillMaxWidth().then(flow).heightIn(min = 44.dp).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
@@ -635,9 +635,9 @@ private fun ChapterGroups(
             closeAfterChoice = false
         }
     }
-    Row(modifier.fillMaxWidth().heightIn(min = 36.dp),
+    Row(modifier.fillMaxWidth().heightIn(min = 44.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.heightIn(min = 36.dp).widthIn(min = 44.dp, max = 176.dp)
+        Row(Modifier.heightIn(min = 44.dp).widthIn(min = 44.dp, max = 176.dp)
             .clip(RoundedCornerShape(10.dp))
             .clickable(enabled = active, interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = if (expanded) "收起章节分组" else "展开章节分组",
@@ -684,7 +684,7 @@ private fun ChapterGroups(
                             if (motion) tween(MangaMotion.Quick) else snap(), label = "chapter-choice-background")
                         val choiceColor by animateColorAsState(if (chosen) DetailForeground else DetailSecondary,
                             if (motion) tween(MangaMotion.Quick) else snap(), label = "chapter-choice-label")
-                        Row(Modifier.heightIn(min = 36.dp).clip(RoundedCornerShape(10.dp))
+                        Row(Modifier.heightIn(min = 44.dp).clip(RoundedCornerShape(10.dp))
                             .background(choiceBackground)
                             .selectable(selected = chosen, enabled = active && expanded, role = Role.Tab,
                                 interactionSource = rowInteraction, indication = null, onClick = {
@@ -699,7 +699,7 @@ private fun ChapterGroups(
                             horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                             Text(label, color = choiceColor, fontSize = 12.sp,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(count.toString(), color = DetailMuted, fontSize = 10.sp)
+                            Text(count.toString(), color = DetailMuted, fontSize = 11.sp)
                         }
                     }
                 }

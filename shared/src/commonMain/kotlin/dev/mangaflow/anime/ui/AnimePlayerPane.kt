@@ -379,14 +379,14 @@ internal fun AnimePlayerPane(
                     else -> Modifier.offset(y = controlsTop).width(videoWidth)
                 }
                 val panel = if (overlayTransport) Modifier.background(Brush.verticalGradient(
-                    listOf(Color.Transparent, Color.Black.copy(alpha = .9f)))) else Modifier.background(Color.Black)
+                    listOf(Color.Transparent, Color.Black.copy(alpha = .82f)))) else Modifier.background(colors.surface)
                 Box(transportPlacement
                     .onSizeChanged { if (!overlayTransport) controlsHeight = with(density) { it.height.toDp() } }
                     .graphicsLayer { alpha = chromeReveal; translationY = (1f - chromeReveal) * 10.dp.toPx() }
                     .motionInputGate(active && showChrome && !obscured && !settingsPresent)
                     .onFocusChanged { transportFocused = it.hasFocus }.focusGroup()
                     .then(panel), contentAlignment = Alignment.BottomCenter) {
-                    MaterialTheme(colorScheme = videoColors) {
+                    MaterialTheme(colorScheme = if (overlayTransport) videoColors else colors) {
                         AnimePlayerControls(controller.player, playback,
                             previous, next, onEpisode, onToggle = ::toggle,
                             onInteraction = ::interact, onHoldControls = { controlsHeld = it },
@@ -554,7 +554,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
                 horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 val timeStyle = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum")
                 Text(animeTime(scrub ?: state.positionMs), style = timeStyle, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                MaterialTheme(colorScheme = MaterialTheme.colorScheme.copy(surface = Color.White)) {
+                MaterialTheme(colorScheme = MaterialTheme.colorScheme.copy(surface = MaterialTheme.colorScheme.onSurface)) {
                     MotionSlider(value = (scrub ?: state.positionMs).toFloat(),
                         onValueChange = { onHoldControls(true); scrub = it.toLong() },
                         valueRange = 0f..duration.toFloat(),
@@ -654,7 +654,7 @@ private fun AnimePlayerEpisodes(
         }
         if (main.isNotEmpty() && extra.isNotEmpty()) MotionTabs(selectedGroup, listOf("正片", "特别篇等"),
             onSelect = { group = it }, modifier = Modifier.padding(horizontal = panelPadding).widthIn(max = 280.dp).fillMaxWidth(),
-            controlHeight = 44.dp, compact = true, treatment = MotionTabTreatment.Underline)
+            controlHeight = 44.dp, compact = true, treatment = MotionTabTreatment.Soft)
         if (searchVisible) AnimeTextField(query, { query = it }, "集号或标题",
             Modifier.padding(horizontal = panelPadding, vertical = 4.dp))
         LazyVerticalGrid(GridCells.Adaptive(cellWidth), modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -681,7 +681,7 @@ private fun WatchEpisodeCell(
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
-    val color = if (current) colors.onPrimary else if (watched) colors.onSurfaceVariant else colors.onSurface
+    val color = if (watched && !current) colors.onSurfaceVariant else colors.onSurface
     val stateLabel = if (current) "当前集" else if (watched) "已看完" else "未看完"
     val lineLabel = when (availability) {
         AnimeEpisodeAvailability.MATCHED -> null
@@ -691,15 +691,19 @@ private fun WatchEpisodeCell(
         AnimeEpisodeAvailability.UPCOMING -> "待播"
     }
     Box(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(11.dp))
-        .background(if (current) colors.primary else colors.surfaceContainerHigh)
+        .background(if (current) colors.onSurface.copy(alpha = .11f) else colors.surfaceContainerLow)
         .motionPress(interaction, enabled = enabled)
         .clickable(enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = if (lineLabel == null) "播放本集" else "查看本集来源", onClick = onClick)
         .semantics { selected = current; stateDescription = listOfNotNull(stateLabel, lineLabel).joinToString("，") }
         .padding(horizontal = 6.dp, vertical = 6.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(animeEpisodeLabel(episode), style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
-                maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, color = color)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                if (current || watched) Icon(if (current) Icons.Outlined.PlayArrow else Icons.Outlined.Check,
+                    null, Modifier.size(12.dp), tint = color)
+                Text(animeEpisodeLabel(episode), style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
+                    maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, color = color)
+            }
             if (lineLabel != null) Text(lineLabel, style = MaterialTheme.typography.labelSmall,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, color = color.copy(alpha = .8f))
         }

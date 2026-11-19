@@ -16,7 +16,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -79,7 +78,7 @@ import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.motion.*
 import dev.mangaflow.ui.platform.*
 
-/** Reuse root chrome and the actual Ovio tab motion; content has one stable readable base. */
+/** One catalogue surface: visible source comparison, one retained filter workspace. */
 @Composable
 internal fun SiteRankingsScreen(
     controller: SiteRankingsController,
@@ -95,39 +94,53 @@ internal fun SiteRankingsScreen(
         controller.setVisible(active && !awards)
         onDispose { controller.setVisible(false) }
     }
-    var siteMenu by remember { mutableStateOf(false) }
-    var filterMenu by remember { mutableStateOf(false) }
-    var sitePresent by remember { mutableStateOf(false) }
-    var filterPresent by remember { mutableStateOf(false) }
-    var menuSelection by remember { mutableStateOf(state.selection) }
-    var menuSite by remember { mutableStateOf(state.selection.site) }
-    var menuFetchedAt by remember { mutableLongStateOf(0L) }
-    var menuError by remember { mutableStateOf<String?>(null) }
-    var infoRequested by remember { mutableStateOf(false) }
-    var infoVisible by remember { mutableStateOf(false) }
-    var infoPresent by remember { mutableStateOf(false) }
-    var filtersRequested by remember { mutableStateOf(false) }
     var filtersVisible by remember { mutableStateOf(false) }
     var filtersPresent by remember { mutableStateOf(false) }
+    var infoVisible by remember { mutableStateOf(false) }
+    var infoPresent by remember { mutableStateOf(false) }
+    var panelSelection by remember { mutableStateOf(state.selection) }
+    var panelFetchedAt by remember { mutableLongStateOf(0L) }
     LaunchedEffect(active) {
         if (!active) {
-            siteMenu = false; filterMenu = false
-            infoRequested = false; infoVisible = false; infoPresent = false
-            filtersRequested = false; filtersVisible = false; filtersPresent = false
+            filtersVisible = false
+            infoVisible = false
         }
     }
     val colors = MaterialTheme.colorScheme
-    val controlColors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)
     val positions = rememberSaveableStateHolder()
     val ready = active && !state.restoringSelection
-    val menuWidth = 208.dp * LocalDensity.current.fontScale.coerceIn(1f, 1.4f)
+    val contentReady = ready && !filtersPresent && !infoPresent
+    val openFilters: () -> Unit = {
+        panelSelection = state.selection
+        filtersPresent = true
+        filtersVisible = true
+    }
     val sectionTabs: @Composable () -> Unit = {
-        val tabsActive = active && !siteMenu && !filterMenu && !sitePresent && !filterPresent &&
-            !infoPresent && !filtersPresent
-        MotionTabs(if (awards) 1 else 0, listOf("各站榜单", "年度获奖"), onSelect = {
-            if (tabsActive) awards = it == 1
-        }, treatment = MotionTabTreatment.Underline, controlHeight = 44.dp,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).motionInputGate(tabsActive))
+        val enabled = active && !filtersPresent && !infoPresent
+        val density = LocalDensity.current
+        val scroll = rememberScrollState()
+        val minimumCell = with(density) { 13.sp.toDp() * 2 + 24.dp }.coerceAtLeast(44.dp)
+        BoxWithConstraints(Modifier.fillMaxWidth().motionInputGate(enabled)) {
+            val width = maxWidth.coerceAtLeast(minimumCell * 2)
+            LaunchedEffect(awards, width, maxWidth, density, scroll.maxValue) {
+                val cell = with(density) { width.toPx() / 2 }
+                val viewport = with(density) { maxWidth.toPx() }
+                val start = if (awards) cell else 0f
+                val end = start + cell
+                val target = when {
+                    start < scroll.value -> start.toInt()
+                    end > scroll.value + viewport -> (end - viewport).toInt()
+                    else -> scroll.value
+                }.coerceIn(0, scroll.maxValue)
+                scroll.scrollTo(target)
+            }
+            Box(Modifier.horizontalScroll(scroll, enabled = enabled)) {
+                MotionTabs(if (awards) 1 else 0, listOf("榜单", "获奖"), onSelect = {
+                    if (enabled) awards = it == 1
+                }, treatment = MotionTabTreatment.Soft, controlHeight = 44.dp,
+                    modifier = Modifier.width(width))
+            }
+        }
     }
     if (awards) {
         positions.SaveableStateProvider("award-catalogue") {
@@ -139,138 +152,77 @@ internal fun SiteRankingsScreen(
     RankingPageFrame(Modifier.fillMaxSize().background(colors.background.copy(alpha = .97f))
         .semantics { paneTitle = "漫画榜单" }, header = {
         Column {
-            PageTitleHeader("漫画榜单", backdrop, navigation,
+            PageTitleHeader("漫画榜单", backdrop,
+                navigation = { Box(Modifier.motionInputGate(contentReady)) { navigation() } },
                 modifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
                     .padding(horizontal = 8.dp, vertical = 2.dp),
-                summary = {
-                    Text("漫画榜单", Modifier.padding(start = 4.dp),
-                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }, actions = {
+                summary = sectionTabs,
+                actions = {
+                    MotionIconButton(onClick = {
+                        panelSelection = state.selection
+                        panelFetchedAt = state.fetchedAt
+                        infoPresent = true
+                        infoVisible = true
+                    }, enabled = contentReady, modifier = Modifier.size(44.dp), tooltip = "榜单口径与更新时间") {
+                        Icon(Icons.Outlined.Info, "榜单口径与更新时间", Modifier.size(18.dp))
+                    }
                     Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
                         if (state.refreshing) MotionBusyIndicator(Modifier.size(17.dp))
                         else MotionIconButton(onClick = controller::refresh,
-                            enabled = ready && !state.loading && !state.loadingMore && !sitePresent && !filterPresent &&
-                                !filtersPresent && !infoPresent,
+                            enabled = contentReady && !state.loading && !state.loadingMore,
                             modifier = Modifier.size(44.dp), tooltip = "刷新当前榜单") {
                             Icon(Icons.Outlined.Refresh, "刷新当前榜单", Modifier.size(19.dp))
                         }
                     }
                 })
-            sectionTabs()
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box {
-                    MotionTextButton(onClick = {
-                        if (!siteMenu) menuSite = state.selection.site
-                        siteMenu = !siteMenu; filterMenu = false
-                    }, enabled = ready && !filterPresent && !filtersPresent && !infoPresent,
-                        modifier = Modifier.heightIn(min = 44.dp).semantics {
-                            contentDescription = "选择榜单站点"
-                            stateDescription = "当前站点 ${state.selection.site.title}"
-                        }, contentPadding = PaddingValues(horizontal = 7.dp), colors = controlColors) {
-                        if (!state.restoringSelection) ReviewSourceMark(state.selection.site.id, size = 16.dp)
-                        Text(if (state.restoringSelection) "站点" else state.selection.site.title,
-                            Modifier.padding(horizontal = 5.dp).widthIn(max = 84.dp),
-                            style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Icon(Icons.Outlined.ExpandMore, null, Modifier.size(14.dp))
-                    }
-                    CompactGlassPopover(siteMenu && ready, backdrop, onDismiss = { siteMenu = false },
-                        onPresenceChange = { sitePresent = it }, alignToStart = true, maximumWidth = menuWidth) {
-                        Column(Modifier.selectableGroup()) {
-                            RankingSite.entries.forEach { site ->
-                                RankingMenuChoice(site.title, site == menuSite, ready && siteMenu,
-                                    sourceId = site.id) {
-                                    siteMenu = false; controller.selectSite(site)
-                                }
-                            }
-                        }
-                    }
-                }
-                val kinds = state.selection.availableKinds
-                val keywordMatch = state.selection.site == RankingSite.BANGUMI &&
-                    state.selection.filters.query.isNotBlank()
-                if (keywordMatch) Text("搜索匹配", Modifier.weight(1f).padding(horizontal = 6.dp),
-                    style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                else if (kinds.size > 1) BoxWithConstraints(Modifier.weight(1f)) {
-                    val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-                    val minimum = 48.dp * scale * kinds.size
-                    val tabsWidth = maxWidth.coerceAtLeast(minimum)
-                    Box(Modifier.horizontalScroll(rememberScrollState())) {
-                        MotionTabs(kinds.indexOf(state.selection.kind).coerceAtLeast(0), kinds.map { it.label },
-                            onSelect = { if (ready) controller.selectKind(kinds[it]) },
-                            treatment = MotionTabTreatment.Underline, fontSize = 12.sp, controlHeight = 44.dp,
-                            modifier = Modifier.width(tabsWidth).motionInputGate(ready))
-                    }
-                } else Spacer(Modifier.weight(1f))
-                Box {
-                    MotionTextButton(onClick = {
-                        if (!filterMenu) {
-                            menuSelection = state.selection
-                            menuFetchedAt = state.fetchedAt
-                            menuError = state.preferenceError
-                        }
-                        filterMenu = !filterMenu; siteMenu = false
-                    }, enabled = ready && !sitePresent && !filtersPresent && !infoPresent,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                        colors = controlColors, modifier = Modifier.heightIn(min = 44.dp)) {
-                        Icon(Icons.Outlined.FilterList, null, Modifier.size(16.dp))
-                        Column(Modifier.padding(start = 5.dp).widthIn(max = 88.dp)) {
-                            Text("筛选", style = MaterialTheme.typography.labelMedium)
-                            if (!state.restoringSelection) Text(state.selection.scopeLabel,
-                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                    CompactGlassPopover(filterMenu && ready, backdrop, onDismiss = { filterMenu = false },
-                        onPresenceChange = { present ->
-                            filterPresent = present
-                            if (!present && infoRequested) {
-                                infoRequested = false
-                                infoVisible = active
-                            }
-                            if (!present && filtersRequested) {
-                                filtersRequested = false
-                                filtersVisible = active
-                            }
-                        }, maximumWidth = menuWidth) {
-                        Column(Modifier.selectableGroup()) {
-                            menuSelection.availableScopes.forEach { value ->
-                                RankingMenuChoice(if (menuSelection.usesBangumiSearch) menuSelection.scopeLabel else value.label,
-                                    value == menuSelection.scope, ready && filterMenu) {
-                                    filterMenu = false; controller.selectScope(value)
-                                }
-                            }
-                        }
-                        menuError?.let { Text(it, Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                            fontSize = 11.sp, lineHeight = 16.sp, color = colors.error) }
-                        Box(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)
-                            .height(1.dp).background(colors.onSurface.copy(alpha = .07f)))
-                        CompactMenuAction(Icons.Outlined.FilterList, "组合筛选", enabled = ready && filterMenu) {
-                            filtersRequested = true; filtersPresent = true; filterMenu = false
-                        }
-                        CompactMenuAction(Icons.Outlined.Info, "榜单说明", enabled = ready && filterMenu) {
-                            infoRequested = true; infoPresent = true; filterMenu = false
-                        }
+            Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                RankingSourceTabs(state.selection.site, contentReady, !state.restoringSelection,
+                    onSelect = controller::selectSite, modifier = Modifier.weight(1f))
+                MotionTextButton(onClick = openFilters, enabled = contentReady,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface),
+                    modifier = Modifier.heightIn(min = 44.dp).semantics {
+                        contentDescription = "筛选与排序"
+                        stateDescription = state.selection.kind.label + "，" + state.selection.scopeLabel +
+                            if (state.selection.activeFilterCount > 0) "，${state.selection.activeFilterCount}项条件" else ""
+                    }) {
+                    Icon(Icons.Outlined.FilterList, null, Modifier.size(17.dp))
+                    Column(Modifier.padding(start = 5.dp).widthIn(max = 64.dp)) {
+                        Text(when {
+                            state.restoringSelection -> "筛选"
+                            state.selection.site == RankingSite.BANGUMI && state.selection.filters.query.isNotBlank() -> "匹配"
+                            else -> state.selection.kind.label
+                        },
+                            style = MaterialTheme.typography.labelMedium, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis)
+                        if (!state.restoringSelection) Text(state.selection.scopeLabel,
+                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
             }
             if (state.selection.activeFilterCount > 0) Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically,
+                Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                MotionTextButton(onClick = {
-                    menuSelection = state.selection
-                    filtersPresent = true; filtersVisible = true
-                }, enabled = ready && !sitePresent && !filterPresent && !infoPresent,
-                    modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 10.dp)) {
+                MotionTextButton(onClick = openFilters, enabled = contentReady,
+                    modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 0.dp)) {
                     Text(state.selection.filterSummary, Modifier.fillMaxWidth(), maxLines = 1,
                         overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant)
                 }
                 MotionIconButton(onClick = {
                     controller.applySelection(state.selection.copy(filters = SiteRankingFilters()))
-                }, enabled = ready && !filtersPresent, modifier = Modifier.size(44.dp), tooltip = "清除筛选") {
-                    Icon(Icons.Outlined.Close, "清除筛选", Modifier.size(16.dp))
+                }, enabled = contentReady, modifier = Modifier.size(44.dp), tooltip = "清除组合条件") {
+                    Icon(Icons.Outlined.Close, "清除组合条件", Modifier.size(16.dp))
                 }
+            }
+            state.preferenceError?.let { error ->
+                Text(error, Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)
+                    .semantics { liveRegion = LiveRegionMode.Polite },
+                    style = MaterialTheme.typography.labelSmall, color = colors.error)
             }
         }
     }) {
@@ -278,30 +230,31 @@ internal fun SiteRankingsScreen(
             order = { it.selection.site.ordinal * 100 + it.selection.kind.ordinal * 10 + it.selection.scope.ordinal },
             soft = true, modifier = Modifier.fillMaxSize()) { pane ->
             positions.SaveableStateProvider(pane.selection.key) {
-                RankingPane(pane, backdrop, 0.dp, active = ready && pane.selection == state.selection &&
-                    !siteMenu && !filterMenu && !sitePresent && !filterPresent && !infoPresent && !filtersPresent,
+                RankingPane(pane, backdrop, 0.dp,
+                    active = contentReady && pane.selection == state.selection,
                     onRetry = controller::retry, onMore = controller::more, onOpen = onOpen, onInspect = onInspect)
             }
         }
     }
-    SiteRankingFiltersDialog(visible = filtersVisible && active, selection = menuSelection,
+    SiteRankingFiltersDialog(visible = filtersVisible && active, selection = panelSelection,
         active = active, backdrop = backdrop, onApply = {
-            controller.applySelection(it); filtersVisible = false
+            controller.applySelection(it)
+            filtersVisible = false
         }, onDismiss = { filtersVisible = false }, onClosed = {
             if (!filtersVisible) filtersPresent = false
         })
-    // A help action waits for the actual menu exit; it never stacks two active surfaces.
     MotionDialog(visible = infoVisible && active, onDismissRequest = { infoVisible = false },
-        maximumWidth = 320.dp, onClosed = { if (!infoVisible) infoPresent = false }) {
+        maximumWidth = 360.dp, onClosed = { if (!infoVisible) infoPresent = false }) {
         LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
             role = GlassSurfaceRole.PANEL, softCard = true) {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 10.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(menuSelection.site.title + " · " + menuSelection.kind.label,
+                    ReviewSourceMark(panelSelection.site.id, size = 20.dp)
+                    Column(Modifier.weight(1f).padding(start = 8.dp)) {
+                        Text(panelSelection.site.title + " · " + panelSelection.kind.label,
                             style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
-                        Text(menuSelection.scopeLabel, style = MaterialTheme.typography.labelSmall,
+                        Text(panelSelection.scopeLabel, style = MaterialTheme.typography.labelSmall,
                             color = colors.onSurfaceVariant)
                     }
                     MotionIconButton(onClick = { infoVisible = false }, modifier = Modifier.size(44.dp),
@@ -309,12 +262,43 @@ internal fun SiteRankingsScreen(
                         Icon(Icons.Outlined.Close, "关闭榜单说明", Modifier.size(18.dp))
                     }
                 }
-                Text(menuSelection.explanation, Modifier.padding(vertical = 8.dp),
+                Text(panelSelection.explanation, Modifier.padding(vertical = 8.dp),
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                if (menuFetchedAt > 0) Text("本机获取 · " + formatInstantMillis(menuFetchedAt, "MM-dd HH:mm"),
+                if (panelFetchedAt > 0) Text("本机获取 · " + formatInstantMillis(panelFetchedAt, "MM-dd HH:mm"),
                     Modifier.padding(bottom = 8.dp), style = MaterialTheme.typography.labelSmall,
                     color = colors.onSurfaceVariant)
             }
+        }
+    }
+}
+
+/** Direct source comparison uses the existing Ovio cells and source marks. */
+@Composable
+private fun RankingSourceTabs(
+    selected: RankingSite,
+    enabled: Boolean,
+    selectionVisible: Boolean,
+    onSelect: (RankingSite) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val sites = RankingSite.entries
+    val labels = sites.map { if (it == RankingSite.MYANIMELIST) "MAL" else it.title }
+    val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    BoxWithConstraints(modifier) {
+        val width = maxWidth.coerceAtLeast(78.dp * scale * sites.size)
+        Box(Modifier.horizontalScroll(rememberScrollState(), enabled = enabled)) {
+            MotionTabs(sites.indexOf(selected), labels, onSelect = { if (enabled) onSelect(sites[it]) },
+                modifier = Modifier.width(width).motionInputGate(enabled),
+                treatment = MotionTabTreatment.Underline, controlHeight = 44.dp, fontSize = 12.sp,
+                role = Role.RadioButton, selectionVisible = selectionVisible,
+                tooltips = sites.map { it.title }, itemContent = { index, _, color ->
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        ReviewSourceMark(sites[index].id, size = 15.dp)
+                        Text(labels[index], style = MaterialTheme.typography.labelMedium,
+                            color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                })
         }
     }
 }
@@ -390,11 +374,11 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
             !state.loadingMore && !state.refreshing && state.error == null) onMore()
     }
     Box(Modifier.fillMaxSize().mangaHazeSource(backdrop).motionInputGate(active)) {
-        LazyVerticalGrid(columns = if (desktop) GridCells.Adaptive(360.dp * LocalDensity.current.fontScale.coerceAtLeast(1f))
-            else GridCells.Fixed(1), state = grid, modifier = Modifier.fillMaxSize(),
+        LazyVerticalGrid(columns = GridCells.Adaptive(344.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
+            state = grid, modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 16.dp, end = if (desktop) 24.dp else 16.dp,
                 top = top + 6.dp, bottom = 24.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding()),
-            horizontalArrangement = Arrangement.spacedBy(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            horizontalArrangement = Arrangement.spacedBy(28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             if (empty || state.refreshing || firstError != null) item(key = "rank-status", span = { GridItemSpan(maxLineSpan) }) {
                 val site = state.selection.site.title
                 val observed = state.fetchedAt.takeIf { it > 0 }?.let { formatInstantMillis(it, "MM-dd HH:mm") }
@@ -461,42 +445,62 @@ private fun SiteRankingRow(entry: SiteRankingEntry, kind: SiteRankingKind, linke
             transition?.select?.invoke(if (linked) null else MangaCoverKey(w.manga.id, placement))
             onOpen(w)
         }).motionPress(interaction, pressedScale = .985f).padding(vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        Text(entry.position.toString().padStart(2, '0'), Modifier.widthIn(min = 28.dp).padding(end = 6.dp),
-            style = mangaMetricValueStyle(16.sp, 22.sp), maxLines = 1,
+        verticalAlignment = Alignment.Top) {
+        Text(entry.position.toString().padStart(2, '0'),
+            Modifier.widthIn(min = 30.dp).padding(end = 4.dp, top = 2.dp),
+            style = mangaMetricValueStyle(17.sp, 23.sp), maxLines = 1,
+            fontWeight = if (entry.position <= 3) FontWeight.SemiBold else FontWeight.Normal,
             color = colors.onSurface.copy(alpha = if (entry.position <= 3) .84f else .42f))
-        CatalogueCover(w.manga, Modifier.width(56.dp).height(80.dp)
-            .mangaSharedCover(w.manga.id, placement).mangaCoverCard(7.dp))
-        Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(w.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
-            if (w.manga.authors.isNotEmpty()) Text(w.manga.authors.take(2).joinToString(" / "),
-                style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                color = colors.onSurfaceVariant)
-            FlowRow(verticalArrangement = Arrangement.spacedBy(2.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                val value = when (kind) {
-                    SiteRankingKind.SCORE -> w.score?.toString()?.removeSuffix(".0")
-                    SiteRankingKind.POPULARITY -> w.popularity?.let(::rankingCount)
-                    SiteRankingKind.TRENDING -> w.trending?.let(::rankingCount)
-                    SiteRankingKind.FAVOURITES -> w.favourites?.let(::rankingCount)
-                    SiteRankingKind.NEWEST -> w.publishedDate
-                }
-                if (value != null) Text(value, modifier = Modifier.alignByBaseline(), style = mangaMetricValueStyle(16.sp, 22.sp))
-                if (kind == SiteRankingKind.SCORE && w.ratingCount != null)
-                    Text(rankingCount(w.ratingCount.toLong()) + "人评分", Modifier.alignByBaseline(),
-                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 1)
-                else if (kind != SiteRankingKind.SCORE && value != null)
-                    Text(when (kind) {
-                        SiteRankingKind.POPULARITY -> "书单"
-                        SiteRankingKind.NEWEST -> "首发"
-                        else -> kind.label
-                    }, Modifier.alignByBaseline(),
-                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 1)
+        CatalogueCover(w.manga, Modifier.width(68.dp).height(98.dp)
+            .mangaSharedCover(w.manga.id, placement).mangaCoverCard(8.dp))
+        Column(Modifier.weight(1f).padding(start = 10.dp).heightIn(min = 98.dp),
+            verticalArrangement = Arrangement.SpaceBetween) {
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(w.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                    fontSize = 15.sp, lineHeight = 21.sp, fontWeight = FontWeight.Medium,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (w.manga.authors.isNotEmpty()) Text(w.manga.authors.take(2).joinToString(" / "),
+                    style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    color = colors.onSurfaceVariant)
             }
-        }
-        if (linked) MotionIconButton(onClick = inspect, modifier = Modifier.size(44.dp), tooltip = "更换阅读来源") {
-            Icon(Icons.Outlined.Link, "已关联，点击更换阅读来源", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+            Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                FlowRow(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val value = when (kind) {
+                        SiteRankingKind.SCORE -> w.score?.toString()?.removeSuffix(".0")
+                        SiteRankingKind.POPULARITY -> w.popularity?.let(::rankingCount)
+                        SiteRankingKind.TRENDING -> w.trending?.let(::rankingCount)
+                        SiteRankingKind.FAVOURITES -> w.favourites?.let(::rankingCount)
+                        SiteRankingKind.NEWEST -> w.publishedDate
+                    }
+                    if (value != null && kind == SiteRankingKind.NEWEST) {
+                        Text(value, Modifier.alignByBaseline(), style = mangaMetricValueStyle(13.sp, 19.sp), maxLines = 1)
+                        Text("首发", Modifier.alignByBaseline(), style = MaterialTheme.typography.labelSmall,
+                            color = colors.onSurfaceVariant, maxLines = 1)
+                    } else if (value != null) {
+                        Row(Modifier.alignByBaseline(), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(value, style = mangaMetricValueStyle(16.sp, 22.sp), maxLines = 1)
+                            Text(if (kind == SiteRankingKind.SCORE) "/${w.scoreScale}" else when (kind) {
+                                SiteRankingKind.POPULARITY -> "书单"
+                                SiteRankingKind.NEWEST -> "首发"
+                                else -> kind.label
+                            }, style = MaterialTheme.typography.labelSmall,
+                                color = colors.onSurfaceVariant, maxLines = 1)
+                        }
+                    } else Text(if (kind == SiteRankingKind.SCORE) "暂无评分" else "暂无数据",
+                        Modifier.alignByBaseline(), style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant)
+                    if (kind == SiteRankingKind.SCORE && w.ratingCount != null)
+                        Text(rankingCount(w.ratingCount.toLong()) + "人评分", Modifier.alignByBaseline(),
+                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant, maxLines = 1)
+                }
+                if (linked) MotionIconButton(onClick = inspect, modifier = Modifier.size(44.dp),
+                    tooltip = "已关联阅读来源，点击更换") {
+                    Icon(Icons.Outlined.Link, "已关联阅读来源，点击更换", Modifier.size(17.dp),
+                        tint = colors.onSurfaceVariant)
+                }
+            }
         }
     }
 }

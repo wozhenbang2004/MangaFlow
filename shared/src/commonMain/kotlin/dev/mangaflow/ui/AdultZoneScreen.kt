@@ -17,7 +17,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Tune
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -121,14 +120,13 @@ internal fun ContentProfileAccountScreen(
                     catch (cancel: CancellationException) { throw cancel }
                     catch (_: Exception) { accountReadError = true }
                 }
-                HorizontalDivider(Modifier.padding(top = 4.dp))
-                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ChapterSourceLogo(source.id, source.name, Modifier.size(22.dp))
-                    Text(source.name, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
-                    MotionTextButton(onClick = { onInspect(source.id) }, enabled = active && !busy) {
-                        Icon(Icons.Outlined.Tune, null, Modifier.size(16.dp))
-                        Text("设置", Modifier.padding(start = 5.dp))
+                Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(top = 8.dp, bottom = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ChapterSourceLogo(source.id, source.name, Modifier.size(32.dp))
+                    Text(source.name, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    MotionIconButton(onClick = { onInspect(source.id) }, enabled = active && !busy,
+                        modifier = Modifier.size(44.dp), tooltip = "${source.name}设置") {
+                        Icon(Icons.Outlined.Tune, "${source.name}设置", Modifier.size(19.dp))
                     }
                 }
                 val current = account

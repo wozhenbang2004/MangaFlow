@@ -427,8 +427,8 @@ internal fun AnimeWorkspace(
                             val preferred = animePreferredColumns(maxWidth, state.discoveryColumns)
                             val actualColumns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
                             AnimeWorkspaceHeader(root = shown.depth == 0 && !directoryOpen,
-                                title = if (shown.depth == 0) (if (directoryOpen) "来源目录" else "动漫") else
-                                    shownDetail?.subject?.title ?: openingSubject?.title ?: "动漫详情",
+                                title = if (shown.depth == 0) (if (directoryOpen) "来源目录" else "番剧") else
+                                    shownDetail?.subject?.title ?: openingSubject?.title ?: "番剧详情",
                                 backdrop = backdrop, navigationVisible = navigationVisible,
                                 navigation = {
                                     if (shown.depth == 0 && !directoryOpen) navigation()
@@ -453,8 +453,8 @@ internal fun AnimeWorkspace(
                                         Box {
                                             MotionIconButton(onClick = { pendingTool = null; toolsVisible = !toolsVisible },
                                                 modifier = Modifier.size(44.dp), enabled = !layoutPresent && (toolsVisible || !toolsPresent),
-                                                tooltip = "动漫菜单") {
-                                                Icon(Icons.Outlined.MoreHoriz, "动漫菜单", Modifier.size(21.dp))
+                                                tooltip = "番剧菜单") {
+                                                Icon(Icons.Outlined.MoreHoriz, "番剧菜单", Modifier.size(21.dp))
                                             }
                                             CompactGlassPopover(toolsVisible, backdrop,
                                                 onDismiss = { toolsVisible = false; pendingTool = null },
@@ -664,9 +664,9 @@ private fun AnimeWorkspaceNavigation(selected: AnimeWorkspacePage, active: Boole
         }
         Box(Modifier.horizontalScroll(scroll)) {
             MotionTabs(selected.ordinal, pages.map { it.label }, onSelect = { onSelect(pages[it]) },
-                modifier = Modifier.width(width), controlHeight = 44.dp, treatment = MotionTabTreatment.Underline,
-                foreground = MaterialTheme.colorScheme.onSurface,
-                indicator = MaterialTheme.colorScheme.primary)
+                modifier = Modifier.width(width), controlHeight = 44.dp, treatment = MotionTabTreatment.Soft,
+                fullWidthIndicator = true, foreground = MaterialTheme.colorScheme.onSurface,
+                indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .085f))
         }
     }
 }

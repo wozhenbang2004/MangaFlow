@@ -27,7 +27,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -212,41 +211,132 @@ internal fun ReaderExperienceStatus(
             ReaderStatusSummary("下页准备失败", ReaderStatusMark.ERROR, ReaderStatusSection.WORK)
         else -> ReaderStatusSummary("阅读状态", ReaderStatusMark.IDLE)
     }
+    val steps = listOf(preparation.resolving, preparation.originals, preparation.decoding)
+    val failed = steps.sumOf { it.failed }
+    val deferred = steps.sumOf { it.deferred }
+    val active = steps.sumOf { it.active }
+    val queued = steps.sumOf { it.queued }
+    val workMaximum = maxOf(preparation.pages.size.toLong(),
+        steps.maxOf { maxOf(it.active, it.queued, it.complete, it.deferred, it.failed) }.toLong(),
+        nextChapterPreparation?.let { next -> maxOf(next.requestedPages.toLong() + 1L,
+            next.activePages.toLong() + 1L, next.queuedPages.toLong() + 1L,
+            next.originalReadyPages.toLong(), next.deferredPages.toLong(), next.failedPages.toLong()) } ?: 0L)
+    val sourceMaximum = standbys.maxOfOrNull { row -> maxOf(row.requestedPages.toLong() + 1L,
+        row.preparedPages.toLong(), row.previewResidentPages.toLong(), row.activePages.toLong() + 1L,
+        row.queuedPages.toLong() + 1L, row.failedPages.toLong()) } ?: 1L
+    val sourceReserve = "8".repeat(sourceMaximum.coerceAtLeast(1L).toString().length)
+    val activityMark = when {
+        failed > 0 -> ReaderStatusMark.ERROR
+        active > 0 -> ReaderStatusMark.ACTIVE
+        chapterLoading && preparation.pages.isEmpty() -> ReaderStatusMark.ACTIVE
+        preparation.pauseReason != null || deferred > 0 -> ReaderStatusMark.PAUSED
+        queued > 0 -> ReaderStatusMark.QUEUED
+        preparation.pages.isEmpty() -> ReaderStatusMark.UNKNOWN
+        else -> ReaderStatusMark.IDLE
+    }
+    val workDetail = when {
+        chapterLoading && preparation.pages.isEmpty() -> "正在打开章节，当前阅读窗口尚未建立"
+        preparation.pages.isEmpty() -> "等待建立当前阅读窗口"
+        else -> "实际进行 $active 项，排队 $queued，失败 $failed，暂缓 $deferred"
+    }
+    val stageMarks = steps.map { step -> when {
+        preparation.pages.isEmpty() -> ReaderStatusMark.UNKNOWN
+        step.failed > 0 -> ReaderStatusMark.ERROR
+        step.active > 0 -> ReaderStatusMark.ACTIVE
+        step.deferred > 0 -> ReaderStatusMark.PAUSED
+        step.queued > 0 -> ReaderStatusMark.QUEUED
+        step.complete > 0 -> ReaderStatusMark.READY
+        else -> ReaderStatusMark.IDLE
+    } }
+    val aheadPages = preparation.pages.filter { it.role == ReaderPreparationRole.AHEAD }
+    val aheadMark = originalReadinessMark(aheadPages, preparation.pauseReason)
+    val sourceStatus = standbySummary(standbyAvailability, standbys, budget)
+    val aheadValue = when {
+        aheadPages.isEmpty() || aheadPages.all { it.originalPresent == null } -> "—"
+        else -> stripCount(aheadPages.count { it.originalPresent == true }) +
+            if (aheadPages.any { it.originalPresent == null }) "?" else ""
+    }
+    val aheadDetail = when {
+        preparation.aheadTarget > 0 -> "已核实 ${preparation.aheadReady} / ${preparation.aheadTarget} 页；" +
+            "${aheadPages.count { it.originalPresent == null }} 页待核实"
+        preparation.pauseReason != null -> preparation.pauseReason
+        preparation.pages.isEmpty() -> "等待建立当前阅读窗口"
+        else -> "当前没有前方准备目标"
+    }
     Box(modifier.fillMaxSize()) {
         Box(Modifier.align(if (top) Alignment.TopCenter else if (bottomEndClearance > 0.dp) Alignment.BottomStart else Alignment.BottomCenter)
             .windowInsetsPadding(
                 (if (top) readerStatusInsets().union(WindowInsets.captionBar) else readerNavigationInsets())
                     .union(WindowInsets.displayCutout)
                     .only(WindowInsetsSides.Horizontal + if (top) WindowInsetsSides.Top else WindowInsetsSides.Bottom))
-            .padding(start = if (!top && bottomEndClearance > 0.dp) 12.dp else 52.dp,
-                end = if (!top && bottomEndClearance > 0.dp) bottomEndClearance + 16.dp else 52.dp,
+            .padding(start = 12.dp,
+                end = if (!top && bottomEndClearance > 0.dp) bottomEndClearance + 20.dp else 12.dp,
                 top = if (top) clearance + 2.dp else 0.dp,
                 bottom = if (top) 0.dp else clearance + 2.dp)
-            .widthIn(max = 164.dp)) {
+            .widthIn(max = 248.dp)) {
             AnimatedVisibility(shown,
                 enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)),
                 exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
-                Box(Modifier.width(164.dp).heightIn(min = 48.dp).motionInputGate(shown)) {
-                    LiquidGlassSurface(backdrop, Modifier.align(Alignment.Center).fillMaxWidth().height(32.dp),
-                        cornerRadius = 16.dp,
-                        role = GlassSurfaceRole.READING_DOCK, elevation = 0.dp,
-                        softCard = false, trackPointer = false) { }
-                    MotionTextButton(onClick = {
-                        if (selected != null) selected = null else inspect(summary.section)
-                    }, enabled = shown, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                        .semantics {
-                            contentDescription = "阅读状态"
-                            stateDescription = if (selected != null) "已展开，${summary.label}" else summary.label
-                        },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 3.dp)) {
-                        if (summary.mark == ReaderStatusMark.ACTIVE) {
-                            Icon(Icons.Outlined.Schedule, null, Modifier.size(14.dp), tint = mangaStatusColors().activity)
-                        } else if (summary.mark == ReaderStatusMark.IDLE) {
-                            Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        } else StatusMark(summary.mark, Modifier.size(14.dp))
-                        Text(summary.label, Modifier.padding(start = 6.dp).clearAndSetSemantics {},
-                            color = MaterialTheme.colorScheme.onSurface,
-                            style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Column(Modifier.width(248.dp).motionInputGate(shown)) {
+                    AnimatedVisibility(summary.mark == ReaderStatusMark.ERROR,
+                        enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)),
+                        exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
+                        MotionTextButton(onClick = { inspect(summary.section) }, enabled = shown,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+                            Row(Modifier.background(MaterialTheme.colorScheme.surface.copy(alpha = .94f), RoundedCornerShape(12.dp))
+                                .padding(horizontal = 9.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                StatusMark(ReaderStatusMark.ERROR, Modifier.size(14.dp))
+                                Text(summary.label, style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurface, maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                Icon(Icons.Outlined.ChevronRight, "查看恢复方式", Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                    val dockSlot = if (selected == ReaderStatusSection.CACHE) ReaderStatusSlot.MEMORY else selectedSlot
+                    val dockRetained = if (retainedSlot == ReaderStatusSlot.DISK) ReaderStatusSlot.MEMORY else retainedSlot
+                    val dockHeight = maxOf(34.dp, with(LocalDensity.current) {
+                        MaterialTheme.typography.labelSmall.fontSize.toDp() * 1.3f + 20.dp
+                    })
+                    Box(Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+                        LiquidGlassSurface(backdrop, Modifier.align(Alignment.Center).fillMaxWidth().height(dockHeight),
+                            cornerRadius = dockHeight / 2,
+                            role = GlassSurfaceRole.READING_DOCK, elevation = 0.dp,
+                            softCard = false, trackPointer = false) { }
+                        ReaderStatusStrip(dockSlot, dockRetained, shown, { slot ->
+                            if (selected == slot.section) selected = null
+                            else {
+                                if (slot.section == ReaderStatusSection.CACHE &&
+                                    expandedWorks[ReaderStatusSection.CACHE] !in listOf(ReaderWork.MEMORY, ReaderWork.DISK)) {
+                                    expandedWorks[ReaderStatusSection.CACHE] = ReaderWork.MEMORY
+                                }
+                                inspect(slot.section)
+                            }
+                        }, entries = listOf(ReaderStatusSlot.PREPARATION, ReaderStatusSlot.WORK,
+                            ReaderStatusSlot.SOURCES, ReaderStatusSlot.MEMORY), labelsVisible = false) { slot, isSelected ->
+                            when (slot) {
+                                ReaderStatusSlot.PREPARATION -> StatusMicro(Icons.AutoMirrored.Outlined.MenuBook,
+                                    aheadValue, "前方已备原图", aheadMark, aheadDetail,
+                                    progress = if (preparation.aheadTarget > 0 && aheadPages.none { it.originalPresent == null })
+                                        preparation.aheadReady.toFloat() / preparation.aheadTarget else null,
+                                    selected = isSelected)
+                                ReaderStatusSlot.WORK -> StatusMicro(Icons.Outlined.AccountTree,
+                                    if (preparation.pages.isEmpty()) "—" else stripCount(active), "当前窗口任务", activityMark,
+                                    workDetail,
+                                    progress = null, selected = isSelected, stages = stageMarks)
+                                ReaderStatusSlot.SOURCES -> StatusMicro(Icons.Outlined.Layers,
+                                    if (sourceStatus.hasTargets) stripCount(standbys.count { it.requestedPages > 0 && it.targetOriginalPresent }) else "—",
+                                    "备用来源与补页", if (sourceStatus.mark == ReaderStatusMark.ERROR) ReaderStatusMark.ERROR
+                                        else if (repairBusy) ReaderStatusMark.ACTIVE else sourceStatus.mark,
+                                    sourceStatus.detail + "；已补 $repairedPages 页",
+                                    progress = sourceStatus.progress, selected = isSelected, busy = repairBusy)
+                                ReaderStatusSlot.MEMORY, ReaderStatusSlot.DISK -> ReaderCacheDock(store, isSelected)
+                            }
+                        }
                     }
                 }
             }
@@ -254,56 +344,18 @@ internal fun ReaderExperienceStatus(
                 aboveAnchor = !top, alignToStart = !top && bottomEndClearance > 0.dp,
                 maximumWidth = if (window.width >= 720.dp) 480.dp else 344.dp,
                 onDismiss = { selected = null }, onPresenceChange = { popoverPresent = it }) {
-                val steps = listOf(preparation.resolving, preparation.originals, preparation.decoding)
-                val failed = steps.sumOf { it.failed }
-                val deferred = steps.sumOf { it.deferred }
-                val active = steps.sumOf { it.active }
-                val queued = steps.sumOf { it.queued }
-                val workMaximum = maxOf(preparation.pages.size.toLong(),
-                    steps.maxOf { maxOf(it.active, it.queued, it.complete, it.deferred, it.failed) }.toLong(),
-                    nextChapterPreparation?.let { next -> maxOf(next.requestedPages.toLong() + 1L,
-                        next.activePages.toLong() + 1L, next.queuedPages.toLong() + 1L,
-                        next.originalReadyPages.toLong(), next.deferredPages.toLong(), next.failedPages.toLong()) } ?: 0L)
-                val sourceMaximum = standbys.maxOfOrNull { row -> maxOf(row.requestedPages.toLong() + 1L,
-                    row.preparedPages.toLong(), row.previewResidentPages.toLong(), row.activePages.toLong() + 1L,
-                    row.queuedPages.toLong() + 1L, row.failedPages.toLong()) } ?: 1L
-                val sourceReserve = "8".repeat(sourceMaximum.coerceAtLeast(1L).toString().length)
-                val activityMark = when {
-                    failed > 0 -> ReaderStatusMark.ERROR
-                    active > 0 -> ReaderStatusMark.ACTIVE
-                    preparation.pauseReason != null || deferred > 0 -> ReaderStatusMark.PAUSED
-                    queued > 0 -> ReaderStatusMark.QUEUED
-                    preparation.pages.isEmpty() -> ReaderStatusMark.UNKNOWN
-                    else -> ReaderStatusMark.IDLE
-                }
-                val stageMarks = steps.map { step -> when {
-                    preparation.pages.isEmpty() -> ReaderStatusMark.UNKNOWN
-                    step.failed > 0 -> ReaderStatusMark.ERROR
-                    step.active > 0 -> ReaderStatusMark.ACTIVE
-                    step.deferred > 0 -> ReaderStatusMark.PAUSED
-                    step.queued > 0 -> ReaderStatusMark.QUEUED
-                    step.complete > 0 -> ReaderStatusMark.READY
-                    else -> ReaderStatusMark.IDLE
-                } }
-                val aheadPages = preparation.pages.filter { it.role == ReaderPreparationRole.AHEAD }
-                val aheadMark = originalReadinessMark(aheadPages, preparation.pauseReason)
-                val sourceStatus = standbySummary(standbyAvailability, standbys, budget)
-                val aheadValue = when {
-                    aheadPages.isEmpty() || aheadPages.all { it.originalPresent == null } -> "—"
-                    else -> stripCount(aheadPages.count { it.originalPresent == true }) +
-                        if (aheadPages.any { it.originalPresent == null }) "?" else ""
-                }
-                val aheadDetail = when {
-                    preparation.aheadTarget > 0 -> "已核实 ${preparation.aheadReady} / ${preparation.aheadTarget} 页；" +
-                        "${aheadPages.count { it.originalPresent == null }} 页待核实"
-                    preparation.pauseReason != null -> preparation.pauseReason
-                    preparation.pages.isEmpty() -> "等待建立当前阅读窗口"
-                    else -> "当前没有前方准备目标"
-                }
                 Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)) {
                     Row(Modifier.fillMaxWidth().bringIntoViewRequester(sectionHeader), verticalAlignment = Alignment.CenterVertically) {
-                        Text("阅读状态", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("阅读状态", style = MaterialTheme.typography.titleSmall,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(if (preparation.lastVisible >= preparation.firstVisible && preparation.pageCount > 0)
+                                "第 ${pageRange(preparation.firstVisible, preparation.lastVisible)} 页 · 共 ${preparation.pageCount} 页"
+                                else summary.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                         MotionIconButton(onClick = { scopeHelp[retainedSection] = scopeHelp[retainedSection] != true }, modifier = Modifier.size(44.dp),
                             enabled = selected != null, tooltip = "图标与当前范围说明") {
                             Icon(Icons.Outlined.Info, "图标与当前范围说明", Modifier.size(18.dp),
@@ -332,7 +384,8 @@ internal fun ReaderExperienceStatus(
                                 selected = isSelected)
                             ReaderStatusSlot.WORK -> StatusMicro(Icons.Outlined.AccountTree,
                                 if (preparation.pages.isEmpty()) "—" else stripCount(active), "当前窗口工作", activityMark,
-                                "原图 ${preparation.originals.active}，解码与核验 ${preparation.decoding.active}，解析 ${preparation.resolving.active}，排队 $queued，失败 $failed，暂缓 $deferred；${steps.sumOf { it.complete }} 项阶段完成；下方三格依次为解析、原图、解码阶段",
+                                if (preparation.pages.isEmpty()) workDetail else
+                                    "原图 ${preparation.originals.active}，解码与核验 ${preparation.decoding.active}，解析 ${preparation.resolving.active}，排队 $queued，失败 $failed，暂缓 $deferred；${steps.sumOf { it.complete }} 项阶段完成；下方三格依次为解析、原图、解码阶段",
                                 progress = null, selected = isSelected, stages = stageMarks)
                             ReaderStatusSlot.SOURCES -> StatusMicro(Icons.Outlined.Layers,
                                 if (sourceStatus.hasTargets) stripCount(standbys.count { it.requestedPages > 0 && it.targetOriginalPresent }) else "—",
@@ -344,20 +397,15 @@ internal fun ReaderExperienceStatus(
                                 memorySlot = slot == ReaderStatusSlot.MEMORY, selected = isSelected)
                         }
                     }
-                    Text(retainedSection.title, Modifier.padding(start = 4.dp, top = 4.dp),
-                        style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     MotionTabContent(selected = retainedSection, contentKey = { it }, order = { it.ordinal },
                         fillContent = false) { shownSection ->
                         val bodyEnabled = selected == shownSection
                         val expandedWork = expandedWorks[shownSection]
                         fun toggle(work: ReaderWork) { if (bodyEnabled) expandedWorks[shownSection] = if (expandedWork == work) null else work }
-                        val currentPage = if (preparation.lastVisible >= preparation.firstVisible && preparation.pageCount > 0)
-                            "${pageRange(preparation.firstVisible, preparation.lastVisible)} / ${preparation.pageCount}" else "—"
                         Column(Modifier.fillMaxWidth().motionInputGate(bodyEnabled)) {
                             StatusReveal(scopeHelp[shownSection] == true) { ReaderStatusLegend(shownSection, budget, preparation) }
                             when (shownSection) {
                                 ReaderStatusSection.PREPARATION -> {
-                                    StatusContext(currentPage)
                                     ReadinessRow(Icons.Outlined.KeyboardDoubleArrowRight, "前方",
                                         preparation.pages.filter { it.role == ReaderPreparationRole.AHEAD },
                                         preparation.pauseReason, expandedWork == ReaderWork.AHEAD, bodyEnabled) { toggle(ReaderWork.AHEAD) }
@@ -377,7 +425,6 @@ internal fun ReaderExperienceStatus(
                                     }
                                 }
                                 ReaderStatusSection.WORK -> {
-                                    StatusContext(currentPage)
                                     listOf(ReaderWork.RESOLVE, ReaderWork.ORIGINAL, ReaderWork.PREVIEW).forEach { work ->
                                         val counts = work.counts(preparation)
                                         WorkDisclosure(work.icon, work.title, counts.active.toLong(), workMaximum,
@@ -392,7 +439,6 @@ internal fun ReaderExperienceStatus(
                                     }
                                 }
                                 ReaderStatusSection.SOURCES -> {
-                                    StatusContext(currentPage)
                                     sourceLockError?.let { StatusExplanation(it, error = true) }
                                     repairReason?.let { StatusExplanation(it) }
                                     FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -519,33 +565,54 @@ private fun ReaderStatusSection.slot(cacheWork: ReaderWork?): ReaderStatusSlot? 
 @Composable
 private fun ReaderStatusStrip(selected: ReaderStatusSlot?, retained: ReaderStatusSlot, enabled: Boolean,
     onSelect: (ReaderStatusSlot) -> Unit,
+    entries: List<ReaderStatusSlot> = ReaderStatusSlot.entries,
+    labelsVisible: Boolean = true,
     content: @Composable (ReaderStatusSlot, Boolean) -> Unit) {
-    val entries = ReaderStatusSlot.entries
     val colors = MaterialTheme.colorScheme
     val scroll = rememberScrollState()
     val minimumSlotWidth = maxOf(44.dp, statusNumberWidth("99+?", 20.dp))
-    val anchors = remember { List(entries.size) { BringIntoViewRequester() } }
-    LaunchedEffect(selected) {
-        if (selected != null) {
+    val lineHeight = with(LocalDensity.current) { MaterialTheme.typography.labelSmall.lineHeight.toDp() }
+    // Custom tab content contains a metric row, its thin track, and an optional label.
+    // MotionTabs only budgets a single default text row, so reserve our actual type geometry.
+    val microHeight = maxOf(18.dp, lineHeight) + 5.dp
+    val controlHeight = maxOf(if (labelsVisible) 62.dp else 44.dp,
+        microHeight + (if (labelsVisible) lineHeight + 4.dp else 0.dp) + 12.dp)
+    val anchors = remember(entries) { List(entries.size) { BringIntoViewRequester() } }
+    val selectedIndex = entries.indexOf(selected)
+    LaunchedEffect(selectedIndex, entries) {
+        if (selectedIndex >= 0) {
             withFrameNanos { }
-            anchors[selected.ordinal].bringIntoView()
+            anchors[selectedIndex].bringIntoView()
         }
     }
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val trackWidth = maxOf(maxWidth, minimumSlotWidth * entries.size)
         Box(Modifier.fillMaxWidth().horizontalScroll(scroll)) {
-            MotionTabs(selected = retained.ordinal, labels = entries.map { it.title },
+            MotionTabs(selected = entries.indexOf(retained).coerceAtLeast(0), labels = entries.map { it.title },
                 onSelect = { if (enabled) onSelect(entries[it]) },
                 modifier = Modifier.width(trackWidth).motionInputGate(enabled),
-                foreground = colors.primary, muted = colors.onSurfaceVariant,
-                indicator = colors.primary.copy(alpha = .12f), fullWidthIndicator = true,
-                controlHeight = 44.dp, indicatorHeight = 28.dp, indicatorCornerRadius = 14.dp,
+                foreground = colors.onSurface, muted = colors.onSurfaceVariant,
+                indicator = colors.onSurface.copy(alpha = .075f), fullWidthIndicator = true,
+                controlHeight = controlHeight,
+                indicatorHeight = if (labelsVisible) controlHeight - 10.dp else maxOf(30.dp, microHeight + 4.dp),
+                indicatorCornerRadius = if (labelsVisible) 13.dp else 15.dp,
                 selectionVisible = enabled && selected != null,
-                tooltips = if (enabled) listOf("前方已备原图，点击查看目标", "当前窗口实际任务", "备用来源与补页",
-                    "解码内存用量与回收", "共享图片磁盘用量与预算") else null,
+                tooltips = if (enabled) entries.map { slot -> when (slot) {
+                    ReaderStatusSlot.PREPARATION -> "预读 · 当前窗口已核实原图"
+                    ReaderStatusSlot.WORK -> "任务 · 解析、原图与解码"
+                    ReaderStatusSlot.SOURCES -> "补页 · 备用来源与恢复"
+                    ReaderStatusSlot.MEMORY -> if (labelsVisible) "内存 · 解码用量与回收" else "缓存 · 上轨内存，下轨磁盘"
+                    ReaderStatusSlot.DISK -> "磁盘 · 共享图片缓存与预算"
+                } } else null,
                 itemContent = { index, isSelected, _ ->
-                    Box(Modifier.fillMaxSize().bringIntoViewRequester(anchors[index]), contentAlignment = Alignment.Center) {
+                    Column(Modifier.fillMaxSize().bringIntoViewRequester(anchors[index]),
+                        verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically),
+                        horizontalAlignment = Alignment.CenterHorizontally) {
                         content(entries[index], isSelected)
+                        if (labelsVisible) Text(entries[index].title,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isSelected) colors.onSurface else colors.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 })
         }
@@ -865,7 +932,7 @@ private fun StatusMicro(icon: ImageVector, value: String, label: String,
     mark: ReaderStatusMark, detail: String, progress: Float?, selected: Boolean,
     stages: List<ReaderStatusMark> = emptyList(), busy: Boolean = false) {
     val colors = MaterialTheme.colorScheme
-    val accent = if (selected) colors.primary else colors.onSurface.copy(alpha = .72f)
+    val accent = colors.onSurface.copy(alpha = if (selected) .95f else .72f)
     val progressColor = statusTone(mark)
     val numberWidth = statusNumberWidth("99+?", 0.dp)
     Column(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {
@@ -1394,6 +1461,41 @@ private fun cacheState(used: Long?, limit: Long?, pending: Boolean = false): Cac
     }
 }
 
+/** Shared cache observations occupy one quiet dock slot; the panel exposes both owners. */
+@Composable
+private fun ReaderCacheDock(store: ExperiencePolicyStore, selected: Boolean) {
+    val cache = projectedCacheUsage(store)
+    val memory = cacheState(cache.memoryBytes, cache.memoryLimit)
+    val disk = cacheState(cache.diskBytes, cache.diskLimit, cache.pending)
+    val colors = MaterialTheme.colorScheme
+    val status = mangaStatusColors()
+    val ink = colors.onSurface.copy(alpha = if (selected) .95f else .72f)
+    val mark = when {
+        cache.error != null -> ReaderStatusMark.ERROR
+        memory.mark == ReaderStatusMark.UNKNOWN || disk.mark == ReaderStatusMark.UNKNOWN -> ReaderStatusMark.UNKNOWN
+        cache.pending -> ReaderStatusMark.QUEUED
+        memory.mark == ReaderStatusMark.DISABLED && disk.mark == ReaderStatusMark.DISABLED -> ReaderStatusMark.DISABLED
+        else -> ReaderStatusMark.IDLE
+    }
+    Column(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {
+        contentDescription = "缓存"
+        stateDescription = "上轨解码内存，${statusCacheUsage(cache.memoryBytes, cache.memoryLimit)}，${memory.label}；" +
+            "下轨共享图片磁盘，${statusCacheUsage(cache.diskBytes, cache.diskLimit)}，${disk.label}；" +
+            (cache.error?.let { "$it；" } ?: "") + "点击查看用量与回收"
+    }, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Box(Modifier.width(24.dp).height(18.dp), contentAlignment = Alignment.Center) {
+            Icon(Icons.Outlined.Memory, null, Modifier.size(16.dp), tint = ink)
+            if (mark != ReaderStatusMark.IDLE) StatusMark(mark, Modifier.align(Alignment.TopEnd).size(8.dp))
+            else if (cache.recentMemoryRelease) Icon(Icons.Outlined.Cached, "近期有解码缓存回收",
+                Modifier.align(Alignment.TopEnd).size(9.dp), tint = status.success)
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            CacheOccupancy(memory.occupancy, Modifier.width(26.dp).height(1.5.dp), ink)
+            CacheOccupancy(disk.occupancy, Modifier.width(26.dp).height(1.5.dp), ink)
+        }
+    }
+}
+
 @Composable
 private fun ReaderCacheEntry(store: ExperiencePolicyStore, memorySlot: Boolean, selected: Boolean) {
     val cache = projectedCacheUsage(store)
@@ -1401,7 +1503,7 @@ private fun ReaderCacheEntry(store: ExperiencePolicyStore, memorySlot: Boolean, 
     val limit = if (memorySlot) cache.memoryLimit else cache.diskLimit
     val state = cacheState(used, limit, !memorySlot && cache.pending)
     val status = mangaStatusColors()
-    val accent = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = .72f)
+    val accent = MaterialTheme.colorScheme.onSurface.copy(alpha = if (selected) .95f else .72f)
     Column(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {
         contentDescription = if (memorySlot) "解码内存，应用共享" else "图片磁盘，应用共享"
         stateDescription = "已用 / ${if (memorySlot) "容量" else "策略预算"}${statusCacheUsage(used, limit)}，${state.label}；" +
@@ -1525,13 +1627,6 @@ private fun pageRanges(indices: List<Int>): String {
 private fun pageRange(first: Int, last: Int) = if (first == last) "${first + 1}" else "${first + 1}–${last + 1}"
 private fun transferLabel(received: Long, expected: Long?) = experienceCacheSize(received) +
     (expected?.takeIf { it > 0L }?.let { " / ${experienceCacheSize(it)}" } ?: "")
-
-@Composable
-private fun StatusContext(page: String) {
-    Box(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 8.dp)) {
-        StatusToken(Icons.AutoMirrored.Outlined.MenuBook, "当前阅读页", page)
-    }
-}
 
 /** Compact facts reuse the existing icon/value language; explanations stay in scoped Info. */
 @Composable

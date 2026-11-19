@@ -1,5 +1,11 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,6 +16,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Text
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,6 +32,9 @@ import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeUnifiedSearchState
 import dev.mangaflow.anime.canLoadMoreSearch
 import dev.mangaflow.ui.motion.MotionTextButton
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.motionInputGate
 
 internal fun LazyListScope.animeSearchResults(
     search: AnimeUnifiedSearchState,
@@ -62,7 +73,8 @@ internal fun LazyListScope.animeSearchResults(
     fun LazyListScope.issues() {
         if (failureCount == 0) return
         item(key = "search-issues") {
-            MotionTextButton(onClick = onToggleIssues, modifier = Modifier.heightIn(min = 44.dp)) {
+            MotionTextButton(onClick = onToggleIssues, modifier = Modifier.heightIn(min = 44.dp),
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
                 Text(if (showIssues) "收起搜索问题" else "$failureCount 个来源可重试")
             }
         }
@@ -80,7 +92,10 @@ internal fun LazyListScope.animeSearchResults(
             }
         }
     }
-    if (groups.isEmpty()) issues()
+    if (groups.isNotEmpty()) item(key = "search-summary") {
+        AnimeSectionTitle("${groups.size} 部番剧", if (pending > 0 || loadingIndex) "来源结果仍在补全" else null)
+    }
+    issues()
 
     items(groups, key = { it.key }) { group ->
         val subject = group.subject
@@ -103,14 +118,24 @@ internal fun LazyListScope.animeSearchResults(
                             stateDescription = if (expanded) "已展开来源候选" else "搜索命中的播放候选"
                         }, onClick = { onToggleSources(group.key) })
                 })
-                if (expanded) candidates.forEach { candidate ->
-                    val name = sourceNames[candidate.sourceId] ?: animeSourceName(candidate.sourceId)
-                    MotionTextButton(onClick = { onOpenSource(group, candidate) },
-                        Modifier.padding(start = 64.dp).heightIn(min = 44.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                            AnimeSourceMark(candidate.sourceId, name, size = 17.dp)
-                            Text(listOfNotNull(name, candidate.title.takeIf { it != display.title })
-                                .joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val motion = LocalMotionEnabled.current
+                AnimatedVisibility(expanded,
+                    enter = expandVertically(tween(if (motion) MangaMotion.Content else 0)) +
+                        fadeIn(tween(if (motion) MangaMotion.Quick else 0)),
+                    exit = shrinkVertically(tween(if (motion) MangaMotion.Content else 0)) +
+                        fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
+                    Column(Modifier.padding(start = 68.dp).motionInputGate(expanded)) {
+                        candidates.forEach { candidate ->
+                            val name = sourceNames[candidate.sourceId] ?: animeSourceName(candidate.sourceId)
+                            MotionTextButton(onClick = { onOpenSource(group, candidate) },
+                                modifier = Modifier.heightIn(min = 44.dp),
+                                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                    AnimeSourceMark(candidate.sourceId, name, size = 17.dp)
+                                    Text(listOfNotNull(name, candidate.title.takeIf { it != display.title })
+                                        .joinToString(" · "), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
                         }
                     }
                 }
@@ -118,12 +143,10 @@ internal fun LazyListScope.animeSearchResults(
         }
     }
 
-    if (groups.isNotEmpty() && (pending > 0 || loadingIndex)) item(key = "search-pending") {
-        AnimeQuietLabel("正在补全搜索结果", Modifier.padding(12.dp))
-    }
     if (canLoadMore) item(key = "search-more") {
         MotionTextButton(onClick = controller::loadMoreCatalog,
-            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
             Text("更多结果")
         }
     }
@@ -132,5 +155,4 @@ internal fun LazyListScope.animeSearchResults(
         val remaining = (paging.size - 2).takeIf { it > 0 }?.let { "等 ${paging.size} 个来源" }.orEmpty()
         AnimeQuietLabel("正在读取下一页 · $names$remaining", Modifier.padding(12.dp))
     }
-    if (groups.isNotEmpty()) issues()
 }

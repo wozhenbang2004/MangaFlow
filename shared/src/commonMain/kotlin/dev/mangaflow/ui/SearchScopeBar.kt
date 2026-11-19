@@ -56,8 +56,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -134,7 +132,7 @@ internal fun SearchScopeBar(
             onTarget(targets[it])
         },
             modifier = Modifier.width(44.dp * targets.size),
-            controlHeight = 36.dp, indicatorHeight = 28.dp, indicatorCornerRadius = 8.dp,
+            controlHeight = 44.dp, indicatorHeight = 34.dp, indicatorCornerRadius = 10.dp,
             fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
             fontSize = 11.sp, itemContent = { index, _, color ->
                 Icon(icons[index], if (targets[index] == SearchTarget.TRANSLATION_GROUP)
@@ -144,11 +142,11 @@ internal fun SearchScopeBar(
         }
         if (target != SearchTarget.TITLE && showScope) {
             Text(if (target == SearchTarget.TRANSLATION_GROUP) "汉化组搜索使用拷贝来源。"
-                else "优先使用来源的原生检索；不支持的来源按返回的作者／标签核对，结果可能不完整。",
-                fontSize = 10.sp, color = colors.onSurfaceVariant, maxLines = 2)
+                else "部分来源的作者／标签检索结果可能不完整。",
+                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 2)
         }
         if (selectedTags.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth().heightIn(min = 36.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                 Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -158,7 +156,8 @@ internal fun SearchScopeBar(
                             contentDescription = "已选 ${selectedPaths.size} 个标签"
                         }) {
                         Icon(Icons.Outlined.Check, null, Modifier.size(12.dp), tint = colors.onSurfaceVariant)
-                        Text(selectedPaths.size.toString(), fontSize = 10.sp, color = colors.onSurfaceVariant)
+                        Text(selectedPaths.size.toString(), style = MaterialTheme.typography.labelSmall,
+                            color = colors.onSurfaceVariant)
                     }
                     selectedTags.distinctBy { it.path }.forEach { tag ->
                         SearchTagChoice(tag, selected = true, remove = true) { chooseTag(tag) }
@@ -166,7 +165,7 @@ internal fun SearchScopeBar(
                 }
                 if (target == SearchTarget.TAG) {
                     val action = remember { MutableInteractionSource() }
-                    Row(Modifier.size(36.dp)
+                    Row(Modifier.size(44.dp)
                         .clickable(interactionSource = action, indication = null, role = Role.Button,
                             onClickLabel = if (showChoices) "收起标签选择" else "添加筛选标签",
                             onClick = {
@@ -187,7 +186,7 @@ internal fun SearchScopeBar(
             if (visible) Column(Modifier.fillMaxWidth().heightIn(max = maxChoicesHeight.coerceAtLeast(0.dp)),
                 verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (tagsOnly && onTagQuery != null) {
-                    Row(Modifier.fillMaxWidth().heightIn(min = 40.dp).clip(RoundedCornerShape(12.dp))
+                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
                         .background(colors.onSurface.copy(alpha = .045f)).padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Icon(Icons.Outlined.Search, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
@@ -231,7 +230,7 @@ internal fun SearchScopeBar(
                         onSelect = {
                             choseTabForQuery = true
                             eventTab = it == 1
-                        }, modifier = Modifier.width(154.dp), controlHeight = 36.dp, indicatorHeight = 28.dp,
+                        }, modifier = Modifier.width(154.dp), controlHeight = 44.dp, indicatorHeight = 34.dp,
                         treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, fontSize = 12.sp)
                     Spacer(Modifier.weight(1f))
                     if (origins.isNotEmpty()) MotionTextButton(onClick = { showTagSources = !showTagSources }) {
@@ -308,39 +307,32 @@ private fun SearchTagChoice(tag: MangaTag, selected: Boolean, remove: Boolean = 
     val interaction = remember(tag.path) { MutableInteractionSource() }
     val origins = if (includeProvenance && !remove) tag.providerPaths.keys else emptySet()
     val copyCount = tag.count?.takeIf { it >= 0 && "copy" in origins }
-    val light = colors.surface.luminance() > .5f
-    val accent = when ((tag.path.hashCode() and Int.MAX_VALUE) % 4) {
-        0 -> if (light) Color(0xFF805C43) else Color(0xFFD9B49E)
-        1 -> if (light) Color(0xFF486481) else Color(0xFFAFC4E2)
-        2 -> if (light) Color(0xFF75588A) else Color(0xFFC7B0DC)
-        else -> if (light) Color(0xFF865B6B) else Color(0xFFD5AFBB)
-    }
-    Box(Modifier.heightIn(min = 36.dp)
+    Box(Modifier.heightIn(min = 44.dp)
         .toggleable(selected, interactionSource = interaction, indication = null, role = Role.Checkbox,
             onValueChange = { onClick() })
         .motionPress(interaction, pressedScale = .97f)
         .semantics(mergeDescendants = true) {
-            contentDescription = listOfNotNull(tag.name,
+            contentDescription = listOfNotNull(if (remove) "移除${tag.name}标签" else tag.name,
                 origins.takeIf { it.isNotEmpty() }?.joinToString("、", prefix = "支持来源 ") { sourceDisplayName(it) },
                 copyCount?.let { "拷贝统计 $it 部" }).joinToString("，")
         },
         contentAlignment = Alignment.Center) {
-        Row(Modifier.clip(RoundedCornerShape(7.dp))
-            .background(accent.copy(alpha = if (selected) .14f else .06f))
-            .padding(horizontal = 7.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+        Row(Modifier.clip(RoundedCornerShape(10.dp))
+            .background(colors.onSurface.copy(alpha = if (selected) .09f else .035f))
+            .padding(horizontal = 10.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             if (remove || selected) Icon(if (remove) Icons.Outlined.Close else Icons.Outlined.Check, null,
-                Modifier.size(10.dp), tint = accent)
-            Text(tag.name, fontSize = if (remove) 11.sp else 10.sp, lineHeight = 15.sp,
-                color = accent,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Modifier.size(12.dp), tint = colors.onSurface)
+            Text(tag.name, fontSize = 12.sp, lineHeight = 17.sp,
+                color = colors.onSurface,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (showOrigins) origins.filterNot { it == "copy" && copyCount != null }.forEach { origin ->
-                ReviewSourceMark(origin, size = 10.dp)
+                ReviewSourceMark(origin, size = 12.dp)
             }
             copyCount?.let { count ->
-                ReviewSourceMark("copy", size = 10.dp)
-                Text(count.toString(), fontSize = 9.sp, lineHeight = 15.sp,
-                    color = accent.copy(alpha = .72f), maxLines = 1)
+                ReviewSourceMark("copy", size = 12.dp)
+                Text(count.toString(), fontSize = 11.sp, lineHeight = 17.sp,
+                    color = colors.onSurfaceVariant, maxLines = 1)
             }
         }
     }

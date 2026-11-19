@@ -84,9 +84,9 @@ internal fun SearchScopeControl(
         if (motion) spring(MangaMotion.SearchDamping, MangaMotion.SearchStiffness) else snap()
     }, label = "search-scope-reveal") { if (it) 1f else 0f }
     val progress = reveal.value.coerceIn(0f, 1f)
-    val fullWidth = minOf((44 * targets.size).dp, maxWidth.coerceAtLeast(36.dp))
+    val fullWidth = minOf((44 * targets.size).dp, maxWidth.coerceAtLeast(44.dp))
     val choicesReady = progress >= .55f
-    val visibleWidth = 36.dp + (fullWidth - 36.dp) * progress
+    val visibleWidth = 44.dp + (fullWidth - 44.dp) * progress
     var preview by remember { mutableStateOf<Int?>(null) }
     LaunchedEffect(expanded, enabled, target) { preview = null }
     val choose: (Int) -> Unit = { index ->
@@ -169,7 +169,7 @@ internal fun SearchScopeControl(
                     else "当前分区全部已启用来源，已收起"
             }
         else Modifier.clearAndSetSemantics { }
-        Box(Modifier.align(Alignment.CenterEnd).size(36.dp).then(trigger)
+        Box(Modifier.align(Alignment.CenterEnd).size(44.dp).then(trigger)
             .graphicsLayer { alpha = (1f - progress * 2f).coerceIn(0f, 1f) },
             contentAlignment = Alignment.Center) {
             Box(Modifier.size(22.dp)) {

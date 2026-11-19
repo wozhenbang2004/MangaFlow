@@ -109,6 +109,14 @@ internal fun ContentProfileSourceSheet(
     onOpenSourceAccount: ((String) -> Unit)? = null,
 ) {
     val sources = remember(entries) { entries.distinctBy { it.source.id } }
+    val sourceGroups = remember(sources, unavailableReasons, accountRequiredIds) {
+        sources.groupBy { entry -> when {
+            !entry.enabled || !entry.isInstalled || entry.removed -> 2
+            entry.source.id in accountRequiredIds -> 1
+            entry.source.id in unavailableReasons -> 2
+            else -> 0
+        } }.entries.sortedBy { it.key }
+    }
     val colors = MaterialTheme.colorScheme
     var pendingSource by remember { mutableStateOf<String?>(null) }
     var manageAfterDismiss by remember { mutableStateOf(false) }
@@ -178,68 +186,75 @@ internal fun ContentProfileSourceSheet(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (sources.isNotEmpty()) item(key = "profile-source-list-heading") {
-                Text("单独浏览", Modifier.padding(start = 12.dp, top = 16.dp, bottom = 4.dp),
-                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-            }
-            items(sources, key = { "profile-source:" + it.source.id }) { entry ->
-                val hasReason = entry.source.id in unavailableReasons
-                val reason = unavailableReasons[entry.source.id]?.ifBlank { "暂不可用" }
-                val usable = entry.enabled && entry.isInstalled && !entry.removed
-                val requiresAccount = usable && entry.source.id in accountRequiredIds
-                val canOpenAccount = requiresAccount && (onOpenSourceAccount != null || onInspect != null || onAccount != null)
-                val available = !hasReason && usable && !requiresAccount
-                val isSelected = entry.source.id == selectedId
-                val status = when {
-                    entry.removed -> "已移除"
-                    !entry.isInstalled -> "未安装"
-                    !entry.enabled -> "已停用"
-                    requiresAccount -> "浏览需要登录"
-                    hasReason -> reason.orEmpty()
-                    isSelected -> "当前"
-                    else -> "已启用"
-                }
-                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
-                    .background(if (isSelected) colors.onSurface.copy(alpha = .055f) else Color.Transparent,
-                        RoundedCornerShape(14.dp)), verticalAlignment = Alignment.CenterVertically) {
-                    MotionTextButton(
-                        onClick = {
-                            if (canChoose() && (available || canOpenAccount)) {
-                                if (canOpenAccount) pendingAccount = entry.source.id else pendingSource = entry.source.id
-                                dismiss()
-                            }
-                        },
-                        enabled = (available || canOpenAccount) && !choosing,
-                        modifier = Modifier.weight(1f).heightIn(min = 56.dp)
-                            .semantics { selected = isSelected; stateDescription = status },
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface),
-                        contentPadding = PaddingValues(start = 12.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
-                    ) {
-                        ChapterSourceLogo(entry.source.id, entry.source.name,
-                            Modifier.size(24.dp).clearAndSetSemantics { }, muted = !available && !canOpenAccount)
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Text(entry.source.name, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = if (isSelected) FontWeight.Medium else FontWeight.Normal)
-                            if (!available) Text(status, maxLines = 3, overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        if (canOpenAccount) Text("登录", style = MaterialTheme.typography.labelMedium, color = colors.primary)
-                        else if (isSelected) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp),
-                            tint = colors.onSurfaceVariant)
-                        else Spacer(Modifier.size(18.dp))
+            sourceGroups.forEach { (group, groupSources) ->
+                item(key = "profile-source-list-heading:$group") {
+                    Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 18.dp, bottom = 5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(when (group) { 0 -> "浏览来源"; 1 -> "登录后浏览"; else -> "待处理" },
+                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        Text(groupSources.size.toString(), style = MaterialTheme.typography.labelSmall,
+                            color = colors.onSurfaceVariant.copy(alpha = .65f))
                     }
-                    if (onInspect != null && entry.isInstalled && !entry.removed) {
-                        MotionIconButton(onClick = {
-                            if (canChoose()) { pendingInspect = entry.source.id; dismiss() }
-                        }, enabled = !choosing, modifier = Modifier.size(48.dp), tooltip = "${entry.source.name}状态与设置") {
-                            Icon(Icons.Outlined.Tune, "${entry.source.name}状态与设置", Modifier.size(18.dp),
+                }
+                items(groupSources, key = { "profile-source:" + it.source.id }) { entry ->
+                    val hasReason = entry.source.id in unavailableReasons
+                    val reason = unavailableReasons[entry.source.id]?.ifBlank { "暂不可用" }
+                    val usable = entry.enabled && entry.isInstalled && !entry.removed
+                    val requiresAccount = usable && entry.source.id in accountRequiredIds
+                    val canOpenAccount = requiresAccount && (onOpenSourceAccount != null || onInspect != null || onAccount != null)
+                    val available = !hasReason && usable && !requiresAccount
+                    val isSelected = entry.source.id == selectedId
+                    val status = when {
+                        entry.removed -> "已移除"
+                        !entry.isInstalled -> "未安装"
+                        !entry.enabled -> "已停用"
+                        requiresAccount -> "浏览需要登录"
+                        hasReason -> reason.orEmpty()
+                        isSelected -> "当前"
+                        else -> "已启用"
+                    }
+                    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                        .background(if (isSelected) colors.onSurface.copy(alpha = .055f) else Color.Transparent,
+                            RoundedCornerShape(14.dp)), verticalAlignment = Alignment.CenterVertically) {
+                        MotionTextButton(
+                            onClick = {
+                                if (canChoose() && (available || canOpenAccount)) {
+                                    if (canOpenAccount) pendingAccount = entry.source.id else pendingSource = entry.source.id
+                                    dismiss()
+                                }
+                            },
+                            enabled = (available || canOpenAccount) && !choosing,
+                            modifier = Modifier.weight(1f).heightIn(min = 56.dp)
+                                .semantics { selected = isSelected; stateDescription = status },
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface),
+                            contentPadding = PaddingValues(start = 12.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+                        ) {
+                            ChapterSourceLogo(entry.source.id, entry.source.name,
+                                Modifier.size(24.dp).clearAndSetSemantics { }, muted = !available && !canOpenAccount)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text(entry.source.name, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = if (isSelected) FontWeight.Medium else FontWeight.Normal)
+                                if (!available) Text(status, maxLines = 3, overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            if (canOpenAccount) Text("登录", style = MaterialTheme.typography.labelMedium, color = colors.onSurface)
+                            else if (isSelected) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp),
                                 tint = colors.onSurfaceVariant)
+                            else Spacer(Modifier.size(18.dp))
                         }
-                    } else if (onInspect != null) Spacer(Modifier.size(48.dp))
+                        if (onInspect != null && entry.isInstalled && !entry.removed) {
+                            MotionIconButton(onClick = {
+                                if (canChoose()) { pendingInspect = entry.source.id; dismiss() }
+                            }, enabled = !choosing, modifier = Modifier.size(48.dp), tooltip = "${entry.source.name}状态与设置") {
+                                Icon(Icons.Outlined.Tune, "${entry.source.name}状态与设置", Modifier.size(18.dp),
+                                    tint = colors.onSurfaceVariant)
+                            }
+                        } else if (onInspect != null) Spacer(Modifier.size(48.dp))
+                    }
                 }
             }
             item(key = "profile-source-management") {

@@ -575,7 +575,7 @@ fun DetailScreen(
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             Column(Modifier.fillMaxSize().verticalScroll(summaryScroll).padding(end = 12.dp)) {
                                 HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
-                                    compact = true, artworkHeadroom = 0.dp,
+                                    compact = true, artworkHeadroom = 0.dp, adultProfile = adultProfile,
                                     onIntroduction = { fullIntroduction = true },
                                     onRatings = if (adultProfile) null else ({ fullRatings = true }),
                                     onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
@@ -656,7 +656,7 @@ fun DetailScreen(
                         if (!collapsedHero) {
                             key(current.id, viewportWidth, density) {
                                 HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
-                                    compact = compactHero, artworkHeadroom = artworkHeadroom,
+                                    compact = compactHero, artworkHeadroom = artworkHeadroom, adultProfile = adultProfile,
                                     onIntroduction = { fullIntroduction = true },
                                     onRatings = if (adultProfile) null else ({ fullRatings = true }),
                                     onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
@@ -769,7 +769,7 @@ fun DetailScreen(
             onRetryCloudProgress = onRetryCloudProgress)
     }
     }
-    if (fullIntroduction) DetailIntroduction(current, backdrop = readingBackdrop,
+    if (fullIntroduction) DetailIntroduction(current, backdrop = readingBackdrop, adultProfile = adultProfile,
         onAuthor = onAuthor?.let { action -> { name -> fullIntroduction = false; action(current, name) } },
         onTag = onTag?.let { action -> { tag -> fullIntroduction = false; action(current, tag) } },
         onOriginal = { original -> if (active) { fullIntroduction = false; onOriginal(original) } },
@@ -894,6 +894,7 @@ private fun HeroBookInformation(
     onTag: ((String) -> Unit)?,
     collapse: () -> Float,
     modifier: Modifier = Modifier,
+    adultProfile: Boolean = false,
 ) {
     val infoVisible by remember(collapse) { derivedStateOf { collapse() < .98f } }
     val density = LocalDensity.current
@@ -956,6 +957,7 @@ private fun HeroBookInformation(
                 }
                 Column(Modifier.width(if (stacked) contentWidth else infoWidth),
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (adultProfile) MangaBrowseSource(manga, foreground = ink.copy(alpha = .75f))
                     Text(manga.title, color = ink, style = titleStyle,
                         modifier = Modifier.fillMaxWidth().clickable(enabled = infoVisible,
                             interactionSource = titleInteraction, indication = null,
@@ -970,10 +972,13 @@ private fun HeroBookInformation(
                 }
             }
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
-                DetailTags(manga, includeState = false, enabled = infoVisible, onTag = onTag)
+                DetailTags(manga, includeState = false, enabled = infoVisible, onTag = onTag,
+                    neutral = adultProfile,
+                    maximumVisible = if (adultProfile) 6 else Int.MAX_VALUE,
+                    onMore = if (adultProfile) onIntroduction else null)
                 if (onRatings != null) DetailRatingStrip(manga, ink.copy(alpha = .86f), enabled = infoVisible,
                     compact = true, onExpand = onRatings)
-                else MangaBrowseSource(manga, Modifier.padding(top = 6.dp), foreground = ink.copy(alpha = .80f))
+                else if (!adultProfile) MangaBrowseSource(manga, Modifier.padding(top = 6.dp), foreground = ink.copy(alpha = .80f))
             }
         }
     }
@@ -996,7 +1001,8 @@ private fun HeroSynopsis(manga: Manga, ink: Color, enabled: Boolean, onIntroduct
 
 @Composable
 private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: Boolean = false,
-    includeState: Boolean = true, enabled: Boolean = true, onTag: ((String) -> Unit)?) {
+    includeState: Boolean = true, enabled: Boolean = true, onTag: ((String) -> Unit)?,
+    neutral: Boolean = false, maximumVisible: Int = Int.MAX_VALUE, onMore: (() -> Unit)? = null) {
     val tags = remember(manga.status, manga.tags, manga.latestChapter, includeState) {
         buildList<Pair<String, Boolean>> {
             val status = manga.status.trim()
@@ -1011,16 +1017,21 @@ private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: B
         modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = if (onArtwork) 0.dp else 3.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
-    ) { tags.forEachIndexed { index, (tag, topic) ->
-        DetailTag(tag, index, onArtwork, enabled,
-            onClick = if (topic) onTag?.let { action -> { action(tag) } } else null)
-    } }
+    ) {
+        tags.take(maximumVisible.coerceAtLeast(1)).forEachIndexed { index, (tag, topic) ->
+            DetailTag(tag, index, onArtwork, enabled, neutral = neutral,
+                onClick = if (topic) onTag?.let { action -> { action(tag) } } else null)
+        }
+        if (tags.size > maximumVisible && onMore != null) DetailTag("+${tags.size - maximumVisible}",
+            maximumVisible, onArtwork, enabled, neutral = neutral, onClickLabel = "查看全部标签", onClick = onMore)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DetailIntroduction(manga: Manga, backdrop: HazeState, onAuthor: ((String) -> Unit)?,
-    onTag: ((String) -> Unit)?, onOriginal: (MangaTag) -> Unit, onDismiss: () -> Unit) {
+    onTag: ((String) -> Unit)?, onOriginal: (MangaTag) -> Unit, adultProfile: Boolean = false,
+    onDismiss: () -> Unit) {
     MotionBottomSheet(
         onDismissRequest = onDismiss,
         backdrop = backdrop, desktopCloseButton = true,
@@ -1036,9 +1047,10 @@ private fun DetailIntroduction(manga: Manga, backdrop: HazeState, onAuthor: ((St
                 Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 20.sp, lineHeight = 28.sp,
                     color = DetailForeground, fontWeight = FontWeight.SemiBold)
                 AuthorNames(manga.authors, DetailSecondary, onAuthor = onAuthor)
-                DetailTags(manga, onTag = onTag)
+                if (adultProfile) MangaBrowseSource(manga)
+                DetailTags(manga, onTag = onTag, neutral = adultProfile)
                 DetailSourceMetadata(manga, onOriginal)
-                MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = DetailForeground)
+                if (!adultProfile) MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = DetailForeground)
                 Text(manga.description.ifBlank { "来源暂无简介" },
                     fontFamily = mangaFontFamily(MangaFontScene.READING), fontSize = 16.sp, lineHeight = 26.sp, color = DetailSecondary)
             }
@@ -1094,19 +1106,23 @@ private val CopyOriginalPath = Regex("[A-Za-z0-9_-]{1,160}")
 
 @Composable
 private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false,
-    enabled: Boolean = true, onClick: (() -> Unit)? = null) {
+    enabled: Boolean = true, neutral: Boolean = false,
+    onClickLabel: String = "搜索${label}漫画", onClick: (() -> Unit)? = null) {
     val onDark = onArtwork || DetailForeground.luminance() > .5f
-    val accent = when (index % 4) {
+    val accent = if (neutral) {
+        if (onArtwork) Color.White else DetailSecondary
+    } else when (index % 4) {
         0 -> if (onDark) Color(0xFFD9B49E) else Color(0xFF805C43)
         1 -> if (onDark) Color(0xFFAFC4E2) else Color(0xFF486481)
         2 -> if (onDark) Color(0xFFC7B0DC) else Color(0xFF75588A)
         else -> if (onDark) Color(0xFFD5AFBB) else Color(0xFF865B6B)
     }
     val interaction = remember(label) { MutableInteractionSource() }
+    val touchHeight = if (neutral) 44.dp else 32.dp
     if (onArtwork) {
-        Box(Modifier.heightIn(min = 32.dp).then(if (onClick != null)
+        Box(Modifier.heightIn(min = touchHeight).then(if (onClick != null)
             Modifier.clickable(interactionSource = interaction, indication = null, enabled = enabled,
-                role = Role.Button, onClickLabel = "搜索${label}漫画", onClick = onClick)
+                role = Role.Button, onClickLabel = onClickLabel, onClick = onClick)
                 .motionPress(interaction, enabled = enabled) else Modifier).padding(horizontal = 3.dp),
             contentAlignment = Alignment.Center) {
             Text(label, modifier = Modifier.clip(RoundedCornerShape(6.dp))
@@ -1117,9 +1133,9 @@ private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false,
         return
     }
     Box(
-        modifier = if (onClick != null) Modifier.heightIn(min = 32.dp).widthIn(min = 32.dp)
+        modifier = if (onClick != null) Modifier.heightIn(min = touchHeight).widthIn(min = touchHeight)
             .clickable(interactionSource = interaction, indication = null, enabled = enabled,
-                role = Role.Button, onClickLabel = "搜索${label}漫画", onClick = onClick)
+                role = Role.Button, onClickLabel = onClickLabel, onClick = onClick)
             .motionPress(interaction, enabled = enabled)
             else Modifier,
         contentAlignment = Alignment.Center,

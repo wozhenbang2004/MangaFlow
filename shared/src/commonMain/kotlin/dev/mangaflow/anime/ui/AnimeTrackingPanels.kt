@@ -47,7 +47,7 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
         }
     }
     MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 540.dp) {
-        LiquidGlassSurface(backdrop, role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp) {
+        AnimePanelSurface(backdrop) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
@@ -129,7 +129,7 @@ internal fun AnimeProgressReviewPanel(visible: Boolean, state: AnimeScreenState,
     backdrop: HazeState, onDismiss: () -> Unit, onConnect: () -> Unit,
     onRecheck: (AnimeTrackingReview) -> Unit) {
     MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 760.dp) {
-        LiquidGlassSurface(backdrop, role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp) {
+        AnimePanelSurface(backdrop) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
@@ -263,7 +263,7 @@ internal fun AnimeResumePanel(choice: AnimePlaybackChoice?, backdrop: HazeState,
     MotionDialog(choice != null, onDismissRequest = onDismiss, maximumWidth = 480.dp,
         onClosed = { retained = null }) {
         val shown = choice ?: retained
-        if (shown != null) LiquidGlassSurface(backdrop, role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp) {
+        if (shown != null) AnimePanelSurface(backdrop) {
             Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text("切换版本，确认续看位置", style = MaterialTheme.typography.titleMedium)
                 Text(animeEpisodeLabel(shown.episode) + " · " + shown.option.episode.title,

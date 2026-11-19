@@ -1,3 +1,4 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.background
@@ -20,7 +21,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.CalendarMonth
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ButtonDefaults
@@ -41,6 +43,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -85,10 +88,8 @@ internal fun MangaAwardsScreen(
     val focus = LocalFocusManager.current
     val colors = MaterialTheme.colorScheme
     val pageTitle = if (sectionTabs != null) "漫画榜单" else "年度获奖"
-    var filterMenu by remember { mutableStateOf<AwardFilterMenu?>(null) }
-    var awardPresent by remember { mutableStateOf(false) }
+    var yearVisible by remember { mutableStateOf(false) }
     var yearPresent by remember { mutableStateOf(false) }
-    var menuAwardId by remember { mutableStateOf(awardId) }
     var menuYear by remember { mutableStateOf(year) }
     var infoVisible by remember { mutableStateOf(false) }
     var infoPresent by remember { mutableStateOf(false) }
@@ -96,25 +97,21 @@ internal fun MangaAwardsScreen(
     var lookupVisible by remember { mutableStateOf(false) }
     var lookupPresent by remember { mutableStateOf(false) }
     var requestedWork by remember { mutableStateOf<SiteRankedWork?>(null) }
-    val modalPresent = infoVisible || infoPresent || lookupVisible || lookupPresent
-    val contentReady = active && !modalPresent && filterMenu == null && !awardPresent && !yearPresent
+    val modalPresent = infoVisible || infoPresent || lookupVisible || lookupPresent || yearVisible || yearPresent
+    val contentReady = active && !modalPresent
 
     LaunchedEffect(active) {
         if (!active) {
             focus.clearFocus(force = true)
             requestedWork = null
-            filterMenu = null
+            yearVisible = false
             infoVisible = false
             lookupVisible = false
         }
     }
     BackHandler(active && !modalPresent) {
         focus.clearFocus(force = true)
-        when {
-            filterMenu != null -> filterMenu = null
-            awardPresent || yearPresent -> Unit
-            else -> onBack()
-        }
+        onBack()
     }
 
     RankingPageFrame(Modifier.fillMaxSize().background(colors.background.copy(alpha = .97f))
@@ -125,7 +122,8 @@ internal fun MangaAwardsScreen(
                 modifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
                     .padding(horizontal = 8.dp, vertical = 2.dp),
                 summary = {
-                    Text(pageTitle, Modifier.padding(start = 4.dp),
+                    if (sectionTabs != null) Box(Modifier.motionInputGate(contentReady)) { sectionTabs() }
+                    else Text(pageTitle, Modifier.padding(start = 4.dp),
                         style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }, actions = {
@@ -143,53 +141,39 @@ internal fun MangaAwardsScreen(
                         Icon(Icons.Outlined.Info, "获奖目录说明", Modifier.size(19.dp))
                     }
                 })
-            if (sectionTabs != null) Box(Modifier.motionInputGate(contentReady)) { sectionTabs() }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                val awardMenu = filterMenu == AwardFilterMenu.AWARD && active && !modalPresent
-                val yearMenu = filterMenu == AwardFilterMenu.YEAR && active && !modalPresent
-                AwardFilterControl("奖项", award?.title ?: "全部奖项", backdrop, awardMenu,
-                    modifier = Modifier.weight(1f, fill = false),
-                    enabled = contentReady || awardMenu, onPresence = { awardPresent = it },
-                    onDismiss = { if (awardMenu) filterMenu = null },
-                    onToggle = {
-                        focus.clearFocus(force = true)
-                        if (!awardMenu) menuAwardId = awardId
-                        filterMenu = if (awardMenu) null else AwardFilterMenu.AWARD
-                    }) {
-                    RankingMenuChoice("全部奖项", menuAwardId == null, awardMenu) {
-                        awardId = null
-                        filterMenu = null
-                    }
-                    MangaAward.entries.forEach { next ->
-                        RankingMenuChoice(next.title, menuAwardId == next.id, awardMenu) {
-                            awardId = next.id
-                            val available = MangaAwardsCatalog.years(next)
-                            val selectedYear = year
-                            if (selectedYear != null && selectedYear !in available) year = available.firstOrNull()
-                            filterMenu = null
-                        }
+            Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                val choices = listOf<MangaAward?>(null) + MangaAward.entries
+                val labels = listOf("全部", "漫画大赏", "小学馆", "讲谈社")
+                val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+                BoxWithConstraints(Modifier.weight(1f)) {
+                    val tabsWidth = maxWidth.coerceAtLeast(68.dp * fontScale * choices.size)
+                    Box(Modifier.horizontalScroll(rememberScrollState(), enabled = contentReady)) {
+                        MotionTabs(choices.indexOf(award), labels, onSelect = { index ->
+                            if (contentReady) {
+                                val next = choices[index]
+                                awardId = next?.id
+                                val available = MangaAwardsCatalog.years(next)
+                                val selectedYear = year
+                                if (selectedYear != null && selectedYear !in available) year = available.firstOrNull()
+                            }
+                        }, modifier = Modifier.width(tabsWidth).motionInputGate(contentReady),
+                            treatment = MotionTabTreatment.Underline, controlHeight = 44.dp,
+                            fontSize = 12.sp, tooltips = choices.map { it?.title ?: "全部奖项" })
                     }
                 }
-                AwardFilterControl("公布年份", year?.let { "${it} 年公布" } ?: "全部年份", backdrop, yearMenu,
-                    modifier = Modifier.weight(1f, fill = false),
-                    enabled = contentReady || yearMenu, onPresence = { yearPresent = it },
-                    onDismiss = { if (yearMenu) filterMenu = null },
-                    onToggle = {
-                        focus.clearFocus(force = true)
-                        if (!yearMenu) menuYear = year
-                        filterMenu = if (yearMenu) null else AwardFilterMenu.YEAR
-                    }) {
-                    RankingMenuChoice("全部年份", menuYear == null, yearMenu) {
-                        year = null
-                        filterMenu = null
-                    }
-                    years.forEach { value ->
-                        RankingMenuChoice(value.toString(), menuYear == value, yearMenu) {
-                            year = value
-                            filterMenu = null
-                        }
-                    }
+                MotionTextButton(onClick = {
+                    focus.clearFocus(force = true)
+                    menuYear = year
+                    yearPresent = true
+                    yearVisible = true
+                }, enabled = contentReady, colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface),
+                    modifier = Modifier.heightIn(min = 44.dp).semantics {
+                        contentDescription = "选择获奖公布年份，${year?.toString() ?: "全部年份"}"
+                    }, contentPadding = PaddingValues(horizontal = 9.dp)) {
+                    Icon(Icons.Outlined.CalendarMonth, null, Modifier.size(17.dp))
+                    Text(year?.toString() ?: "全部", Modifier.padding(start = 5.dp),
+                        style = MaterialTheme.typography.labelMedium)
                 }
             }
         }
@@ -237,6 +221,10 @@ internal fun MangaAwardsScreen(
             }
         }
     }
+
+    MangaAwardYearDialog(yearVisible && active, years, menuYear, backdrop,
+        onSelect = { year = it; yearVisible = false }, onDismiss = { yearVisible = false },
+        onClosed = { if (!yearVisible) yearPresent = false })
 
     MotionDialog(infoVisible && active, onDismissRequest = { infoVisible = false },
         maximumWidth = 360.dp, onClosed = { if (!infoVisible) infoPresent = false }) {
@@ -286,25 +274,56 @@ private data class AwardCatalogueSelection(val award: MangaAward?, val year: Int
     val key: String get() = (award?.id ?: "all") + ":" + (year?.toString() ?: "all")
 }
 
-private enum class AwardFilterMenu { AWARD, YEAR }
-
+/** A bounded year palette replaces the long anchored dropdown. */
 @Composable
-private fun AwardFilterControl(label: String, value: String, backdrop: HazeState, visible: Boolean,
-    enabled: Boolean, onToggle: () -> Unit, onDismiss: () -> Unit, onPresence: (Boolean) -> Unit,
-    modifier: Modifier = Modifier, choices: @Composable ColumnScope.() -> Unit) {
-    Box(modifier) {
-        MotionTextButton(onClick = onToggle, enabled = enabled,
-            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
-            contentPadding = PaddingValues(horizontal = 8.dp),
-            modifier = Modifier.heightIn(min = 44.dp).semantics { contentDescription = "$label，$value" }) {
-            Text(value, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.labelLarge,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Spacer(Modifier.width(3.dp))
-            Icon(Icons.Outlined.ExpandMore, null, Modifier.size(17.dp))
-        }
-        CompactGlassPopover(visible, backdrop, onDismiss, onPresenceChange = onPresence,
-            alignToStart = true, maximumWidth = 232.dp) {
-            Column(Modifier.selectableGroup(), content = choices)
+private fun MangaAwardYearDialog(
+    visible: Boolean,
+    years: List<Int>,
+    selectedYear: Int?,
+    backdrop: HazeState,
+    onSelect: (Int?) -> Unit,
+    onDismiss: () -> Unit,
+    onClosed: () -> Unit,
+) {
+    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 360.dp, onClosed = onClosed) {
+        val colors = MaterialTheme.colorScheme
+        val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+        LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 24.dp,
+            role = GlassSurfaceRole.PANEL, softCard = true) {
+            Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("公布年份", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
+                        Text("以奖项公布年为准", style = MaterialTheme.typography.labelSmall,
+                            color = colors.onSurfaceVariant)
+                    }
+                    MotionIconButton(onClick = onDismiss, enabled = visible, modifier = Modifier.size(44.dp),
+                        tooltip = "关闭年份选择") {
+                        Icon(Icons.Outlined.Close, "关闭年份选择", Modifier.size(19.dp))
+                    }
+                }
+                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).selectableGroup()) {
+                    RankingMenuChoice("全部年份", selectedYear == null, visible) { onSelect(null) }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(vertical = 8.dp)) {
+                        years.forEach { candidate ->
+                            val chosen = candidate == selectedYear
+                            MotionTextButton(onClick = { onSelect(candidate) }, enabled = visible,
+                                modifier = Modifier.widthIn(min = 68.dp * fontScale).heightIn(min = 44.dp).semantics {
+                                    selected = chosen
+                                    contentDescription = "${candidate}年公布"
+                                }, colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface,
+                                    containerColor = colors.onSurface.copy(alpha = if (chosen) .08f else 0f)),
+                                contentPadding = PaddingValues(horizontal = 10.dp)) {
+                                Box(Modifier.padding(end = 4.dp).size(13.dp), contentAlignment = Alignment.Center) {
+                                    if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(13.dp))
+                                }
+                                Text(candidate.toString(), style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

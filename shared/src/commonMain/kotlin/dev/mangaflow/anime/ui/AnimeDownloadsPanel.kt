@@ -33,7 +33,7 @@ import dev.mangaflow.ui.motion.*
 internal fun AnimeDownloadsPanel(visible: Boolean, controller: AnimeController, state: AnimeScreenState,
     backdrop: HazeState, onDismiss: () -> Unit, onPlay: (String) -> Unit) {
     MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 640.dp) {
-        LiquidGlassSurface(backdrop, role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp) {
+        AnimePanelSurface(backdrop) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
@@ -75,7 +75,7 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                 }
             }
         } else {
-            MotionTabs(filter, listOf("全部", "进行中", "已完成"), onSelect = { filter = it },
+            MotionTabs(filter, listOf("全部", "未完成", "已完成"), onSelect = { filter = it },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp), controlHeight = 44.dp,
                 treatment = MotionTabTreatment.Soft)
             LazyColumn(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(16.dp),
@@ -85,10 +85,23 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                 if (downloads.loading && rows.isEmpty()) item { AnimeMessage("正在读取下载任务") }
                 else if (rows.isEmpty()) item { AnimeMessage(if (downloads.entries.isEmpty()) "准备离线看番" else "这里暂无下载",
                     if (downloads.entries.isEmpty()) "在播放设置中选择“下载当前集”，保留已确认的版本与来源。" else null) }
-                items(rows, key = { it.id }) { entry ->
-                    AnimeDownloadRow(entry, screen, backdrop, onPlay = { onPlay(entry.id) },
-                        onPause = { controller.pauseDownload(entry.id) }, onResume = { controller.resumeDownload(entry.id) },
-                        onRemove = { removing = entry.id })
+                rows.groupBy { it.subject.id }.forEach { (subjectId, episodes) ->
+                    item(key = "work:$subjectId") {
+                        Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            AnimePoster(episodes.first().subject, Modifier.width(46.dp).height(66.dp))
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                Text(episodes.first().subject.title, style = MaterialTheme.typography.titleSmall,
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                AnimeQuietLabel("${episodes.size} 集 · ${episodes.count { it.status == AnimeDownloadStatus.COMPLETED }} 集已完成")
+                            }
+                        }
+                    }
+                    items(episodes, key = { it.id }) { entry ->
+                        AnimeDownloadRow(entry, screen, backdrop, onPlay = { onPlay(entry.id) },
+                            onPause = { controller.pauseDownload(entry.id) }, onResume = { controller.resumeDownload(entry.id) },
+                            onRemove = { removing = entry.id })
+                    }
                 }
             }
         }
@@ -99,15 +112,15 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
 private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState, backdrop: HazeState,
     onPlay: () -> Unit, onPause: () -> Unit, onResume: () -> Unit, onRemove: () -> Unit) {
     var menu by remember(entry.id) { mutableStateOf(false) }
+    var menuPresent by remember(entry.id) { mutableStateOf(false) }
+    var removeRequested by remember(entry.id) { mutableStateOf(false) }
     val active = entry.status in setOf(AnimeDownloadStatus.DOWNLOADING, AnimeDownloadStatus.QUEUED, AnimeDownloadStatus.WAITING)
     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            AnimePoster(entry.subject, Modifier.width(44.dp).height(62.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(entry.subject.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(animeEpisodeLabel(entry.episode) + " · " + entry.episode.title,
-                    style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(listOfNotNull(animeEpisodeLabel(entry.episode), animeEpisodeSubtitle(entry.episode)).joinToString(" · "),
+                    style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 AnimeQuietLabel(listOf(animeDownloadStatus(entry.status), animeSourceName(entry.sourceId, screen), entry.edition)
                     .filter { it.isNotBlank() }.distinct().joinToString(" · "))
             }
@@ -115,7 +128,7 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
                 entry.status == AnimeDownloadStatus.COMPLETED -> onPlay
                 active -> onPause
                 else -> onResume
-            }, modifier = Modifier.size(44.dp), tooltip = when {
+            }, enabled = !menuPresent, modifier = Modifier.size(44.dp), tooltip = when {
                 entry.status == AnimeDownloadStatus.COMPLETED -> "播放离线视频"
                 active -> "暂停下载"
                 entry.status == AnimeDownloadStatus.FAILED -> "重试下载"
@@ -133,12 +146,16 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
                 }, Modifier.size(21.dp))
             }
             Box {
-                MotionIconButton(onClick = { menu = true }, modifier = Modifier.size(44.dp), tooltip = "管理下载") {
+                MotionIconButton(onClick = { menuPresent = true; menu = true }, enabled = !menuPresent,
+                    modifier = Modifier.size(44.dp), tooltip = "管理下载") {
                     Icon(Icons.Outlined.MoreHoriz, "管理下载", Modifier.size(19.dp))
                 }
-                CompactGlassPopover(menu, backdrop, onDismiss = { menu = false }) {
+                CompactGlassPopover(menu, backdrop, onDismiss = { menu = false }, onPresenceChange = { present ->
+                    menuPresent = present
+                    if (!present && removeRequested) { removeRequested = false; onRemove() }
+                }) {
                     CompactMenuAction(Icons.Outlined.DeleteOutline, "移除下载", destructive = true,
-                        onClick = { menu = false; onRemove() })
+                        onClick = { removeRequested = true; menu = false })
                 }
             }
         }
@@ -146,11 +163,11 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
         val fraction = total?.let { (entry.downloadedBytes.toFloat() / it).coerceIn(0f, 1f) }
         if (fraction != null && entry.status != AnimeDownloadStatus.COMPLETED) AnimeDownloadProgress(fraction)
         AnimeQuietLabel(listOfNotNull(
-            animeDownloadBytes(entry.downloadedBytes) + (total?.let { " / " + animeDownloadBytes(it) } ?: ""),
+            fraction?.takeIf { entry.status != AnimeDownloadStatus.COMPLETED }?.let { "${(it * 100).toInt()}%" },
+            animeDownloadBytes(entry.downloadedBytes) + (total?.let { " / " + animeDownloadBytes(it) } ?: " · 总量未知"),
             entry.totalFiles?.takeIf { it > 1 }?.let { entry.completedFiles.toString() + " / " + it + " 段" },
         ).joinToString(" · "))
-        if (!entry.error.isNullOrBlank()) Text(entry.error, style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error)
+        if (!entry.error.isNullOrBlank()) AnimeDiscoveryInlineStatus(entry.error, showIssue = true)
     }
 }
 

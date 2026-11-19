@@ -71,7 +71,7 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
             pendingBrowse = null
             if (provider != null) onBrowse(provider)
         }) {
-        LiquidGlassSurface(backdrop, role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp) {
+        AnimePanelSurface(backdrop) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
                 val nested = selected != null || moreVideoSources
                 Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp),
