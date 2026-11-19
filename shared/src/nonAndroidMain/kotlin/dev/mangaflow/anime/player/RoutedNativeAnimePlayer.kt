@@ -610,6 +610,7 @@ internal fun AnimePlayerOptions.sameDecoderStartupOptions(other: AnimePlayerOpti
     bufferMinMs = other.bufferMinMs, bufferMaxMs = other.bufferMaxMs,
     bufferStartMs = other.bufferStartMs, bufferRebufferMs = other.bufferRebufferMs,
     bufferForwardBytes = other.bufferForwardBytes, bufferBackBytes = other.bufferBackBytes,
+    bufferRefillNearTarget = other.bufferRefillNearTarget,
 ) == other
 
 @Composable

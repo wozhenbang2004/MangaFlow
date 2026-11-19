@@ -715,7 +715,9 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         source: String, estimatedBytes: Long, promoted: () -> Boolean, browseOnly: Boolean,
         onWaiting: (AdmissionWait?) -> Unit = {}, block: suspend () -> T,
     ): T {
-        val reserved = estimatedBytes.coerceAtLeast(EXPERIENCE_MIB)
+        // A small live byte window must not be rounded above its own hard limit.
+        // The caller's bounded estimate reserves capacity; received chunks enforce size.
+        val reserved = estimatedBytes.coerceAtLeast(1L)
         return admit(
             ready = {
                 val b = mutableState.value
@@ -748,7 +750,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                 val optionalCap = if (readerUsers > 0 && cap > 1 && mutableOverrides.value.decodeRequests == null) cap - 1 else cap
                 activeDecodes < cap && foregroundDecodeWaiters == 0 && activeOptionalDecodes < optionalCap && canDecodeOptional()
             }
-            else -> activePrefetch < b.prefetchRequests && estimate.coerceAtLeast(EXPERIENCE_MIB) <=
+            else -> activePrefetch < b.prefetchRequests && minOf(estimate, b.prefetchBytes).coerceAtLeast(1L) <=
                 b.prefetchBytes - prefetchReserved && sourceAvailable(source)
         }
     }

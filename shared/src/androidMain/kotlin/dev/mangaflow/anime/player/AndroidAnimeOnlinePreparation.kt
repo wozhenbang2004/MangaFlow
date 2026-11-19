@@ -310,6 +310,8 @@ internal class AndroidPreparedFrameRenderer(private val prepared: () -> AndroidP
         } ?: return null
         val frame = window.frames[presentationTimeUs] ?: return null
         if (!matchingSource(inputTexId, frame.signature) || !load(frame)) return null
+        // Disabling, seeking or reattaching may happen while a compressed frame is being decoded.
+        if (prepared() !== window) return null
         drawTexture(texture)
         GlUtil.checkGlError()
         return window

@@ -235,10 +235,15 @@ class EnhancementScheduler(
                     }
                     publish()
                 }
-            } catch (error: Exception) {
+            } catch (error: Throwable) {
+                // Header/hash/cache preparation can fail before entering an engine's own
+                // memory guard. Settle this attempt instead of killing the sole queue loop.
+                if (error !is Exception && error !is OutOfMemoryError) throw error
+                val failure = if (error is OutOfMemoryError)
+                    IllegalStateException("增强准备超出当前内存，已保留原图；可降低画质后重试", error) else error
                 synchronized(lock) {
-                    entry.task = entry.task.copy(phase = EnhancementTaskPhase.FAILED, reason = error.message?.take(240) ?: "增强未完成，原画仍可使用")
-                    entry.result.completeExceptionally(error); publish()
+                    entry.task = entry.task.copy(phase = EnhancementTaskPhase.FAILED, reason = failure.message?.take(240) ?: "增强未完成，原画仍可使用")
+                    entry.result.completeExceptionally(failure); publish()
                 }
             } finally {
                 synchronized(lock) { entry.run = null; publish() }

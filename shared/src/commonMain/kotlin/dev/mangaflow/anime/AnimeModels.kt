@@ -277,6 +277,7 @@ data class AnimePlaybackSettings(
     val nextEpisodeCacheMiB: Int? = null,
     val predecodeNextEpisode: Boolean = true,
     val onlinePreparationSeconds: Int? = null,
+    val bufferRefillNearTarget: Boolean = true,
 ) {
     fun validate(): AnimePlaybackSettings {
         require(skipOpeningSeconds >= 0 && skipEndingSeconds >= 0) { "跳过时长不能小于零。" }

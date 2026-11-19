@@ -74,6 +74,18 @@ data class AnimePreparedVideoWindow(
     val usageIsSampled: Boolean = false,
 )
 
+/** Reuse only a still-useful window from this exact media/model/timeline and preparation budget. */
+internal fun AnimePreparedVideoRequest.canReuse(
+    previous: AnimePreparedVideoRequest,
+    window: AnimePreparedVideoWindow,
+    positionMs: Long,
+): Boolean = asset == previous.asset && sessionGeneration == previous.sessionGeneration &&
+    timelineGeneration == previous.timelineGeneration && model == previous.model &&
+    width == previous.width && height == previous.height &&
+    endMs - startMs == previous.endMs - previous.startMs &&
+    maximumSourceBytes == previous.maximumSourceBytes && maximumResultBytes == previous.maximumResultBytes &&
+    window.bytes in 1L..maximumResultBytes && window.endMs > maxOf(positionMs, startMs) && window.startMs < endMs
+
 enum class AnimePlayerPhase { IDLE, OPENING, READY, ENDED, ERROR, RELEASED }
 
 enum class AnimeVideoScale { FIT, FILL, ZOOM }
@@ -123,6 +135,9 @@ data class AnimeBufferMetrics(
     val targetBackBytes: Long? = null,
     val sampledAtMillis: Long? = null,
     val detail: String? = null,
+    val targetDurationMs: Long? = null,
+    val refillBelowMs: Long? = null,
+    val isLoading: Boolean? = null,
 )
 
 /** Buffer times are targets, not a claim about memory use or startup latency. */
@@ -140,7 +155,13 @@ data class AnimePlayerOptions(
     val realtimeFrames: AnimeRealtimeFrameRequest? = null,
     val bufferForwardBytes: Long = 64L * 1024L * 1024L,
     val bufferBackBytes: Long = 8L * 1024L * 1024L,
+    val bufferRefillNearTarget: Boolean = true,
 ) {
+    /** A small refill band preserves the saved low/high watermarks and bounds request churn. */
+    val effectiveBufferRefillMs: Int get() = if (!bufferRefillNearTarget) bufferMinMs else
+        maxOf(bufferMinMs, bufferMaxMs - minOf(5_000, maxOf(1_000, bufferMaxMs / 10)))
+            .coerceAtMost(bufferMaxMs)
+
     fun requireValid() {
         require(if (videoEnhancement == AnimeVideoEnhancementMode.MODEL)
             enhancementScale in setOf(1, 2, 4) && enhancementModel?.nativeScale == enhancementScale
@@ -203,7 +224,10 @@ data class AnimePlayerState(
     val droppedFrames: Long? = null,
     val presentedFps: Double? = null,
     val presentedFrames: Long? = null,
+    val frameMetrics: AnimePlaybackFrameMetrics? = null,
     val preparedVideoWindow: AnimePreparedVideoWindow? = null,
+    /** A detached completed window still occupies memory/disk until reused or explicitly evicted. */
+    val preparedVideoRetainedBytes: Long = 0L,
     val preparedVideoIssue: String? = null,
     val realtimeMotion: AnimeRealtimeMotionState? = null,
     val nativeVideoStatistics: AnimeNativeVideoStatistics? = null,
@@ -226,7 +250,7 @@ interface AnimePlayer {
     fun discardStartup(asset: AnimePlaybackAsset? = null) {}
     suspend fun prepareVideoWindow(request: AnimePreparedVideoRequest): Boolean = false
     fun noteVideoPreparationIssue(detail: String?) {}
-    fun discardPreparedVideo() {}
+    fun discardPreparedVideo(retainReusable: Boolean = false) {}
     fun open(request: AnimePlayerRequest)
     fun play()
     fun pause()
@@ -356,7 +380,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
                 timelineGeneration = current.timelineGeneration + 1,
                 bufferedMs = -1L, bufferMetrics = null, nativeVideoStatistics = null,
                 sourceFps = null, decoderOutputFrames = null, droppedFrames = null,
-                presentedFps = null, presentedFrames = null,
+                presentedFps = null, presentedFrames = null, frameMetrics = null,
                 videoEnhancement = current.videoEnhancement.copy(observation = null))
             seekNative(0L)
             setPlayingNative(true)
@@ -367,7 +391,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
     }
 
     final override fun pause() = command {
-        mutableState.value = mutableState.value.copy(playWhenReady = false)
+        mutableState.value = mutableState.value.copy(playWhenReady = false, frameMetrics = null)
         setPlayingNative(false)
     }
 
@@ -381,7 +405,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
             timelineGeneration = current.timelineGeneration + 1,
             bufferedMs = -1L, bufferMetrics = null, nativeVideoStatistics = null,
             sourceFps = null, decoderOutputFrames = null, droppedFrames = null,
-            presentedFps = null, presentedFrames = null,
+            presentedFps = null, presentedFrames = null, frameMetrics = null,
             videoEnhancement = current.videoEnhancement.copy(observation = null),
             phase = if (current.ended) AnimePlayerPhase.READY else current.phase,
         )
@@ -392,7 +416,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         require(speed.isFinite() && speed > 0f) { "播放速度必须大于零" }
         val accepted = setSpeedNative(speed)
         check(accepted.isFinite() && accepted > 0f) { "播放器没有接受这个倍速，请选择其他速度" }
-        mutableState.value = mutableState.value.copy(speed = accepted)
+        mutableState.value = mutableState.value.copy(speed = accepted, frameMetrics = null)
     }
 
     final override fun configure(options: AnimePlayerOptions) {
@@ -400,6 +424,10 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         command(fatal = false) {
             val previous = this.options
             this.options = options
+            if (previous.videoEnhancement != options.videoEnhancement || previous.enhancementScale != options.enhancementScale ||
+                previous.enhancementModel != options.enhancementModel || previous.realtimeFrames != options.realtimeFrames ||
+                previous.preparedVideoModel != options.preparedVideoModel)
+                mutableState.value = mutableState.value.copy(frameMetrics = null)
             if (previous.videoEnhancement != options.videoEnhancement || previous.enhancementScale != options.enhancementScale ||
                 previous.enhancementModel != options.enhancementModel) {
                 mutableState.value = mutableState.value.copy(videoEnhancement = AnimeVideoEnhancementState(

@@ -67,8 +67,9 @@ internal fun NetworkRouteDirectory(repository: UnifiedMangaRepository?, registry
         MotionIconButton(onClick = {
             if (!checks.lockTarget(targetId, !locked)) notice = "锁定状态未保存，请重试"
         }, enabled = active, modifier = Modifier.size(44.dp),
-            tooltip = if (locked) "已锁定，不自动修改线路" else "允许自动优化；点击锁定") {
-            Icon(if (locked) Icons.Outlined.Lock else Icons.Outlined.LockOpen, if (locked) "已锁定" else "允许自动优化", Modifier.size(16.dp),
+            tooltip = if (locked) "已禁止自动改线；点击允许" else "允许自动改线；点击禁止") {
+            Icon(if (locked) Icons.Outlined.Lock else Icons.Outlined.LockOpen,
+                if (locked) "禁止自动改线" else "允许自动改线", Modifier.size(16.dp),
                 tint = if (locked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
@@ -94,7 +95,7 @@ internal fun NetworkRouteDirectory(repository: UnifiedMangaRepository?, registry
         }
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("按用途展开，单独设置来源线路。锁定项仍检测，但不自动修改。",
+        Text("使用默认会跟随默认线路；单独设置只用于该来源。锁图标控制自动改线：锁定后仍可检测和手动改线。",
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         SettingsDisclosure("漫画来源", "${mangaSources.size} 源", Icons.Outlined.AutoStories,
             expanded == "manga", { if (active) expanded = if (expanded == "manga") null else "manga" }, compact = true) {

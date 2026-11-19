@@ -48,6 +48,9 @@ data class EnhancementPolicy(
     val detectScenes: Boolean = true,
     val enhanceAfterDownload: Boolean = false,
     val cacheMiB: Int = 1024,
+    /** Viewing switches apply to both live processing and automatic use of prepared results. */
+    val realtimeEnhancementEnabled: Boolean = true,
+    val realtimeInterpolationEnabled: Boolean = true,
 ) {
     fun checked(): EnhancementPolicy = apply {
         require(scale > 0) { "放大倍率须大于零" }
@@ -202,31 +205,36 @@ class EnhancementSettingsStore(context: PlatformContext) {
         mutableSessions.value = mutableSessions.value - sessionKey
     }
 
-    private fun encode(p: EnhancementPolicy): String = JSONObject().put("version", 1)
+    private fun encode(p: EnhancementPolicy): String = JSONObject().put("version", 2)
         .put("tier", p.tier.name).put("scale", p.scale).put("style", p.style.name)
         .put("preparation", JSONArray().apply { p.preparation.sortedBy { it.ordinal }.forEach { put(it.name) } })
         .put("locked", p.locked).put("modelId", p.modelId ?: "")
         .put("frameMode", p.frameMode.name).put("frameQuality", p.frameQuality.name)
         .put("customFps", p.customFps).put("detectScenes", p.detectScenes)
+        .put("realtimeEnhancementEnabled", p.realtimeEnhancementEnabled)
+        .put("realtimeInterpolationEnabled", p.realtimeInterpolationEnabled)
         .put("enhanceAfterDownload", p.enhanceAfterDownload).put("cacheMiB", p.cacheMiB).toString()
 
     private fun decode(raw: String?): EnhancementPolicy? = runCatching {
         if (raw.isNullOrBlank()) return@runCatching null
         val j = JSONObject(raw)
-        require(j.optInt("version") == 1)
+        require(j.optInt("version") in 1..2)
         val prep = j.optJSONArray("preparation")
+        val preparation = if (prep == null) setOf(PreparationMode.SMART) else (0 until prep.length()).mapNotNull { i ->
+            PreparationMode.entries.firstOrNull { it.name == prep.optString(i) }
+        }.toSet()
         EnhancementPolicy(
             tier = QualityTier.entries.firstOrNull { it.name == j.optString("tier") } ?: QualityTier.ORIGINAL,
             scale = j.optInt("scale", 1),
             style = ImageStyle.entries.firstOrNull { it.name == j.optString("style") } ?: ImageStyle.AUTO,
-            preparation = if (prep == null) setOf(PreparationMode.SMART) else (0 until prep.length()).mapNotNull { i ->
-                PreparationMode.entries.firstOrNull { it.name == prep.optString(i) }
-            }.toSet(),
+            preparation = preparation,
             locked = j.optBoolean("locked"), modelId = j.optString("modelId").takeIf { it.isNotBlank() },
             frameMode = FrameMode.entries.firstOrNull { it.name == j.optString("frameMode") } ?: FrameMode.ORIGINAL,
             frameQuality = FrameQuality.entries.firstOrNull { it.name == j.optString("frameQuality") } ?: FrameQuality.BALANCED,
             customFps = j.optInt("customFps", 60), detectScenes = j.optBoolean("detectScenes", true),
             enhanceAfterDownload = j.optBoolean("enhanceAfterDownload"), cacheMiB = j.optInt("cacheMiB", 1024),
+            realtimeEnhancementEnabled = j.optBoolean("realtimeEnhancementEnabled", PreparationMode.IMMEDIATE in preparation),
+            realtimeInterpolationEnabled = j.optBoolean("realtimeInterpolationEnabled", PreparationMode.IMMEDIATE in preparation),
         ).checked()
     }.getOrNull()
 }

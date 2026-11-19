@@ -103,12 +103,12 @@ internal fun enhancementOutputScales(content: EnhancementContent, policy: Enhanc
         PlatformKind.DESKTOP -> EnhancementEngineIds.DESKTOP_REALTIME_RIFE
         else -> null
     }
-    val realtimeFramesSelected = PreparationMode.IMMEDIATE in policy.preparation &&
+    val realtimeFramesSelected = policy.realtimeInterpolationEnabled &&
         policy.frameMode != FrameMode.ORIGINAL && policy.frameQuality == FrameQuality.BALANCED &&
         (policy.frameMode != FrameMode.CUSTOM || policy.customFps in 1..(if (platformKind == PlatformKind.ANDROID) 120 else 240)) &&
         inventory.frameModels.any { it.engineId == frameEngine }
     val onlineAutomatic = tier in setOf(QualityTier.AUTO, QualityTier.BALANCED, QualityTier.FINE, QualityTier.ULTRA) &&
-        PreparationMode.SMART in policy.preparation && policy.cacheMiB >= 16 && !realtimeFramesSelected
+        policy.realtimeEnhancementEnabled && PreparationMode.SMART in policy.preparation && !realtimeFramesSelected
     val onlineEngines = when (platformKind) {
         PlatformKind.ANDROID -> setOf(EnhancementEngineIds.ANDROID_CUGAN_VIDEO, EnhancementEngineIds.ANDROID_VIDEO_ONNX)
         PlatformKind.DESKTOP -> setOf(EnhancementEngineIds.VIDEOJANAI)
@@ -125,7 +125,7 @@ internal fun enhancementOutputScales(content: EnhancementContent, policy: Enhanc
         val model = candidates.firstOrNull { it.engineId == EnhancementEngineIds.ANDROID_CUGAN_VIDEO }
             ?: candidates.first()
         // The player does not prepare an online window while this scale selects MODEL mode.
-        if (PreparationMode.IMMEDIATE !in policy.preparation || model.nativeScale !in selectedRealtimeScales)
+        if (!policy.realtimeEnhancementEnabled || model.nativeScale !in selectedRealtimeScales)
             scales += modelScales(model.id)
     }
     return scales.sorted()
@@ -134,9 +134,9 @@ internal fun enhancementOutputScales(content: EnhancementContent, policy: Enhanc
 /** A preview for an explicit model-selection action; callers alone decide whether to save it. */
 internal fun enhancementModelSelectionPolicy(content: EnhancementContent, policy: EnhancementPolicy,
     inventory: EngineInventory, modelId: String?): EnhancementPolicy? {
-    val choice = policy.copy(modelId = modelId, preparation =
-        if (content == EnhancementContent.ANIME && policy.tier != QualityTier.ORIGINAL)
-            policy.preparation + PreparationMode.IMMEDIATE else policy.preparation)
+    val choice = policy.copy(modelId = modelId, realtimeEnhancementEnabled =
+        if (content == EnhancementContent.ANIME && policy.tier != QualityTier.ORIGINAL) true
+        else policy.realtimeEnhancementEnabled)
     val scales = enhancementOutputScales(content, choice, inventory)
     val scale = policy.scale.takeIf { it in scales }
         ?: scales.minByOrNull { abs(it.toLong() - policy.scale.toLong()) } ?: return null

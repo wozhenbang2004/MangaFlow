@@ -209,15 +209,17 @@ private fun Section.navigationTitle(restricted: Boolean): String =
 private data class SidebarDestination(
     val section: Section,
     val anime: AnimeWorkspaceDestination? = null,
+    val experience: Boolean = false,
 ) {
-    val icon: ImageVector get() = anime?.icon ?: section.icon
-    fun title(profile: ContentProfile): String = anime?.label
+    val icon: ImageVector get() = if (experience) Icons.Outlined.Tune else anime?.icon ?: section.icon
+    fun title(profile: ContentProfile): String = if (experience) "体验策略" else anime?.label
         ?: if (profile == ContentProfile.ANIME && section == Section.SETTINGS) "应用设置"
         else section.navigationTitle(profile == ContentProfile.RESTRICTED)
 }
 /** A new reference owns the motion; cancellation cannot replay a stale destination. */
 private class DrawerAction(val target: DrawerValue, val destination: Section? = null,
-    val profile: ContentProfile? = null, val animeDestination: AnimeWorkspaceDestination? = null) {
+    val profile: ContentProfile? = null, val animeDestination: AnimeWorkspaceDestination? = null,
+    val openExperience: Boolean = false) {
     var rootCommitted by mutableStateOf(false)
 }
 
@@ -457,6 +459,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val restrictedMetrics = remember(model) { MangaMetricState(model.metrics, { _ -> }, { _ -> }) }
     val displayedMetrics = if (restrictedMode) restrictedMetrics else metricState
     var drawerAction by remember { mutableStateOf<DrawerAction?>(null) }
+    var experienceOpen by remember { mutableStateOf(false) }
     var drawerRootTransition by remember { mutableStateOf<Section?>(null) }
     val rootOpacity = remember { Animatable(1f) }
     val rootHandoff by remember {
@@ -680,6 +683,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     else rootOpacity.snapTo(1f)
                 }
             }
+            if (drawerAction === action && action.openExperience) experienceOpen = true
         } finally {
             if (drawerAction === action && currentCoroutineContext().isActive) {
                 rootOpacity.snapTo(1f)
@@ -732,10 +736,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 AnimeWorkspaceDestination.CALENDAR, AnimeWorkspaceDestination.RANKING,
                 AnimeWorkspaceDestination.GENRES, AnimeWorkspaceDestination.DIRECTORY,
                 AnimeWorkspaceDestination.DOWNLOADS, AnimeWorkspaceDestination.TRACKING)
-                .map { SidebarDestination(Section.ANIME, it) } + SidebarDestination(Section.SETTINGS)
+                .map { SidebarDestination(Section.ANIME, it) } +
+                listOf(SidebarDestination(Section.SETTINGS, experience = true), SidebarDestination(Section.SETTINGS))
         } else {
             Section.entries.filter { it.availableIn(contentProfile) && (restrictedMode || it != Section.ACCOUNT) }
-                .map { SidebarDestination(it) }
+                .flatMap { if (it == Section.SETTINGS)
+                    listOf(SidebarDestination(it, experience = true), SidebarDestination(it)) else listOf(SidebarDestination(it)) }
         }
     }
     val highlightedSection = when {
@@ -760,6 +766,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         accountOwner = account.profile?.username, backdrop = drawerBackdrop,
         onDismiss = { copySyncOpen = false }, focusMangaId = copySyncFocus,
     )
+    ExperienceSettingsDialog(experienceOpen, drawerBackdrop, onDismiss = { experienceOpen = false })
     sourceManagement?.let { state ->
         val checkPreferences by model.services.sourceChecks.preferences.collectAsStateWithLifecycle()
         val checkSchedule by model.services.sourceChecks.state.collectAsStateWithLifecycle()
@@ -984,7 +991,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         if (destination in profileSections && canSelectDrawer()) {
             if ((pendingSidebarDestination ?: highlightedSection) != destination)
                 feedback.perform(FeelEvent.Selection)
-            if (destination.anime != null) navigateAnime(destination.anime)
+            if (destination.experience) drawerAction = DrawerAction(DrawerValue.Closed, openExperience = true)
+            else if (destination.anime != null) navigateAnime(destination.anime)
             else changeSection(destination.section)
         }
     }
@@ -1005,13 +1013,16 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         onToggle = { desktopNavigationMode = if (desktopNavigationWide) 2 else 1 },
         onNavigate = { index ->
             val destination = profileSections[index]
-            model.closeDetail()
-            tagSearchVisible = false
-            recentReadingOpen = false
-            if (destination.anime != null) navigateAnime(destination.anime)
+            if (destination.experience) experienceOpen = true
             else {
-                if (!animeMode) searchExpanded = destination.section == Section.DISCOVER && browse.isSearch
-                changeSection(destination.section)
+                model.closeDetail()
+                tagSearchVisible = false
+                recentReadingOpen = false
+                if (destination.anime != null) navigateAnime(destination.anime)
+                else {
+                    if (!animeMode) searchExpanded = destination.section == Section.DISCOVER && browse.isSearch
+                    changeSection(destination.section)
+                }
             }
         },
         onSearch = openDesktopSearch,

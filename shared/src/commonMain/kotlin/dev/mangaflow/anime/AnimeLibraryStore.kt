@@ -409,6 +409,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("longPressSpeed", value.longPressSpeed.toDouble()).put("backgroundAudio", value.backgroundAudio)
         .put("automaticSourceRecovery", value.automaticSourceRecovery)
         .put("bufferMinMs", value.bufferMinMs).put("bufferMaxMs", value.bufferMaxMs)
+        .put("bufferRefillNearTarget", value.bufferRefillNearTarget)
         .put("bufferStartMs", value.bufferStartMs).put("bufferRebufferMs", value.bufferRebufferMs)
         .put("automaticRecoveryAttempts", value.automaticRecoveryAttempts)
         .put("videoEnhancement", value.videoEnhancement.name)
@@ -432,6 +433,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             automaticSourceRecovery = json.optBoolean("automaticSourceRecovery", defaults.automaticSourceRecovery),
             bufferMinMs = json.optInt("bufferMinMs", defaults.bufferMinMs),
             bufferMaxMs = json.optInt("bufferMaxMs", defaults.bufferMaxMs),
+            bufferRefillNearTarget = json.optBoolean("bufferRefillNearTarget", defaults.bufferRefillNearTarget),
             bufferStartMs = json.optInt("bufferStartMs", defaults.bufferStartMs),
             bufferRebufferMs = json.optInt("bufferRebufferMs", defaults.bufferRebufferMs),
             automaticRecoveryAttempts = json.optInt("automaticRecoveryAttempts", defaults.automaticRecoveryAttempts),

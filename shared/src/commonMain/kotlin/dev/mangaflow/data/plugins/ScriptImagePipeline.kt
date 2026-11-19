@@ -280,6 +280,7 @@ internal suspend fun materializeScriptPage(
     promoted: () -> Boolean = { false },
     work: PrefetchWork? = null,
     retry: Boolean = false,
+    prefetchRemaining: (() -> Long)? = null,
 ): Page {
     if (page.url.startsWith("file://")) return page.copy(headers = emptyMap())
     val ref = SourceKeys.decodeChapter(mangaId, chapterId)
@@ -385,7 +386,11 @@ internal suspend fun materializeScriptPage(
                     prefetched -> {
                         if (promoted()) policy.withImageAdmission(reader = true, source = ref.sourceId, onWaiting = waiting) { fetch() }
                         else try {
-                            policy.withPrefetchAdmission(ref.sourceId, policy.estimatedPageBytes(page.url), promoted, waiting) { fetch() }
+                            val remaining = minOf(policy.state.value.prefetchBytes,
+                                prefetchRemaining?.invoke() ?: Long.MAX_VALUE)
+                            if (remaining <= 0L && !promoted()) throw PrefetchBudgetExceeded()
+                            policy.withPrefetchAdmission(ref.sourceId,
+                                minOf(policy.estimatedPageBytes(page.url), remaining.coerceAtLeast(0L)), promoted, waiting) { fetch() }
                         } catch (_: PrefetchPromoted) {
                             policy.withImageAdmission(reader = true, source = ref.sourceId, onWaiting = waiting) { fetch() }
                         }
@@ -451,7 +456,8 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
         currentCoroutineContext().ensureActive()
         val resolved = resolveScriptPage(context, mangaId, chapterId, page, route, promoted = { work.isForeground }, work = work)
         val result = materializeScriptPage(context, mangaId, chapterId, resolved, route,
-            prefetched = true, promoted = { work.isForeground }, work = work, onBytes = { count ->
+            prefetched = true, promoted = { work.isForeground }, work = work,
+            prefetchRemaining = { receipt.remaining }, onBytes = { count ->
             synchronized(transferLock) {
                 if (closed) throw CancellationException("图片预取已结束。")
                 received += count
@@ -470,7 +476,10 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
         val path = dev.mangaflow.reader.readerFilePath(result.url)
         val size = path?.let { StorageFile(it).length() }
         val cacheHit = synchronized(transferLock) { received == 0L }
-        if (cacheHit && size != null) work.ifOptional { receipt.accept(size) }
+        if (cacheHit && size != null) work.ifOptional {
+            try { receipt.accept(size) }
+            catch (_: PrefetchBudgetExceeded) { budget.exhaust() }
+        }
         policy.recordImage(monotonicTimeMillis() - started, memory = false, disk = cacheHit,
             prefetch = !work.isForeground, key = page.url, bytes = size)
         return result

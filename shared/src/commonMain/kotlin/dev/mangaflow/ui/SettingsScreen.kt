@@ -145,7 +145,6 @@ import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.experience.ExperiencePolicyStore
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
-import dev.mangaflow.enhancement.ui.EnhancementCenterPanel
 import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
 import androidx.compose.material.icons.outlined.SwapHoriz
@@ -262,7 +261,6 @@ fun SettingsScreen(
     }
     var showNetworkDownloads by remember { mutableStateOf(false) }
     var showExperience by remember { mutableStateOf(false) }
-    var showEnhancement by remember { mutableStateOf(false) }
     val toggleSetting: (String) -> Unit = { expandedSetting = if (expandedSetting == it) null else it }
     LaunchedEffect(screenActive, openWebDavSettings, backupBusy) {
         if (screenActive && openWebDavSettings && (backupBusy == null || backupBusy.startsWith("webdav-"))) {
@@ -505,9 +503,7 @@ fun SettingsScreen(
                 RetainedSettingsCategory(!desktop || settingsCategory == 3) {
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SettingsSection("应用", sourceBackdrop) {
-                        SettingsLinkRow("画质与性能", "增强、补帧与提前处理", Icons.Outlined.Image,
-                            inlineDetail = true) { showEnhancement = true }
-                        SettingsLinkRow("体验策略", experienceModeLabel(experienceMode), Icons.Outlined.Tune,
+                        SettingsLinkRow("体验策略", "画质、补帧、缓冲与预读 · ${experienceModeLabel(experienceMode)}", Icons.Outlined.Tune,
                             inlineDetail = true) { showExperience = true }
                         SettingsLinkRow("网络与下载", networkRouteOverview(routes), Icons.Outlined.SwapVert,
                             inlineDetail = true) { showNetworkDownloads = true }
@@ -656,7 +652,6 @@ fun SettingsScreen(
     ExperienceSettingsDialog(showExperience, sourceBackdrop, onDismiss = { showExperience = false },
         onOpenStorage = { showStorage = true }, onOpenNetwork = { showNetworkDownloads = true },
         onOpenSourceChecks = if (sourceRegistry != null) ({ showBodySources = true }) else null)
-    EnhancementCenterPanel(showEnhancement, sourceBackdrop, onDismiss = { showEnhancement = false })
 
     StorageManagementDialog(showStorage, storageBackdrop, libraryStore, repository = sourceRepository, active = screenActive,
         onDismiss = { showStorage = false },
@@ -1174,19 +1169,20 @@ internal fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, on
 }
 
 @Composable
-internal fun SettingsToggle(title: String, checked: Boolean, icon: ImageVector, onCheckedChange: (Boolean) -> Unit) {
+internal fun SettingsToggle(title: String, checked: Boolean, icon: ImageVector, enabled: Boolean = true,
+    onCheckedChange: (Boolean) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     Row(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-            .toggleable(checked, interactionSource = interaction, indication = null,
+            .toggleable(checked, enabled = enabled, interactionSource = interaction, indication = null,
                 role = Role.Switch, onValueChange = onCheckedChange).heightIn(min = 48.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         SettingsRowIcon(icon)
         Text(title, Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
+            style = MaterialTheme.typography.bodyMedium, color = colors.onSurface.copy(alpha = if (enabled) 1f else .45f))
         Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
             MotionSwitchThumb(checked, interaction)
         }

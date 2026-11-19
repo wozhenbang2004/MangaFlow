@@ -47,6 +47,7 @@ internal class DesktopAnimeOnlinePreparation(
     private val current: (AnimePreparedVideoRequest, MPVHandle) -> Boolean,
     private val suspendRealtime: (Boolean) -> Unit,
     private val update: (AnimePreparedVideoWindow?, String?) -> Unit,
+    private val updateRetainedBytes: (Long) -> Unit,
 ) {
     private data class Prepared(
         val request: AnimePreparedVideoRequest,
@@ -66,6 +67,8 @@ internal class DesktopAnimeOnlinePreparation(
     @Volatile private var pending: Any? = null
     private var preparation: Job? = null
     private var prepared: Prepared? = null
+    private var reusable: Prepared? = null
+    private var consumerGeneration = 0L
     private var observer: Job? = null
     private var installed: MPVHandle? = null
     private val installedLabels = mutableSetOf<String>()
@@ -75,7 +78,7 @@ internal class DesktopAnimeOnlinePreparation(
         val identity = Any()
         val owner = currentCoroutineContext()[Job]
         val admitted = withContext(Dispatchers.Main.immediate) {
-            if (!clear()) false else { pending = identity; preparation = owner; true }
+            if (!clear(retainReusable = true)) false else { pending = identity; preparation = owner; true }
         }
         if (!admitted) return false
         var directory: File? = null
@@ -83,6 +86,41 @@ internal class DesktopAnimeOnlinePreparation(
         val started = monotonicTimeMillis()
         fun valid() = pending === identity && current(request, handle)
         try {
+            val cached = withContext(Dispatchers.Main.immediate) {
+                reusable.also { reusable = null; updateRetainedBytes(0L) }
+            }
+            if (cached != null) {
+                directory = cached.directory
+                val usable = withContext(Dispatchers.Main.immediate) {
+                    valid() && cached.handle === handle && request.canReuse(cached.request, cached.state,
+                        ((handle.getPropertyDoubleOrNull("time-pos") ?: Double.MAX_VALUE) * 1000.0).toLong()) &&
+                        handle.getPropertyDoubleOrNull("time-pos")?.let { it < cached.firstSeconds - 0.3 } == true
+                }
+                if (usable) {
+                    val intact = withContext(Dispatchers.IO) {
+                        cached.original.isFile && cached.media.isFile && cached.media.length() == cached.state.bytes &&
+                            // Old output receipts must never acknowledge a newly reattached consumer.
+                            runCatching {
+                                cached.sourceReceipt.writeText("")
+                                cached.receipt.writeText("")
+                            }.isSuccess
+                    }
+                    withContext(Dispatchers.Main.immediate) {
+                        if (intact && valid() &&
+                            handle.getPropertyDoubleOrNull("time-pos")?.let { it < cached.firstSeconds - 0.3 } == true) {
+                            cached.state = cached.state.copy(framesUsed = 0L, lastUsedAt = 0L)
+                            prepared = cached
+                            retained = true
+                            update(cached.state, null)
+                            observe(cached)
+                        }
+                    }
+                    if (retained) return true
+                }
+                // A different model, timeline, budget or elapsed window cannot occupy the next allocation.
+                withContext(Dispatchers.IO) { files.release(cached.directory) }
+                directory = null
+            }
             val result = withContext(Dispatchers.IO) {
                 require(System.getProperty("os.name", "").startsWith("Windows", true)) { "当前在线视频预处理组件仅支持 Windows" }
                 require(request.model.engineId == EnhancementEngineIds.VIDEOJANAI && EngineContent.VIDEO in request.model.contents) {
@@ -218,7 +256,8 @@ internal class DesktopAnimeOnlinePreparation(
     }
 
     /** Main-thread ownership: remove the old graph before seeking or changing source/model. */
-    fun clear(): Boolean {
+    fun clear(retainReusable: Boolean = false): Boolean {
+        consumerGeneration++
         pending = null
         preparation?.cancel()
         preparation = null
@@ -232,7 +271,17 @@ internal class DesktopAnimeOnlinePreparation(
             }
         }
         val removed = installedLabels.isEmpty()
-        if (old != null) retired += old.directory
+        if (removed && retainReusable) {
+            if (old != null) {
+                reusable?.takeIf { it !== old }?.let { retired += it.directory }
+                reusable = old
+            }
+        } else {
+            if (old != null) retired += old.directory
+            reusable?.let { retired += it.directory }
+            reusable = null
+        }
+        updateRetainedBytes(reusable?.state?.bytes ?: 0L)
         if (removed) {
             installed = null
             suspendRealtime(false)
@@ -246,8 +295,16 @@ internal class DesktopAnimeOnlinePreparation(
     fun nativeClosed() {
         installed = null
         installedLabels.clear()
-        suspendRealtime(false)
-        releaseRetired()
+        clear()
+    }
+
+    /** Reuse cannot cross a seek, so a retained window behind playback has no future consumer. */
+    fun expireRetained(positionMs: Long) {
+        val expired = reusable?.takeIf { positionMs >= it.state.endMs } ?: return
+        reusable = null
+        retired += expired.directory
+        updateRetainedBytes(0L)
+        if (installedLabels.isEmpty()) releaseRetired()
     }
 
     private fun releaseRetired() {
@@ -265,6 +322,8 @@ internal class DesktopAnimeOnlinePreparation(
     }
 
     private fun observe(window: Prepared) {
+        val generation = ++consumerGeneration
+        fun ownsWindow() = consumerGeneration == generation && prepared === window
         observer = scope.launch(Dispatchers.Main.immediate) {
             val sourceReader = ReceiptReader(window.sourceReceipt)
             val outputReader = ReceiptReader(window.receipt)
@@ -276,11 +335,11 @@ internal class DesktopAnimeOnlinePreparation(
             var dropCount: Long? = null
             var overloaded = 0
             try {
-                while (prepared === window && current(window.request, window.handle)) {
+                while (ownsWindow() && current(window.request, window.handle)) {
                     rendering.first { it }
                     val position = withContext(Dispatchers.IO) { window.handle.getPropertyDoubleOrNull("video-pts") }
                         ?.takeIf(Double::isFinite)
-                    if (prepared !== window || !current(window.request, window.handle)) return@launch
+                    if (!ownsWindow() || !current(window.request, window.handle)) return@launch
                     if (position == null) { delay(200L); continue }
                     if (position >= window.endSeconds) { clear(); return@launch }
                     if (installed == null && position >= window.firstSeconds - 0.3) {
@@ -293,7 +352,7 @@ internal class DesktopAnimeOnlinePreparation(
                                 window.handle.getPropertyLongOrNull("video-out-params/w") to
                                     window.handle.getPropertyLongOrNull("video-out-params/h"))
                         }
-                        if (prepared !== window || !current(window.request, window.handle)) return@launch
+                        if (!ownsWindow() || !current(window.request, window.handle)) return@launch
                         sample.first.first.filter { it.first >= window.firstSeconds - 0.002 && it.first < window.endSeconds }.forEach { (time, identical) ->
                             check(identical) { "当前原画与准备时的原视频帧不一致，已请求退出增强窗口" }
                             sourceFuture += time
@@ -334,12 +393,12 @@ internal class DesktopAnimeOnlinePreparation(
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) {
-                if (prepared === window) {
+                if (ownsWindow()) {
                     val removed = clear()
                     update(null, if (removed) readablePlayerError(failure) else "无法确认已移除增强窗口，请重新打开当前视频")
                 }
             } finally {
-                if (prepared === window) withContext(NonCancellable + Dispatchers.Main.immediate) { clear() }
+                withContext(NonCancellable + Dispatchers.Main.immediate) { if (ownsWindow()) clear() }
             }
         }
     }

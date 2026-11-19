@@ -802,8 +802,10 @@ private fun ReaderEnhancementWork(
 ) {
     val colors = MaterialTheme.colorScheme
     val current = state.assets[state.currentPage]
+    val task = state.currentTask.takeIf { policy.tier != QualityTier.ORIGINAL }
+    val progress = task?.let(::readerEnhancementTaskProgress)
     val readiness = if (policy.tier == QualityTier.ORIGINAL) "原画 · 增强未启用"
-        else (if (state.currentEnhanced) "本页增强已备" else "本页增强未备") +
+        else (if (state.currentEnhanced) "本页增强已备" else progress ?: "本页增强未备") +
             if (state.nextReady) " · 前方增强已备" else " · 前方增强未备"
     MotionTextButton(onClick = onToggle, enabled = enabled,
         modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
@@ -821,6 +823,9 @@ private fun ReaderEnhancementWork(
     StatusReveal(expanded) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             StatusExplanation("目标 ${policy.tier.label} · ${policy.scale}×")
+            task?.let {
+                StatusExplanation(listOfNotNull(progress, it.reason ?: it.progress?.detail).joinToString(" · "))
+            }
             StatusMetricSlots(maxOf(state.running, state.queued, state.assets.size, 1).toString(), count = 3) { index ->
                 when (index) {
                     0 -> StatusCounter(Icons.Outlined.PlayArrow, state.running.toLong(), "正在增强的页数")
@@ -833,14 +838,15 @@ private fun ReaderEnhancementWork(
             if (current != null) StatusExplanation("本页增强文件 ${current.width} × ${current.height}")
             val p50 = state.elapsedP50Millis?.let { formatDecimal(it, 0) + " ms" } ?: "—"
             val p95 = state.elapsedP95Millis?.let { formatDecimal(it, 0) + " ms" } ?: "—"
-            StatusExplanation("整页处理 P50 / P95  $p50 / $p95")
+            StatusExplanation(if (state.elapsedP50Millis == null) "尚无已完成整页，完成后显示处理耗时"
+                else "整页处理 P50 / P95  $p50 / $p95")
             state.detail?.let { StatusExplanation("窗口处理反馈：$it") }
             StatusExplanation("已备表示增强文件可用；原图预读与增强准备分别统计。")
             onOpen?.let { open ->
                 MotionTextButton(onClick = open, enabled = enabled,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
                     contentPadding = PaddingValues(horizontal = 0.dp)) {
-                    Text("画质与性能", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                    Text("漫画体验策略", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
                     Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp))
                 }
             }

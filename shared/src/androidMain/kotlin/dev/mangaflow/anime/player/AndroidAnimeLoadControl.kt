@@ -88,10 +88,11 @@ internal class AndroidAnimeLoadControl(
         configuration = Configuration(options, acceptedTarget(options.bufferForwardBytes, last.target.toLong(), heapMaximumBytes))
         if (previous.bufferMinMs != options.bufferMinMs || previous.bufferMaxMs != options.bufferMaxMs ||
             previous.bufferStartMs != options.bufferStartMs || previous.bufferRebufferMs != options.bufferRebufferMs ||
-            previous.bufferForwardBytes != options.bufferForwardBytes) reevaluate.set(true)
+            previous.bufferForwardBytes != options.bufferForwardBytes ||
+            previous.bufferRefillNearTarget != options.bufferRefillNearTarget) reevaluate.set(true)
     }
 
-    fun metrics(sampledAtMillis: Long): AnimeBufferMetrics {
+    fun metrics(sampledAtMillis: Long, isLoading: Boolean? = null, playbackSpeed: Float = 1f): AnimeBufferMetrics {
         val current = configuration
         val options = current.options
         val target = current.target.toLong()
@@ -100,6 +101,9 @@ internal class AndroidAnimeLoadControl(
             targetForwardBytes = target,
             targetBackBytes = null,
             sampledAtMillis = sampledAtMillis,
+            targetDurationMs = options.bufferMaxMs.toLong(),
+            refillBelowMs = refillDurationUs(options, playbackSpeed) / 1_000L,
+            isLoading = isLoading,
             detail = buildString {
                 append("已分配值为播放器压缩样本内存，无法精确拆分前后方；前方目标按样本块生效")
                 if (options.bufferForwardBytes >= heapMaximumBytes)
@@ -128,10 +132,7 @@ internal class AndroidAnimeLoadControl(
         val full = allocator.totalBytesAllocated >= target
         if (reevaluate.getAndSet(false)) loading = true
         val maximumUs = options.bufferMaxMs.toLong() * 1_000L
-        var minimumUs = options.bufferMinMs.toLong() * 1_000L
-        if (parameters.playbackSpeed > 1f)
-            minimumUs = minOf(Util.getMediaDurationForPlayoutDuration(minimumUs, parameters.playbackSpeed), maximumUs)
-        minimumUs = maxOf(minimumUs, 500_000L)
+        val minimumUs = refillDurationUs(options, parameters.playbackSpeed)
         if (parameters.bufferedDurationUs < minimumUs) loading = !full
         else if (parameters.bufferedDurationUs >= maximumUs || full) loading = false
         return loading
@@ -151,6 +152,16 @@ internal class AndroidAnimeLoadControl(
     }
 
     private companion object {
+        fun refillDurationUs(options: AnimePlayerOptions, playbackSpeed: Float): Long {
+            val maximumUs = options.bufferMaxMs.toLong() * 1_000L
+            val minimumUs = options.effectiveBufferRefillMs.toLong() * 1_000L
+            // The near-target band is already bounded by the media-time ceiling. Scaling it
+            // to that ceiling would remove its hysteresis at faster playback speeds.
+            val speedAdjusted = if (!options.bufferRefillNearTarget && playbackSpeed > 1f)
+                Util.getMediaDurationForPlayoutDuration(minimumUs, playbackSpeed) else minimumUs
+            return speedAdjusted.coerceAtLeast(500_000L).coerceAtMost(maximumUs)
+        }
+
         fun acceptedTarget(requested: Long, previous: Long, heapMaximum: Long): Int {
             // Reject only a provably impossible target; this is not a proportional
             // memory policy and does not claim to prevent every source of memory pressure.

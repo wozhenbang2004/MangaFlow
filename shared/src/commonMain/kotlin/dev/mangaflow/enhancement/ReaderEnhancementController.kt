@@ -319,6 +319,7 @@ internal class ReaderEnhancementController(
                 estimatedBytes = 16L * 1024 * 1024,
                 isCurrent = { valid(index, id, epoch, original) }, title = "第 ${index + 1} 页") { task ->
                 task.checkpoint()
+                task.progress(EngineProgress(EngineStage.VERIFY, detail = "检查原图与增强缓存"))
                 val source = withContext(Dispatchers.IO) { openOriginal(original) }
                     ?: throw IllegalStateException("等待原图缓存，继续显示原画")
                 var work: EnhancedAssetWork? = null

@@ -453,6 +453,7 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
     val currentProxy = if (saved == null) settings.proxy else saved.proxy
     val editableProxy = currentProxy?.takeIf { supportsHttp || it.type == DownloadProxyType.SOCKS }
     var mode by remember(sourceId, saved) { mutableStateOf(initialMode()) }
+    var useDefault by remember(sourceId, saved) { mutableStateOf(saved == null) }
     var host by remember(sourceId, saved) { mutableStateOf(editableProxy?.host.orEmpty()) }
     var port by remember(sourceId, saved) { mutableStateOf(editableProxy?.port?.toString().orEmpty()) }
     var type by remember(sourceId, saved) { mutableStateOf(editableProxy?.type ?: DownloadProxyType.SOCKS) }
@@ -462,6 +463,7 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
     val keyboard = LocalSoftwareKeyboardController.current
     fun resetDraft() {
         mode = initialMode()
+        useDefault = saved == null
         host = editableProxy?.host.orEmpty()
         port = editableProxy?.port?.toString().orEmpty()
         type = editableProxy?.type ?: DownloadProxyType.SOCKS
@@ -475,27 +477,33 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
     val downloadLabel = if (showChapterDownload && saved == null) routeLabel(DownloadCategory.CHAPTERS) else currentLabel
     val inheritsDifferentRoutes = showChapterDownload && saved == null && downloadLabel != currentLabel
     Column(Modifier.fillMaxWidth().motionInputGate(enabled), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        val summary = when {
-            inheritsDifferentRoutes -> "阅读 $currentLabel · 下载 $downloadLabel"
-            saved == null -> "跟随 · $currentLabel"
-            else -> currentLabel
-        }
-        RouteDisclosure(title, summary, expanded) {
+        RouteDisclosure(title, if (saved == null) "使用默认" else "单独设置", expanded) {
             if (expanded) { resetDraft(); close() } else { resetDraft(); expanded = true }
         }
+        Text(if (inheritsDifferentRoutes) "当前：阅读 $currentLabel · 下载 $downloadLabel" else "当前：$currentLabel",
+            modifier = Modifier.padding(start = 12.dp, bottom = 4.dp),
+            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
         // This lazy source-details row owns its single retained editor expansion.
         CopyShelfReveal(expanded) {
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                DownloadModeChoices(mode, enabled = enabled, onSelect = { mode = it; notice = null })
-                if (mode == null) Text("选择直连或代理后保存", style = MaterialTheme.typography.labelSmall,
+                MotionTabs(if (useDefault) 0 else 1, listOf("使用默认", "单独设置"),
+                    onSelect = { useDefault = it == 0; notice = null }, modifier = Modifier.fillMaxWidth(),
+                    treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 44.dp)
+                if (useDefault) Text(if (showChapterDownload)
+                    "阅读使用全局默认，下载使用章节下载默认；默认线路改变时此源随之变化。"
+                    else if (category != null) "使用${downloadCategoryLabel(category)}的默认线路；默认线路改变时此源随之变化。"
+                    else "使用全局默认线路；默认线路改变时此源随之变化。",
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                if (!useDefault) DownloadModeChoices(mode, enabled = enabled, onSelect = { mode = it; notice = null })
+                if (!useDefault && mode == null) Text("选择直连或代理后保存", style = MaterialTheme.typography.labelSmall,
                     color = colors.onSurfaceVariant)
-                if (mode == DownloadRouteMode.PROXY && !relaySelected) {
+                if (!useDefault && mode == DownloadRouteMode.PROXY && !relaySelected) {
                     MotionTabs(if (useManualProxy) 1 else 0, listOf("全局地址", "此源地址"),
                         onSelect = { useManualProxy = it == 1; notice = null }, modifier = Modifier.fillMaxWidth(),
                         treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 36.dp,
                         fontSize = 12.sp, track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
                 }
-                if (mode == DownloadRouteMode.PROXY && !relaySelected && useManualProxy) {
+                if (!useDefault && mode == DownloadRouteMode.PROXY && !relaySelected && useManualProxy) {
                     ProxyProtocolChoice(type, supportsHttp, enabled) { type = it; notice = null }
                     if (!supportsHttp && currentProxy?.type == DownloadProxyType.HTTP) Text(
                         "原设置是 HTTP，请填写可用的 SOCKS5 地址。",
@@ -513,40 +521,40 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
                         }
                     }
                 }
-                if (mode == DownloadRouteMode.DIRECT && !relayDirect) Text("直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。",
+                if (!useDefault && mode == DownloadRouteMode.DIRECT && !relayDirect) Text("直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                if ((mode == DownloadRouteMode.DIRECT && relayDirect) ||
-                    (mode == DownloadRouteMode.PROXY && relaySelected))
+                if (!useDefault && ((mode == DownloadRouteMode.DIRECT && relayDirect) ||
+                    (mode == DownloadRouteMode.PROXY && relaySelected)))
                     Text(when {
                         !relayLinkAvailable -> "请在网络设置中改用自定义代理。"
                         relayProxy || mode == DownloadRouteMode.DIRECT -> "使用全局 Relay · 无需端口"
                         else -> "全局 Relay 尚未就绪"
                     }, style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant)
-                Text(if (showChapterDownload) "单独设置后，此源的浏览、阅读与新下载会使用同一线路。本次下载的指定线路优先。"
+                if (!useDefault) Text(if (showChapterDownload) "单独设置后，此源的浏览、阅读与新下载会使用同一线路。本次下载的指定线路优先。"
                     else "用于该源后续请求与新下载。网页认证仍遵循系统网络。",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                if (!relaySelected) saved?.proxy?.let { Text("已保存 · " + proxyAddressLabel(it), style = MaterialTheme.typography.labelSmall,
+                if (!useDefault && !relaySelected) saved?.proxy?.let { Text("已保存 · " + proxyAddressLabel(it), style = MaterialTheme.typography.labelSmall,
                     color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis) }
                 notice?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.error) }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    if (saved != null) MotionTextButton(onClick = {
-                        try { store.setSource(sourceId, null); close() }
-                        catch (_: Exception) { notice = "设置未保存，请重试" }
-                    }, enabled = enabled) { Text("清除此源设置") }
                     MotionTextButton(onClick = { resetDraft(); close() }, enabled = enabled) { Text("取消") }
                     MotionTextButton(onClick = {
                         try {
-                            val selectedMode = mode?.takeIf { it in selectableDownloadRoutes }
-                                ?: throw DownloadRouteException("请选择直连或代理。")
-                            val manualProxy = !relaySelected && useManualProxy
-                            if (selectedMode == DownloadRouteMode.PROXY && manualProxy && type == DownloadProxyType.HTTP &&
-                                !supportsHttp)
-                                throw DownloadRouteException("此来源暂不支持 HTTP 代理，请选择 SOCKS5。")
-                            val endpoint = if (selectedMode == DownloadRouteMode.PROXY && manualProxy)
-                                DownloadProxyEndpoint(host.trim(), port.toIntOrNull() ?: 0, type)
-                                else if (relaySelected || selectedMode == DownloadRouteMode.DIRECT) saved?.proxy else null
-                            store.setSource(sourceId, SourceNetworkSettings(selectedMode, endpoint))
+                            if (useDefault) {
+                                store.setSource(sourceId, null)
+                            } else {
+                                val selectedMode = mode?.takeIf { it in selectableDownloadRoutes }
+                                    ?: throw DownloadRouteException("请选择直连或代理。")
+                                val manualProxy = !relaySelected && useManualProxy
+                                if (selectedMode == DownloadRouteMode.PROXY && manualProxy && type == DownloadProxyType.HTTP &&
+                                    !supportsHttp)
+                                    throw DownloadRouteException("此来源暂不支持 HTTP 代理，请选择 SOCKS5。")
+                                val endpoint = if (selectedMode == DownloadRouteMode.PROXY && manualProxy)
+                                    DownloadProxyEndpoint(host.trim(), port.toIntOrNull() ?: 0, type)
+                                    else if (relaySelected || selectedMode == DownloadRouteMode.DIRECT) saved?.proxy else null
+                                store.setSource(sourceId, SourceNetworkSettings(selectedMode, endpoint))
+                            }
                             notice = null
                             close()
                         } catch (failure: DownloadRouteException) { notice = failure.message ?: "连接配置未能保存" }

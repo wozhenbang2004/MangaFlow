@@ -42,6 +42,8 @@ private class DesktopAnimePlayer(
     private var enhancementMediaReady = false
     private var statisticsJob: Job? = null
     private var statisticsHandle: MPVHandle? = null
+    private var statisticsRevision = 0L
+    private val frameWindow = AnimePlaybackFrameWindow()
     private val videoRenderingActive = MutableStateFlow(false)
     private var windowOwnsVideo = false
     private val animeJaNai = DesktopAnimeJaNai(File(context.dataRoot, "enhancement/engines"))
@@ -75,13 +77,13 @@ private class DesktopAnimePlayer(
                 engine.value?.impl === handle && snapshot.sessionGeneration == window.sessionGeneration &&
                     snapshot.timelineGeneration == window.timelineGeneration && options.preparedVideoModel == window.model &&
                     (foreground || snapshot.inPictureInPicture) && request?.localMedia == null &&
-                    request?.asset?.let { asset -> asset.playbackIdentity() == window.asset.playbackIdentity() &&
-                        asset.url == window.asset.url && asset.headers == window.asset.headers } == true
+                    request?.asset == window.asset
             },
             suspendRealtime = { suspended ->
                 if (windowOwnsVideo != suspended) { windowOwnsVideo = suspended; applyVideoEnhancement() }
             },
             update = { window, issue -> mutableState.value = state.value.copy(preparedVideoWindow = window, preparedVideoIssue = issue) },
+            updateRetainedBytes = { bytes -> mutableState.value = state.value.copy(preparedVideoRetainedBytes = bytes) },
         )
     }
 
@@ -90,15 +92,33 @@ private class DesktopAnimePlayer(
         return onlinePreparation.prepare(request, handle)
     }
 
-    override fun discardPreparedVideo() = command(fatal = false) { onlinePreparation.clear() }
+    override fun discardPreparedVideo(retainReusable: Boolean) = command(fatal = false) {
+        onlinePreparation.clear(retainReusable = retainReusable)
+    }
 
     override fun noteVideoPreparationIssue(detail: String?) = command(fatal = false) {
         mutableState.value = state.value.copy(preparedVideoIssue = detail)
     }
 
     override fun seekNative(positionMs: Long) {
+        frameWindow.reset()
         check(onlinePreparation.clear()) { "增强窗口尚未退出，请重新打开当前视频后定位" }
         super.seekNative(positionMs)
+    }
+
+    override fun setPlayingNative(playing: Boolean) {
+        if (!playing) {
+            statisticsRevision++
+            frameWindow.reset()
+            videoRenderingActive.value = false
+        }
+        super.setPlayingNative(playing)
+    }
+
+    override fun setSpeedNative(speed: Float): Float {
+        statisticsRevision++
+        frameWindow.reset()
+        return super.setSpeedNative(speed)
     }
 
     override suspend fun createBackend(): MediampPlayer = createMpv()
@@ -191,8 +211,13 @@ private class DesktopAnimePlayer(
     }
 
     private fun updateStatisticsObservation(handle: MPVHandle?) {
-        val rendering = handle != null && state.value.isPlaying && (foreground || state.value.inPictureInPicture)
+        val rendering = handle != null && state.value.isPlaying && !state.value.playbackSuppressed &&
+            state.value.hasVideoTracks != false && (foreground || state.value.inPictureInPicture)
         videoRenderingActive.value = rendering
+        if (!rendering) {
+            frameWindow.reset()
+            if (state.value.frameMetrics != null) mutableState.value = state.value.copy(frameMetrics = null)
+        }
         if (handle == null || !enhancementMediaReady) {
             statisticsJob?.cancel()
             statisticsJob = null
@@ -211,6 +236,7 @@ private class DesktopAnimePlayer(
                 if (!initialSample) videoRenderingActive.first { it }
                 initialSample = false
                 val timeline = state.value.timelineGeneration
+                val revision = statisticsRevision
                 val alternateRuntime = animeJaNai.usesNativeRuntime()
                 // The pinned native registry retains each read across teardown. A closed Kotlin
                 // handle is unavailable; it must not leave stale values on a replacement session.
@@ -236,31 +262,56 @@ private class DesktopAnimePlayer(
                             targetBackBytes = counter("demuxer-max-back-bytes"),
                             sampledAtMillis = monotonicTimeMillis(),
                             detail = "原生压缩包缓存估计；回看实际字节未单独公开，不含已解码画面或磁盘缓存",
+                            targetDurationMs = handle.getPropertyDoubleOrNull("cache-secs")
+                                ?.takeIf { it.isFinite() && it >= 0.0 }?.let { (it * 1_000).toLong() },
+                            refillBelowMs = handle.getPropertyDoubleOrNull("demuxer-hysteresis-secs")
+                                ?.takeIf { it.isFinite() && it >= 0.0 }?.let { (it * 1_000).toLong() },
+                            isLoading = handle.getPropertyBooleanOrNull("demuxer-cache-idle")?.not(),
                         )
                         Triple(fps, statistics, buffers)
                     }.getOrNull()
                 }
                 if (!isCurrent(generation) || engine.value?.impl !== handle) break
-                if (state.value.timelineGeneration != timeline) {
+                if (state.value.timelineGeneration != timeline || statisticsRevision != revision) {
                     if (videoRenderingActive.value) delay(1_000L)
                     continue
                 }
+                onlinePreparation.expireRetained(state.value.positionMs)
                 // The display provider reads AWT state and remains on Main, unlike native properties.
                 val refreshHz = context.playbackDisplayRefreshHz?.invoke()
                 if (sample != null) {
+                    val drops = sample.second
+                    val frames = frameWindow.sample(monotonicTimeMillis(),
+                        epoch = listOf(generation, timeline, revision, state.value.speed),
+                        flowing = videoRenderingActive.value && state.value.isPlaying && !state.value.playbackSuppressed,
+                        droppedFrames = if (drops.decoderDroppedFrames != null && drops.outputDroppedFrames != null)
+                            drops.decoderDroppedFrames + drops.outputDroppedFrames else null,
+                        decoderDroppedFrames = drops.decoderDroppedFrames, outputDroppedFrames = drops.outputDroppedFrames,
+                    )
                     publish(generation) { it.copy(sourceFps = sample.first, droppedFrames = sample.second.outputDroppedFrames,
-                        nativeVideoStatistics = sample.second, displayRefreshHz = refreshHz, bufferMetrics = sample.third) }
-                } else publish(generation) { it.copy(sourceFps = null, droppedFrames = null,
-                    nativeVideoStatistics = null, displayRefreshHz = refreshHz, bufferMetrics = null) }
+                        nativeVideoStatistics = sample.second, displayRefreshHz = refreshHz, bufferMetrics = sample.third,
+                        frameMetrics = frames) }
+                } else {
+                    frameWindow.reset()
+                    publish(generation) { it.copy(sourceFps = null, droppedFrames = null,
+                        nativeVideoStatistics = null, displayRefreshHz = refreshHz, bufferMetrics = null, frameMetrics = null) }
+                }
                 if (videoRenderingActive.value) delay(1_000L)
             }
         }
     }
 
     override fun configureNative(previous: AnimePlayerOptions, next: AnimePlayerOptions) {
+        if (previous.videoEnhancement != next.videoEnhancement || previous.enhancementScale != next.enhancementScale ||
+            previous.enhancementModel != next.enhancementModel || previous.realtimeFrames != next.realtimeFrames ||
+            previous.preparedVideoModel != next.preparedVideoModel) {
+            statisticsRevision++
+            frameWindow.reset()
+        }
         if (!previous.sameDecoderStartupOptions(next)) discardStartup()
         if (previous.preparedVideoModel != next.preparedVideoModel || previous.enhancementModel != next.enhancementModel ||
-            previous.videoEnhancement != next.videoEnhancement || previous.realtimeFrames != next.realtimeFrames) onlinePreparation.clear()
+            previous.videoEnhancement != next.videoEnhancement || previous.realtimeFrames != next.realtimeFrames)
+            onlinePreparation.clear(retainReusable = true)
         if (previous.preparedVideoModel != next.preparedVideoModel && next.preparedVideoModel != null) {
             val handle = engine.value?.impl as? MPVHandle
             if (next.realtimeFrames == null && next.enhancementModel?.engineId != EnhancementEngineIds.DESKTOP_REALTIME) {
@@ -311,7 +362,7 @@ private class DesktopAnimePlayer(
             warming -> options.bufferStartMs
             else -> options.bufferMaxMs
         }
-        val minimum = if (inactive || warming) 0 else options.bufferMinMs
+        val minimum = if (inactive || warming) 0 else options.effectiveBufferRefillMs
         val accepted = listOf(
             handle.setPropertyString("demuxer-max-bytes", options.bufferForwardBytes.toString()),
             handle.setPropertyString("demuxer-max-back-bytes", options.bufferBackBytes.toString()),
@@ -327,6 +378,8 @@ private class DesktopAnimePlayer(
     }
 
     override fun releaseNative() {
+        statisticsRevision++
+        frameWindow.reset()
         onlinePreparation.clear()
         videoRenderingActive.value = false
         statisticsJob?.cancel()
@@ -336,6 +389,7 @@ private class DesktopAnimePlayer(
         enhancement.release()
         enhancementMediaReady = false
         mutableState.value = state.value.copy(nativeVideoStatistics = null, sourceFps = null, droppedFrames = null, bufferMetrics = null,
+            frameMetrics = null,
             videoEnhancement = AnimeVideoEnhancementState(
             mode = options.videoEnhancement,
             phase = AnimeVideoEnhancementPhase.OFF,

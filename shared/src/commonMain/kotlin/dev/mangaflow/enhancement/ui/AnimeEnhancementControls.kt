@@ -23,7 +23,7 @@ import dev.mangaflow.ui.motion.*
 
 /** Destinations share one retained surface and one policy editor. */
 internal enum class EnhancementPage(val title: String) {
-    QUALITY("画质"), FRAME("补帧"), PREPARATION("处理方式"), STATUS("状态"),
+    QUALITY("画质"), FRAME("补帧"), PREPARATION("提前准备"), STATUS("状态"),
     QUALITY_OPTIONS("输出与策略"), FRAME_OPTIONS("补帧质量"), DISPLAY("观看时显示"),
     MODELS("画质模型"), MODEL_DETAIL("模型详情"), ENGINES("运行组件"),
     FRAME_ENGINES("补帧组件"), ENGINE_DETAIL("组件详情"), IMPORT("导入模型"),
@@ -134,22 +134,26 @@ internal fun EnhancementQuality(content: EnhancementContent, policy: Enhancement
         label = { if (!anime && it == QualityTier.ORIGINAL) "原图" else it.label },
         onSelect = { tier ->
             onChange(policy.copy(tier = tier,
+                realtimeEnhancementEnabled = if (anime) tier != QualityTier.ORIGINAL else policy.realtimeEnhancementEnabled,
                 preparation = if (anime && tier != QualityTier.ORIGINAL)
                     policy.preparation + PreparationMode.IMMEDIATE else policy.preparation))
         }, description = if (anime) "画质档位，选择增强档位即开启播放时增强" else "画质档位")
     EnhancementQuiet(when {
         policy.tier == QualityTier.ORIGINAL -> if (anime) "保留片源画面，选择增强档位即可开启播放时增强。" else "保留原图。"
         selectedTitle == null && policy.modelId != null -> "所选模型不可用，可重新选择；你的档位会保留。"
-        anime && PreparationMode.IMMEDIATE !in policy.preparation -> "播放时增强已关闭，当前只使用提前处理的结果。"
+        anime && !policy.realtimeEnhancementEnabled -> "播放时画质增强已关闭，所选档位与已备结果保留。"
         anime && selectedTitle != null -> "手动选用 $selectedTitle；输出倍率与补帧单独设置。"
         policy.tier == QualityTier.AUTO -> "依据已有测量和设备负载选择档位。"
         policy.tier == QualityTier.LIGHT -> "优先降低处理开销。"
         policy.tier == QualityTier.BALANCED -> "兼顾清晰度与处理开销。"
         else -> "需要兼容的高质量模型，运行效果以实际观测为准。"
     })
-    if (anime && policy.tier != QualityTier.ORIGINAL && PreparationMode.IMMEDIATE !in policy.preparation)
-        AnimeEnhancementNavigation(Icons.Outlined.PlayArrow, "开启播放时增强", "使用当前${policy.tier.label}档位",
-            onClick = { onChange(policy.copy(preparation = policy.preparation + PreparationMode.IMMEDIATE)) })
+    if (anime && policy.tier != QualityTier.ORIGINAL) {
+        SettingsToggle("播放时画质增强", policy.realtimeEnhancementEnabled, Icons.Outlined.AutoAwesome,
+            onCheckedChange = { onChange(policy.copy(realtimeEnhancementEnabled = it,
+                preparation = if (it) policy.preparation + PreparationMode.IMMEDIATE else policy.preparation)) })
+        EnhancementQuiet("只控制画质，补帧独立设置。关闭后显示原画，已备结果保留。")
+    }
     Spacer(Modifier.height(8.dp))
     AnimeEnhancementNavigation(Icons.Outlined.Memory, "画质模型",
         selectedTitle ?: if (policy.modelId == null) "自动选择" else "所选模型不可用", onClick = onOpenModels)
@@ -207,6 +211,7 @@ internal fun AnimeEnhancementFrames(policy: EnhancementPolicy, inventory: Engine
     EnhancementChoices(FrameMode.entries, policy.frameMode,
         label = { if (it == FrameMode.ORIGINAL) "原始帧率" else it.label },
         onSelect = { mode -> onChange(policy.copy(frameMode = mode, detectScenes = true,
+            realtimeInterpolationEnabled = mode != FrameMode.ORIGINAL,
             preparation = if (mode != FrameMode.ORIGINAL) policy.preparation + PreparationMode.IMMEDIATE
                 else policy.preparation)) }, description = "补帧目标")
     if (policy.frameMode == FrameMode.CUSTOM) customFps()
@@ -217,14 +222,16 @@ internal fun AnimeEnhancementFrames(policy: EnhancementPolicy, inventory: Engine
         ready.isEmpty() -> "补帧组件尚未就绪，目标已保留。"
         ready.none { it.realtime && it.videoOutput == null } -> "当前支持离线补帧，可从离线任务打开处理后的版本。"
         policy.frameQuality != FrameQuality.BALANCED -> "实时补帧仅在均衡档开启；当前所选质量用于离线处理。"
-        PreparationMode.IMMEDIATE !in policy.preparation -> "播放时处理已关闭，补帧目标保留。"
+        !policy.realtimeInterpolationEnabled -> "播放时补帧已关闭，目标帧率保留。"
         policy.frameMode == FrameMode.AUTO -> "按屏幕刷新率与片源帧率选择目标。"
-        else -> "目标已保存，实际呈现帧率可在观看时显示。"
+        else -> "目标已保存，当前输出帧率可在观看时显示。"
     })
-    if (policy.frameMode != FrameMode.ORIGINAL && policy.frameQuality == FrameQuality.BALANCED &&
-        PreparationMode.IMMEDIATE !in policy.preparation)
-        AnimeEnhancementNavigation(Icons.Outlined.PlayArrow, "开启播放时增强与补帧", "使用已选补帧目标",
-            onClick = { onChange(policy.copy(preparation = policy.preparation + PreparationMode.IMMEDIATE)) })
+    if (policy.frameMode != FrameMode.ORIGINAL) {
+        SettingsToggle("播放时补帧", policy.realtimeInterpolationEnabled, Icons.Outlined.SlowMotionVideo,
+            onCheckedChange = { onChange(policy.copy(realtimeInterpolationEnabled = it,
+                preparation = if (it) policy.preparation + PreparationMode.IMMEDIATE else policy.preparation)) })
+        EnhancementQuiet("只控制帧率，不改画质；关闭后按原始帧率播放。")
+    }
     Spacer(Modifier.height(8.dp))
     AnimeEnhancementNavigation(Icons.Outlined.Tune, "补帧质量", policy.frameQuality.label,
         onClick = onOpenQuality)
@@ -276,36 +283,65 @@ internal fun EnhancementPreparation(content: EnhancementContent, policy: Enhance
         return
     }
 
-    Text("播放过程中", style = MaterialTheme.typography.titleSmall)
+    Text("当前播放", style = MaterialTheme.typography.titleSmall)
     if (platformKind !in setOf(PlatformKind.ANDROID, PlatformKind.DESKTOP)) {
         EnhancementQuiet("当前平台尚未接入播放时增强与提前处理。")
         return
     }
-    SettingsToggle("播放时增强与补帧", PreparationMode.IMMEDIATE in policy.preparation,
-        Icons.Outlined.PlayCircleOutline, onCheckedChange = { setMode(PreparationMode.IMMEDIATE, it) })
-    EnhancementQuiet(when {
-        policy.tier == QualityTier.ORIGINAL && policy.frameMode == FrameMode.ORIGINAL ->
-            "先在画质或补帧页选择目标，开启后处理正在播放的画面。"
-        PreparationMode.IMMEDIATE !in policy.preparation -> "已关闭实时处理；仍可使用提前准备或离线增强的结果。"
-        else -> "按画质和补帧页的选择处理当前画面，使用兼容的实时组件。"
-    })
+    EnhancementValue("画质增强", if (policy.realtimeEnhancementEnabled && policy.tier != QualityTier.ORIGINAL)
+        "${policy.tier.label} · ${policy.scale}×" else "已关闭")
+    EnhancementValue("补帧", if (policy.realtimeInterpolationEnabled && policy.frameMode != FrameMode.ORIGINAL)
+        policy.frameMode.label else "已关闭")
+    EnhancementQuiet("画质与补帧在各自页面独立开关。原片缓冲只准备可播放内容，不代表已增强。")
 
-    Spacer(Modifier.height(8.dp))
-    SettingsToggle("提前增强后续片段", PreparationMode.SMART in policy.preparation,
-        Icons.Outlined.AutoAwesome, onCheckedChange = { setMode(PreparationMode.SMART, it) })
+    Spacer(Modifier.height(12.dp))
+    Text("接下来要看的片段", style = MaterialTheme.typography.titleSmall)
     val onlineEngines = if (platformKind == PlatformKind.ANDROID)
         setOf(EnhancementEngineIds.ANDROID_CUGAN_VIDEO, EnhancementEngineIds.ANDROID_VIDEO_ONNX)
         else setOf(EnhancementEngineIds.VIDEOJANAI)
     val compatible = inventory.models.any { model ->
         model.engineId in onlineEngines && EngineContent.VIDEO in model.contents &&
-            model.nativeScale == policy.scale && (policy.modelId == null || model.id == policy.modelId)
+            model.nativeScale == policy.scale && (policy.modelId == null || model.id == policy.modelId) &&
+            inventory.engines.any { it.id == model.engineId &&
+                it.readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.READY_FOR_TRIAL) }
     }
+    val frameEngine = if (platformKind == PlatformKind.ANDROID) EnhancementEngineIds.ANDROID_RIFE_VULKAN
+        else EnhancementEngineIds.DESKTOP_REALTIME_RIFE
+    val realtimeFrames = policy.realtimeInterpolationEnabled && policy.frameMode != FrameMode.ORIGINAL &&
+        policy.frameQuality == FrameQuality.BALANCED && inventory.frameModels.any { it.engineId == frameEngine } &&
+        (policy.frameMode != FrameMode.CUSTOM || policy.customFps in 1..(if (platformKind == PlatformKind.ANDROID) 120 else 240))
+    val androidRealtimeModel = platformKind == PlatformKind.ANDROID && compatible &&
+        (policy.modelId != null || policy.tier in setOf(QualityTier.FINE, QualityTier.ULTRA))
+    val desktopRealtimeModelId = policy.modelId ?: when (policy.tier) {
+        QualityTier.FINE -> if (inventory.models.any { it.id == "animejanai-live:performance" })
+            "animejanai-live:performance" else "artcnn:C4F16"
+        QualityTier.ULTRA -> if (inventory.models.any { it.id == "animejanai-live:balanced" })
+            "animejanai-live:balanced" else "artcnn:C4F32"
+        else -> null
+    }
+    val desktopRealtimeModel = platformKind == PlatformKind.DESKTOP && policy.scale in 1..2 &&
+        inventory.models.any { model ->
+            model.engineId in setOf(EnhancementEngineIds.DESKTOP_ARTCNN, EnhancementEngineIds.DESKTOP_REALTIME) &&
+                model.nativeScale == policy.scale && model.id == desktopRealtimeModelId
+        }
+    val realtimeModel = androidRealtimeModel || desktopRealtimeModel
+    val lightRealtimeOnly = policy.tier == QualityTier.LIGHT && policy.modelId == null
+    val canPrepare = compatible && policy.tier != QualityTier.ORIGINAL && !lightRealtimeOnly &&
+        policy.realtimeEnhancementEnabled && !realtimeFrames && !realtimeModel
+    val requested = PreparationMode.SMART in policy.preparation
+    SettingsToggle("提前增强后续片段", requested, Icons.Outlined.AutoAwesome,
+        onCheckedChange = { setMode(PreparationMode.SMART, it) }, enabled = canPrepare || requested)
     EnhancementQuiet(when {
         policy.tier == QualityTier.ORIGINAL -> "当前使用原画；选择增强档位后才会准备增强片段。"
-        PreparationMode.SMART !in policy.preparation -> "已关闭提前处理；实时增强仍按上方设置运行。"
+        !policy.realtimeEnhancementEnabled -> "播放时画质增强已关闭，提前增强暂停；原片缓冲继续。"
+        realtimeFrames -> "当前实时补帧与提前增强不能同时运行；优先补帧，原片缓冲继续。"
+        realtimeModel -> "当前模型在播放时直接增强，暂不同时准备增强片段；原片缓冲继续。"
+        lightRealtimeOnly -> "轻量自动档只做播放时增强；提前增强可在均衡或更高档位使用。"
         currentIssue != null -> "当前：$currentIssue"
         !compatible -> if (policy.modelId == null) "尚无兼容的已安装模型；可在画质模型中选择，当前继续实时处理或原画。"
             else "所选模型不提供此倍率的在线片段处理；可更换模型，或使用实时／离线增强。"
-        else -> "播放稳定后提前增强后续片段，准备好后自动使用；缓冲或设备负载较高时暂缓。"
+        !requested -> "已关闭提前增强；当前画面仍按画质页选择处理。"
+        else -> "后台准备后续画面，当前播放优先；负载高或缓冲不足时等待，不保证同时运行。"
     })
+    EnhancementQuiet("同一画面优先使用已备增强结果，不重复增强；未备好时使用可用的实时增强或原画。原片和增强结果分别缓存，关闭效果不会清空缓存。")
 }

@@ -3,11 +3,37 @@ package dev.mangaflow.reader
 import dev.mangaflow.enhancement.EnhancementMetric
 import dev.mangaflow.enhancement.EnhancementPolicy
 import dev.mangaflow.enhancement.EnhancementTaskPhase
+import dev.mangaflow.enhancement.EnhancementTask
 import dev.mangaflow.enhancement.QualityTier
 import dev.mangaflow.enhancement.ReaderEnhancementState
 import dev.mangaflow.enhancement.engine.EngineStage
 import dev.mangaflow.enhancement.ui.EnhancementReadout
 import dev.mangaflow.platform.formatDecimal
+
+/** Use only engine-reported completed work; a running task is not an output receipt. */
+internal fun readerEnhancementTaskProgress(task: EnhancementTask): String = when (task.phase) {
+    EnhancementTaskPhase.RUNNING -> {
+        val progress = task.progress
+        when (progress?.stage) {
+            EngineStage.MODEL_LOAD -> "模型加载中"
+            EngineStage.PROCESS -> if (progress.total?.let { it > 0L } == true)
+                "本页处理 ${progress.completed}/${progress.total}"
+                else "本页处理中"
+            EngineStage.ENCODE -> "增强文件写入中"
+            EngineStage.VALIDATE -> "增强文件校验中"
+            EngineStage.COMPLETE -> "增强结果收尾中"
+            EngineStage.DOWNLOAD -> "增强组件下载中"
+            EngineStage.VERIFY -> "增强输入校验中"
+            EngineStage.INSTALL -> "增强组件安装中"
+            null -> "本页增强准备中"
+        }
+    }
+    EnhancementTaskPhase.FAILED -> "本页增强失败"
+    EnhancementTaskPhase.PAUSED -> "本页增强暂停"
+    EnhancementTaskPhase.CANCELLED -> "本页增强取消"
+    EnhancementTaskPhase.COMPLETED -> "本页增强已备"
+    else -> "本页增强等待"
+}
 
 /** Assets are prepared files. This controller has no decoded-image presentation acknowledgement. */
 internal fun readerEnhancementReadouts(
@@ -21,12 +47,7 @@ internal fun readerEnhancementReadouts(
             !enabled -> "原图"
             !pageMatches -> "本页增强 —"
             state.currentEnhanced -> "本页已备"
-            task?.phase == EnhancementTaskPhase.RUNNING ->
-                if (task.progress?.stage == EngineStage.MODEL_LOAD) "模型加载中" else "本页增强中"
-            task?.phase == EnhancementTaskPhase.FAILED -> "本页增强失败"
-            task?.phase == EnhancementTaskPhase.PAUSED -> "本页增强暂停"
-            task?.phase == EnhancementTaskPhase.CANCELLED -> "本页增强取消"
-            task != null -> "本页增强等待"
+            task != null -> readerEnhancementTaskProgress(task)
             else -> "本页未备"
         }
         add(EnhancementReadout(EnhancementMetric.QUALITY, value,

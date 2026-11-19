@@ -147,6 +147,7 @@ private fun AnimeEnhancementStatus(
     onAnimeScopeChange: ((Int) -> Unit)?,
 ) {
     var localScope by remember(playback?.assetKey, playback?.sessionGeneration) { mutableIntStateOf(0) }
+    var playbackDetails by remember(playback?.assetKey, playback?.sessionGeneration) { mutableStateOf(false) }
     val scope = (animeScope ?: localScope).coerceIn(0, 2)
     val hasSession = playback?.assetKey != null && playback.phase !in setOf(AnimePlayerPhase.IDLE, AnimePlayerPhase.RELEASED)
     val metrics = sample?.takeIf {
@@ -187,7 +188,11 @@ private fun AnimeEnhancementStatus(
         effect?.phase == AnimeVideoEnhancementPhase.CONFIGURED -> "增强已配置 · 等待处理样本"
         else -> "等待增强处理样本"
     }
-    val currentFps = playback?.presentedFps.takeIf { playing }
+    val frameMetrics = playback?.frameMetrics.takeIf { playing }
+    val currentFps = frameMetrics?.outputFps
+    val estimatedFps = playback?.nativeVideoStatistics?.estimatedFilterFps.takeIf { playing }
+    val recentWindow = frameMetrics?.windowDurationMs?.takeIf { it < 4_500L }
+        ?.let { "近 ${formatDecimal(it / 1000.0, 1)} 秒" } ?: "近 5 秒"
     val inputSize = dimensions(playback?.videoWidth, playback?.videoHeight).takeIf { hasSession }
     val submittedSize = if (usingPrepared) dimensions(prepared?.outputWidth, prepared?.outputHeight)
         else if (effect?.phase == AnimeVideoEnhancementPhase.ACTIVE && (observation?.submittedFrames ?: 0) > 0)
@@ -222,38 +227,50 @@ private fun AnimeEnhancementStatus(
                     (if (playback?.preEnhanced == true) "增强文件帧率" else "源视频帧率") to
                         animeFps(playback?.sourceFps.takeIf { hasSession }),
                     "目标帧率" to animeFps(metrics?.targetFps),
-                    "实际呈现" to animeFps(currentFps),
+                    (if (currentFps == null && estimatedFps != null) "滤镜估计" else "视频输出") to
+                        animeFps(currentFps ?: estimatedFps),
                     "前方缓冲" to animeSeconds(playback?.bufferedAheadMs?.takeIf { hasSession && it >= 0 }?.div(1000.0)),
                 ))
+                AnimeMetricRow("$recentWindow · 丢帧", frameMetrics?.recentDroppedFrames?.let { "$it 帧" } ?: "—")
+                frameMetrics?.recentDropPercent?.let {
+                    AnimeMetricRow("$recentWindow · 丢帧占比", formatDecimal(it, 1) + "%")
+                }
+                if (frameMetrics?.recentDecoderDroppedFrames != null || frameMetrics?.recentOutputDroppedFrames != null)
+                    AnimeMetricRow("$recentWindow · 解码 / 输出丢帧", animeCount(frameMetrics?.recentDecoderDroppedFrames) +
+                        " / " + animeCount(frameMetrics?.recentOutputDroppedFrames))
+                EnhancementQuiet(when {
+                    !hasSession -> "尚无本集数据。— 表示未采集，不代表数值为零。"
+                    !playing -> "播放未在进行，当前帧率与近期丢帧暂停采样。"
+                    currentFps != null -> "视频输出为播放器输出回调的实测帧率，不是屏幕刷新率；近期丢帧随时间更新。"
+                    estimatedFps != null -> "当前内核只提供滤镜帧率估计；未测得视频输出帧率。"
+                    else -> "正在等待当前采样；未提供的读数保留为空，不以目标帧率代替。"
+                })
                 EnhancementDivider()
                 playback?.displayRefreshHz?.takeIf { hasSession }?.let {
                     AnimeMetricRow("播放屏幕刷新率", formatDecimal(it, 1) + " Hz")
                 }
                 AnimeMetricRow(if (playback?.preEnhanced == true) "增强文件尺寸" else "视频输入尺寸", inputSize ?: "—")
                 if (playback?.preEnhanced != true) AnimeMetricRow("已提交帧尺寸", submittedSize ?: "—")
-                AnimeMetricRow("已呈现帧 · 累计", animeCount(playback?.presentedFrames.takeIf { hasSession }))
-                if (playback?.nativeVideoStatistics == null) {
-                    AnimeMetricRow("解码/输出缓冲丢弃 · 原生计数", animeCount(playback?.droppedFrames.takeIf { hasSession }))
-                }
-                AnimeMetricRow("重复帧 · 累计", animeCount(metrics?.repeatedFrames))
                 AnimeMetricRow("接收速度", playback?.downloadBytesPerSecond?.takeIf { hasSession && it >= 0 }
                     ?.let { enhancementBytes(it) + "/s" } ?: "—")
-                playback?.nativeVideoStatistics?.takeIf { hasSession }?.let { native ->
-                    AnimeMetricRow("解码器 / 视频输出", (native.hardwareDecoder ?: "—") + " / " + (native.videoOutput ?: "—"))
-                    AnimeMetricRow("原生丢帧 · 解码 / 视频输出", animeCount(native.decoderDroppedFrames) + " / " +
-                        animeCount(native.outputDroppedFrames))
-                    AnimeMetricRow("滤镜输出估计", native.estimatedFilterFps?.takeIf { playing }
-                        ?.let { formatDecimal(it, 1) + " FPS" } ?: "—")
-                    AnimeMetricRow("输出延迟帧 · 估计", animeCount(native.estimatedDelayedFrames))
-                    EnhancementQuiet("来源：mpv 原生属性。输出延迟帧是内核估计；滤镜输出不等于屏幕呈现。")
+                EnhancementDetailToggle(playbackDetails, { playbackDetails = !playbackDetails }, "累计与原生统计")
+                if (playbackDetails) {
+                    AnimeMetricRow("屏幕呈现帧率", animeFps(playback?.presentedFps.takeIf { playing }))
+                    AnimeMetricRow("已呈现帧 · 累计", animeCount(playback?.presentedFrames.takeIf { hasSession }))
+                    if (playback?.nativeVideoStatistics == null) {
+                        AnimeMetricRow("解码/输出缓冲丢弃 · 累计", animeCount(playback?.droppedFrames.takeIf { hasSession }))
+                    }
+                    AnimeMetricRow("重复帧 · 累计", animeCount(metrics?.repeatedFrames))
+                    playback?.nativeVideoStatistics?.takeIf { hasSession }?.let { native ->
+                        AnimeMetricRow("解码器 / 视频输出", (native.hardwareDecoder ?: "—") + " / " + (native.videoOutput ?: "—"))
+                        AnimeMetricRow("累计丢帧 · 解码 / 视频输出", animeCount(native.decoderDroppedFrames) + " / " +
+                            animeCount(native.outputDroppedFrames))
+                        AnimeMetricRow("滤镜估计", animeFps(estimatedFps))
+                        AnimeMetricRow("输出延迟帧 · 估计", animeCount(native.estimatedDelayedFrames))
+                        EnhancementQuiet("来源：mpv 原生属性。输出延迟帧是内核估计。")
+                    }
+                    EnhancementQuiet("视频输出按输出帧释放回调计数，不等于屏幕 Present。累计计数可能在定位或重建后重置，不代表当前是否流畅。")
                 }
-                EnhancementQuiet("丢帧是播放器原生计数，定位或重建后可能重置；不是本集总计，也不是丢帧百分比。")
-                EnhancementQuiet(when {
-                    !hasSession -> "尚无本集数据。— 表示未采集，不代表数值为零。"
-                    !playing -> "播放未在进行，实时呈现帧率暂不显示；已收到的累计数据保留。"
-                    currentFps == null -> "播放器未提供实际呈现帧率；提交速度和目标帧率不能替代它。"
-                    else -> "目标帧率是设置；实际呈现只使用播放器回报。— 表示未采集。"
-                })
                 if (playback?.phase == AnimePlayerPhase.ERROR) playback.error?.takeIf { it.isNotBlank() }
                     ?.let { EnhancementQuiet(it, error = true) }
             }
@@ -293,6 +310,9 @@ private fun AnimeEnhancementStatus(
                         AnimeMetricRow("已确认复用 · 样本", prepared.framesUsed.toString())
                         EnhancementQuiet("只累计实际视频输出中核对到的增强帧样本，不代表全部输出帧数或屏幕呈现帧率。")
                     } else AnimeMetricRow("已缓存 / 实际复用 · 帧", "${prepared.frames} / ${prepared.framesUsed}")
+                }
+                playback?.preparedVideoRetainedBytes?.takeIf { hasSession && it > 0L }?.let {
+                    AnimeMetricRow("增强暂存待复用", enhancementBytes(it))
                 }
                 EnhancementQuiet("提交频率不等于 GPU 完成或屏幕呈现帧率；提交尺寸对应处理缓冲区，不代表屏幕呈现分辨率。")
                 EnhancementDivider()

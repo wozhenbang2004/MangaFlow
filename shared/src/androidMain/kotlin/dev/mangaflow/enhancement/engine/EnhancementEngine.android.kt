@@ -27,9 +27,14 @@ import java.nio.file.Files
 import java.nio.file.StandardOpenOption
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -290,8 +295,8 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                         require(request.content in model.contents && model.engineId == request.engineId) { "模型不适用于此页面类别" }
                         require(model.nativeScale == request.scale) { "所选倍率与模型原生倍率不一致" }
                         check(engineSha256(File(model.path)) == model.sha256) { "模型已改变，请重新选择" }
-                        runtimes.ensureLoaded(PanelRuntimeId.ONNX)
                         progress(EngineProgress(EngineStage.MODEL_LOAD, detail = "准备真实 ONNX CPU 模型"))
+                        runtimes.ensureLoaded(PanelRuntimeId.ONNX)
                         val readySession = modelSession(model)
                         currentCoroutineContext().ensureActive()
                         progress(EngineProgress(EngineStage.PROCESS, detail = "正在处理首个分块 · CPU ONNX"))
@@ -425,23 +430,40 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
     private suspend fun renderOnnx(decoder: BitmapRegionDecoder, output: File, request: EngineImageRequest,
         session: OrtSession, progress: (EngineProgress) -> Unit) {
         val coroutine = currentCoroutineContext()
-        val renderer = AndroidOnnxTiles(session, decoder.width, decoder.height,
-            request.scale, request.tileSize, request.overlap, request.maximumOutputBytes)
-        val decoderOptions = BitmapFactory.Options().apply {
-            inPreferredConfig = Bitmap.Config.ARGB_8888
-            inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
-        }
-        EnginePngWriter(output, renderer.outWidth, renderer.outHeight).use { writer ->
-            renderer.render(coroutine::ensureActive, { left, top, width, height, pixels ->
-                val bitmap = decoder.decodeRegion(Rect(left, top, left + width, top + height), decoderOptions)
-                    ?: error("无法解码模型分块")
+        OrtSession.RunOptions().use { runOptions ->
+            coroutineScope {
+                // Coroutine cancellation cannot interrupt session.run's native call by itself.
+                // Signal its supported termination flag from a different dispatcher, then keep
+                // the native gate and options alive until the real call and this observer exit.
+                val cancellation = launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+                    try { awaitCancellation() }
+                    finally { runCatching { runOptions.setTerminate(true) } }
+                }
                 try {
-                    bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-                } finally { bitmap.recycle() }
-            }, { _, row -> writer.row(row) }, { completed, total ->
-                progress(EngineProgress(EngineStage.PROCESS, completed, total, detail = "重叠分块 · CPU ONNX"))
-            })
-            writer.finish()
+                    val renderer = AndroidOnnxTiles(session, decoder.width, decoder.height,
+                        request.scale, request.tileSize, request.overlap, request.maximumOutputBytes,
+                        runOptions = runOptions)
+                    val decoderOptions = BitmapFactory.Options().apply {
+                        inPreferredConfig = Bitmap.Config.ARGB_8888
+                        inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
+                    }
+                    EnginePngWriter(output, renderer.outWidth, renderer.outHeight).use { writer ->
+                        renderer.render(coroutine::ensureActive, { left, top, width, height, pixels ->
+                            val bitmap = decoder.decodeRegion(Rect(left, top, left + width, top + height), decoderOptions)
+                                ?: error("无法解码模型分块")
+                            try { bitmap.getPixels(pixels, 0, width, 0, 0, width, height) }
+                            finally { bitmap.recycle() }
+                        }, { _, row -> writer.row(row) }, { completed, total ->
+                            progress(EngineProgress(EngineStage.PROCESS, completed, total,
+                                detail = if (completed == 0L) "正在处理首个分块 · CPU ONNX" else "重叠分块 · CPU ONNX"))
+                        })
+                        coroutine.ensureActive()
+                        writer.finish()
+                    }
+                } finally {
+                    withContext(NonCancellable) { cancellation.cancelAndJoin() }
+                }
+            }
         }
     }
 }

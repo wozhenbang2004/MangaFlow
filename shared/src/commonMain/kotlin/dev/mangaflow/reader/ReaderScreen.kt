@@ -180,6 +180,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.platform.monotonicTimeMillis
+import dev.mangaflow.platform.storage.StorageFile
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
@@ -628,7 +629,18 @@ fun ReaderScreen(
             { page, budget, work ->
                 val local = downloadStore.resolvePrefetchPage(manga.id, readingChapterId, page)
                     ?: throw ReaderPrefetchDownloadOwned()
-                if (local.url.startsWith("file:")) local else {
+                if (local.url.startsWith("file:")) {
+                    // A download can finish after resolution but before this attempt starts.
+                    // This shortcut has no script/JM receipt, so charge its actual local size.
+                    val bytes = withContext(Dispatchers.IO) {
+                        readerFilePath(local.url)?.let { StorageFile(it).length().takeIf { size -> size > 0L } }
+                    }
+                    if (bytes != null) work.ifOptional {
+                        try { budget.accept(bytes) }
+                        catch (_: PrefetchBudgetExceeded) { budget.exhaust() }
+                    }
+                    local
+                } else {
                     val owner = chapterSourceMangaId(manga.id, chapter)
                     if (dev.mangaflow.data.SourceKeys.decodeChapter(owner, readingChapterId).sourceId == "jmcomic")
                         prefetchJmPage(adultImageContext, owner, readingChapterId, local, budget, work)
@@ -2459,7 +2471,7 @@ private data class PrefetchWindow(
     val resolveParallel: Int, val decodeParallel: Int, val decodeEnabled: Boolean, val foregroundActive: Boolean,
     val runtime: ExperienceRuntimePreferences,
     val scrollDirection: Int?, val directionAnchor: Long?, val directionBaseline: Pair<Long, Long>?,
-    val groups: List<PageSpread>?, val layoutKey: Any?,
+    val groups: List<PageSpread>?, val layoutKey: Any?, val originalCacheRevision: Long,
 )
 
 private data class PrefetchedReaderPage(val page: Page, val diskCacheKey: String?)
@@ -2538,6 +2550,7 @@ internal fun AdjacentPagePrefetch(
         val resolutionJobs = mutableStateMapOf<Int, Job>()
         val resolutionTokens = mutableMapOf<Int, PrefetchWork>()
         val originalFinished = mutableSetOf<Int>()
+        var originalCacheRevision by mutableLongStateOf(0L)
         val retryAttempts = mutableMapOf<Pair<Int, PrefetchStage>, Long>()
         val retryAfter = mutableMapOf<Pair<Int, PrefetchStage>, Long>()
         val resourceDeferred = mutableSetOf<Pair<Int, PrefetchStage>>()
@@ -2609,6 +2622,7 @@ internal fun AdjacentPagePrefetch(
         val retainedPages = mutableMapOf<Int, PrefetchedReaderPage>()
         val originalEpochs = mutableMapOf<Int, Int>()
         val originalStamps = mutableMapOf<Int, ReaderOriginalStamp>()
+        val originalBytes = mutableMapOf<Int, Long>()
         val newlyAvailable = mutableSetOf<Int>()
         val inspected = mutableMapOf<Int, Int>()
         // An attempted cache-only check is not a claim that a preview remains resident.
@@ -2616,12 +2630,14 @@ internal fun AdjacentPagePrefetch(
         val deferredChecks = mutableMapOf<Int, Long>()
         fun transfers(): Set<Int> = (requests.keys + scriptRequests.keys).toSet()
         fun pending(): Set<Int> = transfers() + resolutionJobs.keys
-        fun originalReady(index: Int, page: Page, diskKey: String?) {
+        fun originalReady(index: Int, page: Page, diskKey: String?, bytes: Long? = null) {
             enhancement?.originalReady(index, page, headers, page.sourceRouteId.ifBlank { sourceId }, diskKey)
             cacheRangeOwner?.let { rangeStore.registerReadingResource(it, index, page, diskKey) }
             retainedPages[index] = PrefetchedReaderPage(page, diskKey)
             originalEpochs[index] = (originalEpochs[index] ?: 0) + 1
             originalStamps.remove(index)
+            originalBytes.remove(index)
+            bytes?.takeIf { it > 0L }?.let { originalBytes[index] = it }
             newlyAvailable.add(index)
             inspected.remove(index)
             previewChecks.remove(index)
@@ -2649,6 +2665,13 @@ internal fun AdjacentPagePrefetch(
         var budgetOwner: Set<Int> = emptySet()
         var budgetLimit = -1L
         var byteWindow = PrefetchByteBudget(0L)
+        val accountedOriginals = mutableSetOf<Int>()
+        fun accountCachedOriginal(index: Int, bytes: Long?) {
+            if (bytes == null || index !in budgetOwner || index in accountedOriginals) return
+            try { byteWindow.accept(bytes) }
+            catch (_: PrefetchBudgetExceeded) { byteWindow.exhaust() }
+            accountedOriginals += index
+        }
         val progressSampler = requestScope.launch {
             var cacheAt = 0L
             var previousScanMillis = 0L
@@ -2695,14 +2718,31 @@ internal fun AdjacentPagePrefetch(
                             tracker?.inspectedObservation(owner, scan)
                             if (index in inspectTargets && index !in inspectVisible && originalEpochs[index] == epoch &&
                                 retainedPages[index] === retained && resolvedPages[index] == resolved) {
-                                if (artifact.originalStamp != null) originalStamps[index] = artifact.originalStamp
-                                else if (artifact.originalPresent == false) originalStamps.remove(index)
                                 // The exact remote cache hit is useful before resolution. A miss may
                                 // still have a downloaded/materialized alias; only resolved misses count.
                                 val original = artifact.originalPresent.takeIf { it == true || retained != null ||
                                     resolved != null || resource.url.startsWith("file:") }
-                                if (original == true) enhancement?.originalReady(index, resource, headers,
-                                    resource.sourceRouteId.ifBlank { sourceId }, retained?.diskCacheKey)
+                                if (original == true) {
+                                    if (index !in transfers() && (retained == null || index !in originalFinished)) {
+                                        // Register exact cache evidence before network/byte admission.
+                                        // Existing files need no transfer slot, even with a full window.
+                                        originalReady(index, resource, retained?.diskCacheKey, artifact.originalBytes)
+                                        accountCachedOriginal(index, artifact.originalBytes)
+                                        originalFinished += index
+                                        val key = index to PrefetchStage.DOWNLOADING
+                                        retryAttempts.remove(key); retryAfter.remove(key); resourceDeferred.remove(key)
+                                        budgetDeferred.remove(index); transientDeferred.remove(key); capacityDeferred.remove(key)
+                                        tracker?.localOriginal(index, owner)
+                                        originalCacheRevision++
+                                    } else {
+                                        if (index !in transfers()) accountCachedOriginal(index, artifact.originalBytes)
+                                        enhancement?.originalReady(index, resource, headers,
+                                            resource.sourceRouteId.ifBlank { sourceId }, retained?.diskCacheKey)
+                                    }
+                                }
+                                if (artifact.originalStamp != null) originalStamps[index] = artifact.originalStamp
+                                else if (artifact.originalPresent == false) originalStamps.remove(index)
+                                artifact.originalBytes?.let { originalBytes[index] = it }
                                 tracker?.artifact(index, original, artifact.originalBytes,
                                     artifact.previewResident.takeIf { scanLayout === currentLayout &&
                                         memoryKeys[index] == previewKey &&
@@ -2730,7 +2770,7 @@ internal fun AdjacentPagePrefetch(
                     checks.keys.toSet(), resolutionJobs.keys.toSet(), resolvedPages.keys.toSet(),
                     currentBudget.resolveRequests, currentBudget.decodeRequests, experience.canDecodePrefetch(), readerActive,
                     currentBudget.runtime, currentScrollDirection?.invoke(), currentDirectionAnchor?.invoke(),
-                    currentDirectionBaseline?.invoke(), currentGroups, currentLayout)
+                    currentDirectionBaseline?.invoke(), currentGroups, currentLayout, originalCacheRevision)
             }.distinctUntilChanged().combine(snapshotFlow {
                 prefetchEnabled && (currentBudget.prefetchBytes > 0L ||
                     currentBudget.decodedPrefetchPages > 0 && experience.canDecodePrefetch())
@@ -2849,11 +2889,6 @@ internal fun AdjacentPagePrefetch(
                 val observationWindow = (aheadTargets + behindTargets).toSet() + visiblePages
                 inspectTargets = observationWindow + previewTargets
                 inspectVisible = visiblePages
-                tracker?.window(owner, window.first, window.last, direction, aheadTargets, behindTargets,
-                    networkDesired, memoryWindow, previewTargets, window.foregroundActive,
-                    when { !window.enabled -> "阅读暂缓"; !window.visibleReady -> "当前页优先"
-                        window.bytes <= 0L -> currentBudget.reason
-                        !writable -> "等待可回收空间；当前阅读和下载受保护"; else -> null })
                 // A remounted current image can temporarily be unready. Keep only already
                 // running originals within the same observation window; never start new
                 // optional requests until visibleReady. Disabled/zero-budget still cancels.
@@ -2872,6 +2907,7 @@ internal fun AdjacentPagePrefetch(
                 retainedPages.keys.retainAll(retained)
                 originalEpochs.keys.retainAll(retained)
                 originalStamps.keys.retainAll(retained)
+                originalBytes.keys.retainAll(retained)
                 newlyAvailable.retainAll(retained)
                 memoryKeys.keys.retainAll(retained)
                 inspected.keys.retainAll(retained)
@@ -2891,18 +2927,25 @@ internal fun AdjacentPagePrefetch(
                     budgetOwner = networkDesired
                     budgetLimit = window.bytes
                     byteWindow = PrefetchByteBudget(window.bytes)
+                    accountedOriginals.clear()
                     for (index in networkDesired.filter { it in originalFinished && it in retainedPages }) {
-                        try { byteWindow.accept(experience.estimatedPageBytes(pages[index].url)) }
-                        catch (_: PrefetchBudgetExceeded) { byteWindow.exhaust(); break }
+                        accountCachedOriginal(index, originalBytes[index])
                     }
                 }
+                tracker?.window(owner, window.first, window.last, direction, aheadTargets, behindTargets,
+                    networkDesired, memoryWindow, previewTargets, window.foregroundActive,
+                    when { !window.enabled -> "阅读暂缓"; !window.visibleReady -> "当前页优先"
+                        window.bytes <= 0L -> currentBudget.reason
+                        !writable -> "等待可回收空间；当前阅读和下载受保护"
+                        byteWindow.remaining <= 0L && networkDesired.any { it !in originalFinished } ->
+                            "原图预取额度已用尽；翻页或提高额度后继续"
+                        else -> null })
                 // A new window can have usable bytes without changing configured limits.
                 // Retry only settled budget failures from an older owner; keep source-failure
                 // retry limits, in-flight ownership and the new window's byte checks intact.
                 budgetDeferred.forEach { (index, failedWindow) ->
                     if (failedWindow !== byteWindow && index in networkDesired && index !in pending() &&
-                        writable && window.foregroundActive && byteWindow.remaining > 0L &&
-                        experience.estimatedPageBytes(resolvedPages[index]?.url ?: pages[index].url) <= byteWindow.remaining) {
+                        writable && window.foregroundActive && byteWindow.remaining > 0L) {
                         val key = index to PrefetchStage.DOWNLOADING
                         retryAfter[key] = now
                     }
@@ -2960,7 +3003,12 @@ internal fun AdjacentPagePrefetch(
                             if (resource != null) {
                                 resolvedPages[index] = resource
                                 if (resource.url.startsWith("file:")) {
-                                    originalReady(index, resource, readerPageCacheKey(resource, headers, sourceId))
+                                    val key = readerPageCacheKey(resource, headers, sourceId)
+                                    val bytes = inspectReaderPreparedArtifacts(context, resource, headers, sourceId, key).originalBytes
+                                    currentCoroutineContext().ensureActive()
+                                    if (resolutionJobs[index] !== owned) return@launch
+                                    originalReady(index, resource, key, bytes)
+                                    accountCachedOriginal(index, bytes)
                                     originalFinished += index
                                     tracker?.localOriginal(index, owner)
                                 }
@@ -3008,7 +3056,9 @@ internal fun AdjacentPagePrefetch(
                             !experience.canRetryPrefetchCapacity(it)
                         } == true) continue
                     if (transfers().size >= window.parallel) break
-                    if (experience.estimatedPageBytes(resource.url) > byteWindow.remaining) break
+                    // An estimate cannot prove this page exceeds the remaining window.
+                    // Transport admission and real body bytes bound the attempted transfer.
+                    if (byteWindow.remaining <= 0L) break
                     val windowBytes = byteWindow
                     val token = token(index, PrefetchStage.DOWNLOADING)
                     if (sourceId.startsWith("js_") || sourceId == "jmcomic") {
@@ -3019,7 +3069,13 @@ internal fun AdjacentPagePrefetch(
                                 currentCoroutineContext().ensureActive()
                                 if (scriptRequests[index] !== owned) return@launch
                                 if (local != null) {
-                                    originalReady(index, local, readerPageCacheKey(local, headers, sourceId))
+                                    val cacheKey = readerPageCacheKey(local, headers, sourceId)
+                                    val bytes = inspectReaderPreparedArtifacts(context, local, headers, sourceId, cacheKey).originalBytes
+                                    currentCoroutineContext().ensureActive()
+                                    if (scriptRequests[index] !== owned) return@launch
+                                    originalReady(index, local, cacheKey, bytes)
+                                    // Script/JM receipts already charged the actual transfer or cache hit.
+                                    if (windowBytes === byteWindow) accountedOriginals += index
                                     // A recovered script/JM original is complete, not a pending
                                     // resource failure to restart when another budget changes.
                                     val key = index to PrefetchStage.DOWNLOADING
@@ -3091,11 +3147,20 @@ internal fun AdjacentPagePrefetch(
                             currentCoroutineContext().ensureActive()
                             if (requests[index] !== ownedRequest) return@launch
                             if (result is SuccessResult) {
-                                originalReady(index, resource, result.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId))
+                                val cachedBytes = if (result.dataSource != coil3.decode.DataSource.NETWORK)
+                                    inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
+                                        result.diskCacheKey, previousOriginal = originalStamps[index]).originalBytes else null
+                                currentCoroutineContext().ensureActive()
+                                if (requests[index] !== ownedRequest) return@launch
+                                originalReady(index, resource, result.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId),
+                                    cachedBytes ?: transfer.snapshot().receivedBytes.takeIf { it > 0L })
                                 if (result.dataSource != coil3.decode.DataSource.NETWORK) token.ifOptional {
-                                    try { windowBytes.accept(experience.estimatedPageBytes(resource.url)) }
-                                    catch (_: PrefetchBudgetExceeded) { windowBytes.exhaust() }
+                                    if (cachedBytes != null) {
+                                        try { windowBytes.accept(cachedBytes) }
+                                        catch (_: PrefetchBudgetExceeded) { windowBytes.exhaust() }
+                                    }
                                 }
+                                if (windowBytes === byteWindow) accountedOriginals += index
                                 val key = index to PrefetchStage.DOWNLOADING
                                 retryAttempts.remove(key); retryAfter.remove(key); resourceDeferred.remove(key)
                                 end(index, PrefetchStage.DOWNLOADING, ReaderPreparationPhase.COMPLETE)

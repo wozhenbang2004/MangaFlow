@@ -99,7 +99,8 @@ internal class AndroidCuganVulkan(context: Context, root: File) {
                     try { bitmap.getPixels(pixels, 0, width, 0, 0, width, height) }
                     finally { bitmap.recycle() }
                 }, { _, row -> writer.row(row) }) { completed, total ->
-                    progress(EngineProgress(EngineStage.PROCESS, completed, total, detail = "Real-CUGAN · Vulkan 已完成分块"))
+                    progress(EngineProgress(EngineStage.PROCESS, completed, total,
+                        detail = if (completed == 0L) "正在处理首个分块 · Vulkan Real-CUGAN" else "Real-CUGAN · Vulkan 已完成分块"))
                 }
                 writer.finish()
             }
@@ -166,6 +167,7 @@ internal class AndroidCuganTiles(private val handle: Long, private val width: In
         onTile: (Long, Long) -> Unit = { _, _ -> }) {
         var completed = 0L
         val total = columns.size.toLong() * rows.size
+        onTile(0L, total)
         for ((top, ys) in rows) {
             for ((left, xs) in columns) {
                 checkActive()

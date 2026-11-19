@@ -182,7 +182,7 @@ internal fun AnimePlayerSettings(
                     }
                     Text(when (section) {
                         AnimePlayerPanel.GENERAL -> "播放设置"
-                        AnimePlayerPanel.VIDEO -> if (enhancementPage in enhancementTabs) "画质与性能" else enhancementPage.title
+                        AnimePlayerPanel.VIDEO -> if (enhancementPage in enhancementTabs) "番剧体验策略" else enhancementPage.title
                         AnimePlayerPanel.VIDEO_SOURCE -> "片源与显示"
                         AnimePlayerPanel.VIDEO_PREFERENCE -> "开播清晰度偏好"
                         AnimePlayerPanel.AUDIO -> "声音"
@@ -220,7 +220,7 @@ internal fun AnimePlayerSettings(
                     when (section) {
                         AnimePlayerPanel.GENERAL -> {
                             item { AnimeQuietLabel("画面与声音") }
-                            item { AnimePlayerSettingLink(Icons.Outlined.AspectRatio, "画质与性能",
+                            item { AnimePlayerSettingLink(Icons.Outlined.AspectRatio, "画质与补帧",
                                 "画质、补帧与运行状态") { show(AnimePlayerPanel.VIDEO) } }
                             if (AnimePlayerCapability.VOLUME in capabilities || AnimePlayerCapability.AUDIO_TRACKS in capabilities) item {
                                 val soundSummary = listOfNotNull(
@@ -520,8 +520,10 @@ internal fun AnimePlayerSettings(
                                 val speed = currentMedia?.downloadBytesPerSecond?.takeIf { it >= 0 }?.let(::animeSourceRate)
                                 AnimeQuietLabel("打开至首帧 ${firstFrame ?: "—"} · 前方已缓冲 ${buffered ?: "—"}")
                                 AnimeQuietLabel("实播传输速率 · ${speed ?: "—"}")
-                                AnimeQuietLabel("已保存时长目标 · ${bufferSeconds(state.settings.bufferMinMs)}–${bufferSeconds(state.settings.bufferMaxMs)} 秒")
-                                AnimeQuietLabel("达到上限后暂停预读，播放消耗至补充阈值后继续；容量先满或临近片尾时，实际时长可能更少。")
+                                AnimeQuietLabel("前方缓冲目标 · ${bufferSeconds(state.settings.bufferMaxMs)} 秒")
+                                AnimeQuietLabel(if (state.settings.bufferRefillNearTarget)
+                                    "接近目标时及时补充，尽量稳定前方可播时长；容量、网速或片尾可能限制实际时长。"
+                                    else "达到目标后暂停读取，降至 ${bufferSeconds(state.settings.bufferMinMs)} 秒再补充；容量或片尾可能限制实际时长。")
                                 currentMedia?.bufferMetrics?.let { metrics ->
                                     AnimeQuietLabel("已分配缓冲 · ${metrics.allocatedBytes?.let(::animeBytes) ?: "—"}")
                                     if (metrics.forwardBytes != null || metrics.backBytes != null)
@@ -540,7 +542,12 @@ internal fun AnimePlayerSettings(
                                 currentMedia == null || playback.phase in setOf(AnimePlayerPhase.OPENING, AnimePlayerPhase.ERROR)
                             if (configureBuffer) {
                                 item { AnimeQuietLabel("缓冲目标会保存，实际缓存量随内核、媒体与可用预算变化。") }
-                                item { AnimeTextField(minimumDraft, { minimumDraft = it; error = null }, "继续预读的补充阈值（秒）") }
+                                item { SettingsToggle("及时补充", state.settings.bufferRefillNearTarget, Icons.Outlined.Sync,
+                                    onCheckedChange = { value -> controller.updatePlaybackSettings {
+                                        it.copy(bufferRefillNearTarget = value)
+                                    } }) }
+                                if (!state.settings.bufferRefillNearTarget)
+                                    item { AnimeTextField(minimumDraft, { minimumDraft = it; error = null }, "继续读取的补充阈值（秒）") }
                                 item { AnimeTextField(maximumDraft, { maximumDraft = it; error = null }, "前方缓冲目标上限（秒）") }
                                 item { AnimeTextField(startDraft, { startDraft = it; error = null }, "起播需要的缓冲（秒）") }
                                 item { AnimeTextField(rebufferDraft, { rebufferDraft = it; error = null }, "卡顿后恢复需要（秒）") }

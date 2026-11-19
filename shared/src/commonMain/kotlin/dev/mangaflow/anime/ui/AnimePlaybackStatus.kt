@@ -13,7 +13,6 @@ import dev.mangaflow.enhancement.EnhancementCenter
 import dev.mangaflow.enhancement.EnhancementContent
 import dev.mangaflow.enhancement.EnhancementMetric
 import dev.mangaflow.enhancement.EnhancementPolicy
-import dev.mangaflow.enhancement.PreparationMode
 import dev.mangaflow.enhancement.QualityTier
 import dev.mangaflow.enhancement.animeEnhancementSessionKey
 import dev.mangaflow.experience.ExperienceResources
@@ -73,7 +72,7 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
             else -> when (effect?.phase) {
                 AnimeVideoEnhancementPhase.OFF -> when {
                     policy.tier == QualityTier.ORIGINAL -> "原画"
-                    PreparationMode.IMMEDIATE !in policy.preparation -> "原画 · 即时关闭"
+                    !policy.realtimeEnhancementEnabled -> "原画 · 增强关闭"
                     resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2 -> "原画 · 设备保护"
                     else -> "原画 · 增强未运行"
                 }
@@ -104,28 +103,50 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
             "视频输入尺寸 ${input ?: "无观测"}，已提交增强帧尺寸 ${submitted ?: "无观测"}；提交不代表最终呈现"))
     }
     if (EnhancementMetric.PRESENTED_FPS in metrics) {
-        val fps = playback?.presentedFps?.takeIf { flowing && it.isFinite() && it >= 0.0 }
-        val value = fps?.let { "呈现 ${formatDecimal(it, 1)} fps" } ?: "呈现 —"
-        add(EnhancementReadout(EnhancementMetric.PRESENTED_FPS, value,
-            if (fps != null) "播放器实际呈现帧率 ${formatDecimal(fps, 1)} 帧每秒"
-            else if (!flowing && playback != null) "播放未在进行，暂不显示实时呈现帧率"
-            else "播放器尚无实际呈现帧率观测"))
+        val recent = playback?.frameMetrics?.takeIf { flowing }
+        val output = recent?.outputFps?.takeIf { it.isFinite() && it >= 0.0 }
+        val presented = playback?.presentedFps?.takeIf { flowing && it.isFinite() && it >= 0.0 }
+        val estimate = playback?.nativeVideoStatistics?.estimatedFilterFps?.takeIf { flowing && recent != null }
+        val value = when {
+            presented != null -> "呈现 ${formatDecimal(presented, 1)} fps"
+            output != null -> "视频输出 ${formatDecimal(output, 1)} fps"
+            estimate != null -> "滤镜估计 ${formatDecimal(estimate, 1)} fps"
+            playback == null -> "帧率 —"
+            playback.isBuffering -> "帧率 · 缓冲中"
+            !flowing -> "帧率 · 已暂停"
+            recent == null -> "帧率 · 采样中"
+            else -> "输出帧率未提供"
+        }
+        val description = when {
+            presented != null -> "播放器实际呈现帧率 ${formatDecimal(presented, 1)} 帧每秒"
+            output != null -> "最近 ${formatDecimal(checkNotNull(recent).windowDurationMs / 1000.0, 1)} 秒视频输出帧释放回调实测；" +
+                "包含处理后输出，不等于屏幕实际呈现或屏幕刷新率"
+            estimate != null -> "播放器根据最近视频帧时间戳估计的滤镜输出帧率；丢帧时可能不准确，不等于当前屏幕帧率"
+            else -> value
+        }
+        add(EnhancementReadout(EnhancementMetric.PRESENTED_FPS, value, description))
     }
     if (EnhancementMetric.DROPPED_FRAMES in metrics) {
         fun count(value: Long?) = value?.takeIf { it >= 0L }?.toString() ?: "—"
-        val native = playback?.nativeVideoStatistics
-        val value = if (native != null)
-            "丢帧 解码 ${count(native.decoderDroppedFrames)} · 输出 ${count(native.outputDroppedFrames)}"
-        else "丢帧 ${count(playback?.droppedFrames)}"
-        val description = if (native != null)
-            "原生解码丢帧 ${count(native.decoderDroppedFrames)}，原生视频输出丢帧 ${count(native.outputDroppedFrames)}"
-        else "原生解码／输出缓冲丢弃计数 ${count(playback?.droppedFrames)}"
+        val recent = playback?.frameMetrics?.takeIf { flowing }
+        val duration = recent?.windowDurationMs?.let { if (it >= 4_500L) "近5秒" else "近${formatDecimal(it / 1000.0, 1)}秒" }
+        val percent = recent?.recentDropPercent?.let { " · ${formatDecimal(it, 1)}%" }.orEmpty()
+        val value = when {
+            playback == null -> "丢帧 —"
+            !flowing -> "丢帧 · 待播放"
+            recent == null -> "丢帧 · 采样中"
+            playback.nativeVideoStatistics != null ->
+                "$duration丢帧 解码 ${count(recent.recentDecoderDroppedFrames)} · 输出 ${count(recent.recentOutputDroppedFrames)}"
+            else -> "$duration丢帧 ${count(recent.recentDroppedFrames)}$percent"
+        }
         add(EnhancementReadout(EnhancementMetric.DROPPED_FRAMES, value,
-            "$description；计数可能在定位或播放器重建后重置，不是本集总计；— 表示没有观测"))
+            "$value；滚动窗口最长5秒，暂停、定位与处理档位变化后重新采样。" +
+                "仅已观测的丢帧与输出分母可比时显示比例，补帧时不混用输入/输出分母；累计计数见状态详情"))
     }
     if (EnhancementMetric.MOTION_STATUS in metrics) {
         val value = when {
             playback == null -> "补帧 —"
+            !policy.realtimeInterpolationEnabled -> "补帧已关闭"
             motion?.phase == AnimeVideoEnhancementPhase.FAILED || motion?.phase == AnimeVideoEnhancementPhase.UNAVAILABLE ->
                 motionProblemLabel(motion?.detail)
             motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && flowing && motion.synthesizedFrames > 0L -> "补帧处理中"
@@ -157,8 +178,12 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
     if (EnhancementMetric.BUFFER in metrics) {
         val buffer = playback?.bufferedAheadMs?.takeIf { it >= 0L }
         val value = buffer?.let { formatDecimal(it / 1000.0, 1) + " s" } ?: "—"
-        add(EnhancementReadout(EnhancementMetric.BUFFER, "前方缓冲 $value",
-            "播放点前方已连续缓冲 $value，播放时消耗、下载时补充；不是磁盘缓存总量"))
+        val target = playback?.bufferMetrics?.targetDurationMs?.let { " / ${formatDecimal(it / 1000.0, 0)} s" }.orEmpty()
+        val loading = if (playback?.bufferMetrics?.isLoading == true) " · 补充中" else ""
+        val refill = playback?.bufferMetrics?.refillBelowMs?.let { "；低于 ${formatDecimal(it / 1000.0, 1)} 秒继续补充" }.orEmpty()
+        add(EnhancementReadout(EnhancementMetric.BUFFER, "缓冲 $value$target$loading",
+            "播放点前方已连续缓冲 $value，目标${target.removePrefix(" / ").ifBlank { "未提供" }}$refill；" +
+                "按媒体分段补充，仍受网络、容量与片尾限制；不是磁盘缓存总量"))
     }
     if (EnhancementMetric.BUFFER_BYTES in metrics) {
         val bytes = playback?.bufferMetrics?.allocatedBytes

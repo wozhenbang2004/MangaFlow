@@ -185,7 +185,7 @@ internal class AndroidAnimePlayer(
     private var startupCacheExpiry: Job? = null
     private var remoteMediaPlan: RemoteMediaPlan? = null
     private var inspectedAfterParserError = false
-    private var enhancementRevision = 0L
+    @Volatile private var enhancementRevision = 0L
     private var enhancementEffect: AndroidAnime4KEffect? = null
     private var realtimeLoading: Job? = null
     private var realtimeModel: AndroidRealtimeVideoModel? = null
@@ -194,6 +194,8 @@ internal class AndroidAnimePlayer(
     private var motionEffect: Effect? = null
     private var baseVideoEffects: List<Effect> = emptyList()
     @Volatile private var preparedVideo: AndroidPreparedWindow? = null
+    private var reusablePreparedVideo: AndroidPreparedWindow? = null
+    private val videoPreparationRevision = AtomicLong(0L)
     private var lastEnhancementSubmissionAt: Long? = null
     private var enhancementRecoveryUsed = false
     private var nativeVideoRecoveryPending = false
@@ -205,6 +207,8 @@ internal class AndroidAnimePlayer(
     private var receivedBytes = AtomicLong(0L)
     private var lastSampleBytes = 0L
     private var lastSampleAt = 0L
+    private var outputFrameReleases = AtomicLong(0L)
+    private val frameWindow = AnimePlaybackFrameWindow()
     private var bufferingSince: Long? = null
     private var bufferingProgressAt = 0L
     private var bufferingBytes = 0L
@@ -263,42 +267,63 @@ internal class AndroidAnimePlayer(
         mutableState.value = mutableState.value.copy(preparedVideoIssue = detail)
     }
 
-    override suspend fun prepareVideoWindow(request: AnimePreparedVideoRequest): Boolean {
+    override suspend fun prepareVideoWindow(request: AnimePreparedVideoRequest): Boolean = withContext(Dispatchers.Main.immediate) {
         val generation = nativeGeneration
+        val revision = videoPreparationRevision.incrementAndGet()
         fun current(): Boolean {
             val snapshot = state.value
             val exo = engine.value
-            return isCurrent(generation) && !nativeVideoOnly && options.preparedVideoModel == request.model &&
-                this.request?.localMedia == null && this.request?.asset == request.asset &&
+            return videoPreparationRevision.get() == revision && isCurrent(generation) && !nativeVideoOnly &&
+                options.preparedVideoModel == request.model &&
+                this@AndroidAnimePlayer.request?.localMedia == null && this@AndroidAnimePlayer.request?.asset == request.asset &&
                 exo != null && exo.isCurrentMediaItemSeekable && !exo.isCurrentMediaItemLive &&
                 snapshot.sessionGeneration == request.sessionGeneration && snapshot.timelineGeneration == request.timelineGeneration
         }
-        if (!current()) return false
+        if (!current()) return@withContext false
+        val reusable = (preparedVideo ?: reusablePreparedVideo)?.takeIf {
+            request.canReuse(it.request, it.receipt, state.value.positionMs)
+        }
+        // Own at most one completed window, including while the consumer is switched off.
+        preparedVideo = null
+        reusablePreparedVideo = null
+        if (reusable != null) {
+            // A new consumer identity fences an old GL draw even when the immutable frame bytes are reused.
+            val restored = reusable.copy(receipt = reusable.receipt.copy(framesUsed = 0L, lastUsedAt = 0L))
+            preparedVideo = restored
+            publish(generation) { it.copy(preparedVideoWindow = restored.receipt,
+                preparedVideoRetainedBytes = 0L, preparedVideoIssue = null) }
+            return@withContext true
+        }
+        publish(generation) { it.copy(preparedVideoWindow = null, preparedVideoRetainedBytes = 0L) }
         val result = try { prepareAndroidAnimeWindow(context, request) }
         catch (cancel: CancellationException) { throw cancel }
         catch (_: LinkageError) {
             if (current()) publish(generation) { it.copy(preparedVideoIssue = "原生推理运行库未能加载") }
-            return false
+            return@withContext false
         }
         catch (_: OutOfMemoryError) {
             if (current()) publish(generation) { it.copy(preparedVideoIssue = "当前内存不足以保留预处理帧") }
-            return false
+            return@withContext false
         }
         catch (failure: Exception) {
             if (current()) publish(generation) { it.copy(preparedVideoIssue = readablePlayerError(failure)) }
-            return false
+            return@withContext false
         }
         currentCoroutineContext().ensureActive()
-        if (!current() || state.value.positionMs >= result.receipt.endMs) return false
+        if (!current() || state.value.positionMs >= result.receipt.endMs) return@withContext false
         preparedVideo = result
-        publish(generation) { it.copy(preparedVideoWindow = result.receipt, preparedVideoIssue = null) }
-        return true
+        publish(generation) { it.copy(preparedVideoWindow = result.receipt, preparedVideoRetainedBytes = 0L,
+            preparedVideoIssue = null) }
+        true
     }
 
-    override fun discardPreparedVideo() {
+    override fun discardPreparedVideo(retainReusable: Boolean) {
+        videoPreparationRevision.incrementAndGet()
+        // Repeated configuration notifications must not replace an already retained window with null.
+        reusablePreparedVideo = if (retainReusable) preparedVideo ?: reusablePreparedVideo else null
         preparedVideo = null
-        if (state.value.preparedVideoWindow != null || state.value.preparedVideoIssue != null)
-            mutableState.value = state.value.copy(preparedVideoWindow = null, preparedVideoIssue = null)
+        mutableState.value = state.value.copy(preparedVideoWindow = null,
+            preparedVideoRetainedBytes = reusablePreparedVideo?.receipt?.bytes ?: 0L, preparedVideoIssue = null)
     }
 
     override suspend fun prepareStartup(asset: AnimePlaybackAsset, positionMs: Long, byteLimit: Long, validUntil: Long): Boolean =
@@ -412,7 +437,8 @@ internal class AndroidAnimePlayer(
     private fun sameStartupConfiguration(left: AnimePlayerOptions, right: AnimePlayerOptions): Boolean =
         left.copy(bufferMinMs = right.bufferMinMs, bufferMaxMs = right.bufferMaxMs,
             bufferStartMs = right.bufferStartMs, bufferRebufferMs = right.bufferRebufferMs,
-            bufferForwardBytes = right.bufferForwardBytes, bufferBackBytes = right.bufferBackBytes) == right
+            bufferForwardBytes = right.bufferForwardBytes, bufferBackBytes = right.bufferBackBytes,
+            bufferRefillNearTarget = right.bufferRefillNearTarget) == right
 
     private fun takeStartup(request: AnimePlayerRequest): Startup? {
         val owner = startup
@@ -680,6 +706,16 @@ internal class AndroidAnimePlayer(
     }
 
     private fun connectEngine(generation: Long, exo: ExoPlayer) {
+        val releases = AtomicLong(0L)
+        val lastPresentationTimeUs = AtomicLong(C.TIME_UNSET)
+        outputFrameReleases = releases
+        frameWindow.reset()
+        // Media3 routes this listener through the final VideoSink when effects are active,
+        // so synthesized frames are counted too. A release is not a physical Present receipt.
+        exo.setVideoFrameMetadataListener { presentationTimeUs, releaseTimeNs, _, _ ->
+            if (releaseTimeNs != C.TIME_UNSET &&
+                lastPresentationTimeUs.getAndSet(presentationTimeUs) != presentationTimeUs) releases.incrementAndGet()
+        }
         val observer = object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) { synchronize(generation, exo) }
             override fun onPlayerError(error: PlaybackException) { recoverOrFail(generation, exo, error) }
@@ -757,6 +793,7 @@ internal class AndroidAnimePlayer(
 
     private fun applyVideoEnhancement(generation: Long, exo: ExoPlayer) {
         val revision = ++enhancementRevision
+        frameWindow.reset()
         lastEnhancementSubmissionAt = null
         clearRealtimeVideoModel()
         clearRealtimeMotion()
@@ -788,7 +825,11 @@ internal class AndroidAnimePlayer(
             }
             val preparedModel = options.preparedVideoModel
             val preparedFrames: (() -> AndroidPreparedWindow?)? = preparedModel?.let { model ->
-                { preparedVideo?.takeIf { it.request.model == model } }
+                { preparedVideo?.takeIf { window ->
+                    enhancementRevision == revision && isCurrent(generation) && window.request.model == model &&
+                        window.request.sessionGeneration == state.value.sessionGeneration &&
+                        window.request.timelineGeneration == state.value.timelineGeneration
+                } }
             }
             var lastPreparedReport = 0L
             var preparedFramesUsed = 0L
@@ -1249,11 +1290,27 @@ internal class AndroidAnimePlayer(
         if (!isCurrent(generation) || engine.value !== exo) return
         if (nativeVideoRecoveryPending || nativeVideoRecoveryFailed || bufferingTimedOut) return
         if (exo.playerError != null) return // The typed error callback alone owns recovery/error publication.
+        reusablePreparedVideo?.takeIf { exo.currentPosition >= it.receipt.endMs }?.let {
+            reusablePreparedVideo = null
+            mutableState.value = state.value.copy(preparedVideoRetainedBytes = 0L)
+        }
         val now = SystemClock.elapsedRealtime()
         val enhancementActive = lastEnhancementSubmissionAt?.let { now - it < ANIME4K_ACTIVITY_TIMEOUT_MS } == true &&
             canReportLiveEnhancement(exo)
         if (!enhancementActive) lastEnhancementSubmissionAt = null
         val elapsed = now - lastSampleAt
+        val counters = exo.videoDecoderCounters?.also { it.ensureUpdated() }
+        val frameMetrics = frameWindow.sample(now,
+            epoch = listOf(generation, state.value.timelineGeneration, enhancementRevision, counters,
+                exo.playbackParameters.speed, outputFrameReleases),
+            flowing = exo.isPlaying && exo.playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_NONE &&
+                (foreground || state.value.inPictureInPicture) && state.value.hasVideoTracks != false &&
+                state.value.firstFrameRendered == true,
+            outputFrames = outputFrameReleases.get(), droppedFrames = counters?.droppedBufferCount?.toLong(),
+            // Interpolation mixes pre-synthesis and post-synthesis drop stages. Do not invent
+            // a percentage with the decoder's input-frame count as an output denominator.
+            comparableDropDenominator = options.realtimeFrames == null,
+        )
         val speed = if (elapsed >= 1_000L) {
             val bytes = receivedBytes.get()
             ((bytes - lastSampleBytes).coerceAtLeast(0L) * 1_000L / elapsed).also {
@@ -1276,7 +1333,7 @@ internal class AndroidAnimePlayer(
                 positionMs = exo.currentPosition.coerceAtLeast(0L),
                 durationMs = exo.duration.takeIf { it != C.TIME_UNSET && it >= 0 } ?: -1L,
                 bufferedMs = exo.bufferedPosition.takeIf { it != C.TIME_UNSET && it >= 0 } ?: -1L,
-                bufferMetrics = loadControls[exo]?.metrics(wallTimeMillis()),
+                bufferMetrics = loadControls[exo]?.metrics(wallTimeMillis(), exo.isLoading, exo.playbackParameters.speed),
                 speed = exo.playbackParameters.speed,
                 isBuffering = exo.playbackState == Player.STATE_BUFFERING,
                 playbackSuppressed = exo.playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE,
@@ -1290,8 +1347,9 @@ internal class AndroidAnimePlayer(
                 videoHeight = exo.videoFormat?.height?.takeIf { it > 0 },
                 sourceFps = exo.videoFormat?.frameRate?.takeIf { it.isFinite() && it > 0 }?.toDouble(),
                 displayRefreshHz = displayRefreshHz(),
-                decoderOutputFrames = exo.videoDecoderCounters?.also { it.ensureUpdated() }?.renderedOutputBufferCount?.toLong(),
-                droppedFrames = exo.videoDecoderCounters?.droppedBufferCount?.toLong(),
+                decoderOutputFrames = counters?.renderedOutputBufferCount?.toLong(),
+                droppedFrames = counters?.droppedBufferCount?.toLong(),
+                frameMetrics = frameMetrics,
                 videoEnhancement = previous.videoEnhancement.let { last ->
                     val enhancement = if (enhancementActive) last else last.withoutLiveSample()
                     if (enhancement.phase in setOf(AnimeVideoEnhancementPhase.OFF,
@@ -1497,13 +1555,14 @@ internal class AndroidAnimePlayer(
             loadControls[exo]?.let { control ->
                 control.update(next)
                 lastAcceptedForwardBytes = control.effectiveForwardBytes
-                mutableState.value = mutableState.value.copy(bufferMetrics = control.metrics(wallTimeMillis()))
+                mutableState.value = mutableState.value.copy(bufferMetrics =
+                    control.metrics(wallTimeMillis(), exo.isLoading, exo.playbackParameters.speed))
             }
         }
         if (previous.videoEnhancement != next.videoEnhancement || previous.enhancementScale != next.enhancementScale ||
             previous.preparedVideoModel != next.preparedVideoModel || previous.enhancementModel != next.enhancementModel ||
             previous.realtimeFrames != next.realtimeFrames) {
-            discardPreparedVideo()
+            discardPreparedVideo(retainReusable = true)
             val exo = engine.value
             if (exo != null) applyVideoEnhancement(nativeGeneration, exo)
             else mutableState.value = mutableState.value.copy(videoEnhancement = AnimeVideoEnhancementState(
@@ -1514,6 +1573,7 @@ internal class AndroidAnimePlayer(
     }
 
     override fun setForegroundNative(foreground: Boolean, backgroundAudio: Boolean) {
+        if (!foreground && !state.value.inPictureInPicture) frameWindow.reset()
         resetBufferingObservation()
         nativeFrameWaitSince = null
         if (!foreground) clearLiveEnhancement()
@@ -1571,21 +1631,24 @@ internal class AndroidAnimePlayer(
     }
 
     override fun setPlayingNative(playing: Boolean) {
-        if (!playing) clearLiveEnhancement()
+        if (!playing) { clearLiveEnhancement(); frameWindow.reset() }
         engine.value?.playWhenReady = playing
     }
     override fun seekNative(positionMs: Long) {
+        frameWindow.reset()
         discardPreparedVideo()
         resetBufferingObservation(); nativeFrameWaitSince = null
         clearLiveEnhancement()
         engine.value?.seekTo(positionMs)
     }
     override fun setSpeedNative(speed: Float): Float {
+        frameWindow.reset()
         val exo = engine.value ?: return speed
         exo.setPlaybackSpeed(speed)
         return exo.playbackParameters.speed
     }
     override fun releaseNative() {
+        frameWindow.reset()
         clearRealtimeMotion()
         baseVideoEffects = emptyList()
         clearRealtimeVideoModel()

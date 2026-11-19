@@ -894,7 +894,10 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                 if (!retry && target.isFile && target.length() in 128L..maximumBytes &&
                     readJmImageBounds(target, runtime, policy, resourceOwner, !token.isForeground) != null) {
                     current()
-                    token.ifOptional { receipt?.accept(target.length()) }
+                    token.ifOptional {
+                        try { receipt?.accept(target.length()) }
+                        catch (_: PrefetchBudgetExceeded) { budget?.exhaust() }
+                    }
                     policy.recordImage(monotonicTimeMillis() - started, memory = false, disk = true,
                         prefetch = !token.isForeground, key = page.url, bytes = target.length())
                     completed = true
@@ -1025,8 +1028,13 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                                 token.admission(PrefetchStage.DOWNLOADING, it)
                             }
                             if (token.isForeground) policy.withImageAdmission(true, info.id, waiting) { fetch(url) }
-                            else try { policy.withPrefetchAdmission(info.id, policy.estimatedPageBytes(page.url),
-                                { token.isForeground }, waiting) { fetch(url) } }
+                            else try {
+                                val remaining = minOf(policy.state.value.prefetchBytes, receipt?.remaining ?: Long.MAX_VALUE)
+                                token.ifOptional { if (remaining <= 0L) throw PrefetchBudgetExceeded() }
+                                policy.withPrefetchAdmission(info.id,
+                                    minOf(policy.estimatedPageBytes(page.url), remaining.coerceAtLeast(0L)),
+                                    { token.isForeground }, waiting) { fetch(url) }
+                            }
                             catch (_: PrefetchPromoted) { policy.withImageAdmission(true, info.id, waiting) { fetch(url) } }
                         }
                         token.during(PrefetchStage.CHECKING) {

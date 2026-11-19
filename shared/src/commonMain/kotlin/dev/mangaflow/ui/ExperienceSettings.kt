@@ -14,6 +14,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -44,6 +45,13 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.currentStateAsState
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.MangaApplicationServices
+import dev.mangaflow.anime.AnimePlaybackSettings
+import dev.mangaflow.enhancement.EnhancementContent
+import dev.mangaflow.enhancement.ui.EnhancementNavigation
+import dev.mangaflow.enhancement.ui.EnhancementSettingsContent
+import dev.mangaflow.enhancement.ui.enhancementPrimaryPages
+import dev.mangaflow.enhancement.ui.titleFor
 import dev.mangaflow.experience.*
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.PlatformKind
@@ -58,6 +66,7 @@ import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
+import dev.mangaflow.ui.motion.MotionBackHandler
 import dev.mangaflow.ui.motion.motionInputGate
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CancellationException
@@ -282,12 +291,18 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                                         }
                                     }, onCategory = { selectCategory(it) })
                             }
-                            ExperienceSettings(interactive, shownCategory,
-                                store, preview, savedBudget, editor, draft, ::change,
-                                currentDraft = { draft },
-                                mode = draftMode,
-                                onOpenNetwork = onOpenNetwork?.let { { requestExit("network") } },
-                                onOpenSourceChecks = onOpenSourceChecks?.let { { requestExit("source-checks") } })
+                            when (shownCategory) {
+                                "manga-enhancement", "anime-enhancement" -> ExperienceEnhancementSettings(
+                                    if (shownCategory == "anime-enhancement") EnhancementContent.ANIME else EnhancementContent.MANGA,
+                                    interactive)
+                                "playback" -> ExperiencePlaybackSettings(interactive, editor)
+                                else -> ExperienceSettings(interactive, shownCategory,
+                                    store, preview, savedBudget, editor, draft, ::change,
+                                    currentDraft = { draft },
+                                    mode = draftMode,
+                                    onOpenNetwork = onOpenNetwork?.let { { requestExit("network") } },
+                                    onOpenSourceChecks = onOpenSourceChecks?.let { { requestExit("source-checks") } })
+                            }
                         }
                     }
                     // Successful saves do not resize the body. Only actionable failures get a footer.
@@ -327,7 +342,13 @@ private fun ExperienceOverview(budget: ExperienceBudget, custom: ExperienceOverr
     enabled: Boolean, onMode: (ExperienceMode) -> Unit, onCategory: (String) -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         ExperienceModeChoices(mode, enabled, onMode)
-        ExperienceHint("阅读中的准备、补页和缓存状态可从阅读栏打开。")
+        ExperienceHint("增强、补帧、缓冲与预读统一在这里设置；观看时可打开对应的当前状态。")
+        ExperienceOverviewLink(Icons.Outlined.AutoAwesome, "漫画增强",
+            "画质 · 提前增强 · 阅读时显示", enabled) { onCategory("manga-enhancement") }
+        ExperienceOverviewLink(Icons.Outlined.SlowMotionVideo, "番剧增强与补帧",
+            "画质与帧率分别控制 · 提前准备", enabled) { onCategory("anime-enhancement") }
+        ExperienceOverviewLink(Icons.Outlined.DataUsage, "播放缓冲",
+            "前方可播时长 · 缓存容量 · 下一集准备", enabled) { onCategory("playback") }
         ExperienceOverviewLink(Icons.Outlined.AutoStories, "阅读与预读",
             "待读 ${budget.goal.prefetchAhead} 页 · 回看 ${budget.goal.prefetchBehind} 页", enabled) { onCategory("reading") }
         ExperienceOverviewLink(Icons.Outlined.AccountTree, "并行调度",
@@ -357,11 +378,155 @@ private fun ExperienceOverviewLink(icon: ImageVector, title: String, value: Stri
     }
 }
 
+/** Reuse the reader/player editor in the same retained experience surface. */
+@Composable
+private fun ExperienceEnhancementSettings(content: EnhancementContent, active: Boolean) {
+    val navigation = remember(content) { EnhancementNavigation() }
+    val primary = enhancementPrimaryPages(content)
+    MotionBackHandler(active && navigation.parent != null, state = null, onBack = { navigation.back() })
+    Column(Modifier.fillMaxWidth().motionInputGate(active), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        navigation.parent?.let { parent ->
+            MotionTextButton(onClick = { navigation.back() }, modifier = Modifier.heightIn(min = 44.dp)) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("返回${parent.titleFor(false)}")
+            }
+            Text(navigation.page.titleFor(false), style = MaterialTheme.typography.titleSmall)
+        }
+        if (navigation.page.isPrimary) MotionTabs(primary.indexOf(navigation.page), primary.map { it.titleFor(false) },
+            onSelect = { navigation.open(primary[it]) }, modifier = Modifier.fillMaxWidth(),
+            controlHeight = 44.dp, treatment = MotionTabTreatment.Soft)
+        EnhancementSettingsContent(content, page = navigation.page, onPageChange = navigation::open,
+            showContentRecords = false)
+    }
+}
+
+/** These controls keep the existing playback settings owner and update a running player in place. */
+@Composable
+private fun ExperiencePlaybackSettings(active: Boolean, editor: ExperienceEditor) {
+    val context = LocalMangaContext.current
+    val controller = remember(context) { MangaApplicationServices.get(context).anime }
+    val state by controller.state.collectAsStateWithLifecycle()
+    val settings = state.settings
+    val budget = controller.preparationBudget(settings)
+    val defaults = remember { AnimePlaybackSettings() }
+    var details by rememberSaveable { mutableStateOf(false) }
+    var nextDetails by rememberSaveable { mutableStateOf(false) }
+    var notice by remember { mutableStateOf<String?>(null) }
+    fun update(change: (AnimePlaybackSettings) -> AnimePlaybackSettings) {
+        if (!active) return
+        try {
+            change(controller.state.value.settings).validate()
+            notice = null
+            controller.updatePlaybackSettings(change)
+        } catch (error: IllegalArgumentException) {
+            notice = error.message ?: "数值组合无效，请检查缓冲范围。"
+        }
+    }
+    fun settle(): Boolean {
+        if (editor.pending && editor.accept?.invoke() != true) return false
+        editor.clear()
+        return true
+    }
+    Column(Modifier.fillMaxWidth().motionInputGate(active), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("前方可播放内容", style = MaterialTheme.typography.titleSmall)
+        SettingsToggle("及时补充", settings.bufferRefillNearTarget, Icons.Outlined.Sync, enabled = active) { enabled ->
+            if (settle()) update { it.copy(bufferRefillNearTarget = enabled) }
+        }
+        ExperienceHint(if (settings.bufferRefillNearTarget)
+            "接近目标时就开始补充，尽量保持前方可播时长；片段下载完成后读数仍会小幅跳动。"
+            else "下降到补充阈值后再继续读取，读数会在阈值与目标之间变化。")
+        ExperienceDurationNumber("前方缓冲目标", settings.bufferMaxMs, defaults.bufferMaxMs,
+            settings.bufferMinMs.coerceAtLeast(1), Int.MAX_VALUE, 600, editor, active) { value ->
+            update { it.copy(bufferMaxMs = value) }
+        }
+        if (!settings.bufferRefillNearTarget) ExperienceDurationNumber("继续读取的阈值", settings.bufferMinMs,
+            defaults.bufferMinMs, maxOf(settings.bufferStartMs, settings.bufferRebufferMs), settings.bufferMaxMs,
+            300, editor, active) { value -> update { it.copy(bufferMinMs = value) } }
+        ExperienceLiveNumber("前方缓冲容量", settings.bufferForwardMiB,
+            (budget.forwardBytes / (1024L * 1024L)).toInt(), 1..512, "MiB", editor, active) { value ->
+            update { it.copy(bufferForwardMiB = value) }
+        }
+        ExperienceHint("时长目标与容量共同约束原片缓冲。容量先满、网络较慢或临近片尾时，实际可播时长可能低于目标。")
+        SettingsDisclosure("缓冲细节", "起播、恢复与回看", Icons.Outlined.Tune,
+            expanded = details, compact = true, onToggle = { if (active && settle()) details = !details }) {
+            if (settings.bufferRefillNearTarget) ExperienceDurationNumber("关闭及时补充后的阈值", settings.bufferMinMs,
+                defaults.bufferMinMs, maxOf(settings.bufferStartMs, settings.bufferRebufferMs), settings.bufferMaxMs,
+                300, editor, active && details) { value -> update { it.copy(bufferMinMs = value) } }
+            ExperienceDurationNumber("起播所需缓冲", settings.bufferStartMs, defaults.bufferStartMs,
+                0, settings.bufferMinMs, 10, editor, active && details) { value -> update { it.copy(bufferStartMs = value) } }
+            ExperienceDurationNumber("卡顿后恢复所需", settings.bufferRebufferMs, defaults.bufferRebufferMs,
+                0, settings.bufferMinMs, 15, editor, active && details) { value -> update { it.copy(bufferRebufferMs = value) } }
+            ExperienceLiveNumber("回看缓冲容量", settings.bufferBackMiB,
+                (budget.backBytes / (1024L * 1024L)).toInt(), 0..128, "MiB", editor, active && details) { value ->
+                update { it.copy(bufferBackMiB = value) }
+            }
+            ExperienceLiveNumber("单线路重试", settings.automaticRecoveryAttempts, defaults.automaticRecoveryAttempts,
+                0..8, "次", editor, active && details, automaticLabel = "默认值") { value ->
+                update { it.copy(automaticRecoveryAttempts = value ?: defaults.automaticRecoveryAttempts) }
+            }
+            ExperienceHint("支持的参数会立即更新当前播放；平台限制和实际用量在播放器状态中说明。")
+        }
+        Spacer(Modifier.height(8.dp))
+        SettingsToggle("提前准备下一集", settings.prepareNextEpisode, Icons.Outlined.SkipNext, enabled = active) { enabled ->
+            if (settle()) update { it.copy(prepareNextEpisode = enabled) }
+        }
+        ExperienceHint("先读取下一集原片，可另选解码首帧；这与画质增强、补帧是独立的准备步骤。")
+        if (settings.prepareNextEpisode) SettingsDisclosure("下一集准备范围", "开始时间、容量与首帧",
+            Icons.Outlined.Tune, expanded = nextDetails, compact = true,
+            onToggle = { if (active && settle()) nextDetails = !nextDetails }) {
+            ExperienceLiveNumber("片尾前开始", settings.nextEpisodeLeadSeconds,
+                (budget.nextEpisodeLeadMs / 1000L).toInt(), 0..180, "秒", editor, active && nextDetails) { value ->
+                update { it.copy(nextEpisodeLeadSeconds = value) }
+            }
+            ExperienceLiveNumber("下一集原片时长", settings.nextEpisodeBufferSeconds,
+                (budget.nextEpisodeDurationMs / 1000L).toInt(), 0..120, "秒", editor, active && nextDetails) { value ->
+                update { it.copy(nextEpisodeBufferSeconds = value) }
+            }
+            ExperienceLiveNumber("下一集原片容量", settings.nextEpisodeCacheMiB,
+                (budget.nextEpisodeBytes / (1024L * 1024L)).toInt(), 0..128, "MiB", editor, active && nextDetails) { value ->
+                update { it.copy(nextEpisodeCacheMiB = value) }
+            }
+            SettingsToggle("提前解码起播首帧", settings.predecodeNextEpisode, Icons.Outlined.PlayCircleOutline,
+                enabled = active && nextDetails) { enabled ->
+                if (settle()) update { it.copy(predecodeNextEpisode = enabled) }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text("增强片段准备", style = MaterialTheme.typography.titleSmall)
+        ExperienceLiveNumber("每段目标时长", settings.onlinePreparationSeconds,
+            (budget.onlineWindowMs / 1000L).toInt(), 1..30, "秒", editor, active) { value ->
+            update { it.copy(onlinePreparationSeconds = value) }
+        }
+        ExperienceHint("在“番剧增强 → 提前准备”开启。原片缓冲优先，设备忙时增强任务等待；开关不删除原片或已有增强缓存。")
+        notice?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall) }
+        state.notice?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall) }
+    }
+}
+
+/** Keep exact millisecond values; whole-second values use a shorter seconds control. */
+@Composable
+private fun ExperienceDurationNumber(title: String, valueMillis: Int, defaultMillis: Int,
+    minimumMillis: Int, maximumMillis: Int, shortcutSeconds: Int, editor: ExperienceEditor, active: Boolean,
+    onChange: (Int) -> Unit) {
+    val factor = if (valueMillis % 1000 == 0 && defaultMillis % 1000 == 0) 1000 else 1
+    val minimum = ((minimumMillis.toLong() + factor - 1L) / factor).toInt()
+    val maximum = maximumMillis / factor
+    val shortcut = (shortcutSeconds.toLong() * 1000L / factor).toInt().coerceIn(minimum, maximum)
+    ExperienceLiveNumber(title, valueMillis / factor, defaultMillis / factor, minimum..shortcut,
+        if (factor == 1000) "秒" else "ms", editor, active, automaticLabel = "默认值", semanticMaximum = maximum) { value ->
+        onChange(if (value == null) defaultMillis else (value.toLong() * factor).toInt())
+    }
+}
+
 /** Keep configuration categories visible at both window widths. */
 @Composable
 private fun ExperienceCategoryNavigation(selectedCategory: String, custom: ExperienceOverrides,
     enabled: Boolean, vertical: Boolean = false, onSelect: (String) -> Unit) {
     val entries = listOf(
+        Triple("manga-enhancement", "漫画增强", Icons.Outlined.AutoAwesome),
+        Triple("anime-enhancement", "番剧增强", Icons.Outlined.SlowMotionVideo),
+        Triple("playback", "播放缓冲", Icons.Outlined.DataUsage),
         Triple("reading", "阅读", Icons.Outlined.AutoStories),
         Triple("parallel", "并行", Icons.Outlined.AccountTree),
         Triple("sources", "多源", Icons.Outlined.Layers),
@@ -374,6 +539,7 @@ private fun ExperienceCategoryNavigation(selectedCategory: String, custom: Exper
         "sources" -> experienceSourceCustom(custom)
         "downloads" -> experienceDownloadCustom(custom)
         "resources" -> experienceDeviceCustom(custom)
+        "manga-enhancement", "anime-enhancement", "playback" -> false
         else -> experienceCacheCustom(custom)
     }
     if (vertical) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -460,6 +626,9 @@ private fun ExperienceNavigationLegend() {
         ResourceValue(Icons.Outlined.AutoMode, "自动", "随设备调整")
         ResourceValue(Icons.Outlined.BatterySaver, "节能", "减少预取与后台工作")
         ResourceValue(Icons.Outlined.Speed, "流畅", "提前准备更多内容")
+        ResourceValue(Icons.Outlined.AutoAwesome, "漫画增强", "画质与提前增强")
+        ResourceValue(Icons.Outlined.SlowMotionVideo, "番剧增强", "画质、补帧与提前准备")
+        ResourceValue(Icons.Outlined.DataUsage, "播放缓冲", "前方原片与下一集准备")
         ResourceValue(Icons.Outlined.AutoStories, "阅读", "预读与回看")
         ResourceValue(Icons.Outlined.AccountTree, "并行", "请求与解码数量")
         ResourceValue(Icons.Outlined.Layers, "多源", "备用、补页与切源")

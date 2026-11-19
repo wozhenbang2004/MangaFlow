@@ -19,6 +19,7 @@ internal class AndroidOnnxTiles(
     overlapSize: Int,
     budget: Long,
     private val requireRgb: Boolean = false,
+    private val runOptions: OrtSession.RunOptions? = null,
 ) {
     private val input = session.inputInfo.values.single().info as TensorInfo
     private val inputName = session.inputNames.single()
@@ -65,6 +66,7 @@ internal class AndroidOnnxTiles(
         var previousLength = 0
         var completed = 0L
         var top = 0
+        onTile(0L, total)
         while (top < height) {
             checkActive()
             val bottom = minOf(height, top + stepY)
@@ -90,7 +92,8 @@ internal class AndroidOnnxTiles(
                 }
                 data.rewind()
                 OnnxTensor.createTensor(environment, data, inputShape).use { tensor ->
-                    session.run(mapOf(inputName to tensor)).use { result ->
+                    val inputs = mapOf(inputName to tensor)
+                    (if (runOptions == null) session.run(inputs) else session.run(inputs, runOptions)).use { result ->
                         val image = result[0] as? OnnxTensor ?: error("模型未输出图像张量")
                         val shape = image.info.shape
                         require(image.info.type == OnnxJavaType.FLOAT && shape.size == 4 && shape[0] == 1L && shape[1] in longArrayOf(1, 3) &&

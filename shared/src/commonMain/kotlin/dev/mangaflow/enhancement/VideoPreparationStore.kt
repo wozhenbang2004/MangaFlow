@@ -299,18 +299,23 @@ class VideoPreparationStore(
     }
 
     /** Read/verify before issuing a native capability; deletion and acquisition share the same lock. */
-    suspend fun playback(original: AnimeDownloadedPlayback, versionId: String? = null): AnimeDownloadedPlayback = withContext(Dispatchers.IO) {
+    suspend fun playback(original: AnimeDownloadedPlayback, versionId: String? = null,
+        viewingPolicy: EnhancementPolicy? = null): AnimeDownloadedPlayback = withContext(Dispatchers.IO) {
         ready.await()
+        val desired = viewingPolicy ?: center.settings.policy(EnhancementContent.ANIME)
+        val inventory = center.inventory.value
         val row = synchronized(lock) { records.values.filter { it.downloadId == original.localMedia.downloadId &&
             it.phase == EnhancementTaskPhase.COMPLETED && if (versionId != null) it.id == versionId else {
-                val desired = center.settings.policy(EnhancementContent.ANIME)
-                (desired.tier != QualityTier.ORIGINAL || desired.frameMode != FrameMode.ORIGINAL) &&
-                    it.tier == desired.tier &&
-                    it.scale == (if (desired.tier == QualityTier.ORIGINAL) 1 else desired.scale) &&
-                    it.frameMode == desired.frameMode &&
+                val picture = if (desired.realtimeEnhancementEnabled) desired.tier else QualityTier.ORIGINAL
+                val frames = if (desired.realtimeInterpolationEnabled) desired.frameMode else FrameMode.ORIGINAL
+                (picture != QualityTier.ORIGINAL || frames != FrameMode.ORIGINAL) &&
+                    it.tier == picture &&
+                    it.scale == (if (picture == QualityTier.ORIGINAL) 1 else desired.scale) &&
+                    it.frameMode == frames &&
                     (it.frameMode == FrameMode.ORIGINAL || it.frameQuality == desired.frameQuality && it.detectScenes) &&
                     (it.frameMode != FrameMode.CUSTOM || it.customFps == desired.customFps) &&
-                    (desired.modelId == null || desired.modelId == it.modelId)
+                    (picture == QualityTier.ORIGINAL || desired.modelId == null || desired.modelId == it.modelId) &&
+                    matchesInstalledRecipe(it, inventory)
             } }
             .maxByOrNull { it.updatedAt } } ?: return@withContext original
         if (row.sourceIdentity != sourceIdentity(original)) return@withContext original
@@ -338,6 +343,33 @@ class VideoPreparationStore(
             }
         }
         original.copy(asset = asset, localMedia = capability)
+    }
+
+    /** A reused name must not silently select pixels produced by older weights or another runtime. */
+    private fun matchesInstalledRecipe(row: VideoEnhancementVersion, inventory: EngineInventory): Boolean {
+        val model = if (row.tier == QualityTier.ORIGINAL) null else {
+            inventory.models.firstOrNull { it.id == row.modelId && it.nativeScale == row.scale } ?: return false
+        }
+        val engine = inventory.engines.firstOrNull {
+            it.videoOutput == row.container && it.version == row.engineVersion &&
+                (model == null || it.id == model.engineId) &&
+                (row.frameMode == FrameMode.ORIGINAL || it.supportsInterpolation)
+        } ?: return false
+        val rife = if (row.frameMode == FrameMode.ORIGINAL) null else {
+            val version = when (row.frameQuality) {
+                FrameQuality.LIGHT -> "4.25-lite"
+                FrameQuality.BALANCED, FrameQuality.FINE -> "4.22"
+                FrameQuality.ULTRA -> "4.26"
+            }
+            val ensemble = row.frameQuality in setOf(FrameQuality.FINE, FrameQuality.ULTRA)
+            val name = "rife_v${version.replace("-lite", "_lite")}${if (ensemble) "_ensemble" else ""}.onnx"
+            inventory.frameModels.firstOrNull {
+                if (row.container == EngineVideoContainer.MP4)
+                    it.engineId == EnhancementEngineIds.ANDROID_RIFE && it.version == version
+                else it.engineId == engine.id && StorageFile(it.path).name == name
+            } ?: return false
+        }
+        return row.modelDigest == EnhancedAssetIdentity.digest("${model?.sha256.orEmpty()}|${rife?.sha256.orEmpty()}")
     }
 
     override suspend fun snapshot(): List<AuxiliaryCacheEntry> = withContext(Dispatchers.IO) {

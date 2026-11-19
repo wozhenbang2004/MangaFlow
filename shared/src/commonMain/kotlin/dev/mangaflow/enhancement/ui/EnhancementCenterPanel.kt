@@ -86,7 +86,7 @@ internal fun EnhancementCenterPanel(
                 }
                 Column(Modifier.weight(1f).padding(start = if (navigation.parent == null) 8.dp else 0.dp)) {
                     val title = when {
-                        navigation.page.isPrimary -> "画质与性能"
+                        navigation.page.isPrimary -> "体验策略"
                         canSwitchMedia && content.settingsOwner == EnhancementContent.MANGA &&
                             navigation.page == EnhancementPage.CACHE -> "缓存预算"
                         else -> navigation.page.title
@@ -96,7 +96,7 @@ internal fun EnhancementCenterPanel(
                         Text(content.settingsLabel, style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                MotionIconButton(onDismiss, Modifier.size(44.dp), tooltip = "关闭画质与性能") {
+                MotionIconButton(onDismiss, Modifier.size(44.dp), tooltip = "关闭体验策略") {
                     Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                 }
             }
@@ -243,7 +243,7 @@ internal fun EnhancementSettingsContent(
                         effect.phase in setOf(AnimeVideoEnhancementPhase.UNAVAILABLE, AnimeVideoEnhancementPhase.FAILED) -> effect.detail
                         currentPolicy.tier == QualityTier.ORIGINAL -> null
                         effect.phase == AnimeVideoEnhancementPhase.OFF -> when {
-                            PreparationMode.IMMEDIATE !in currentPolicy.preparation -> "播放时增强已关闭，尚未匹配到提前处理的画面。"
+                            !currentPolicy.realtimeEnhancementEnabled -> "播放时画质增强已关闭，所选档位与已备结果保留。"
                             usage.resources.memoryPressure == true || (usage.resources.thermalPressure ?: 0) >= 2 ->
                                 "设备保护暂缓了增强，所选档位保留。"
                             else -> observed?.reason ?: "所选增强尚未运行，正在等待播放器应用。"

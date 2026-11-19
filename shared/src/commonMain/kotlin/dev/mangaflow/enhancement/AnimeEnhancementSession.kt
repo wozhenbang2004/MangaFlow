@@ -18,11 +18,7 @@ fun selectRealtimeEnhancement(policy: EnhancementPolicy, resources: ExperienceRe
     val scale = policy.scale.takeIf { it in 1..2 } ?: 1
     fun original(reason: String? = null) = RealtimeEnhancementSelection(AnimeVideoEnhancementMode.OFF, scale, reason)
     if (policy.tier == QualityTier.ORIGINAL) return original()
-    if (PreparationMode.IMMEDIATE !in policy.preparation) return original(when {
-        PreparationMode.SMART in policy.preparation -> "优先使用已完成的增强结果；当前在线片段尚未准备，继续播放原画"
-        PreparationMode.COMPLETE in policy.preparation -> "仅使用完整预处理结果；未准备的内容保持原画"
-        else -> "即时和提前处理均已关闭，已有增强版本仍可从离线任务打开"
-    })
+    if (!policy.realtimeEnhancementEnabled) return original("播放时画质增强已关闭；模型和已完成缓存保留，当前显示原画")
     if (resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2)
         return original("设备保护已暂缓增强，目标档位保留；当前显示原画")
     val builtInMode = when (policy.modelId) {
@@ -50,7 +46,7 @@ fun selectRealtimeEnhancement(policy: EnhancementPolicy, resources: ExperienceRe
         else -> AnimeVideoEnhancementMode.OFF
     }
     return RealtimeEnhancementSelection(mode, scale, when {
-        policy.frameMode != FrameMode.ORIGINAL -> "当前画质增强独立运行；RIFE 补帧需离线处理或已适配的实时内核"
+        policy.realtimeInterpolationEnabled && policy.frameMode != FrameMode.ORIGINAL -> "画质增强与补帧分别运行，补帧结果见当前播放读数"
         policy.tier == QualityTier.AUTO && mode == AnimeVideoEnhancementMode.FAST -> "本次 GPU 处理接近帧预算，自动选用轻量"
         else -> null
     })

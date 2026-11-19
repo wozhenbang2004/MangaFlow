@@ -325,12 +325,15 @@ internal suspend fun prefetchOriginalPageResult(
     currentCoroutineContext().ensureActive()
     return when (result) {
         is SuccessResult -> {
-            if (result.dataSource != DataSource.NETWORK) try {
-                bytes.accept(ExperiencePolicyStore.get(context).estimatedPageBytes(page.url))
-            } catch (_: PrefetchBudgetExceeded) {
-                bytes.exhaust()
-                return OriginalPagePrefetchResult(false, result.diskCacheKey, deferred = true)
+            if (result.dataSource != DataSource.NETWORK) {
+                val cachedBytes = inspectReaderPreparedArtifacts(context, page, headers, source,
+                    result.diskCacheKey).originalBytes
+                if (cachedBytes != null) work.ifOptional {
+                    try { bytes.accept(cachedBytes) }
+                    catch (_: PrefetchBudgetExceeded) { bytes.exhaust() }
+                }
             }
+            // A real local hit remains usable even when the optional transfer window is full.
             OriginalPagePrefetchResult(true, result.diskCacheKey)
         }
         is ErrorResult -> {
@@ -709,9 +712,16 @@ private class ExperienceImageNetworkClient(
             val waiting: (AdmissionWait?) -> Unit = { token?.admission(PrefetchStage.DOWNLOADING, it) }
             return if (optional && token?.isForeground != true) {
                 try {
-                    token?.ifOptional { if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded() }
+                    val remaining = minOf(policy.state.value.prefetchBytes,
+                        request.extras[bytesKey]?.remaining ?: Long.MAX_VALUE)
+                    token?.ifOptional {
+                        if (!policy.canWritePrefetch() || remaining <= 0L) throw PrefetchBudgetExceeded()
+                    }
+                    // Unknown images start with an estimate, not an observed minimum size.
+                    // Admit a bounded attempt; response/body bytes enforce the real ceiling.
                     policy.withPrefetchAdmission(source,
-                        policy.estimatedPageBytes(request.url), { token?.isForeground == true }, waiting) { transfer() }
+                        minOf(policy.estimatedPageBytes(request.url), remaining.coerceAtLeast(0L)),
+                        { token?.isForeground == true }, waiting) { transfer() }
                 } catch (_: PrefetchPromoted) {
                     policy.withImageAdmission(reader = true, source = source, onWaiting = waiting) { transfer() }
                 }
