@@ -42,6 +42,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
     private val models = ImportedEngineModels(File(root, "models"), EnhancementEngineIds.ANDROID_ONNX)
     private val videoModels = ImportedEngineModels(File(root, "video-models"), EnhancementEngineIds.ANDROID_VIDEO_ONNX)
     private val rifeModels = AndroidRifeModels(File(root, "rife-models"))
+    private val cugan = AndroidCuganVulkan(this.context, root)
     private val runtimes = PanelRuntimeStore.get(context)
     private val nativeGate = Mutex()
     private var session: OrtSession? = null
@@ -51,6 +52,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
         val installed = models.list()
         val installedVideo = videoModels.list()
         val frameModels = rifeModels.installed()
+        val cuganModel = cugan.model()
         val runtime = runtimes.states.value[PanelRuntimeId.ONNX]
         fun modelReadiness(models: List<EngineModel>) = when {
             runtime?.installed != true -> EngineReadiness.NOT_INSTALLED
@@ -73,6 +75,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                     else -> "CPU 原生推理与重叠分块；未声明 Vulkan 或手机性能验证"
                 }, setOf(1, 2, 4), setOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON),
                 canInstall = canInstall),
+            cugan.descriptor(cuganModel),
             EngineDescriptor(EnhancementEngineIds.ANDROID_RIFE, "RIFE 运动补帧", ANDROID_VIDEO_ENGINE_VERSION, "上游 RIFE 与导出模型各自许可",
                 "https://github.com/AmusementClub/vs-mlrt/releases/tag/external-models", modelReadiness(frameModels),
                 "离线 CPU 推理。导入官方包内 rife_v2 的 4.25 Lite、4.22 或 4.26 FP32。精细、极致各对对应基座做双向两次推理。",
@@ -90,11 +93,16 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                 if (Build.VERSION.SDK_INT >= 29) videoReadiness else EngineReadiness.UNSUPPORTED,
                 "Android 10+ 可尝试仅硬件执行已导入的 RGB 模型。实际图与设备支持、处理耗时和回退状态在播放中显示。",
                 setOf(1, 2, 4), setOf(EngineContent.VIDEO), realtime = true),
-        ) + anime4kEngineDescriptors(), installed + installedVideo, (installed + installedVideo + frameModels).sumOf { it.bytes },
-            runtime?.bytes ?: 0, frameModels)
+        ) + anime4kEngineDescriptors(), installed + installedVideo + listOfNotNull(cuganModel),
+            (installed + installedVideo + frameModels + listOfNotNull(cuganModel)).sumOf { it.bytes },
+            (runtime?.bytes ?: 0) + (runtimes.states.value[PanelRuntimeId.CUGAN]?.bytes ?: 0), frameModels)
     }
 
     override suspend fun install(engineId: String, progress: (EngineProgress) -> Unit): EngineInventory {
+        if (engineId == EnhancementEngineIds.ANDROID_CUGAN) {
+            withContext(Dispatchers.IO) { cugan.install(progress) }
+            return inspect()
+        }
         require(engineId in setOf(EnhancementEngineIds.ANDROID_ONNX, EnhancementEngineIds.ANDROID_VIDEO_ONNX,
             EnhancementEngineIds.ANDROID_RIFE)) {
             "当前设备没有这一引擎的可安装组件"
@@ -251,29 +259,37 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
             @Suppress("DEPRECATION")
             val decoder = BitmapRegionDecoder.newInstance(source.path, false) ?: error("此格式暂不支持安全分块；保留原图")
             try {
-                if (request.engineId == EnhancementEngineIds.LOCAL_DETAIL) {
-                    require(request.scale == 1) { "轻量处理只支持 1×" }
-                    renderLocal(decoder, output, request.maximumOutputBytes, progress)
-                } else {
-                    require(request.engineId == EnhancementEngineIds.ANDROID_ONNX)
-                    val model = request.model ?: error("尚未选择适合当前页面的模型")
-                    require(request.content in model.contents && model.engineId == request.engineId) { "模型不适用于此页面类别" }
-                    require(model.nativeScale == request.scale) { "所选倍率与模型原生倍率不一致" }
-                    check(engineSha256(File(model.path)) == model.sha256) { "模型已改变，请重新选择" }
-                    runtimes.ensureLoaded(PanelRuntimeId.ONNX)
-                    progress(EngineProgress(EngineStage.MODEL_LOAD, detail = "准备真实 ONNX CPU 模型"))
-                    val live = modelSession(model)
-                    renderOnnx(decoder, output, request, live, progress)
+                val engineVersion = when (request.engineId) {
+                    EnhancementEngineIds.LOCAL_DETAIL -> {
+                        require(request.scale == 1) { "轻量处理只支持 1×" }
+                        renderLocal(decoder, output, request.maximumOutputBytes, progress)
+                        EnhancementEngineIds.LOCAL_DETAIL_VERSION
+                    }
+                    EnhancementEngineIds.ANDROID_CUGAN -> {
+                        cugan.render(decoder, output, request, progress)
+                        AndroidCuganVulkan.ENGINE_VERSION
+                    }
+                    EnhancementEngineIds.ANDROID_ONNX -> {
+                        val model = request.model ?: error("尚未选择适合当前页面的模型")
+                        require(request.content in model.contents && model.engineId == request.engineId) { "模型不适用于此页面类别" }
+                        require(model.nativeScale == request.scale) { "所选倍率与模型原生倍率不一致" }
+                        check(engineSha256(File(model.path)) == model.sha256) { "模型已改变，请重新选择" }
+                        runtimes.ensureLoaded(PanelRuntimeId.ONNX)
+                        progress(EngineProgress(EngineStage.MODEL_LOAD, detail = "准备真实 ONNX CPU 模型"))
+                        renderOnnx(decoder, output, request, modelSession(model), progress)
+                        check(engineSha256(File(model.path)) == model.sha256) { "处理期间模型发生变化，结果已丢弃" }
+                        "1.31.1"
+                    }
+                    else -> error("此图像增强引擎不可用")
                 }
                 currentCoroutineContext().ensureActive()
                 check(engineSha256(source) == sourceHash) { "原始页面已变化，旧增强结果不再使用" }
-                request.model?.let { check(engineSha256(File(it.path)) == it.sha256) { "处理期间模型发生变化，结果已丢弃" } }
                 progress(EngineProgress(EngineStage.VALIDATE, detail = "校验完整 PNG 与页面尺寸"))
                 val size = verifyEnginePng(output)
                 check(size.first.toLong() == decoder.width.toLong() * request.scale && size.second.toLong() == decoder.height.toLong() * request.scale)
                 val local = request.engineId == EnhancementEngineIds.LOCAL_DETAIL
                 val result = EngineOutput(destination.canonicalPath, size.first, size.second, engineSha256(output), output.length(),
-                    request.engineId, if (local) EnhancementEngineIds.LOCAL_DETAIL_VERSION else "1.31.1",
+                    request.engineId, engineVersion,
                     if (local) EnhancementEngineIds.LOCAL_DETAIL_DIGEST else checkNotNull(request.model).sha256,
                     (System.nanoTime() - started) / 1_000_000)
                 currentCoroutineContext().ensureActive()

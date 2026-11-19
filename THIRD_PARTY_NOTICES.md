@@ -773,6 +773,8 @@ MangaFlow's anime adapters use public source/API contracts. A source entry does 
   GraphQL protocol integration. User credentials are supplied separately and never distributed with the application.
 - **AndroidX Media3** — https://developer.android.com/media/media3 and https://github.com/androidx/media
   Android playback, media sessions, data sources and compressed media caching. Apache License 2.0; licenses and attribution supplied by its published artifacts remain applicable.
+- **Tencent ncnn 20261020 and Real-CUGAN** — https://github.com/Tencent/ncnn/releases/tag/20261020 and https://github.com/nihui/realcugan-ncnn-vulkan/tree/395302c5c70f1bff604c974e92e0a87e45c9f9ee
+  The Android Vulkan bridge links the pinned official ncnn static runtime under BSD-3-Clause and adapts the MIT preprocessor and model I/O contract. The app downloads the fixed Real-CUGAN NOSE model from the upstream repository. The original Real-CUGAN MIT notice (Copyright 2022 bilibili), converter MIT notice (Copyright 2019 nihui), and ncnn notices are included in Android assets.
 - **ArtCNN v1.6.2** — https://github.com/Artoriuz/ArtCNN/releases/tag/v1.6.2
   Bundled unmodified C4F16 and C4F32 GLSL release files for Windows libmpv. MIT, Copyright (c) 2024 João Chrisóstomo. The full upstream notice is packaged alongside the shaders in `shared/src/desktopMain/resources/artcnn/LICENSE`.
 - **RIFE FP32 v2 ONNX exports** — https://github.com/AmusementClub/vs-mlrt/releases/tag/external-models

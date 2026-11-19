@@ -22,6 +22,7 @@
 
 # JNI exports bind to this exact class and method names after an explicit component load.
 -keep class dev.mangaflow.storage.SteamNative { *; }
+-keep class dev.mangaflow.enhancement.engine.AndroidCuganVulkanJni { *; }
 
 # Android's adapted JmImageTool owns the software Bitmap restoration directly.
 # It does not initialize SPI processors or the desktop AWT fallback.

@@ -38,7 +38,7 @@ jobs:
           set +o pipefail
           yes | "$SDKMANAGER" --licenses > /dev/null
           set -o pipefail
-          "$SDKMANAGER" 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+          "$SDKMANAGER" 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;27.2.12479018' 'cmake;3.22.1'
       - name: Check out pinned Steam protocol source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -79,6 +79,8 @@ jobs:
         run: ./gradlew --no-daemon --console=plain --max-workers=2 :app:assembleDebug :app:assembleRelease :app:stageInferenceAars
       - name: Build optional Steam component
         run: python3 scripts/build_steam.py --platform android
+      - name: Build optional Vulkan enhancement component
+        run: python3 scripts/build_cugan.py
       - name: Preserve resolved Steam dependencies and licenses
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

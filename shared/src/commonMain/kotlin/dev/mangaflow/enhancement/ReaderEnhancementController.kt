@@ -395,8 +395,12 @@ internal fun readerEnhancementParameters(center: EnhancementCenter, engineId: St
     val engine = center.inventory.value.engines.firstOrNull { it.id == engineId }
         ?: error("无法确认当前增强引擎版本，请刷新模型详情")
     check(engine.version.isNotBlank()) { "增强引擎版本尚未确认" }
-    val tile = 256
-    val overlap = if (engine.id == EnhancementEngineIds.MANGAJANAI) 128 else 32
+    val tile = if (engine.id == EnhancementEngineIds.ANDROID_CUGAN) EnhancementEngineIds.ANDROID_CUGAN_TILE_SIZE else 256
+    val overlap = when (engine.id) {
+        EnhancementEngineIds.ANDROID_CUGAN -> EnhancementEngineIds.ANDROID_CUGAN_PADDING
+        EnhancementEngineIds.MANGAJANAI -> 128
+        else -> 32
+    }
     val identity = listOf("algorithm" to "reader-image-v1", "engine" to engine.id,
         "engineVersion" to engine.version, "content" to content.name,
         "tile" to tile.toString(), "overlap" to overlap.toString()).joinToString("") { (key, value) ->

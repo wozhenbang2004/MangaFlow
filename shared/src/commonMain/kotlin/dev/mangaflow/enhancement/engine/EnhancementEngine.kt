@@ -162,6 +162,9 @@ object EnhancementEngineIds {
     /** Algorithm identity, not a claim that this non-neural filter has trained weights. */
     const val LOCAL_DETAIL_DIGEST = "a9241c52aac7eecfb6b4ced9fdd587004da45864954d528047406ce3aa09b620"
     const val ANDROID_ONNX = "android-onnx"
+    const val ANDROID_CUGAN = "android-realcugan-vulkan"
+    const val ANDROID_CUGAN_TILE_SIZE = 96
+    const val ANDROID_CUGAN_PADDING = 18
     const val ANDROID_VIDEO_ONNX = "android-video-onnx"
     const val ANDROID_VIDEO_REALTIME = "android-video-nnapi"
     const val MANGAJANAI = "mangajanai-cli"

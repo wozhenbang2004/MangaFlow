@@ -369,6 +369,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                                 System.load(File(root, "libonnxruntime4j_jni.so").absolutePath)
                             }
                             PanelRuntimeId.STEAM -> System.load(File(root, "libmangaflow_steam.so").absolutePath)
+                            PanelRuntimeId.CUGAN -> System.load(File(root, "libmangaflow_cugan.so").absolutePath)
                             PanelRuntimeId.QUICKJS -> {
                                 System.setProperty("com.dokar.quickjs.library.path", root.absolutePath)
                                 System.setProperty("com.dokar.quickjs.library.name", "libquickjs.so")
@@ -923,12 +924,15 @@ actual class PanelRuntimeStore private constructor(context: Context) {
             PanelRuntimeId.ONNX to PanelRuntimeSpec(PanelRuntimeId.ONNX, "高精度与排序运行库", "1.31.1", "运行 Koharu 和 Inkwell，两个模型共用此运行库", "MIT"),
             PanelRuntimeId.QUICKJS to PanelRuntimeSpec(PanelRuntimeId.QUICKJS, "来源脚本引擎", "1.0.18",
                 "供漫画和动漫来源脚本使用，已随应用提供，无需单独下载", "Apache-2.0 / MIT", bundled = true),
+            PanelRuntimeId.CUGAN to PanelRuntimeSpec(PanelRuntimeId.CUGAN, "Real-CUGAN Vulkan 组件", "1.0.0-ncnn20261020",
+                "可选图像增强，仅下载当前应用架构", "BSD-3-Clause / MIT"),
         )
         private fun libraryNames(id: PanelRuntimeId): Set<String> = when (id) {
             PanelRuntimeId.STEAM -> setOf("libmangaflow_steam.so")
             PanelRuntimeId.LITERT -> setOf("libtensorflowlite_jni.so")
             PanelRuntimeId.ONNX -> setOf("libonnxruntime.so", "libonnxruntime4j_jni.so")
             PanelRuntimeId.QUICKJS -> setOf("libquickjs.so")
+            PanelRuntimeId.CUGAN -> setOf("libmangaflow_cugan.so")
         }
         @Volatile private var instance: PanelRuntimeStore? = null
         actual fun get(context: Context): PanelRuntimeStore = instance ?: synchronized(this) {

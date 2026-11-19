@@ -89,7 +89,7 @@ jobs:
           set +o pipefail
           yes | "$SDKMANAGER" --licenses > /dev/null
           set -o pipefail
-          "$SDKMANAGER" 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+          "$SDKMANAGER" 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;27.2.12479018' 'cmake;3.22.1'
 
       - name: Check out pinned Steam protocol source
         if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
@@ -155,6 +155,9 @@ jobs:
       - name: Build optional Steam component
         if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         run: python3 scripts/build_steam.py --platform android
+      - name: Build optional Vulkan enhancement component
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
+        run: python3 scripts/build_cugan.py
       - name: Preserve resolved Steam dependencies and licenses
         if: always() && env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

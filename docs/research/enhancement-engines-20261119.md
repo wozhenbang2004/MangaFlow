@@ -164,6 +164,21 @@ cache namespaces.
 
 ## Android implementation and native research boundary
 
+The Vulkan image follow-up pins Tencent ncnn's official
+`ncnn-20261020-android-vulkan.zip` static package, SHA-256
+`6e0c5f9b397faf32b923de2ef6210af9bf375851869dceff06a8005331981086`.
+Its Android ARMv7, ARM64, x86 and x64 headers and CMake exports were inspected.
+The app JNI bridge adapts the MIT Real-CUGAN NOSE 2× model and the original
+18-pixel reflected-padding scheme at commit `395302c5c70f1bff604c974e92e0a87e45c9f9ee`.
+The selected weights lack the globally pooled SE branch, so bounded tiles
+use consistent model behavior. The process checks a real Vulkan hardware
+device, verifies model layer support, uploads a floating-point `VkMat`,
+extracts `out0` on the same Vulkan command buffer, downloads it and checks
+the full output geometry before publication. The runtime uses the existing
+signed, ABI-specific optional package catalog. The original model pair is installed explicitly from the verified upstream
+files. CPU-side wall time stays distinct from GPU-only timing. Device behavior
+has yet to be observed.
+
 The RIFE follow-up inspected the official vs-mlrt `external-models` archives
 `rife_v4.25_lite.7z`, `rife_v4.22.7z`, and `rife_v4.26.7z`. Each selected
 `rife_v2` ONNX file has FP32 `[N,7,H,W]` input and opset 16 with normalized RGB

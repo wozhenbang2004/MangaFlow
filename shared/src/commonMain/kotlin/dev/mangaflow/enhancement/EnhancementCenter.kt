@@ -43,10 +43,12 @@ class EnhancementCenter private constructor(context: PlatformContext) {
 
         // Android runtime download() only enqueues the OS-managed transfer.
         scope.launch {
-            var lastReadiness: Pair<Boolean, Boolean>? = null
+            var lastReadiness: List<Boolean>? = null
             PanelRuntimeStore.get(app).states.collect { states ->
                 val runtime = states[PanelRuntimeId.ONNX] ?: return@collect
-                val readiness = runtime.installed to runtime.downloading
+                val cugan = states[PanelRuntimeId.CUGAN]
+                val readiness = listOf(runtime.installed, runtime.downloading, cugan?.installed == true,
+                    cugan?.pendingRemoval == true)
                 if (lastReadiness != readiness) {
                     lastReadiness = readiness
                     refreshInventory()
