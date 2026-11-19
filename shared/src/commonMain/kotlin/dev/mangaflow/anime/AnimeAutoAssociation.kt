@@ -1,7 +1,36 @@
 package dev.mangaflow.anime
 
-/** Cosmetic title normalization only: season, part, punctuation and edition suffixes survive. */
-private fun autoTitleKey(value: String) = value.trim().lowercase().filterNot { it.isWhitespace() }
+/** Ignore cosmetic spacing and punctuation, never drop episode, sequel or season identity. */
+private fun autoTitleKey(value: String) = value.trim().lowercase().filter { it.isLetterOrDigit() }
+
+/** Only the explicitly written season suffix and a separated sequel number may be compared.
+ * The base title and year must still agree. A bare series title never equals season two. */
+private fun autoSeasonSignature(value: String): Pair<String, Int>? {
+    val title = value.trim().lowercase()
+    val named = Regex("""^(.+?)\s*第([一二三四五六七八九十]|[1-9])季$""").matchEntire(title)
+    val numbered = Regex("""^(.+?)\s+([2-9])$""").matchEntire(title)
+    val base = named?.groupValues?.get(1) ?: numbered?.groupValues?.get(1) ?: return null
+    val label = named?.groupValues?.get(2) ?: numbered?.groupValues?.get(2) ?: return null
+    val number = label.toIntOrNull() ?: "一二三四五六七八九十".indexOf(label).takeIf { it >= 0 }?.plus(1) ?: return null
+    return autoTitleKey(base).takeIf { it.length >= 6 }?.let { it to number }
+}
+
+/** Search recall is wider than automatic binding. Search variants still must pass full identity checks. */
+internal fun autoPlaySearchKeywords(subject: AnimeSubject): List<String> {
+    val ordinal = listOf("", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
+    val variants = listOf(subject.title, subject.originalTitle).flatMap { raw ->
+        val signature = autoSeasonSignature(raw)
+        if (signature == null) listOf(raw) else {
+            val numeric = Regex("""^(.+?)\s+([2-9])$""").matchEntire(raw.trim())
+            val named = Regex("""^(.+?)\s*第([一二三四五六七八九十]|[1-9])季$""").matchEntire(raw.trim())
+            val base = numeric?.groupValues?.get(1) ?: named?.groupValues?.get(1)
+            val season = signature.second
+            if (base == null || season !in 1..10) listOf(raw)
+            else listOf(raw, "$base 第${ordinal[season]}季", "$base 第${season}季", base)
+        }
+    }
+    return variants.map(String::trim).filter { it.length >= 2 }.distinct().take(6)
+}
 
 /** AGE uses both 第02集 and 第2集 for the same regular episode across routes.
  * Only that complete numeric label is normalized; season/special/edition text survives. */
@@ -42,9 +71,16 @@ private fun autoPlaySubjectEvidence(subject: AnimeSubject, title: AnimeSourceTit
     val exactName = listOf(subject.title, subject.originalTitle).any {
         it.isNotBlank() && autoTitleKey(it) == autoTitleKey(title.title)
     }
+    val sourceSeason = autoSeasonSignature(title.title)
+    val explicitSeasonAlias = sourceSeason != null && listOf(subject.title, subject.originalTitle).any { name ->
+        // Different spellings of one explicit season are allowed; the bare base and another
+        // season remain different works. Year evidence is mandatory before binding.
+        autoSeasonSignature(name) == sourceSeason
+    }
     val sharedId = sharesAuthoritativeAnimeId(subject, title)
-    // A matching authoritative ID permits aliases, while conflicting IDs/years above still veto.
-    return sharedId || (exactName && (!requireEvidence || (subject.year != null && title.year == subject.year)))
+    // A shared authoritative ID permits aliases. Name-only binding still requires both years.
+    return sharedId || ((exactName || explicitSeasonAlias) &&
+        (!requireEvidence || (subject.year != null && title.year == subject.year)))
 }
 
 /** Do not select between seasons/editions, or infer episode identity from list position. */
@@ -122,6 +158,15 @@ internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalo
             // Parsing order only, not measured speed or a promise of playable streams.
             return eligible.keys.sortedBy { if (route(it) == "xigua") 1 else 0 }
         }
+    }
+    // yzx builds its groups from the same native playUrlList work record. Only completely
+    // equivalent number/kind and original episode labels can be rotated automatically.
+    if (catalog.title.sourceId == "anime-native-yzx" && eligible.size == groups.size) {
+        val labels = eligible.values.map { rows -> rows.associate {
+            (it.kind to requireNotNull(it.number)) to autoTitleKey(it.title)
+        } }
+        if (labels.distinct().size == 1 && labels.first().values.all { it.isNotBlank() })
+            return eligible.keys.sorted()
     }
     // Only adapters with a typed, audited automatic-line contract can select among groups.
     // Equal numbering with an empty edition is not proof that arbitrary groups are the same season.

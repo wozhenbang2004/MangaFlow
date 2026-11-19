@@ -1246,7 +1246,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     associationPermits.withPermit {
                         if (!current()) return@withPermit
                         report(AnimeAssociationPhase.SEARCHING)
-                        val loaded = withTimeoutOrNull(15_000) aggregation@ {
+                        val loaded = withTimeoutOrNull(24_000) aggregation@ {
                             val existing = library.state.value.bindings.firstOrNull {
                                 it.subjectId == detail.subject.id && it.catalog.sourceId == sourceId
                             }
@@ -1274,8 +1274,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 report(AnimeAssociationPhase.LINKED, catalog.notice)
                                 return@aggregation true
                             }
-                            val keywords = listOf(detail.subject.title, detail.subject.originalTitle)
-                                .map { it.trim() }.filter { it.isNotBlank() }.distinct()
+                            val keywords = autoPlaySearchKeywords(detail.subject)
                             val rows = if (force) mutableListOf<AnimeSourceTitle>() else associationCandidates[sourceId]
                                 ?.takeIf { it.first == revision }?.second.orEmpty().toMutableList()
                             var searchSucceeded = false
@@ -1285,7 +1284,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             // Recall only. Round-robin keywords so extra title pages cannot
                             // starve the original-title first page. Leave time to read catalogues.
                             val lastPage = if (provider.supportsSearchPagination) 3 else 1
-                            val recalled = withTimeoutOrNull(6_500) recall@ {
+                            val recalled = withTimeoutOrNull(9_000) recall@ {
                                 for (pageNumber in 1..lastPage) {
                                     for (keyword in keywords) {
                                         // A grouped search row without ID/year is only a hint.
@@ -1354,6 +1353,53 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 return@aggregation true
                             }
                             if (!current()) return@aggregation false
+                            // The normal manga merger also distinguishes recall from identity proof.
+                            // An anime identity alone is not proof that any real episode can resolve.
+                            val sampleEpisode = detail.episodes.firstOrNull {
+                                it.kind == AnimeEpisodeKind.MAIN && it.number.isFinite() && it.number > 0.0
+                            }
+                            val sampledLines = sampleEpisode?.let { canonical ->
+                                autoPlayGroups(detail, canonical, catalog).mapNotNull { group ->
+                                    catalog.episodes.singleOrNull { episode ->
+                                        episode.group == group && episode.kind == canonical.kind &&
+                                            episode.number == canonical.number
+                                    }
+                                }
+                            }.orEmpty()
+                            if (catalog.notice != null || sampledLines.isEmpty()) {
+                                report(AnimeAssociationPhase.NEEDS_SELECTION,
+                                    "已找到同作品候选，但集数或线路仍需核对；未自动认定可播放。", possible)
+                                return@aggregation true
+                            }
+                            var resolvedLine: AnimeSourceEpisode? = null
+                            var lastProbeFailure: String? = null
+                            // At most two exact-episode lines, with one bounded address check each.
+                            for (line in sampledLines.take(2)) {
+                                if (!current()) return@aggregation false
+                                try {
+                                    val asset = withTimeoutOrNull(3_500L) { provider.resolve(catalog, line) }
+                                    if (asset == null) {
+                                        lastProbeFailure = "取址超时"
+                                        continue
+                                    }
+                                    check(asset.sourceId == sourceId && asset.sourceEpisodeId == line.id &&
+                                        asset.sourceRevision == revision && asset.url.isNotBlank() &&
+                                        asset.expiresAt?.let { it > wallTimeMillis() } != false) {
+                                        "来源返回的本集地址身份不一致"
+                                    }
+                                    resolvedLine = line
+                                    break
+                                } catch (cancel: CancellationException) { throw cancel }
+                                catch (failure: Exception) {
+                                    lastProbeFailure = (failure as? AnimeSourceException)?.httpStatus
+                                        ?.let { "HTTP $it" } ?: (failure.message ?: "取址失败")
+                                }
+                            }
+                            if (resolvedLine == null) {
+                                report(AnimeAssociationPhase.NEEDS_SELECTION,
+                                    "同作品目录已找到，但本集取址未通过（${lastProbeFailure ?: "未取得地址"}），不会自动加入可播放来源。", possible)
+                                return@aggregation true
+                            }
                             library.editPlaybackAssociation(detail.subject, editBindings = { bindings ->
                                 check(current() && sourceId !in library.state.value.entries[detail.subject.id]?.excludedSourceIds.orEmpty()) {
                                     "来源选择已变化，自动关联已停止。"
@@ -1368,7 +1414,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 it.title.sourceId == sourceId
                             } + catalog, sourceCatalogErrors = state.sourceCatalogErrors - sourceId) }
                             rebuildOptions()
-                            report(AnimeAssociationPhase.LINKED, catalog.notice)
+                            report(AnimeAssociationPhase.LINKED, "本集已通过取址检查；实际解码仍以播放器为准。")
                             true
                         }
                         if (loaded != true) report(AnimeAssociationPhase.UNAVAILABLE, "来源暂未完成，已保留现有目录。")
