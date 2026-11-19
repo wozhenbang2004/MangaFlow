@@ -20,7 +20,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 internal enum class CacheArea(val label: String) {
-    ANIME("番剧缓冲"), READING("阅读图片"), ARTWORK("封面与头像"), DATA("资料与列表"), PANELS("分镜结果"),
+    ANIME("番剧缓冲"), READING("阅读图片"), ARTWORK("封面与头像"), DATA("资料与列表"), PANELS("分镜结果"), ENHANCEMENT("增强结果"),
 }
 internal enum class CacheBackend { COIL, SCRIPT, JM, PANEL, CATALOG, ANIME, AUXILIARY }
 
@@ -483,7 +483,8 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                 val catalogue = owner.ownerId == "catalog"
                 val backend = if (catalogue) CacheBackend.CATALOG else CacheBackend.AUXILIARY
                 val key = owner.ownerId + ":" + entry.key
-                val resource = CacheResource(identity(backend, key), backend, key, CacheArea.DATA,
+                val resource = CacheResource(identity(backend, key), backend, key,
+                    if (owner.ownerId in setOf("enhancement-v1", "enhanced-video-v1")) CacheArea.ENHANCEMENT else CacheArea.DATA,
                     mangaId = if (catalogue) entry.key else "", accessedAt = if (catalogue)
                         catalogAccess(entry.key).takeIf { it > 0L } ?: entry.modifiedAt else entry.modifiedAt,
                     used = true, auxiliaryOwnerId = owner.ownerId)

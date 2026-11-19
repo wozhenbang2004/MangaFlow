@@ -12,6 +12,8 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import dev.mangaflow.enhancement.VideoEnhancementVersion
+import dev.mangaflow.enhancement.EnhancementTaskPhase
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,10 +31,22 @@ import dev.mangaflow.anime.downloads.*
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 
+internal data class AnimeDownloadSelection(
+    val downloadId: String,
+    val versionId: String? = null,
+    val originalOnly: Boolean = false,
+)
+
 @Composable
 internal fun AnimeDownloadsPanel(visible: Boolean, controller: AnimeController, state: AnimeScreenState,
-    backdrop: HazeState, onDismiss: () -> Unit, onPlay: (String) -> Unit) {
-    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 640.dp) {
+    backdrop: HazeState, onDismiss: () -> Unit, onPlay: (AnimeDownloadSelection) -> Unit) {
+    var pendingPlayback by remember { mutableStateOf<AnimeDownloadSelection?>(null) }
+    LaunchedEffect(visible) { if (visible) pendingPlayback = null }
+    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 640.dp, onClosed = {
+        val request = pendingPlayback
+        pendingPlayback = null
+        if (request != null) onPlay(request)
+    }) {
         AnimePanelSurface(backdrop) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 8.dp),
@@ -42,8 +56,8 @@ internal fun AnimeDownloadsPanel(visible: Boolean, controller: AnimeController, 
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
                 }
-                AnimeDownloadsContent(controller, state, backdrop, onPlay,
-                    Modifier.weight(1f, fill = false))
+                AnimeDownloadsContent(controller, state, backdrop,
+                    onPlay = { pendingPlayback = it; onDismiss() }, modifier = Modifier.weight(1f, fill = false))
             }
         }
     }
@@ -52,8 +66,9 @@ internal fun AnimeDownloadsPanel(visible: Boolean, controller: AnimeController, 
 /** Shared by library and player settings, keeping actions in the panel that owns the task. */
 @Composable
 internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScreenState, backdrop: HazeState,
-    onPlay: (String) -> Unit, modifier: Modifier = Modifier) {
+    onPlay: (AnimeDownloadSelection) -> Unit, modifier: Modifier = Modifier) {
     val downloads by controller.downloads.state.collectAsStateWithLifecycle()
+    val enhancement by controller.enhancements.state.collectAsStateWithLifecycle()
     var filter by remember { mutableIntStateOf(0) }
     var removing by remember { mutableStateOf<String?>(null) }
     val removal = downloads.entries.firstOrNull { it.id == removing }
@@ -82,6 +97,14 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 item { AnimeQuietLabel("下载在应用前台进行；播放时优先保障当前视频。") }
                 if (downloads.notice != null) item { AnimeQuietLabel(downloads.notice.orEmpty()) }
+                if (enhancement.notice != null) item { AnimeQuietLabel(enhancement.notice.orEmpty()) }
+                if (rows.any { it.status == AnimeDownloadStatus.COMPLETED }) item {
+                    MotionTextButton(onClick = { rows.filter { it.status == AnimeDownloadStatus.COMPLETED }
+                        .forEach { controller.enhanceDownload(it.id) } }) {
+                        Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp)); Text("增强已下载剧集")
+                    }
+                }
                 if (downloads.loading && rows.isEmpty()) item { AnimeMessage("正在读取下载任务") }
                 else if (rows.isEmpty()) item { AnimeMessage(if (downloads.entries.isEmpty()) "准备离线看番" else "这里暂无下载",
                     if (downloads.entries.isEmpty()) "在播放设置中选择“下载当前集”，保留已确认的版本与来源。" else null) }
@@ -98,9 +121,16 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                         }
                     }
                     items(episodes, key = { it.id }) { entry ->
-                        AnimeDownloadRow(entry, screen, backdrop, onPlay = { onPlay(entry.id) },
+                        AnimeDownloadRow(entry, screen, backdrop, onPlay = { onPlay(AnimeDownloadSelection(entry.id)) },
                             onPause = { controller.pauseDownload(entry.id) }, onResume = { controller.resumeDownload(entry.id) },
-                            onRemove = { removing = entry.id })
+                            onRemove = { removing = entry.id },
+                            versions = enhancement.entries.filter { it.downloadId == entry.id },
+                            onEnhance = { controller.enhanceDownload(entry.id) },
+                            onOriginal = { onPlay(AnimeDownloadSelection(entry.id, originalOnly = true)) },
+                            onPlayVersion = { onPlay(AnimeDownloadSelection(entry.id, versionId = it)) },
+                            onPauseVersion = controller.enhancements::pause, onResumeVersion = controller.enhancements::resume,
+                            onCancelVersion = controller.enhancements::cancel,
+                            onRemoveVersion = { controller.enhancements.removeVersion(it) })
                     }
                 }
             }
@@ -110,10 +140,14 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
 
 @Composable
 private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState, backdrop: HazeState,
-    onPlay: () -> Unit, onPause: () -> Unit, onResume: () -> Unit, onRemove: () -> Unit) {
+    onPlay: () -> Unit, onPause: () -> Unit, onResume: () -> Unit, onRemove: () -> Unit,
+    versions: List<VideoEnhancementVersion>, onEnhance: () -> Unit, onOriginal: () -> Unit,
+    onPlayVersion: (String) -> Unit, onPauseVersion: (String) -> Unit, onResumeVersion: (String) -> Unit,
+    onCancelVersion: (String) -> Unit, onRemoveVersion: (String) -> Unit) {
     var menu by remember(entry.id) { mutableStateOf(false) }
     var menuPresent by remember(entry.id) { mutableStateOf(false) }
     var removeRequested by remember(entry.id) { mutableStateOf(false) }
+    var originalRequested by remember(entry.id) { mutableStateOf(false) }
     val active = entry.status in setOf(AnimeDownloadStatus.DOWNLOADING, AnimeDownloadStatus.QUEUED, AnimeDownloadStatus.WAITING)
     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
@@ -152,8 +186,16 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
                 }
                 CompactGlassPopover(menu, backdrop, onDismiss = { menu = false }, onPresenceChange = { present ->
                     menuPresent = present
-                    if (!present && removeRequested) { removeRequested = false; onRemove() }
+                    if (!present) {
+                        if (removeRequested) { removeRequested = false; onRemove() }
+                        else if (originalRequested) { originalRequested = false; onOriginal() }
+                    }
                 }) {
+                    if (entry.status == AnimeDownloadStatus.COMPLETED) {
+                        CompactMenuAction(Icons.Outlined.AutoAwesome, "增强此集", onClick = { menu = false; onEnhance() })
+                        CompactMenuAction(Icons.Outlined.PlayArrow, "播放原始版",
+                            onClick = { originalRequested = true; menu = false })
+                    }
                     CompactMenuAction(Icons.Outlined.DeleteOutline, "移除下载", destructive = true,
                         onClick = { removeRequested = true; menu = false })
                 }
@@ -168,6 +210,55 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
             entry.totalFiles?.takeIf { it > 1 }?.let { entry.completedFiles.toString() + " / " + it + " 段" },
         ).joinToString(" · "))
         if (!entry.error.isNullOrBlank()) AnimeDiscoveryInlineStatus(entry.error, showIssue = true)
+        versions.forEach { version ->
+            var versionMenu by remember(version.id) { mutableStateOf(false) }
+            var versionMenuPresent by remember(version.id) { mutableStateOf(false) }
+            var removeVersionRequested by remember(version.id) { mutableStateOf(false) }
+            var cancelVersionRequested by remember(version.id) { mutableStateOf(false) }
+            val working = version.phase in setOf(EnhancementTaskPhase.QUEUED, EnhancementTaskPhase.WAITING, EnhancementTaskPhase.RUNNING)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Column(Modifier.weight(1f)) {
+                    Text("增强 · ${version.label}", style = MaterialTheme.typography.labelMedium)
+                    AnimeQuietLabel(version.phase.label + (version.progress?.processingFps?.let {
+                        " · 处理 ${(it * 10).toInt() / 10.0} 帧/秒" } ?: ""))
+                }
+                if (version.phase != EnhancementTaskPhase.CANCELLED) MotionIconButton(onClick = {
+                    when { version.phase == EnhancementTaskPhase.COMPLETED -> onPlayVersion(version.id)
+                        working -> onPauseVersion(version.id); else -> onResumeVersion(version.id) }
+                }, enabled = !menuPresent && !versionMenuPresent,
+                    tooltip = when { version.phase == EnhancementTaskPhase.COMPLETED -> "播放增强版"
+                    working -> "暂停增强"; else -> "继续增强" }, modifier = Modifier.size(44.dp)) {
+                    Icon(when { version.phase == EnhancementTaskPhase.COMPLETED -> Icons.Outlined.PlayArrow
+                        working -> Icons.Outlined.Pause; else -> Icons.Outlined.Refresh }, null, Modifier.size(19.dp))
+                }
+                Box {
+                    MotionIconButton(onClick = { versionMenuPresent = true; versionMenu = true },
+                        enabled = !menuPresent && !versionMenuPresent, tooltip = "管理增强版本", modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Outlined.MoreHoriz, null, Modifier.size(18.dp))
+                    }
+                    CompactGlassPopover(versionMenu, backdrop, onDismiss = { versionMenu = false }, onPresenceChange = { present ->
+                        versionMenuPresent = present
+                        if (!present) {
+                            if (removeVersionRequested) { removeVersionRequested = false; onRemoveVersion(version.id) }
+                            else if (cancelVersionRequested) { cancelVersionRequested = false; onCancelVersion(version.id) }
+                        }
+                    }) {
+                        if (working || version.phase == EnhancementTaskPhase.PAUSED)
+                            CompactMenuAction(Icons.Outlined.Close, "取消增强", onClick = { cancelVersionRequested = true; versionMenu = false })
+                        if (version.phase == EnhancementTaskPhase.COMPLETED)
+                            CompactMenuAction(Icons.Outlined.DeleteOutline, "清理增强版", destructive = true,
+                                onClick = { removeVersionRequested = true; versionMenu = false })
+                    }
+                }
+            }
+            val completed = version.progress?.completed
+            val enhancedTotal = version.progress?.total?.takeIf { it > 0 }
+            if (working && completed != null && enhancedTotal != null) AnimeDownloadProgress(
+                (completed.toDouble() / enhancedTotal).toFloat().coerceIn(0f, 1f))
+            version.reason?.let { AnimeQuietLabel(it) }
+        }
     }
 }
 

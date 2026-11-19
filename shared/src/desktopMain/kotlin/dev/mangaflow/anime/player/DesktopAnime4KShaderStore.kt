@@ -17,8 +17,8 @@ import java.security.MessageDigest
 
 /** App-owned, immutable-by-version resources; no media/source identity enters paths. */
 internal object DesktopAnime4KShaderStore {
-    fun prepare(context: PlatformContext, mode: AnimeVideoEnhancementMode): List<String> {
-        val shaders = Anime4KShaderLibrary.sources(mode)
+    fun prepare(context: PlatformContext, mode: AnimeVideoEnhancementMode, scale: Int = 2): List<String> {
+        val shaders = Anime4KShaderLibrary.sources(mode, scale)
         if (shaders.isEmpty()) return emptyList()
         val root = Path.of(dataDirectory(context).path).toAbsolutePath().normalize()
         val privateRoot = privateDirectory(root.resolve("anime4k"))

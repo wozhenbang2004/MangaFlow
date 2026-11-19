@@ -1,5 +1,11 @@
 # 漫流 · MangaFlow
 
+## 画质与性能 · 2026-11-19 源码接入
+
+设置、阅读器和番剧播放器新增统一「画质与性能」入口。画质档位、输出倍率、补帧与预处理分别设置；普通漫画、成人漫画和番剧默认值独立。漫画支持原图先显示、临近页面与整章处理、真实同页比较；Windows 接入 MangaJaNai/IllustrationJaNai 和 VideoJaNai/RIFE 离线引擎安装及执行链，下载中心分别显示下载与增强进度，并保留原始版和增强版。衍生缓存独立校验和清理。
+
+这不是整份 V1.0 已完成的声明。Windows 高阶实时、Android GPU 视频/RIFE、在线增强片段切换、通用设备推荐和跨设备复用仍未实现；Android 当前新增的是 CPU ONNX 图像路径。所有新模型与设备性能/视觉尚未验证，缺测指标明确显示不可用。[完整能力、未完成项及文件变更](docs/design/enhancement-v1-delivery-20261119.md) 和 [引擎/许可依据](docs/research/enhancement-engines-20261119.md) 随源码交付。
+
 Current 2026-11-12 interface: an ordinary flat full-cover collection grid, without 3D shelves or follow/hoard/pause groups; picture/spread hearts and image collection (replacing bookmark/notes controls); a reading-edge clock outside the console and actual foreground reading statistics; task-grouped settings, full-segment selections and shared paper-color previews; compact heat/native-score bands with real remaining-source counts; a floating glass discovery/ranking header over the original scrolling content; softer ranking transitions; finger-driven pull and curved swipe removal; glass search that hides underlying history chrome during its full presence; a matching glass downloads header with summary/import/queue/filter actions over the retained lists; immediate short cold-start reveal; local image/silent-video wallpaper; user-selected comic-window icon B. Settings → 外观 → 壁纸 imports ordinary image/video files. Wallpaper Engine scene/project/mobile packages are not generic videos. Build and device behavior remain pending the main CI/user feedback path.
 
 一个专注于阅读的漫画客户端，使用 Kotlin Multiplatform 和 Compose Multiplatform，共享页面与业务代码。

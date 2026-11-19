@@ -15,6 +15,7 @@ class AnimeLocalMedia internal constructor(
     private val sourceRevision: String,
     private val sessionEpoch: Long,
     private val edition: String,
+    val enhancedVersion: Boolean = false,
     private val opener: () -> AnimeLocalMediaLease,
 ) {
     internal fun acquire(asset: AnimePlaybackAsset): AnimeLocalMediaLease {

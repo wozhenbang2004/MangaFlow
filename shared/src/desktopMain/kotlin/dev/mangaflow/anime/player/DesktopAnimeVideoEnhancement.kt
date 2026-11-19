@@ -21,13 +21,14 @@ internal class DesktopAnimeVideoEnhancement(
     private var handle: MPVHandle? = null
     private var generation = -1L
     private var mode = AnimeVideoEnhancementMode.OFF
+    private var scale = 2
     private var mediaReady = false
     private var monitoring: Job? = null
     private var ownsShaders = false
 
-    fun configure(handle: MPVHandle?, generation: Long, mode: AnimeVideoEnhancementMode, mediaReady: Boolean) {
+    fun configure(handle: MPVHandle?, generation: Long, mode: AnimeVideoEnhancementMode, mediaReady: Boolean, scale: Int = 2) {
         if (this.handle === handle && this.generation == generation && this.mode == mode &&
-            this.mediaReady == mediaReady) return
+            this.mediaReady == mediaReady && this.scale == scale) return
 
         monitoring?.cancel()
         monitoring = null
@@ -36,6 +37,7 @@ internal class DesktopAnimeVideoEnhancement(
         this.handle = handle
         this.generation = generation
         this.mode = mode
+        this.scale = scale
         this.mediaReady = mediaReady
         // A replaced backend is closed by the existing session owner. Its failed
         // cleanup must not transfer ownership or errors to a different backend.
@@ -54,7 +56,7 @@ internal class DesktopAnimeVideoEnhancement(
 
         monitoring = scope.launch(Dispatchers.Main.immediate) {
             try {
-                val paths = withContext(Dispatchers.IO) { DesktopAnime4KShaderStore.prepare(context, mode) }
+                val paths = withContext(Dispatchers.IO) { DesktopAnime4KShaderStore.prepare(context, mode, scale) }
                 // append accepts a single literal path, even with ':' / ';' / '\\'.
                 // mpv's string getter prints this list with the platform separator.
                 val expectedList = paths.joinToString(File.pathSeparator)

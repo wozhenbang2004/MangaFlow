@@ -19,6 +19,10 @@ import dev.mangaflow.ui.mangaFontFamily
 import dev.mangaflow.ui.chapterGroupLabel
 import dev.mangaflow.ui.mangaNumberText
 import dev.mangaflow.ui.ChapterSourceLogo
+import dev.mangaflow.enhancement.*
+import dev.mangaflow.enhancement.ui.EnhancementCenterPanel
+import androidx.compose.material.icons.rounded.AutoAwesome
+import dev.mangaflow.ui.motion.MotionSlider
 
 import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.data.ReaderSourceStandby
@@ -291,6 +295,7 @@ fun ReaderScreen(
     communityRepository: CopyCommunityRepository,
     reviewRepository: dev.mangaflow.data.ReviewRepository,
     onBack: () -> Unit,
+    adultProfile: Boolean = false,
     onRequestNotificationPermission: () -> Unit = {},
     onChapterVisible: (Manga, Chapter) -> Unit = { _, _ -> },
     onNearChapterEnd: (Manga, Chapter) -> Unit = { _, _ -> },
@@ -416,6 +421,9 @@ fun ReaderScreen(
     var bottomControlsHeightPx by remember { mutableIntStateOf(0) }
     var readerStatusInspecting by remember(chapterId) { mutableStateOf(false) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showEnhancement by rememberSaveable { mutableStateOf(false) }
+    var compareEnhancement by remember(chapterId) { mutableStateOf(false) }
+    var enhancementDivider by remember(chapterId) { mutableFloatStateOf(.5f) }
     var showPanelModels by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) { if (!PanelReadingAvailable) showPanelModels = false }
     var showComments by remember(chapterId) { mutableStateOf(false) }
@@ -483,6 +491,18 @@ fun ReaderScreen(
     val scope = rememberCoroutineScope()
     val sourceIdentity = ReaderSourceIdentity(chapter.logicalId.ifBlank { chapter.id },
         chapter.id, chapter.sourceId, chapter.sourceMangaId)
+    val enhancementContent = if (adultProfile) EnhancementContent.ADULT_MANGA else EnhancementContent.MANGA
+    val enhancementCenter = remember(adultImageContext) { EnhancementCenter.get(adultImageContext) }
+    val enhancement = remember(manga.id, sourceIdentity, enhancementContent, scope) {
+        ReaderEnhancementController(adultImageContext, enhancementContent, manga.id, chapterId, chapter.sourceId, scope)
+    }
+    DisposableEffect(enhancement) { onDispose { enhancement.close() } }
+    val enhancementDefaults by enhancementCenter.settings.state.collectAsStateWithLifecycle()
+    val enhancementOverrides by enhancementCenter.settings.sessions.collectAsStateWithLifecycle()
+    val enhancementPolicy = remember(enhancementDefaults, enhancementOverrides, enhancement.sessionKey, enhancementContent) {
+        enhancementCenter.settings.policy(enhancementContent, enhancement.sessionKey)
+    }
+    val enhancementState by enhancement.state.collectAsStateWithLifecycle()
     val warmSourceStandbys by rememberUpdatedState(onWarmSourceStandbys)
     val prefetchedPageFailed by rememberUpdatedState(onPrefetchPageFailed)
     val cancelSourceStandbys by rememberUpdatedState(onCancelSourceStandbys)
@@ -508,6 +528,14 @@ fun ReaderScreen(
     val sharedPrefetchRequests = remember(sourceIdentity, pages, headers) { mutableStateMapOf<Int, ReaderPagePrefetch>() }
     val sharedPrefetchFailures = remember(sourceIdentity, pages, headers) { mutableStateMapOf<Int, String>() }
     val preparation by preparationTracker.state.collectAsStateWithLifecycle()
+    LaunchedEffect(enhancement, pageIndex, preparation.direction, pages.size, readerForeground,
+        leavingReader, chapterChangeRequested, enhancementPolicy, experienceBudget) {
+        enhancement.updateWindow(pageIndex, preparation.direction, pages.size,
+            readerForeground && !leavingReader && !chapterChangeRequested,
+            enhancementPolicy, experienceBudget)
+    }
+    LaunchedEffect(enhancement, pageIndex) { compareEnhancement = false }
+    BackHandler(enabled = active && compareEnhancement) { compareEnhancement = false }
     LaunchedEffect(sourceIdentity, chapter, pageIndex, pages, standbyActive, loading, error,
         sourcePickerBlocking, chapterChangeRequested, experienceBudget.standbySources, preparation.direction) {
         // A stalled or failed visible image is exactly when spare sources matter. Do not
@@ -956,10 +984,10 @@ fun ReaderScreen(
         if (pages.isNotEmpty()) downloadStore.prioritizeReadingPage(manga.id, chapterId, pageIndex)
     }
 
-    LaunchedEffect(controlsVisible, showSettings, showChapters, showSpreadAdjustment, showComments,
+    LaunchedEffect(controlsVisible, showSettings, showEnhancement, compareEnhancement, showChapters, showSpreadAdjustment, showComments,
         showPageNavigator, showReaderActions, readerActionsPresent, sourcePickerBlocking, readerStatusInspecting,
         loading, error, imageVisible, progressInteracting, touchExploration, chromeEngaged) {
-        if (controlsVisible && !showSettings && !showChapters && !showSpreadAdjustment && !showComments &&
+        if (controlsVisible && !showSettings && !showEnhancement && !compareEnhancement && !showChapters && !showSpreadAdjustment && !showComments &&
             !showPageNavigator && !showReaderActions && !readerActionsPresent && !sourcePickerBlocking && !readerStatusInspecting &&
             !loading && error == null && imageVisible && !progressInteracting && !touchExploration && !chromeEngaged) {
             delay(5000)
@@ -1016,6 +1044,9 @@ fun ReaderScreen(
         }.focusable(enabled = keyboardReady)
 
     CompositionLocalProvider(LocalReaderActionFinished provides { if (desktop) keyboardFocusRestore++ },
+        LocalReaderEnhancement provides enhancement,
+        LocalReaderEnhancementPresentation provides ReaderEnhancementPresentation(enhancement, enhancementState,
+            enhancementDivider.takeIf { compareEnhancement }),
         LocalReaderPreparationTracker provides preparationTracker,
         LocalReaderCacheRangeOwner provides cacheRangeOwner,
         LocalReaderPageRepair provides ReaderRepairRenderContext(repairState, repairs) { index, waiting ->
@@ -1306,7 +1337,10 @@ fun ReaderScreen(
                             repairState.replacements[pageIndex]?.let {
                                 "补页 · ${it.variant.sourceName} ${it.page.index + 1}"
                             },
-                            currentSourceName.takeIf { chapter.variants.size > 1 }).joinToString(" · "),
+                            currentSourceName.takeIf { chapter.variants.size > 1 },
+                            if (enhancementPolicy.tier != QualityTier.ORIGINAL)
+                                if (enhancementState.currentEnhanced) "增强 ${enhancementPolicy.scale}×" else "原图" else null,
+                            "下页就绪".takeIf { enhancementState.nextReady }).joinToString(" · "),
                             color = colors.onSurface.copy(alpha = .86f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     if (preferences.panelEngine == PanelEngine.OFF &&
@@ -1328,6 +1362,9 @@ fun ReaderScreen(
                     if (desktop) ReaderIcon(Icons.AutoMirrored.Outlined.MenuBook,
                         if (showChapters) "收起章节目录" else "章节目录", interactive = controlsVisible,
                         emphasis = if (showChapters) 1f else .82f, onClick = ::toggleReaderChapters)
+                    ReaderIcon(Icons.Rounded.AutoAwesome, "画质与性能", interactive = controlsVisible,
+                        emphasis = if (enhancementState.currentEnhanced || showEnhancement) 1f else .82f,
+                        onClick = { showEnhancement = true; controlsVisible = true })
                     ReaderIcon(Icons.Rounded.Tune, if (desktop) "阅读设置与快捷键" else "阅读设置",
                         interactive = controlsVisible, emphasis = if (showSettings) 1f else .82f,
                         onClick = ::toggleReaderSettings)
@@ -1646,6 +1683,19 @@ fun ReaderScreen(
                     maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             }
         }
+        if (compareEnhancement && enhancementState.assets[pageIndex] != null) {
+            LiquidGlassSurface(state = readerBackdrop, role = GlassSurfaceRole.NAVIGATION, softCard = true,
+                modifier = Modifier.align(Alignment.BottomCenter).windowInsetsPadding(readerNavigationInsets())
+                    .padding(horizontal = 20.dp, vertical = 12.dp).widthIn(max = 400.dp).fillMaxWidth()) {
+                Row(Modifier.padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("原图", style = MaterialTheme.typography.labelMedium)
+                    MotionSlider(enhancementDivider, { enhancementDivider = it },
+                        Modifier.weight(1f).padding(horizontal = 12.dp), valueRange = 0f..1f)
+                    Text("增强", style = MaterialTheme.typography.labelMedium)
+                    ReaderIcon(Icons.Rounded.Close, "结束当前页比较") { compareEnhancement = false }
+                }
+            }
+        }
         AnimatedVisibility(
             visible = downloadMessage != null,
             modifier = Modifier.align(Alignment.Center),
@@ -1682,6 +1732,14 @@ fun ReaderScreen(
         onDismiss = { showPageNavigator = false },
     )
     if (!dockedPanels) settingsPanel(false)
+    EnhancementCenterPanel(
+        visible = showEnhancement, backdrop = readerBackdrop, initialContent = enhancementContent,
+        sessionKey = enhancement.sessionKey, onDismiss = { showEnhancement = false },
+        onClosed = { keyboardFocusRestore++ },
+        onCompare = if (enhancementState.assets[pageIndex] == null) null else ({
+            compareEnhancement = true; enhancementDivider = .5f; controlsVisible = false
+        }),
+    )
     PanelModelsDialog(visible = showPanelModels, backdrop = readerBackdrop) { showPanelModels = false }
     ReaderSpreadDialog(
         visible = showSpreadAdjustment && pages.isNotEmpty(),
@@ -2397,6 +2455,7 @@ internal fun AdjacentPagePrefetch(
     val imageLoader = SingletonImageLoader.get(imagePlatformContext(context))
     val experience = remember(context) { ExperiencePolicyStore.get(context) }
     val tracker = LocalReaderPreparationTracker.current
+    val enhancement = LocalReaderEnhancement.current
     val cacheRangeOwner = LocalReaderCacheRangeOwner.current
     val rangeStore = remember(context) { dev.mangaflow.storage.StorageCacheStore.get(context) }
     val budget by experience.state.collectAsStateWithLifecycle()
@@ -2422,7 +2481,7 @@ internal fun AdjacentPagePrefetch(
     LaunchedEffect(pages, headers, if (retainOriginalsAcrossLayouts) null else mode, imageLoader,
         resolvePage, scriptPrefetch, sourceId, if (retainOriginalsAcrossLayouts) null else groups,
         if (retainOriginalsAcrossLayouts) null else viewportHeight,
-        if (retainOriginalsAcrossLayouts) null else layoutKey, tracker, cacheRangeOwner, rangeStore) {
+        if (retainOriginalsAcrossLayouts) null else layoutKey, tracker, cacheRangeOwner, rangeStore, enhancement) {
         val owner = Any()
         val requestScope = this
         val resolvedAttempts = mutableSetOf<Int>()
@@ -2509,6 +2568,7 @@ internal fun AdjacentPagePrefetch(
         fun transfers(): Set<Int> = (requests.keys + scriptRequests.keys).toSet()
         fun pending(): Set<Int> = transfers() + resolutionJobs.keys
         fun originalReady(index: Int, page: Page, diskKey: String?) {
+            enhancement?.originalReady(index, page, headers, page.sourceRouteId.ifBlank { sourceId }, diskKey)
             cacheRangeOwner?.let { rangeStore.registerReadingResource(it, index, page, diskKey) }
             retainedPages[index] = PrefetchedReaderPage(page, diskKey)
             originalEpochs[index] = (originalEpochs[index] ?: 0) + 1
@@ -2592,6 +2652,8 @@ internal fun AdjacentPagePrefetch(
                                 // still have a downloaded/materialized alias; only resolved misses count.
                                 val original = artifact.originalPresent.takeIf { it == true || retained != null ||
                                     resolved != null || resource.url.startsWith("file:") }
+                                if (original == true) enhancement?.originalReady(index, resource, headers,
+                                    resource.sourceRouteId.ifBlank { sourceId }, retained?.diskCacheKey)
                                 tracker?.artifact(index, original, artifact.originalBytes,
                                     artifact.previewResident.takeIf { scanLayout === currentLayout &&
                                         memoryKeys[index] == previewKey &&
@@ -3228,6 +3290,7 @@ private fun ReaderPageImage(
 ) {
     val context = LocalContext.current
     val preparationTracker = LocalReaderPreparationTracker.current
+    val enhancementPresentation = LocalReaderEnhancementPresentation.current
     val imageRangeOwner = LocalReaderCacheRangeOwner.current
     val imageRangeStore = remember(context) { dev.mangaflow.storage.StorageCacheStore.get(context) }
     val experience = remember(context) { ExperiencePolicyStore.get(context) }
@@ -3262,6 +3325,9 @@ private fun ReaderPageImage(
     var observedDimensions by remember(originalCacheIdentity) { mutableStateOf<IntSize?>(null) }
     var measuredHeight by remember { mutableIntStateOf(0) }
     var reload by remember(originalCacheIdentity) { mutableIntStateOf(0) }
+    LaunchedEffect(enhancementPresentation?.controller, logicalPageIndex, reload) {
+        if (reload > 0) enhancementPresentation?.controller?.invalidate(logicalPageIndex)
+    }
     var fileRecoveryAttempted by remember(originalCacheIdentity) { mutableStateOf(false) }
     var failedMaterializedUrl by remember(originalCacheIdentity) { mutableStateOf<String?>(null) }
     // Keep the failed-prefetch fact after its caption clears. A late discovery creates one
@@ -3559,6 +3625,8 @@ private fun ReaderPageImage(
         LaunchedEffect(resource, loadedImage, pageVisible, imageRangeOwner) {
             val image = loadedImage ?: return@LaunchedEffect
             if (resource != null) {
+                enhancementPresentation?.controller?.originalReady(logicalPageIndex, resource, headers, sourceId,
+                    image.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId))
                 imageRangeOwner?.let { imageRangeStore.registerReadingResource(it, logicalPageIndex, resource,
                     image.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId)) }
                 readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource,
@@ -3608,6 +3676,10 @@ private fun ReaderPageImage(
         // Vertical reading uses one continuous scroll surface for pages and long strips.
         val pageModifier = if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth().height(naturalHeight)
             .onSizeChanged { measuredHeight = it.height }
+        val enhancedAsset = enhancementPresentation?.state?.assets?.get(logicalPageIndex)?.takeIf { enhanced ->
+            resource != null && enhanced.sourceCacheIdentity ==
+                (loadedImage?.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId))
+        }
         Box(pageModifier.clipToBounds(), contentAlignment = Alignment.Center) {
             if (request != null && !awaitingPrefetch && imageError == null && (pageVisible || loadedImage != null)) key(reload) {
                 if (paged) {
@@ -3637,6 +3709,9 @@ private fun ReaderPageImage(
                             onClick = { onTap() },
                         )
                     }
+                    ReaderEnhancedLayer(enhancedAsset, Modifier.matchParentSize(), pagedAlignment,
+                        zoom = imageState.zoomableState, spread = spreadViewport,
+                        comparisonFraction = enhancementPresentation?.comparisonFraction)
                     imageState.detailNotice?.takeIf { imageState.detailError == null }?.let { message ->
                         Text(message, Modifier.align(Alignment.BottomCenter).padding(16.dp),
                             color = Color.Gray, fontSize = 11.sp)
@@ -3677,6 +3752,8 @@ private fun ReaderPageImage(
                                 onDetailStatus = { detailStatus = it })
                         }
                     }
+                    ReaderEnhancedLayer(enhancedAsset, Modifier.matchParentSize(), Alignment.TopCenter,
+                        visibleWindow = visibleWindow, comparisonFraction = enhancementPresentation?.comparisonFraction)
                 }
             }
             if (!paged) detailStatus?.let { status ->

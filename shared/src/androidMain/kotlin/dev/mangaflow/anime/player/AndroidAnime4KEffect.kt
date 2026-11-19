@@ -28,9 +28,14 @@ import java.util.concurrent.atomic.AtomicLong
  */
 internal class AndroidAnime4KEffect(
     private val mode: AnimeVideoEnhancementMode,
+    private val scale: Int = 2,
     private val report: (AnimeVideoEnhancementState, () -> Boolean) -> Unit,
 ) : GlEffect {
     private val programRevision = AtomicLong(0L)
+    private val streamRevision = AtomicLong(0L)
+
+    /** Called by the player on seek/pause; GL allocations are reset on the GL thread. */
+    fun invalidateObservations() { streamRevision.incrementAndGet() }
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram {
         val revision = programRevision.incrementAndGet()
@@ -53,7 +58,7 @@ internal class AndroidAnime4KEffect(
             if (GlUtil.getContextMajorVersion() < 3L) {
                 return unavailable("当前图形上下文不支持 OpenGL ES 3，已保留原画")
             }
-            val plan = Anime4KGlPlan.create(Anime4KShaderLibrary.sources(mode))
+            val plan = Anime4KGlPlan.create(Anime4KShaderLibrary.sources(mode, scale))
             val textureUnits = IntArray(1)
             GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_IMAGE_UNITS, textureUnits, 0)
             GlUtil.checkGlError()
@@ -71,7 +76,7 @@ internal class AndroidAnime4KEffect(
                 compiled += program
                 program.setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), 4)
             }
-            return Anime4KGlProgram(mode, plan, programs, copy, currentReport)
+            return Anime4KGlProgram(mode, scale, plan, programs, copy, streamRevision::get, currentReport)
         } catch (failure: Exception) {
             // A failed constructor must not strand programs in Media3's shared GL context.
             compiled.forEach { runCatching { it.delete() } }
@@ -90,9 +95,11 @@ internal class AndroidAnime4KEffect(
 
 private class Anime4KGlProgram(
     private val mode: AnimeVideoEnhancementMode,
+    private val scale: Int,
     private val plan: Anime4KGlPlan,
     private val programs: List<GlProgram>,
     private val copy: GlProgram,
+    private val streamRevision: () -> Long,
     private val report: (AnimeVideoEnhancementState, () -> Boolean) -> Unit,
 ) : BaseGlShaderProgram(false, 1) {
     private data class Scratch(val texture: Int, val framebuffer: Int)
@@ -103,6 +110,7 @@ private class Anime4KGlProgram(
     private var enhancing = false
     private var failed = false
     private val observationGeneration = AtomicLong(0L)
+    private var observedStreamRevision = streamRevision()
     private var submittedFrames = 0L
     private var lastSubmissionAt: Long? = null
     private var sampleStartedAt: Long? = null
@@ -110,6 +118,7 @@ private class Anime4KGlProgram(
     private val dimensions = FloatArray(2)
     private val savedFramebuffer = IntArray(1)
     private val savedViewport = IntArray(4)
+    private val gpuTimer = AndroidAnimeGpuTimer()
 
     override fun configure(inputWidth: Int, inputHeight: Int): Size {
         resetObservations()
@@ -126,10 +135,10 @@ private class Anime4KGlProgram(
             GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, maximum, 0)
             GLES20.glGetIntegerv(GLES20.GL_MAX_VIEWPORT_DIMS, viewport, 0)
             GlUtil.checkGlError()
-            if (inputWidth <= 0 || inputHeight <= 0 || inputWidth.toLong() * 2 > maximum[0] ||
-                inputHeight.toLong() * 2 > maximum[0] || inputWidth.toLong() * 2 > viewport[0] ||
-                inputHeight.toLong() * 2 > viewport[1]) {
-                throw Anime4KUnavailable("2 倍输出超出当前 GPU 的纹理尺寸，已保留原画")
+            if (inputWidth <= 0 || inputHeight <= 0 || inputWidth.toLong() * scale > maximum[0] ||
+                inputHeight.toLong() * scale > maximum[0] || inputWidth.toLong() * scale > viewport[0] ||
+                inputHeight.toLong() * scale > viewport[1]) {
+                throw Anime4KUnavailable("所选倍率超出当前 GPU 的纹理尺寸，已保留原画")
             }
             repeat(plan.scratchCount) {
                 // Signed CNN activations MUST survive. RGBA8 would clamp negative features and
@@ -152,7 +161,7 @@ private class Anime4KGlProgram(
             }
             enhancing = true
             publishObservation(AnimeVideoEnhancementPhase.CONFIGURED, "Anime4K 已配置，等待视频帧")
-            return Size(inputWidth * 2, inputHeight * 2)
+            return Size(inputWidth * scale, inputHeight * scale)
         } catch (failure: Exception) {
             // configure runs before BaseGlShaderProgram allocates/binds its output. A same-size
             // copy is safe for a known capability limit with fully owned/released resources.
@@ -171,12 +180,15 @@ private class Anime4KGlProgram(
     }
 
     override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
+        if (observedStreamRevision != streamRevision()) resetObservations()
         val startedAt = if (enhancing) SystemClock.elapsedRealtime() else 0L
         val sampleStart = sampleStartedAt?.takeUnless {
             lastSubmissionAt?.let { last -> startedAt - last >= ANIME4K_ACTIVITY_TIMEOUT_MS } == true
         }
         val sampleSubmission = enhancing && (sampleStart == null || startedAt - sampleStart >= ANIME4K_SAMPLE_MS)
         val cpuStartedAt = if (sampleSubmission) Debug.threadCpuTimeNanos() else -1L
+        gpuTimer.poll()
+        if (sampleSubmission) gpuTimer.begin()
         GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, savedFramebuffer, 0)
         GLES20.glGetIntegerv(GLES20.GL_VIEWPORT, savedViewport, 0)
         val blend = GLES20.glIsEnabled(GLES20.GL_BLEND)
@@ -215,6 +227,7 @@ private class Anime4KGlProgram(
             publishObservation(AnimeVideoEnhancementPhase.FAILED, "Anime4K 处理失败，正在恢复原画")
             throw VideoFrameProcessingException.from(failure)
         } finally {
+            gpuTimer.end()
             restoreOutput()
             if (blend) GLES20.glEnable(GLES20.GL_BLEND) else GLES20.glDisable(GLES20.GL_BLEND)
             if (scissor) GLES20.glEnable(GLES20.GL_SCISSOR_TEST) else GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
@@ -276,6 +289,8 @@ private class Anime4KGlProgram(
     }
 
     private fun resetObservations() {
+        gpuTimer.reset()
+        observedStreamRevision = streamRevision()
         observationGeneration.incrementAndGet()
         submittedFrames = 0L
         lastSubmissionAt = null
@@ -291,18 +306,23 @@ private class Anime4KGlProgram(
         submitThreadCpuNanos: Long? = null,
     ) {
         val generation = observationGeneration.get()
+        val stream = observedStreamRevision
         val hasResources = enhancing && !failed
         report(AnimeVideoEnhancementState(
             mode = mode, phase = phase, detail = detail,
             inputWidth = inputWidth.takeIf { it > 0 }, inputHeight = inputHeight.takeIf { it > 0 },
-            outputWidth = if (hasResources) inputWidth * 2 else null,
-            outputHeight = if (hasResources) inputHeight * 2 else null,
+            outputWidth = if (hasResources) inputWidth * scale else null,
+            outputHeight = if (hasResources) inputHeight * scale else null,
             observation = if (hasResources) AnimeVideoEnhancementObservation(
                 submittedFrames, sampleFrames, sampleDurationMillis, submitThreadCpuNanos,
                 inputWidth.toLong() * inputHeight * RGBA16F_BYTES_PER_PIXEL * scratch.size,
                 recentlySubmitting = phase == AnimeVideoEnhancementPhase.ACTIVE,
+                gpuSampleSequence = gpuTimer.latest?.sequence,
+                gpuExecutionNanos = gpuTimer.latest?.durationNanos,
+                gpuSubmittedAtNanos = gpuTimer.latest?.submittedAtNanos,
+                gpuCompletionObservedAtNanos = gpuTimer.latest?.completionObservedAtNanos,
             ) else null,
-        )) { observationGeneration.get() == generation }
+        )) { observationGeneration.get() == generation && streamRevision() == stream }
     }
 }
 
@@ -344,7 +364,7 @@ private data class Anime4KGlPlan(val passes: List<Pass>, val scratchCount: Int) 
 
     companion object {
         fun create(shaders: List<Anime4KShader>): Anime4KGlPlan {
-            require(shaders.size == 2) { "Expected the pinned Restore/Upscale pair" }
+            require(shaders.size in 1..2) { "Expected pinned Restore or Restore/Upscale shaders" }
             val pending = mutableListOf<PendingPass>()
             var main = "input"
             shaders.forEachIndexed { stage, shader ->
@@ -387,7 +407,7 @@ private data class Anime4KGlPlan(val passes: List<Pass>, val scratchCount: Int) 
                 require(pending.last().savesMain)
                 main = requireNotNull(known["MAIN"])
             }
-            require(pending.last().scale == 2 && pending.dropLast(1).all { it.scale == 1 })
+            require(pending.last().scale == (if (shaders.size == 2) 2 else 1) && pending.dropLast(1).all { it.scale == 1 })
             val lastUse = mutableMapOf<String, Int>()
             pending.forEachIndexed { index, pass -> pass.bindings.forEach { lastUse[it.second] = index } }
             val slots = mutableMapOf<String, Int>()

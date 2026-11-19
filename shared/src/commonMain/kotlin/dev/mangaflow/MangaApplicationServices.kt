@@ -140,6 +140,15 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val preparations = ChapterPreparationStore(application, repository, downloads, scope, ::awaitSourcesReady)
 
     init {
+        dev.mangaflow.enhancement.EnhancementCenter.get(application).chapters.attach(downloads) { entry ->
+            when {
+                entry.manga.sourceUrl == DownloadStore.LOCAL_SOURCE_URL -> dev.mangaflow.enhancement.EnhancementContent.MANGA
+                else -> bodySources.entries.value.firstOrNull { it.source.id == entry.manga.sourceId }?.let { source ->
+                    if (source.adult) dev.mangaflow.enhancement.EnhancementContent.ADULT_MANGA
+                    else dev.mangaflow.enhancement.EnhancementContent.MANGA
+                }
+            }
+        }
         scope.launch(Dispatchers.IO) { steamWallpaperClient }
         dev.mangaflow.anime.sources.AnimeMetadataCache.get(application)
         dev.mangaflow.storage.StorageCacheStore.get(application).apply {

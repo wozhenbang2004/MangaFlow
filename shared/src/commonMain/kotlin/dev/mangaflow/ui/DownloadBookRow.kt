@@ -36,6 +36,7 @@ import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
@@ -69,6 +70,8 @@ import coil3.compose.AsyncImage
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
+import dev.mangaflow.enhancement.EnhancementTaskPhase
+import dev.mangaflow.enhancement.ReaderChapterEnhancementTask
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
@@ -97,6 +100,7 @@ internal fun DownloadBookRow(
     inspectMode: Boolean = false,
     active: Boolean = true,
     onInspect: ((DownloadEntry) -> Unit)? = null,
+    enhancementTasks: List<ReaderChapterEnhancementTask> = emptyList(),
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     val actions = buildList {
@@ -139,6 +143,7 @@ internal fun DownloadBookRow(
                     color = colors.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 DownloadInlineTransferSummary(entries, active, if (managing) null else onInspect)
                 DownloadProgressLine(entries)
+                DownloadEnhancementSummary(entries, enhancementTasks, if (managing) null else onInspect)
             }
             if (managing) DownloadSelection(selected, onSelect)
             else DownloadTransferAction(entries, refreshingIds, onPause, onRetry)
@@ -179,6 +184,7 @@ internal fun DownloadChapterRow(
     onRemove: (() -> Unit)? = null,
     active: Boolean = true,
     onInspect: ((DownloadEntry) -> Unit)? = null,
+    enhancementTasks: List<ReaderChapterEnhancementTask> = emptyList(),
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     val actions = buildList {
@@ -206,6 +212,7 @@ internal fun DownloadChapterRow(
                     dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(entry.manga.id, entry.chapter), entry.chapter.id).sourceId)
                 DownloadInlineTransferSummary(listOf(entry), active, if (managing) null else onInspect, source)
                 DownloadProgressLine(listOf(entry))
+                DownloadEnhancementSummary(listOf(entry), enhancementTasks, if (managing) null else onInspect)
             }
             if (managing) DownloadSelection(selected, onSelect)
             else DownloadTransferAction(listOf(entry), refreshingIds, onPause, onRetry)
@@ -213,6 +220,56 @@ internal fun DownloadChapterRow(
         }
         if (!managing && onInspect == null && entry.error.isNotBlank()) DownloadFailureDetails(entry.error)
     }
+    }
+}
+
+internal fun chapterEnhancementFor(entry: DownloadEntry, tasks: List<ReaderChapterEnhancementTask>) =
+    tasks.firstOrNull { it.mangaId == entry.manga.id && it.chapterId == entry.chapter.id &&
+        it.downloadCreatedAt == entry.createdAt }
+
+internal fun chapterEnhancementPhase(phase: EnhancementTaskPhase): String = when (phase) {
+    EnhancementTaskPhase.QUEUED -> "排队中"
+    EnhancementTaskPhase.WAITING -> "等待资源"
+    EnhancementTaskPhase.RUNNING -> "处理中"
+    EnhancementTaskPhase.PAUSED -> "已暂停"
+    EnhancementTaskPhase.COMPLETED -> "已处理"
+    EnhancementTaskPhase.FAILED -> "未完成"
+    EnhancementTaskPhase.CANCELLED -> "已取消"
+}
+
+/** Enhancement has its own page progress; original download bytes never imply AI completion. */
+@Composable
+private fun DownloadEnhancementSummary(entries: List<DownloadEntry>, tasks: List<ReaderChapterEnhancementTask>,
+    onInspect: ((DownloadEntry) -> Unit)?) {
+    val pairs = entries.mapNotNull { entry -> chapterEnhancementFor(entry, tasks)?.let { entry to it } }
+    if (pairs.isEmpty()) return
+    val observed = pairs.firstOrNull { it.second.phase in setOf(EnhancementTaskPhase.RUNNING,
+        EnhancementTaskPhase.WAITING, EnhancementTaskPhase.QUEUED) } ?: pairs.first()
+    val total = pairs.sumOf { it.second.totalPages.toLong() }
+    val completed = pairs.sumOf { it.second.completedPages.toLong() }
+    val fraction = if (total > 0L) (completed.toFloat() / total).coerceIn(0f, 1f) else 0f
+    val progress by animateFloatAsState(fraction,
+        tween(if (LocalMotionEnabled.current) MangaMotion.Quick else 0), label = "chapter-enhancement-progress")
+    val colors = MaterialTheme.colorScheme
+    val interaction = remember { MutableInteractionSource() }
+    Column(Modifier.fillMaxWidth().then(if (onInspect != null) Modifier.clickable(
+        interactionSource = interaction, indication = null, role = Role.Button,
+        onClickLabel = "查看画质增强进度", onClick = { onInspect(observed.first) })
+        .motionPress(interaction, pressedScale = .99f) else Modifier)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(14.dp), tint = colors.onSurfaceVariant)
+            Text(mangaNumberText("增强 $completed / $total 页 · ${chapterEnhancementPhase(observed.second.phase)}"),
+                style = MaterialTheme.typography.labelSmall, color = if (observed.second.phase == EnhancementTaskPhase.FAILED)
+                    colors.error else colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (pairs.any { it.second.phase != EnhancementTaskPhase.COMPLETED }) Box(Modifier.fillMaxWidth().height(4.dp)
+            .semantics { contentDescription = "整章增强已完成页面"; progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f) }
+            .drawBehind {
+                val y = size.height / 2f
+                drawLine(colors.primary.copy(alpha = .12f), Offset(0f, y), Offset(size.width, y), 2.dp.toPx(), StrokeCap.Round)
+                if (progress > 0f) drawLine(colors.primary.copy(alpha = .8f), Offset(0f, y), Offset(size.width * progress, y), 2.dp.toPx(), StrokeCap.Round)
+            })
     }
 }
 

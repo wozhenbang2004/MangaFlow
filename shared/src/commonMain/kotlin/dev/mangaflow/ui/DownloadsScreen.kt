@@ -70,6 +70,7 @@ import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
@@ -127,6 +128,11 @@ import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.data.Manga
 import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.data.MangaRepository
+import dev.mangaflow.enhancement.EnhancementCenter
+import dev.mangaflow.enhancement.EnhancementContent
+import dev.mangaflow.enhancement.QualityTier
+import dev.mangaflow.enhancement.ReaderChapterEnhancementTask
+import dev.mangaflow.enhancement.ui.EnhancementCenterPanel
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
@@ -177,6 +183,7 @@ fun DownloadsScreen(
     navigation: @Composable () -> Unit,
     toolbar: @Composable (@Composable () -> Unit) -> Unit,
     active: Boolean = true,
+    adultProfile: Boolean = false,
     refreshingIds: Set<String> = emptySet(),
     history: List<ReadingProgress> = emptyList(),
     wallpaper: @Composable () -> Unit = {},
@@ -194,6 +201,12 @@ fun DownloadsScreen(
     val localImportAllowed = sourceIncluded("local")
     val desktop = platformKind == PlatformKind.DESKTOP
     val context = LocalContext.current
+    val enhancementCenter = remember(context) { EnhancementCenter.get(context) }
+    val enhancementContent = if (adultProfile) EnhancementContent.ADULT_MANGA else EnhancementContent.MANGA
+    val allEnhancementTasks by enhancementCenter.chapters.state.collectAsStateWithLifecycle()
+    val enhancementTasks = remember(allEnhancementTasks, enhancementContent) {
+        allEnhancementTasks.filter { it.content == enhancementContent }
+    }
     val entries by store.entries.collectAsStateWithLifecycle()
     val loading by store.loading.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -214,6 +227,9 @@ fun DownloadsScreen(
     var queueActionsPresent by remember { mutableStateOf(false) }
     var pendingNetworkSettings by remember { mutableStateOf(false) }
     var showNetworkSettings by remember { mutableStateOf(false) }
+    var showEnhancement by remember { mutableStateOf(false) }
+    var pendingEnhancement by remember { mutableStateOf(false) }
+    var qualityReturnTaskId by remember { mutableStateOf<String?>(null) }
     var filterMenuExpanded by remember { mutableStateOf(false) }
     val filterChoices = remember { listOf(
         GlassTabChoice(DownloadFilter.ALL.label, Icons.Outlined.Inventory2),
@@ -298,12 +314,47 @@ fun DownloadsScreen(
         showImportSources = false
         // An exiting menu cannot open a new window after its owning page/scope changes.
         pendingNetworkSettings = false
+        pendingEnhancement = false
+        showEnhancement = false
+        qualityReturnTaskId = null
     }
     LaunchedEffect(active, pendingNetworkSettings, queueActionsPresent, showQueueActions) {
         if (pendingNetworkSettings && !queueActionsPresent && !showQueueActions) {
             pendingNetworkSettings = false
             if (active) showNetworkSettings = true
         }
+    }
+    LaunchedEffect(active, pendingEnhancement, queueActionsPresent, showQueueActions, qualityReturnTaskId) {
+        if (pendingEnhancement && qualityReturnTaskId == null && !queueActionsPresent && !showQueueActions) {
+            pendingEnhancement = false
+            if (active) showEnhancement = true
+        }
+    }
+
+    fun openQuality(entry: DownloadEntry? = null) {
+        qualityReturnTaskId = entry?.id
+        inspectedTaskId = null
+        pendingEnhancement = true
+        showQueueActions = false
+    }
+    fun enhanceChapters(chapters: List<DownloadEntry>) {
+        val complete = chapters.filter { it.status == DownloadStatus.COMPLETED }
+        if (complete.isEmpty()) return
+        val policy = enhancementCenter.settings.policy(enhancementContent)
+        if (policy.tier == QualityTier.ORIGINAL) {
+            openQuality(complete.singleOrNull()?.takeIf { it.id == inspectedTaskId })
+            scope.launch { snackbar.showSnackbar("先选择增强档位，再建立整章任务") }
+            return
+        }
+        var queued = 0
+        var failure: String? = null
+        complete.forEach { entry ->
+            runCatching { enhancementCenter.chapters.enqueue(entry, enhancementContent, policy) }
+                .onSuccess { queued++ }.onFailure { failure = it.message }
+        }
+        showQueueActions = false
+        scope.launch { snackbar.showSnackbar(if (failure == null) "已加入 $queued 话增强任务"
+            else "已加入 $queued 话；${failure}") }
     }
 
     BackHandler(enabled = managing) { managing = false; selectedIds = emptySet() }
@@ -409,6 +460,10 @@ fun DownloadsScreen(
                             }
                             toggleSelection(visible)
                         }, modifier = Modifier.size(44.dp)) { Icon(Icons.Outlined.SelectAll, "全选当前列表", Modifier.size(20.dp), tint = foreground) }
+                        MotionIconButton(enabled = selectedEntries.any { it.status == DownloadStatus.COMPLETED },
+                            onClick = { enhanceChapters(selectedEntries) }, modifier = Modifier.size(44.dp), tooltip = "增强选中的已下载章节") {
+                            Icon(Icons.Outlined.AutoAwesome, "增强选中的已下载章节", Modifier.size(20.dp), tint = secondary)
+                        }
                         MotionIconButton(enabled = selectedEntries.isNotEmpty(), onClick = { pendingDeletion = selectedEntries },
                             modifier = Modifier.size(44.dp)) { Icon(Icons.Outlined.DeleteOutline, "删除选中的 ${selectedEntries.size} 话", Modifier.size(20.dp),
                                 tint = if (selectedEntries.isNotEmpty()) colors.error else secondary.copy(alpha = .4f)) }
@@ -461,6 +516,10 @@ fun DownloadsScreen(
                                 CompactMenuAction(Icons.Outlined.Tune, "网络与下载") {
                                     pendingNetworkSettings = true
                                     showQueueActions = false
+                                }
+                                CompactMenuAction(Icons.Outlined.AutoAwesome, "画质与性能") { openQuality() }
+                                if (completedEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.AutoAwesome, "增强已下载章节") {
+                                    enhanceChapters(completedEntries)
                                 }
                                 CompactMenuAction(Icons.Outlined.Inventory2, "管理下载", enabled = manageableEntries.isNotEmpty()) {
                                     showQueueActions = false; managing = true; selectedIds = emptySet()
@@ -652,7 +711,7 @@ fun DownloadsScreen(
                                             onDetails = onDetails?.let { open -> { open(chapters.first().manga) } },
                                             onRemove = { pendingDeletion = chapters }, inspectMode = desktopSplit,
                                             active = active && pageFilter == filter,
-                                            onInspect = { inspectedTaskId = it.id })
+                                            onInspect = { inspectedTaskId = it.id }, enhancementTasks = enhancementTasks)
                                     }
                                 }
                             }
@@ -671,7 +730,7 @@ fun DownloadsScreen(
                                                     onPause = { store.pause(it.id) }, onRetry = onRetry,
                                                     onRemove = { pendingDeletion = listOf(entry) },
                                                     active = active && pageFilter == filter,
-                                                    onInspect = { inspectedTaskId = it.id })
+                                                    onInspect = { inspectedTaskId = it.id }, enhancementTasks = enhancementTasks)
                                             }
                                         }
                                     }
@@ -704,6 +763,7 @@ fun DownloadsScreen(
                     onRemove = { pendingDeletion = listOf(it) },
                     onPause = { store.pause(it.id) }, onRetry = onRetry,
                     active = active, onInspect = { inspectedTaskId = it.id },
+                    enhancementTasks = enhancementTasks,
                 )
             }
             }
@@ -834,7 +894,25 @@ fun DownloadsScreen(
         onPause = { store.pause(it.id) },
         onRetry = onRetry,
         onRetryUsingLatestRoute = onRetryUsingLatestRoute,
+        enhancement = inspectedTask?.let { chapterEnhancementFor(it, enhancementTasks) },
+        onEnhance = { enhanceChapters(listOf(it)) },
+        onPauseEnhancement = enhancementCenter.chapters::pause,
+        onResumeEnhancement = enhancementCenter.chapters::resume,
+        onCancelEnhancement = enhancementCenter.chapters::cancel,
+        onQualitySettings = { inspectedTask?.let { openQuality(it) } },
+        onClosed = {
+            if (pendingEnhancement && qualityReturnTaskId != null) {
+                pendingEnhancement = false
+                if (active) showEnhancement = true
+            }
+        },
     )
+    EnhancementCenterPanel(visible = showEnhancement && active, backdrop = backdrop,
+        initialContent = enhancementContent, onDismiss = { showEnhancement = false }, onClosed = {
+            val returnId = qualityReturnTaskId
+            qualityReturnTaskId = null
+            if (active && returnId != null && manageableEntries.any { it.id == returnId }) inspectedTaskId = returnId
+        })
 
     LocalImportDetailsDialog(
         pending = pendingImport,
@@ -1011,6 +1089,7 @@ private fun DesktopDownloadChapterPane(
     onRetry: (DownloadEntry) -> Unit,
     active: Boolean,
     onInspect: (DownloadEntry) -> Unit,
+    enhancementTasks: List<ReaderChapterEnhancementTask>,
 ) {
     val scroll = rememberLazyListState()
     val workId = entries.firstOrNull()?.manga?.id
@@ -1043,7 +1122,8 @@ private fun DesktopDownloadChapterPane(
                 DownloadChapterRow(entry, managing, entry.id in selectedIds, refreshingIds,
                     onRead = { onRead(entry) }, onSelect = { onSelect(entry) },
                     onManage = { onManage(entry) }, onPause = onPause, onRetry = onRetry,
-                    onRemove = { onRemove(entry) }, active = active, onInspect = onInspect)
+                    onRemove = { onRemove(entry) }, active = active, onInspect = onInspect,
+                    enhancementTasks = enhancementTasks)
             }
         }
         DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd))

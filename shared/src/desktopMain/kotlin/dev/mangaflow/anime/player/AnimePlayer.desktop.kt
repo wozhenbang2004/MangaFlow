@@ -74,6 +74,12 @@ private class DesktopAnimePlayer(
     }
 
     override fun onPlaybackStateNative() {
+        val handle = engine.value?.impl as? MPVHandle
+        if (handle != null) {
+            val fps = handle.getPropertyString("container-fps")?.toDoubleOrNull()?.takeIf { it.isFinite() && it > 0 }
+            val dropped = handle.getPropertyLongOrNull("frame-drop-count")?.takeIf { it >= 0 }
+            mutableState.value = state.value.copy(sourceFps = fps, droppedFrames = dropped)
+        }
         if (warming && state.value.phase == AnimePlayerPhase.READY && !state.value.isBuffering) {
             warming = false
             applyBufferPolicy()
@@ -90,6 +96,7 @@ private class DesktopAnimePlayer(
             handle = engine.value?.impl as? MPVHandle,
             generation = nativeGeneration,
             mode = options.videoEnhancement,
+            scale = options.enhancementScale,
             mediaReady = enhancementMediaReady,
         )
     }

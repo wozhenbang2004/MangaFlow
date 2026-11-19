@@ -27,6 +27,13 @@ data class AnimeVideoEnhancementObservation(
     /** Allocated intermediate texture payload estimate, excluding the output and decoder buffers. */
     val intermediateTextureBytes: Long,
     val recentlySubmitting: Boolean = false,
+    val gpuSampleSequence: Long? = null,
+    val gpuExecutionNanos: Long? = null,
+    val gpuSubmittedAtNanos: Long? = null,
+    /** CPU observation of a completed GPU query, not an exact GPU completion timestamp. */
+    val gpuCompletionObservedAtNanos: Long? = null,
+    /** Populated only by a real presentation acknowledgement, never a scheduled release timestamp. */
+    val presentedAtNanos: Long? = null,
 )
 
 internal data class Anime4KShader(val name: String, val source: String)

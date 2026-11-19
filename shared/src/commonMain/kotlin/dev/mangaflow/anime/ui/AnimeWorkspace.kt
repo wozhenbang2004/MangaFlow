@@ -243,13 +243,17 @@ internal fun AnimeWorkspace(
         openingSubject = entry.subject
         controller.resume(entry.subject.id)
     }
-    fun playDownload(id: String) {
+    fun playDownload(selection: AnimeDownloadSelection) {
         downloadsVisible = false
         beginDetailNavigation()
         pendingAssociation = null
         browseCandidate = null
-        openingSubject = controller.downloads.state.value.entries.firstOrNull { it.id == id }?.subject
-        controller.playDownload(id)
+        openingSubject = controller.downloads.state.value.entries.firstOrNull { it.id == selection.downloadId }?.subject
+        when {
+            selection.originalOnly -> controller.playOriginalDownload(selection.downloadId)
+            selection.versionId != null -> controller.playEnhancedDownload(selection.downloadId, selection.versionId)
+            else -> controller.playDownload(selection.downloadId)
+        }
     }
     fun chooseReference(title: AnimeSourceTitle, videoSource: Boolean) {
         controller.knownDiscoverySubject(title)?.let { known ->

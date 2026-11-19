@@ -143,6 +143,7 @@ import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.experience.ExperiencePolicyStore
+import dev.mangaflow.enhancement.ui.EnhancementCenterPanel
 import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
 import androidx.compose.material.icons.outlined.SwapHoriz
@@ -251,6 +252,7 @@ fun SettingsScreen(
     }
     var showNetworkDownloads by remember { mutableStateOf(false) }
     var showExperience by remember { mutableStateOf(false) }
+    var showEnhancement by remember { mutableStateOf(false) }
     val toggleSetting: (String) -> Unit = { expandedSetting = if (expandedSetting == it) null else it }
     LaunchedEffect(showWebDav, screenActive) {
         if (showWebDav && screenActive) webDavPresent = true
@@ -485,6 +487,8 @@ fun SettingsScreen(
                 RetainedSettingsCategory(!desktop || settingsCategory == 3) {
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SettingsSection("应用", sourceBackdrop) {
+                        SettingsLinkRow("画质与性能", "增强、补帧与提前处理", Icons.Outlined.Image,
+                            inlineDetail = true) { showEnhancement = true }
                         SettingsLinkRow("体验策略", experienceModeLabel(experienceBudget.mode), Icons.Outlined.Tune,
                             inlineDetail = true) { showExperience = true }
                         SettingsLinkRow("网络与下载", downloadRouteLabel(routes.defaultMode), Icons.Outlined.SwapVert,
@@ -634,6 +638,7 @@ fun SettingsScreen(
     ExperienceSettingsDialog(showExperience, sourceBackdrop, onDismiss = { showExperience = false },
         onOpenStorage = { showStorage = true }, onOpenNetwork = { showNetworkDownloads = true },
         onOpenSourceChecks = if (sourceRegistry != null) ({ showBodySources = true }) else null)
+    EnhancementCenterPanel(showEnhancement, sourceBackdrop, onDismiss = { showEnhancement = false })
 
     StorageManagementDialog(showStorage, storageBackdrop, libraryStore, repository = sourceRepository, active = screenActive,
         onDismiss = { showStorage = false },

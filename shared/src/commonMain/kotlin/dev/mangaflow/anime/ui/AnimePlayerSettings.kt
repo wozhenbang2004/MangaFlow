@@ -14,16 +14,16 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.player.*
-import dev.mangaflow.platform.formatDecimal
+import dev.mangaflow.enhancement.EnhancementContent
+import dev.mangaflow.enhancement.animeEnhancementSessionKey
+import dev.mangaflow.enhancement.ui.EnhancementPanelHost
+import dev.mangaflow.enhancement.ui.EnhancementSettingsContent
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
@@ -45,7 +45,7 @@ internal fun AnimePlayerSettings(
     backdrop: HazeState,
     onDismiss: () -> Unit,
     onClosed: () -> Unit,
-    onPlayDownload: (String) -> Unit,
+    onPlayDownload: (AnimeDownloadSelection) -> Unit,
 ) {
     var section by remember { mutableStateOf(initialSection) }
     var speedDraft by remember { mutableStateOf("") }
@@ -58,11 +58,11 @@ internal fun AnimePlayerSettings(
     var startDraft by remember { mutableStateOf("") }
     var rebufferDraft by remember { mutableStateOf("") }
     var retryDraft by remember { mutableStateOf("") }
-    var enhancementDetails by remember(visible, playback.sessionGeneration) { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var pendingDownload by remember { mutableStateOf<AnimeDownloadSelection?>(null) }
     LaunchedEffect(visible, initialSection) {
         if (visible) {
-            section = initialSection; error = null
+            section = initialSection; error = null; pendingDownload = null
             speedDraft = playback.speed.toString(); holdDraft = state.settings.longPressSpeed.toString()
             openingDraft = state.settings.skipOpeningSeconds.toString(); endingDraft = state.settings.skipEndingSeconds.toString()
             minimumDraft = bufferSeconds(state.settings.bufferMinMs); maximumDraft = bufferSeconds(state.settings.bufferMaxMs)
@@ -74,8 +74,12 @@ internal fun AnimePlayerSettings(
     val sectionScrolls = remember { mutableMapOf<AnimePlayerPanel, LazyListState>() }
     val sectionScroll = remember(section) { sectionScrolls.getOrPut(section) { LazyListState() } }
     fun show(next: AnimePlayerPanel) { section = next; error = null }
-    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 540.dp, onClosed = onClosed) {
-        AnimePanelSurface(backdrop) {
+    EnhancementPanelHost(visible, backdrop, onDismiss, maximumWidth = 480.dp, onClosed = {
+        val request = pendingDownload
+        pendingDownload = null
+        onClosed()
+        if (request != null) onPlayDownload(request)
+    }, surface = { modifier, body -> AnimePanelSurface(backdrop, modifier) { body() } }) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
                 Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
@@ -88,7 +92,7 @@ internal fun AnimePlayerSettings(
                     }
                     Text(when (section) {
                         AnimePlayerPanel.GENERAL -> "播放设置"
-                        AnimePlayerPanel.VIDEO -> "画面与清晰度"
+                        AnimePlayerPanel.VIDEO -> "画质与性能"
                         AnimePlayerPanel.AUDIO -> "声音"
                         AnimePlayerPanel.SUBTITLES -> "字幕"
                         AnimePlayerPanel.SPEED -> "播放速度"
@@ -107,7 +111,7 @@ internal fun AnimePlayerSettings(
                     }
                 }
                 if (section == AnimePlayerPanel.DOWNLOADS) AnimeDownloadsContent(controller, state, backdrop,
-                    onPlay = { onDismiss(); onPlayDownload(it) }, modifier = Modifier.weight(1f, fill = false))
+                    onPlay = { pendingDownload = it; onDismiss() }, modifier = Modifier.weight(1f, fill = false))
                 else if (section in setOf(AnimePlayerPanel.DANMAKU, AnimePlayerPanel.DANMAKU_SEARCH,
                     AnimePlayerPanel.DANMAKU_DISPLAY, AnimePlayerPanel.DANMAKU_ACCESS)) AnimeDanmakuPane(section, controller, state,
                     onSection = ::show, modifier = Modifier.weight(1f, fill = false))
@@ -116,7 +120,7 @@ internal fun AnimePlayerSettings(
                     when (section) {
                         AnimePlayerPanel.GENERAL -> {
                             item { AnimeQuietLabel("画面与声音") }
-                            item { AnimePlayerSettingLink(Icons.Outlined.AspectRatio, "画面与清晰度",
+                            item { AnimePlayerSettingLink(Icons.Outlined.AspectRatio, "画质与性能",
                                 animeScaleLabel(playback.videoScale)) { show(AnimePlayerPanel.VIDEO) } }
                             if (AnimePlayerCapability.VOLUME in capabilities || AnimePlayerCapability.AUDIO_TRACKS in capabilities) item {
                                 val soundSummary = listOfNotNull(
@@ -182,14 +186,10 @@ internal fun AnimePlayerSettings(
                             if (playback.videoWidth != null && playback.videoHeight != null) item {
                                 AnimeQuietLabel("视频 " + playback.videoWidth + " × " + playback.videoHeight)
                             }
-                            if (AnimePlayerCapability.VIDEO_ENHANCEMENT in capabilities ||
-                                state.settings.videoEnhancement != AnimeVideoEnhancementMode.OFF) {
-                                item(key = "anime4k") {
-                                    Anime4KSettings(playback, state.settings.videoEnhancement,
-                                        detailsExpanded = enhancementDetails,
-                                        onToggleDetails = { enhancementDetails = !enhancementDetails },
-                                        onSelect = { controller.updatePlaybackSettings(state.settings.copy(videoEnhancement = it)) })
-                                }
+                            item(key = "enhancement-center") {
+                                EnhancementSettingsContent(EnhancementContent.ANIME,
+                                    sessionKey = playback.assetKey?.let { animeEnhancementSessionKey(playback) },
+                                    animePlayback = playback)
                             }
                             if (state.playbackResolutions.isNotEmpty()) {
                                 item { AnimeSectionTitle("来源画质") }
@@ -332,7 +332,6 @@ internal fun AnimePlayerSettings(
                     if (state.notice != null) item { AnimeQuietLabel(state.notice) }
                 }
             }
-        }
     }
 }
 
@@ -345,125 +344,6 @@ internal fun animeScaleLabel(scale: AnimeVideoScale): String = when (scale) {
     AnimeVideoScale.FIT -> "适应"
     AnimeVideoScale.FILL -> "拉伸"
     AnimeVideoScale.ZOOM -> "填满"
-}
-
-@Composable
-private fun Anime4KSettings(
-    playback: AnimePlayerState,
-    selectedMode: AnimeVideoEnhancementMode,
-    detailsExpanded: Boolean,
-    onToggleDetails: () -> Unit,
-    onSelect: (AnimeVideoEnhancementMode) -> Unit,
-) {
-    // A mode change can reach saved settings and the renderer on different frames.
-    val enhancement = playback.videoEnhancement.takeIf { it.mode == selectedMode }
-    val phase = enhancement?.phase ?: if (selectedMode == AnimeVideoEnhancementMode.OFF)
-        AnimeVideoEnhancementPhase.OFF else AnimeVideoEnhancementPhase.WAITING
-    val observation = enhancement?.observation
-    val processing = phase == AnimeVideoEnhancementPhase.ACTIVE && playback.isPlaying &&
-        !playback.playbackSuppressed && observation?.recentlySubmitting == true
-    val status = when (phase) {
-        AnimeVideoEnhancementPhase.OFF -> "原画"
-        AnimeVideoEnhancementPhase.UNAVAILABLE -> "当前无法增强"
-        AnimeVideoEnhancementPhase.FAILED -> "增强失败"
-        AnimeVideoEnhancementPhase.WAITING, AnimeVideoEnhancementPhase.CONFIGURED,
-        AnimeVideoEnhancementPhase.ACTIVE -> when {
-            playback.ended -> "播放已结束"
-            playback.phase == AnimePlayerPhase.ERROR -> "播放已中断"
-            playback.hasVideoTracks == false -> "当前媒体只有音频"
-            playback.isBuffering -> "缓冲中 · 等待视频帧"
-            playback.playbackSuppressed -> "播放暂时挂起"
-            playback.phase == AnimePlayerPhase.READY && !playback.playWhenReady -> "播放已暂停"
-            processing -> "正在提交增强帧"
-            phase == AnimeVideoEnhancementPhase.WAITING -> "等待视频画面"
-            phase == AnimeVideoEnhancementPhase.CONFIGURED -> if (observation == null)
-                "已配置 · 暂无处理观测" else "已配置 · 等待首个增强帧"
-            observation == null -> "已观测到增强帧"
-            else -> "等待后续增强帧"
-        }
-    }
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        AnimeSectionTitle("Anime4K", status, action = {
-            if (selectedMode != AnimeVideoEnhancementMode.OFF) MotionIconButton(
-                onClick = onToggleDetails, modifier = Modifier.size(44.dp),
-                tooltip = if (detailsExpanded) "收起处理口径" else "查看处理口径",
-            ) {
-                Icon(if (detailsExpanded) Icons.Outlined.Close else Icons.Outlined.Info,
-                    if (detailsExpanded) "收起处理口径" else "查看处理口径", Modifier.size(19.dp))
-            }
-        })
-        AnimeChoiceStrip(listOf("原画", "轻量", "精细"), selectedMode.ordinal,
-            onSelect = { onSelect(AnimeVideoEnhancementMode.entries[it]) },
-            modifier = Modifier.semantics { contentDescription = "Anime4K 画质增强" })
-        enhancement?.let { state ->
-            if (phase == AnimeVideoEnhancementPhase.UNAVAILABLE || phase == AnimeVideoEnhancementPhase.FAILED) {
-                state.detail?.takeIf(String::isNotBlank)?.let { AnimeDiscoveryInlineStatus(it, showIssue = true) }
-            }
-            if ((phase == AnimeVideoEnhancementPhase.CONFIGURED || phase == AnimeVideoEnhancementPhase.ACTIVE) &&
-                state.inputWidth != null && state.inputHeight != null &&
-                state.outputWidth != null && state.outputHeight != null) {
-                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Icon(Icons.Outlined.AspectRatio, null, Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("${state.inputWidth} × ${state.inputHeight} → ${state.outputWidth} × ${state.outputHeight}",
-                        style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
-                        modifier = Modifier.semantics { contentDescription = "处理尺寸，从 ${state.inputWidth} 乘 ${state.inputHeight} 到 ${state.outputWidth} 乘 ${state.outputHeight}" })
-                }
-            }
-        }
-        if (selectedMode != AnimeVideoEnhancementMode.OFF) {
-            val duration = observation?.sampleDurationMillis
-            val frames = observation?.sampleFrames
-            val rate = if (processing && duration != null && duration > 0 && frames != null)
-                formatDecimal(frames * 1000.0 / duration, 1) else "—"
-            val texture = observation?.intermediateTextureBytes?.takeIf { it >= 0 }?.let {
-                formatDecimal(it / (1024.0 * 1024.0), 1)
-            } ?: "—"
-            val cpu = observation?.submitThreadCpuNanos?.takeIf { processing && it >= 0L }?.let {
-                formatDecimal(it / 1_000_000.0, 2)
-            } ?: "—"
-            val metrics = listOf(
-                Triple("提交频率", rate, "帧/秒"),
-                Triple("累计提交", observation?.submittedFrames?.toString() ?: "—", "帧"),
-                Triple("中间纹理估算", texture, "MiB"),
-                Triple("CPU 单次提交耗时", cpu, "毫秒"),
-            )
-            val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-            BoxWithConstraints(Modifier.fillMaxWidth()) {
-                val columns = if (maxWidth >= 260.dp * fontScale) 2 else 1
-                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    metrics.chunked(columns).forEach { row ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                            row.forEach { (label, value, unit) ->
-                                AnimeEnhancementMetric(label, value, unit, Modifier.weight(1f))
-                            }
-                        }
-                    }
-                }
-            }
-            if (detailsExpanded) {
-                AnimeQuietLabel("提交频率统计当前采样窗口的视频帧提交；CPU 耗时是单次提交线程采样，不含 GPU 执行。暂停、缓冲或没有当前样本时显示 —。")
-                AnimeQuietLabel("中间纹理为 Anime4K 纹理估算，不含全部显存。GPU 利用率、GPU 完成耗时与实际显示帧率尚无观测。")
-            }
-        }
-    }
-}
-
-@Composable
-private fun AnimeEnhancementMetric(label: String, value: String, unit: String, modifier: Modifier = Modifier) {
-    Column(modifier.semantics(mergeDescendants = true) {
-        contentDescription = if (value == "—") "$label，当前无观测" else "$label $value $unit"
-    }, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(value, style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Medium,
-                fontFeatureSettings = "tnum"), maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false))
-            Text(unit, style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 3.dp))
-        }
-    }
 }
 
 internal fun animeSpeedLabel(speed: Float): String =

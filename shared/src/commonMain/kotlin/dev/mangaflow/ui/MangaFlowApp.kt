@@ -1087,6 +1087,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     }
                     is Frame.Reader -> ReaderScreen(
                         manga = current.session.manga, chapters = current.session.chapters,
+                        adultProfile = current.session.manga.sourceId in privateSourceIds,
                         initialChapterId = current.session.chapterId,
                         initialCollection = current.session.collection,
                         startAtBeginning = current.session.startAtBeginning,
@@ -1535,6 +1536,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         includedSourceIds = profileIncludes, excludedSourceIds = profileExcludes,
                                     )
                                     Section.DOWNLOADS -> DownloadsScreen(store = model.downloads, repository = model.repository, onRead = model::openDownload,
+                                        adultProfile = restrictedMode,
                                         onRetry = model::retryDownload, onDetails = model::openManga,
                                         onRetryUsingLatestRoute = model::retryDownloadUsingLatestRoute,
                                         backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,

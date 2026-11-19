@@ -8,6 +8,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -26,6 +29,8 @@ import dev.mangaflow.platform.platformKind
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
+import dev.mangaflow.enhancement.EnhancementTaskPhase
+import dev.mangaflow.enhancement.ReaderChapterEnhancementTask
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
@@ -43,10 +48,21 @@ internal fun DownloadTaskDetailsDialog(
     onPause: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
     onRetryUsingLatestRoute: (DownloadEntry) -> Unit,
+    enhancement: ReaderChapterEnhancementTask? = null,
+    onEnhance: ((DownloadEntry) -> Unit)? = null,
+    onPauseEnhancement: (String) -> Unit = {},
+    onResumeEnhancement: (String) -> Unit = {},
+    onCancelEnhancement: (String) -> Unit = {},
+    onQualitySettings: (() -> Unit)? = null,
+    onClosed: (() -> Unit)? = null,
 ) {
     var retained by remember { mutableStateOf(entry) }
-    SideEffect { if (entry != null) retained = entry }
+    var retainedEnhancement by remember { mutableStateOf(enhancement) }
+    SideEffect { if (entry != null) { retained = entry; retainedEnhancement = enhancement } }
     val shown = entry ?: retained ?: return
+    val enhanced = (if (entry != null) enhancement else retainedEnhancement)?.takeIf {
+        it.mangaId == shown.manga.id && it.chapterId == shown.chapter.id && it.downloadCreatedAt == shown.createdAt
+    }
     val enabled = entry != null && active
     val now = downloadObservationTime(listOf(shown), enabled)
     val colors = MaterialTheme.colorScheme
@@ -58,7 +74,7 @@ internal fun DownloadTaskDetailsDialog(
             chapterSourceMangaId(shown.manga.id, shown.chapter), shown.chapter.id).sourceId) }
             .getOrElse { sourceDisplayName(shown.chapter.sourceId) }
     }
-    MotionDialog(visible = entry != null, onDismissRequest = onDismiss,
+    MotionDialog(visible = entry != null, onDismissRequest = onDismiss, onClosed = onClosed,
         properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp) {
         Box(Modifier.padding(horizontal = 12.dp)) {
         LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
@@ -79,7 +95,7 @@ internal fun DownloadTaskDetailsDialog(
                 Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState())
                     .motionInputGate(enabled).padding(top = 14.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    DownloadFactRow("状态", downloadTransferPhaseLabel(shown, now))
+                    DownloadFactRow("原始下载", downloadTransferPhaseLabel(shown, now))
                     shown.progress.httpStatus?.let { DownloadFactRow("来源响应", "HTTP $it") }
                     DownloadFactRow("已保存", shown.completedPages.toString() +
                         (if (shown.totalPages > 0) " / ${shown.totalPages}" else "") +
@@ -102,6 +118,58 @@ internal fun DownloadTaskDetailsDialog(
                         PlatformKind.IOS -> "后台可能被系统挂起，重新打开后恢复；强制退出后不能保证继续下载。"
                         else -> "后台任务由系统调度；系统暂停时保留已保存内容和可用断点。"
                     }, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                    if (shown.status == DownloadStatus.COMPLETED || enhanced != null) {
+                        HorizontalDivider(color = colors.onSurface.copy(alpha = .08f))
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                            Text("画质增强", style = MaterialTheme.typography.titleSmall)
+                        }
+                        if (enhanced == null) DownloadFactRow("增强进度", "尚未建立任务") else {
+                            DownloadFactRow("增强进度", "${enhanced.completedPages} / ${enhanced.totalPages} 页 · ${chapterEnhancementPhase(enhanced.phase)}")
+                            DownloadFactRow("处理目标", "${enhanced.policy.tier.label} · ${enhanced.policy.scale}×")
+                            enhanced.reason?.takeIf(String::isNotBlank)?.let { reason -> SelectionContainer {
+                                Text(reason, style = MaterialTheme.typography.bodySmall,
+                                    color = if (enhanced.phase == EnhancementTaskPhase.FAILED) colors.error else colors.onSurfaceVariant)
+                            } }
+                        }
+                        Text(if (platformKind == PlatformKind.DESKTOP)
+                            "增强单独保存，原始下载保留。应用运行时处理；重启后可从已完成页面继续。"
+                            else "增强单独保存，原图始终可读。后台受系统限制；应用退出后可从已完成页面继续。",
+                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            onQualitySettings?.let { open -> MotionTextButton(onClick = open, enabled = enabled) {
+                                Text("画质设置", style = MaterialTheme.typography.labelMedium)
+                            } }
+                            if (enhanced == null || enhanced.phase == EnhancementTaskPhase.COMPLETED) {
+                                onEnhance?.let { start -> MotionTextButton(onClick = { start(shown) },
+                                    enabled = enabled && shown.status == DownloadStatus.COMPLETED) {
+                                    Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp))
+                                    Text(if (enhanced == null) "增强整章" else "重新检查并增强")
+                                } }
+                            } else when (enhanced.phase) {
+                                EnhancementTaskPhase.QUEUED, EnhancementTaskPhase.WAITING, EnhancementTaskPhase.RUNNING -> {
+                                    MotionTextButton(onClick = { onCancelEnhancement(enhanced.id) }, enabled = enabled) { Text("取消增强") }
+                                    MotionTextButton(onClick = { onPauseEnhancement(enhanced.id) }, enabled = enabled) {
+                                        Icon(Icons.Outlined.Pause, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("暂停增强")
+                                    }
+                                }
+                                EnhancementTaskPhase.PAUSED, EnhancementTaskPhase.FAILED, EnhancementTaskPhase.CANCELLED -> {
+                                    onEnhance?.let { start -> MotionTextButton(onClick = { start(shown) },
+                                        enabled = enabled && shown.status == DownloadStatus.COMPLETED) {
+                                        Text("按当前设置重建", style = MaterialTheme.typography.labelMedium)
+                                    } }
+                                    if (enhanced.phase != EnhancementTaskPhase.CANCELLED)
+                                        MotionTextButton(onClick = { onCancelEnhancement(enhanced.id) }, enabled = enabled) { Text("取消增强") }
+                                    MotionTextButton(onClick = { onResumeEnhancement(enhanced.id) }, enabled = enabled) {
+                                        Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("继续增强")
+                                    }
+                                }
+                                EnhancementTaskPhase.COMPLETED -> Unit
+                            }
+                        }
+                    }
                 }
                 if (pausable || retryable) FlowRow(Modifier.fillMaxWidth().motionInputGate(enabled),
                     horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),

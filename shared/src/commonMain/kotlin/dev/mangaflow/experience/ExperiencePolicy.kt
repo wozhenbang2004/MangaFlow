@@ -63,6 +63,9 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var activeDecodes = 0
     private var activeTileDecodes = 0
     private var activePreparations = 0
+    private var activeEnhancements = 0
+    private var enhancementReservedBytes = 0L
+    private val realtimeEnhancementOwners = mutableSetOf<String>()
     private var activeOptionalResolves = 0
     private var activeOptionalDecodes = 0
     private var framePressureUntil = 0L
@@ -315,6 +318,51 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
 
     fun startForeground(): () -> Unit = retainActivity(reader = false)
     fun startReading(): () -> Unit = retainActivity(reader = true)
+
+    /** Enhancement shares these observations and this admission owner with reading/downloads. */
+    internal fun enhancementWaitReason(priority: Int, estimatedBytes: Long = 0L): String? = synchronized(lock) {
+        enhancementWaitReasonLocked(priority, estimatedBytes)
+    }
+
+    private fun enhancementWaitReasonLocked(priority: Int, estimatedBytes: Long): String? {
+        val current = mutableState.value
+        return when {
+            resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2 -> "设备保护：内存或温度压力"
+            storageLow || resources.freeDiskBytes?.let { it <= current.diskReserveBytes } == true -> "存储空间不足"
+            platformKind != PlatformKind.DESKTOP && !current.foreground -> "返回应用后继续处理"
+            realtimeEnhancementOwners.isNotEmpty() -> "当前播放优先"
+            priority >= 2 && (readerUsers > 0 || readerWaiting) -> "当前阅读优先"
+            priority >= 1 && resources.cpuLoad?.let { it >= .92 } == true -> "等待 CPU 负载回落"
+            estimatedBytes > 0 && resources.availableMemoryBytes?.let {
+                estimatedBytes > (it - enhancementReservedBytes).coerceAtLeast(0L) / 2L
+            } == true -> "等待可用内存"
+            else -> null
+        }
+    }
+
+    internal fun tryAcquireEnhancement(priority: Int, estimatedBytes: Long = 0L): (() -> Unit)? = synchronized(lock) {
+        if (activeEnhancements > 0 || enhancementWaitReasonLocked(priority, estimatedBytes) != null) return@synchronized null
+        activeEnhancements++
+        enhancementReservedBytes += estimatedBytes.coerceAtLeast(0L)
+        var released = false
+        val release: () -> Unit = {
+            synchronized(lock) {
+                if (!released) {
+                    released = true
+                    activeEnhancements--
+                    enhancementReservedBytes = (enhancementReservedBytes - estimatedBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
+                    revision.value++
+                }
+            }
+        }
+        release
+    }
+
+    /** A native realtime renderer reserves the lane; queued optional GPU work yields. */
+    internal fun setRealtimeEnhancement(owner: String, active: Boolean) = synchronized(lock) {
+        val changed = if (active) realtimeEnhancementOwners.add(owner) else realtimeEnhancementOwners.remove(owner)
+        if (changed) revision.value++
+    }
     private fun retainActivity(reader: Boolean): () -> Unit {
         synchronized(lock) {
             if (reader) readerUsers++ else foregroundUsers++

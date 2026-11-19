@@ -8,7 +8,7 @@ package dev.mangaflow.anime.player
 internal object Anime4KShaderLibrary {
     const val UPSTREAM_COMMIT = "7684e9586f8dcc738af08a1cdceb024cc184f426"
 
-    fun sources(mode: AnimeVideoEnhancementMode): List<Anime4KShader> = when (mode) {
+    fun sources(mode: AnimeVideoEnhancementMode, scale: Int = 2): List<Anime4KShader> = when (mode) {
         AnimeVideoEnhancementMode.OFF -> emptyList()
         AnimeVideoEnhancementMode.FAST -> listOf(
             Anime4KShader("Anime4K_Restore_CNN_S.glsl", restoreSmall),
@@ -18,7 +18,7 @@ internal object Anime4KShaderLibrary {
             Anime4KShader("Anime4K_Restore_CNN_M.glsl", restoreMedium),
             Anime4KShader("Anime4K_Upscale_CNN_x2_M.glsl", upscaleMedium),
         )
-    }
+    }.also { require(scale in 1..2) }.let { if (scale == 1) it.take(1) else it }
 
     private val restoreSmall: String by lazy { """// MIT License
 

@@ -270,6 +270,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                     CacheArea.ARTWORK -> "封面 · 用户头像"
                                     CacheArea.DATA -> "推荐 · 榜单 · 目录 · 评分与评论"
                                     CacheArea.PANELS -> "识别坐标，可重新生成"
+                                    CacheArea.ENHANCEMENT -> "增强衍生内容 · 原始下载独立保留"
                                 }, storageBytes(paneSnapshot?.areaBytes(kind) ?: 0L), areaIcon(kind), true) {
                                     area = kind; selected = emptySet()
                                 }
@@ -471,6 +472,7 @@ private fun areaIcon(area: CacheArea) = when (area) {
     CacheArea.ARTWORK -> Icons.Outlined.AccountCircle
     CacheArea.DATA -> Icons.Outlined.Storage
     CacheArea.PANELS -> Icons.Outlined.CropFree
+    CacheArea.ENHANCEMENT -> Icons.Outlined.AutoAwesome
 }
 internal fun storageBytes(bytes: Long): String = when {
     bytes >= 1024L * 1024 * 1024 -> "${bytes * 10L / (1024L * 1024 * 1024) / 10.0} GB"

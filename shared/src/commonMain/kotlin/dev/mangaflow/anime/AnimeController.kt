@@ -29,6 +29,7 @@ import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.randomUuid
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.platform.monotonicTimeMillis
+import dev.mangaflow.enhancement.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -50,6 +51,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -61,6 +63,10 @@ import kotlin.time.Instant
 
 /** Application-owned data and playback. Screens keep only disclosure, drafts and scroll state. */
 class AnimeController(private val context: PlatformContext, private val scope: CoroutineScope) {
+    private val enhancementCenter by lazy { EnhancementCenter.get(context) }
+    private var observedEnhancementSession: String? = null
+    private var observedEnhancementTimeline = -1L
+    private var reducedAutoEnhancementSession: String? = null
     private val metadata = AnimeMetadataRepository(context)
     private val sources = AnimeSourceRepository(context)
     private val unifiedSearch = AnimeUnifiedSearch(scope, metadata, sources)
@@ -90,6 +96,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         it.setPlaybackBusy(playbackBusy())
     } }
     val downloads get() = downloadsOwner.value
+    private val enhancementsOwner = lazy { VideoPreparationStore(context, downloads, enhancementCenter).also {
+        enhancementCenter.attachVideoPreparation(it)
+    } }
+    val enhancements get() = enhancementsOwner.value
     val sourceHomes: Map<String, String> get() = sources.providers.associate { it.id to it.homeUrl } +
         dev.mangaflow.anime.sources.lanerc.LANERC_SOURCE_DIRECTORY.filter { descriptor ->
             sources.extensions.state.value.any { it.id == descriptor.id && it.installed && it.enabled }
@@ -228,6 +238,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     init {
         scope.launch {
+            combine(enhancementCenter.settings.state, enhancementCenter.settings.sessions,
+                enhancementCenter.resources.usage) { _, _, _ -> Unit }.collect {
+                playerInstance?.configure(playerOptions(mutableState.value.settings))
+            }
+        }
+        scope.launch {
             try {
                 try { library.awaitReady() }
                 catch (cancel: CancellationException) { throw cancel }
@@ -235,6 +251,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 // Keep observing so an explicit recovery can replace a previously unreadable document.
                 var previousBindings: List<AnimeSourceBinding>? = null
                 library.state.collect { stored ->
+                    if (!enhancementCenter.settings.isConfigured(EnhancementContent.ANIME) &&
+                        stored.settings.videoEnhancement != dev.mangaflow.anime.player.AnimeVideoEnhancementMode.OFF) {
+                        enhancementCenter.savePolicy(EnhancementContent.ANIME, EnhancementPolicy(
+                            tier = if (stored.settings.videoEnhancement == dev.mangaflow.anime.player.AnimeVideoEnhancementMode.FAST)
+                                QualityTier.LIGHT else QualityTier.BALANCED,
+                            scale = 2, preparation = setOf(PreparationMode.IMMEDIATE, PreparationMode.SMART),
+                        )).await()
+                    }
                     val settingsChanged = mutableState.value.settings != stored.settings
                     val bindingsChanged = previousBindings != stored.bindings
                     previousBindings = stored.bindings
@@ -2103,6 +2127,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             sourceDanmakuAvailable = active?.let(::hasSourceDanmaku) == true,
             playbackResolutions = choice.asset.resolutions, selectedResolutionId = choice.resolutionId ?:
                 choice.asset.resolutions.singleOrNull { item -> item.url == choice.asset.url }?.id) }
+        engine.configure(playerOptions(mutableState.value.settings))
         engine.open(AnimePlayerRequest(choice.asset, position, choice.playWhenReady, choice.localMedia,
             bypassMediaCache = choice.bypassMediaCache))
     }
@@ -2242,6 +2267,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private fun observePlayer(engine: AnimePlayer) {
         scope.launch {
             engine.state.collect { snapshot ->
+                observeEnhancement(snapshot)
                 mutablePlaybackPhase.value = snapshot.phase
                 val owner = active ?: return@collect
                 if (!belongsTo(owner, snapshot)) return@collect
@@ -2253,6 +2279,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 if (downloadsOwner.isInitialized()) downloads.setPlaybackBusy(playbackBusy(snapshot))
                 checkpoint(owner, snapshot, force = snapshot.phase != lastSavedPhase || snapshot.ended || !snapshot.playWhenReady)
                 if (snapshot.phase == AnimePlayerPhase.ERROR) {
+                    if (owner.localMedia?.enhancedVersion == true && !owner.recoveryHandled) {
+                        owner.recoveryHandled = true
+                        openDownload(owner.localMedia.downloadId, fallback = null, useOriginal = true)
+                        notice("增强版本播放失败，已切回保留的原始视频")
+                        return@collect
+                    }
                     val historyKey = playbackHistoryKey(owner.detail.subject.id, owner.episode.id, owner.option)
                     if (snapshot.sourceRecoveryAllowed && historyKey != null && owner.asset.route == historyKey.route &&
                         owner.sourceRevision == sourceRevision(owner.option.sourceId) &&
@@ -2484,15 +2516,69 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         else active?.nextPreparationNotBefore = 0L
     }
 
-    private fun playerOptions(settings: AnimePlaybackSettings) = AnimePlayerOptions(
+    private fun playerOptions(settings: AnimePlaybackSettings): AnimePlayerOptions {
+        val snapshot = playerInstance?.state?.value?.takeIf { value -> active?.let { belongsTo(it, value) } != false }
+        val key = active?.let { "anime:${it.asset.id}:${it.playerGeneration}" } ?: snapshot?.let(::animeEnhancementSessionKey)
+        val policy = enhancementCenter.settings.policy(EnhancementContent.ANIME, key)
+        val p95 = key?.let { enhancementCenter.telemetry.state.value.sessions[it]?.gpuP95Millis }
+        val selected = selectRealtimeEnhancement(policy, enhancementCenter.resources.usage.value.resources,
+            snapshot?.sourceFps, if (key != null && reducedAutoEnhancementSession == key) Double.MAX_VALUE else p95)
+        if (policy.tier == QualityTier.AUTO && selected.mode == dev.mangaflow.anime.player.AnimeVideoEnhancementMode.FAST &&
+            p95 != null) reducedAutoEnhancementSession = key
+        return AnimePlayerOptions(
         backgroundAudio = settings.backgroundAudio,
         bufferMinMs = settings.bufferMinMs,
         bufferMaxMs = settings.bufferMaxMs,
         bufferStartMs = settings.bufferStartMs,
         bufferRebufferMs = settings.bufferRebufferMs,
         automaticRecoveryAttempts = settings.automaticRecoveryAttempts,
-        videoEnhancement = settings.videoEnhancement,
-    )
+        videoEnhancement = if (active?.localMedia?.enhancedVersion == true)
+            dev.mangaflow.anime.player.AnimeVideoEnhancementMode.OFF else selected.mode,
+        enhancementScale = selected.scale,
+        )
+    }
+
+    private fun observeEnhancement(snapshot: AnimePlayerState) {
+        val center = enhancementCenter
+        val hasSession = snapshot.assetKey != null && snapshot.phase !in setOf(AnimePlayerPhase.IDLE, AnimePlayerPhase.RELEASED)
+        center.resources.setRealtimeEnhancement("anime-player", hasSession && snapshot.isPlaying &&
+            !snapshot.playbackSuppressed && (foreground || snapshot.inPictureInPicture) && snapshot.hasVideoTracks != false)
+        val key = if (hasSession) animeEnhancementSessionKey(snapshot) else null
+        if (observedEnhancementSession != key) {
+            observedEnhancementSession?.let(center::endSession)
+            observedEnhancementSession = key
+            observedEnhancementTimeline = snapshot.timelineGeneration
+            reducedAutoEnhancementSession = null
+        } else if (observedEnhancementTimeline != snapshot.timelineGeneration && key != null) {
+            center.scheduler.cancelSession(key)
+            center.telemetry.endSession(key)
+            observedEnhancementTimeline = snapshot.timelineGeneration
+        }
+        if (key == null) return
+        val policy = center.settings.policy(EnhancementContent.ANIME, key)
+        val selection = selectRealtimeEnhancement(policy, center.resources.usage.value.resources, snapshot.sourceFps,
+            center.telemetry.state.value.sessions[key]?.gpuP95Millis)
+        val effect = snapshot.videoEnhancement
+        val observation = effect.observation
+        val model = if (snapshot.preEnhanced) "离线增强版本" else when (effect.mode) {
+            dev.mangaflow.anime.player.AnimeVideoEnhancementMode.OFF -> null
+            dev.mangaflow.anime.player.AnimeVideoEnhancementMode.FAST -> "Anime4K S/S"
+            dev.mangaflow.anime.player.AnimeVideoEnhancementMode.QUALITY -> "Anime4K M/M"
+        }
+        center.telemetry.recordVideo(key, model, snapshot.sourceFps,
+            policy.targetFps(snapshot.sourceFps, null),
+            if (snapshot.preEnhanced) snapshot.videoWidth else effect.outputWidth,
+            if (snapshot.preEnhanced) snapshot.videoHeight else effect.outputHeight,
+            observation?.submittedFrames, observation?.submitThreadCpuNanos,
+            presentedFps = snapshot.presentedFps, presentedFrames = snapshot.presentedFrames,
+            droppedFrames = snapshot.droppedFrames,
+            reason = if (snapshot.preEnhanced) "正在使用已完成并校验的增强版本" else selection.reason ?: effect.detail,
+            gpuSampleSequence = observation?.gpuSampleSequence, gpuExecutionNanos = observation?.gpuExecutionNanos,
+            gpuSubmittedAtNanos = observation?.gpuSubmittedAtNanos,
+            gpuCompletionObservedAtNanos = observation?.gpuCompletionObservedAtNanos,
+            presentedAtNanos = observation?.presentedAtNanos)
+        selection.reason?.let { center.telemetry.noteAdjustment(key, EnhancementContent.ANIME, it) }
+    }
 
     fun setSleepTimer(minutes: Int?, atEpisodeEnd: Boolean = false) {
         if (minutes != null && minutes <= 0) { notice("睡眠计时需要大于零的分钟数。"); return }
@@ -2517,6 +2603,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val owner = active ?: run { notice("请先打开要保存的剧集。"); return }
         if (owner.localMedia != null) { notice("当前播放来自已保存的离线剧集。"); return }
         mutate {
+            enhancements // Observe new completed originals for the user's after-download policy.
             downloads.setPlaybackBusy(playbackBusy())
             downloads.enqueue(owner.detail.subject, owner.episode, owner.asset)
             notice("已加入离线下载，可在下载列表查看进度。")
@@ -2528,8 +2615,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     fun removeDownload(id: String) = mutate { downloads.remove(id) }
 
     fun playDownload(id: String) = openDownload(id, fallback = null)
+    fun playOriginalDownload(id: String) = openDownload(id, fallback = null, useOriginal = true)
+    fun playEnhancedDownload(id: String, versionId: String) = openDownload(id, fallback = null, versionId = versionId)
+    fun enhanceDownload(id: String) { enhancements.enqueue(id) }
 
-    private fun openDownload(id: String, fallback: AnimeLibraryEntry?) {
+    private fun openDownload(id: String, fallback: AnimeLibraryEntry?, versionId: String? = null, useOriginal: Boolean = false) {
         cancelPlaybackResolution()
         clearPreparation()
         val request = resolveGeneration
@@ -2537,7 +2627,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         resolveJob = scope.launch {
             try {
                 library.awaitLoaded()
-                val offline = downloads.playback(id)
+                val original = downloads.playback(id)
+                val offline = if (useOriginal) original else try { enhancements.playback(original, versionId) }
+                    catch (cancel: CancellationException) { throw cancel }
+                    catch (_: Exception) { original }
                 check(fallback == null || offline.subject.id == fallback.subject.id &&
                     offline.episode.id == fallback.resume?.episodeId && offline.asset.id == fallback.resume?.assetId) {
                     "离线内容与续看记录不一致。"

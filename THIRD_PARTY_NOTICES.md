@@ -1,5 +1,54 @@
 # Third-party notices
 
+## Optional image and video enhancement engines (2026-11-19)
+
+The Enhancement Center invokes optional external engine executables; their source
+code and weights are not embedded in this application by this integration.
+Explicit component installation downloads the complete fixed upstream archive,
+checks its SHA-256, and preserves its bundled notices. The upstream setup command
+then prepares the platform-specific runtime and models under their respective
+terms. A model being installed is not proof of device compatibility or visual
+qualification.
+
+- **MangaJaNaiCLI 0.9.3** — GPL-3.0; the-database. Source:
+  https://github.com/the-database/MangaJaNaiCLI/tree/901322ae449c6fea82427293ab702aaa7a762dd1 .
+  Fixed `mangajanai-windows-x64.zip` SHA-256:
+  `c1c5396945557fdea0263510a693ed3e976602a7c93ea66a33491463dc747ae5`.
+  MangaFlow uses its documented image, model, scale, tile and progress interface.
+- **VideoJaNai 2.14.1 CLI** — GPL-3.0; the-database. Source:
+  https://github.com/the-database/VideoJaNai/tree/d57f2575a7e53e51a1b0778f307c89f0c4ebcd43 .
+  Fixed `videojanai-windows-x64.zip` SHA-256:
+  `a362daaaaf380cd70b65cfcbd86449f03fde8e606bc251513eaae699747389ec`.
+  MangaFlow invokes actual super-resolution, RIFE and encoding operations in an
+  owned process. No JaNai native implementation is copied into the Kotlin adapter.
+- **FFmpeg / ffprobe, Gyan Windows shared full build 9.0.2** — optional external
+  distribution with its complete upstream component notices; do not describe the
+  full build as exclusively LGPL. Source/build release:
+  https://github.com/GyanD/codexffmpeg/releases/tag/9.0.2 ; legal/source information:
+  https://ffmpeg.org/legal.html . Archive SHA-256:
+  `8d31e162f1616e37aab3fa2db991b97e1b8dbeb1c8465fd81a81be16ff91b328`.
+- **MangaJaNai / IllustrationJaNai model family** — separate model terms,
+  including the MangaJaNai project's CC BY-NC 4.0 license:
+  https://github.com/the-database/MangaJaNai/blob/main/LICENSE . The GPL CLI license
+  does not replace a weight's license. Imported models remain subject to their
+  original terms; MangaFlow records their actual bytes and SHA-256 without
+  assigning unrestricted commercial rights.
+- **RIFE** — upstream project MIT, Copyright Megvii Inc.:
+  https://github.com/hzwer/ECCV2022-RIFE/blob/main/LICENSE . Converted model packages
+  retain the notices supplied with those packages. The upstream ncnn/Vulkan
+  wrapper is MIT: https://github.com/nihui/rife-ncnn-vulkan/blob/master/LICENSE .
+  It was researched but is not bundled or claimed implemented as an Android video
+  pipeline by this change.
+- **ONNX Runtime Android 1.31.1** — the existing optional signed per-ABI component
+  and its MIT/dependency notices below are reused. The image adapter does not add
+  another native runtime download or claim a Vulkan execution provider.
+
+Native libaji/TensorRT/DirectML components and model archives downloaded by the
+upstream setup retain their own license obligations. This notice does not grant
+rights to redistribute an unreviewed native package. Exact interface research,
+fixed archive sizes, model identities and unimplemented backends are documented
+in `docs/research/enhancement-engines-20261119.md`.
+
 ## Anime4K video enhancement
 
 MangaFlow embeds the complete Anime4K Restore CNN S/M and Upscale CNN x2 S/M

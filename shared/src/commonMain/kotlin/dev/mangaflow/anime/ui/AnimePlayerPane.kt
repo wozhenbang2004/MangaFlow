@@ -75,7 +75,7 @@ internal fun AnimePlayerPane(
     onRetry: () -> Unit,
     onKeepPlayback: () -> Unit,
     onRestorePlayback: () -> Unit,
-    onPlayDownload: (String) -> Unit,
+    onPlayDownload: (AnimeDownloadSelection) -> Unit,
     onSources: () -> Unit,
     onEpisode: (AnimeEpisode) -> Unit,
     modifier: Modifier = Modifier,

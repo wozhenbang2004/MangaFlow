@@ -53,8 +53,10 @@ data class AnimePlayerOptions(
     val bufferRebufferMs: Int = 3_000,
     val automaticRecoveryAttempts: Int = 2,
     val videoEnhancement: AnimeVideoEnhancementMode = AnimeVideoEnhancementMode.OFF,
+    val enhancementScale: Int = 2,
 ) {
     fun requireValid() {
+        require(enhancementScale in 1..2) { "当前实时 Anime4K 支持 1× 修复与 2× 输出" }
         require(bufferStartMs >= 0 && bufferRebufferMs >= 0 && bufferMinMs >= 0 && bufferMaxMs > 0) {
             "缓冲时间不能为负，最大缓冲时间必须大于零"
         }
@@ -67,6 +69,8 @@ data class AnimePlayerOptions(
 
 data class AnimePlayerState(
     val sessionGeneration: Long = 0L,
+    /** Seek invalidates prepared frames and measurements without changing the saved episode identity. */
+    val timelineGeneration: Long = 0L,
     val assetKey: String? = null,
     val episodeId: String? = null,
     val phase: AnimePlayerPhase = AnimePlayerPhase.IDLE,
@@ -100,6 +104,13 @@ data class AnimePlayerState(
     val hasVideoTracks: Boolean? = null,
     /** Native playback is temporarily suppressed, for example by audio focus loss. */
     val playbackSuppressed: Boolean = false,
+    val preEnhanced: Boolean = false,
+    val sourceFps: Double? = null,
+    /** Native decoder output is not a display presentation acknowledgement. */
+    val decoderOutputFrames: Long? = null,
+    val droppedFrames: Long? = null,
+    val presentedFps: Double? = null,
+    val presentedFrames: Long? = null,
 ) {
     val ended: Boolean get() = phase == AnimePlayerPhase.ENDED
     val isPlaying: Boolean get() = phase == AnimePlayerPhase.READY && playWhenReady && !isBuffering
@@ -199,6 +210,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
             capabilities = previous.capabilities,
             videoScale = previous.videoScale, volume = previous.volume,
             inPictureInPicture = previous.inPictureInPicture,
+            preEnhanced = next.localMedia?.enhancedVersion == true,
             videoEnhancement = AnimeVideoEnhancementState(options.videoEnhancement,
                 if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF) AnimeVideoEnhancementPhase.OFF
                 else AnimeVideoEnhancementPhase.WAITING),
@@ -223,7 +235,11 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         if (current.phase == AnimePlayerPhase.ERROR) {
             request?.let { openNow(it.copy(positionMs = current.positionMs, playWhenReady = true), sameSession = true) }
         } else if (current.phase == AnimePlayerPhase.ENDED) {
-            mutableState.value = current.copy(phase = AnimePlayerPhase.READY, positionMs = 0L, playWhenReady = true)
+            mutableState.value = current.copy(phase = AnimePlayerPhase.READY, positionMs = 0L, playWhenReady = true,
+                timelineGeneration = current.timelineGeneration + 1,
+                sourceFps = null, decoderOutputFrames = null, droppedFrames = null,
+                presentedFps = null, presentedFrames = null,
+                videoEnhancement = current.videoEnhancement.copy(observation = null))
             seekNative(0L)
             setPlayingNative(true)
         } else if (request != null) {
@@ -244,6 +260,10 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
             else positionMs.coerceAtLeast(0L)
         mutableState.value = current.copy(
             positionMs = target,
+            timelineGeneration = current.timelineGeneration + 1,
+            sourceFps = null, decoderOutputFrames = null, droppedFrames = null,
+            presentedFps = null, presentedFrames = null,
+            videoEnhancement = current.videoEnhancement.copy(observation = null),
             phase = if (current.ended) AnimePlayerPhase.READY else current.phase,
         )
         seekNative(target)
@@ -261,7 +281,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         command(fatal = false) {
             val previous = this.options
             this.options = options
-            if (previous.videoEnhancement != options.videoEnhancement) {
+            if (previous.videoEnhancement != options.videoEnhancement || previous.enhancementScale != options.enhancementScale) {
                 mutableState.value = mutableState.value.copy(videoEnhancement = AnimeVideoEnhancementState(
                     options.videoEnhancement,
                     if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF) AnimeVideoEnhancementPhase.OFF
