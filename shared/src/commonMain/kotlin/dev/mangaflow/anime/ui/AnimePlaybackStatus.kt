@@ -55,7 +55,7 @@ internal fun AnimePlaybackStatus(
 private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<EnhancementMetric>,
     policy: EnhancementPolicy, resources: ExperienceResources, reason: String?,
     nextPreparation: AnimeNextEpisodePreparation?, nextPreparationEnabled: Boolean): List<EnhancementReadout> = buildList {
-    val flowing = playback?.let { it.isPlaying && !it.playbackSuppressed &&
+    val flowing = playback?.let { it.isPlaying && !it.isBuffering && !it.playbackSuppressed &&
         it.hasVideoTracks != false && it.firstFrameRendered != false } == true
     val effect = playback?.videoEnhancement
     val observation = effect?.observation
@@ -150,8 +150,14 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
             !policy.realtimeInterpolationEnabled -> "补帧已关闭"
             motion?.phase == AnimeVideoEnhancementPhase.FAILED || motion?.phase == AnimeVideoEnhancementPhase.UNAVAILABLE ->
                 motionProblemLabel(motion?.detail)
+            motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && flowing && (motion.graphFps ?: 0.0) > 0.0 &&
+                (motion.synthesizedFrames == 0L || motion.generationFps == 0.0) -> "补帧 · 保留原帧"
+            motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && flowing && motion.synthesizedFrames > 0L &&
+                motion.outputInterpolatedFrames == 0L -> "补帧 · 等待视频输出"
             motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && flowing && motion.synthesizedFrames > 0L -> "补帧处理中"
+            motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && !flowing -> "补帧 · 待播放"
             motion?.phase == AnimeVideoEnhancementPhase.WAITING && motion.detail?.contains("等待片源帧率") == true -> "补帧 · 等待源帧率"
+            motion?.phase == AnimeVideoEnhancementPhase.WAITING && motion.detail?.contains("显示屏信息") == true -> "补帧 · 等待屏幕信息"
             motion?.phase == AnimeVideoEnhancementPhase.CONFIGURED -> "补帧 · 等待输出"
             motion != null && motion.phase != AnimeVideoEnhancementPhase.OFF -> "补帧待运行"
             else -> "未实时补帧"
@@ -162,13 +168,13 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
     if (EnhancementMetric.MOTION_THROUGHPUT in metrics) {
         val fps = activeMotion?.generationFps?.takeIf { it.isFinite() && it >= 0.0 }
         val value = fps?.let { formatDecimal(it, 1) + " 帧/s" } ?: "—"
-        add(EnhancementReadout(EnhancementMetric.MOTION_THROUGHPUT, "补帧处理 $value",
-            "补帧处理吞吐 $value，不是屏幕呈现帧率"))
+        add(EnhancementReadout(EnhancementMetric.MOTION_THROUGHPUT, "插值生成 $value",
+            "插值画面生成速度 $value，不是最终视频输出或屏幕呈现帧率"))
     }
     if (EnhancementMetric.MOTION_LATENCY in metrics) {
         val elapsed = activeMotion?.inferenceNanos?.takeIf { it >= 0L }
         val value = elapsed?.let { formatDecimal(it / 1_000_000.0, 1) + " ms" } ?: "—"
-        add(EnhancementReadout(EnhancementMetric.MOTION_LATENCY, "补帧 $value", "单次补帧处理耗时 $value"))
+        add(EnhancementReadout(EnhancementMetric.MOTION_LATENCY, "插值推理 $value", "单次插值推理耗时 $value"))
     }
     if (EnhancementMetric.GPU_TIME in metrics) {
         val elapsed = observation?.takeIf { flowing && effect?.phase == AnimeVideoEnhancementPhase.ACTIVE && it.recentlySubmitting }
@@ -218,10 +224,9 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
 
 private fun motionProblemLabel(detail: String?): String = "补帧 · " + when {
     detail.isNullOrBlank() -> "暂不可用"
-    detail.contains("1080p") -> "输入超过 1080p"
     detail.contains("纹理尺寸") -> "超出纹理上限"
     detail.contains("资源不足") -> "资源暂不足"
-    detail.contains("推理超过帧预算") -> "超出帧预算"
+    detail.contains("推理超过帧预算") || detail.contains("超过实时预算") -> "超出实时预算"
     detail.contains("HDR") -> "HDR 暂不支持"
     detail.contains("屏幕刷新率") -> "等待屏幕信息"
     detail.contains("源帧率的目标") -> "目标或源帧率不支持"

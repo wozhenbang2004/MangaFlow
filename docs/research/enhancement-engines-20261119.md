@@ -6,6 +6,44 @@ device qualification or a claim that the complete V1.0 acceptance has passed**.
 No local build, benchmark, test, executable installation, media conversion or
 device probe was run during this work, following the current project workflow.
 
+## Live interpolation output review · 2026-11-20 Asia/Shanghai
+
+The AUTO/waiting feedback was traced through the exact [Media3 1.11.1
+PlaybackVideoGraphWrapper](https://github.com/androidx/media/blob/1.11.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/video/PlaybackVideoGraphWrapper.java),
+[DefaultVideoSink](https://github.com/androidx/media/blob/1.11.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/video/DefaultVideoSink.java),
+`VideoFrameRenderControl`, `FinalShaderProgramWrapper`,
+`ChainingGlShaderProgramListener` and `FrameConsumptionManager` source. Each
+graph output is queued independently with its own PTS and a FIFO render/drop
+handler; no input-count-equals-output-count assertion was found. An interpolated
+frame can be dropped for lateness, rather than simply for having a new PTS.
+EOS still follows the final input PTS, and the wrapper explicitly leaves support
+for extensively modified media open. MangaFlow's interpolation remains between
+adjacent input timestamps, retains the final original PTS and does not alter
+audio/subtitle duration. This source observation is narrower than supported API
+qualification: the [public setVideoEffects contract](https://developer.android.com/reference/androidx/media3/exoplayer/ExoPlayer)
+still excludes timestamp-updating effects. Device playback, seek/EOS and A/V
+continuity are unverified; do not call that documentation alone a proven 1:N
+deadlock, or claim that successful model inference proves final frame output.
+
+Android uses `RIFE -> picture effects`; Windows' existing native configuration
+sets `rife_before_upscale=yes`. The mobile 1080p bound is original input size,
+not a realtime throughput guarantee. Its synchronous path includes GL readback,
+Kotlin pixel conversion, JNI FP32 conversion, Vulkan upload/compute/download,
+CPU conversion and GL upload before subsequent enhancement. Input-pair work and
+final output need separate observations; per-model inference time alone cannot
+qualify the combined workload. AUTO previously waited indefinitely for optional
+format metadata; actual pre-interpolation PTS can establish cadence without
+feeding generated frames back into source estimation.
+
+The pinned [RIFE a7532fc implementation](https://github.com/nihui/rife-ncnn-vulkan/blob/a7532fc3f9f8f008cd6eecd6f2ffe2a9698e0cf7/src/rife.cpp)
+enables FP16 packing/storage while retaining FP32 arithmetic. MangaFlow's current
+JNI adapter retains FP32 storage and requires unpacked FP32 CPU output. The Warp
+shader has conditional ncnn storage macros, but its packing and download
+contracts must be reviewed together before changing precision. This is an open
+optimization lead, not a measured speedup or an implemented precision change.
+No native runtime/version change is made by this review. Requirements and
+source changes belong to ENH-MOTION-01–05 in the existing delivery record.
+
 ## Implemented platform contracts
 
 `shared/src/commonMain/kotlin/dev/mangaflow/enhancement/engine/EnhancementEngine.kt`

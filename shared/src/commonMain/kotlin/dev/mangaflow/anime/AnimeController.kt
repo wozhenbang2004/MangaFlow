@@ -232,6 +232,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private val playbackEpochs = mutableMapOf<String, Long>()
     private var active: ActivePlayback? = null
     private var pending: PendingPlayback? = null
+    private var motionIntentSession: String? = null
+    private var motionIntentPolicy: EnhancementPolicy? = null
+    private var realtimeMotionIntent = 0L
     private val reviewSnapshots = mutableMapOf<String, ReviewContext>()
     private var lastCheckpointAt = 0L
     private var lastSavedPosition = -1L
@@ -3379,6 +3382,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val snapshot = playerInstance?.state?.value?.takeIf { value -> active?.let { belongsTo(it, value) } != false }
         val key = active?.let { "anime:${it.asset.id}:${it.playerGeneration}" } ?: snapshot?.let(::animeEnhancementSessionKey)
         val policy = enhancementCenter.settings.policy(EnhancementContent.ANIME, key)
+        // A resource projection may temporarily remove the live request. Only a real
+        // viewing choice or session change permits a failed interpolation attempt again.
+        val previousIntent = motionIntentPolicy
+        if (motionIntentSession != key || previousIntent == null || !sameViewingEffects(previousIntent, policy)) {
+            realtimeMotionIntent++
+            motionIntentSession = key
+            motionIntentPolicy = policy
+        }
         val p95 = key?.let { enhancementCenter.telemetry.state.value.sessions[it]?.gpuP95Millis }
         val selected = selectRealtimeEnhancement(policy, enhancementCenter.resources.usage.value.resources,
             snapshot?.sourceFps, if (key != null && reducedAutoEnhancementSession == key) Double.MAX_VALUE else p95,
@@ -3407,6 +3418,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         enhancementModel = selected.model.takeIf { realtimeEnabled },
         preparedVideoModel = prepared,
         realtimeFrames = realtimeFrames,
+        realtimeMotionIntent = realtimeMotionIntent,
         bufferForwardBytes = preparation.forwardBytes,
         bufferBackBytes = preparation.backBytes,
         )

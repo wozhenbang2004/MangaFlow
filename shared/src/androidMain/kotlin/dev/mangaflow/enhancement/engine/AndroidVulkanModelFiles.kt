@@ -25,7 +25,8 @@ internal suspend fun installAndroidVulkanModel(
     progress: (EngineProgress) -> Unit,
 ) {
     val runtimeId = PanelRuntimeId.CUGAN
-    if (!runtimes.states.value.getValue(runtimeId).installed) {
+    val initial = runtimes.states.value.getValue(runtimeId)
+    if (!initial.installed || initial.requiresUpdate) {
         runtimes.download(runtimeId)
         val status = runtimes.states.first { options ->
             val current = options.getValue(runtimeId)
@@ -33,7 +34,7 @@ internal suspend fun installAndroidVulkanModel(
                 current.totalBytes.takeIf { it > 0L }, detail = "正在下载签名 ncnn Vulkan 组件", bytes = current.bytes))
             !current.downloading
         }.getValue(runtimeId)
-        check(status.installed) { status.error ?: "ncnn Vulkan 组件未能安装" }
+        check(status.installed && !status.requiresUpdate) { status.error ?: "ncnn Vulkan 组件未能完成安装或更新" }
     }
     check(!runtimes.states.value.getValue(runtimeId).pendingRemoval) { "ncnn Vulkan 组件将在重启后移除" }
     if (parts.all { it.matches(File(installed, it.name)) }) return

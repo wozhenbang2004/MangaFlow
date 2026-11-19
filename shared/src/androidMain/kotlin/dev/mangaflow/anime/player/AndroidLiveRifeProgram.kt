@@ -19,6 +19,9 @@ import kotlin.math.roundToLong
 internal class AndroidLiveRifeProgram(
     private val model: AndroidLiveRifeVulkan,
     private val targetFps: Double?,
+    private val automatic: Boolean = false,
+    private val onSynthesizedFrame: (Long) -> Unit = {},
+    private val onReset: () -> Unit = {},
     private val report: (RifeSample) -> Unit,
 ) : GlShaderProgram {
     private var inputListener: GlShaderProgram.InputListener = object : GlShaderProgram.InputListener {}
@@ -51,7 +54,14 @@ internal class AndroidLiveRifeProgram(
     private var synthesized = 0L
     private var sampledSynthesized = 0L
     private var sampleWallTime = 0L
-    private var slowFrames = 0
+    private var slowPairs = 0
+    private var pairWorkNanos = 0L
+    private var pairBudgetNanos = 0L
+    private val inputIntervals = LongArray(8)
+    private var intervalCount = 0
+    private var intervalIndex = 0
+    private var observedInputFps: Double? = null
+    private var resolvedTargetFps: Double? = if (automatic) null else targetFps
     private var emptyIntervals = 0
     private var detachReason: String? = null
     private var lastInferenceNanos: Long? = null
@@ -93,24 +103,53 @@ internal class AndroidLiveRifeProgram(
             output = try { provider.createBuffersForTexture(texture, width, height) }
                 catch (failure: Exception) { GlUtil.deleteTexture(texture); throw failure }
             previousPts = NONE
+            resetCadence()
         }
         if (lastPts != NONE && presentationTimeUs <= lastPts) {
             inputListener.onInputFrameProcessed(input)
             inputListener.onReadyToAcceptInputFrame()
             return@guard
         }
+        // Account for one whole input interval, including all inserted frames. Waiting
+        // for downstream release is excluded; later enhancement has its own budget.
+        if (!sourceOnly && pairBudgetNanos > 0L) {
+            slowPairs = if (pairWorkNanos > pairBudgetNanos) slowPairs + 1 else 0
+            if (slowPairs >= 3 || pairWorkNanos > MAX_PAIR_WORK_NANOS) {
+                sourceOnly = true
+                detachReason = "补帧读回、推理与回传超过实时预算，已恢复源帧率"
+            }
+        }
+        val readStart = System.nanoTime()
         read(input, current)
+        pairWorkNanos = System.nanoTime() - readStart
+        pairBudgetNanos = 0L
         inputListener.onInputFrameProcessed(input)
         currentPts = presentationTimeUs
         if (previousPts == NONE || currentPts - previousPts !in 1L..MAX_INTERVAL_US) {
+            resetCadence()
             originPts = currentPts
             gridIndex = 1
             commitInput()
             emit(previousPts, previous, false)
             return@guard
         }
+        val interval = currentPts - previousPts
+        pairBudgetNanos = (interval * 850L)
+        observeInputInterval(interval)
+        if (sourceOnly) {
+            fallback(checkNotNull(detachReason))
+            return@guard
+        }
+        if (automatic && resolvedTargetFps == null) {
+            // Only timestamps arriving before interpolation determine AUTO's cadence.
+            commitInput()
+            emit(previousPts, previous, false)
+            return@guard
+        }
         pairPending = true
+        val cutStart = System.nanoTime()
         cut = isCutOrHeld()
+        pairWorkNanos += System.nanoTime() - cutStart
         drain()
     }
 
@@ -142,21 +181,29 @@ internal class AndroidLiveRifeProgram(
         synthesized = 0
         sampledSynthesized = 0
         sampleWallTime = 0
-        slowFrames = 0
+        slowPairs = 0
+        pairWorkNanos = 0L
+        pairBudgetNanos = 0L
         emptyIntervals = 0
+        lastInferenceNanos = null
+        resetCadence()
+        onReset()
         inputListener.onFlush()
         inputListener.onReadyToAcceptInputFrame()
     }
 
     override fun release() {
         try { output?.release() }
-        finally { GLES20.glDeleteFramebuffers(1, readFbo, 0) }
+        finally {
+            onReset()
+            GLES20.glDeleteFramebuffers(1, readFbo, 0)
+        }
     }
 
     private fun drain() {
         if (inFlight || ended || failed) return
         if (pairPending) {
-            val target = targetFps
+            val target = resolvedTargetFps
             val nextStamp = when {
                 sourceOnly -> currentPts
                 target == null -> if (lastPts <= previousPts) previousPts + (currentPts - previousPts) / 2 else currentPts
@@ -192,10 +239,9 @@ internal class AndroidLiveRifeProgram(
                             (nextStamp - previousPts).toFloat() / (currentPts - previousPts), generated)
                         val elapsed = System.nanoTime() - nanos
                         lastInferenceNanos = elapsed
-                        val budget = (if (target == null) (currentPts - previousPts) / 2.0 else 1_000_000.0 / target) * 850
-                        slowFrames = if (elapsed > budget) slowFrames + 1 else 0
-                        if (slowFrames >= 3 || elapsed > 200_000_000L) {
-                            fallback("实际推理超过帧预算，已恢复源帧率")
+                        pairWorkNanos += elapsed
+                        if (pairWorkNanos > MAX_PAIR_WORK_NANOS) {
+                            fallback("补帧读回与推理超过实时预算，已恢复源帧率")
                             return
                         }
                         emit(nextStamp, generated, true)
@@ -236,6 +282,7 @@ internal class AndroidLiveRifeProgram(
     }
 
     private fun emit(pts: Long, frame: IntArray, interpolated: Boolean) {
+        val uploadStart = System.nanoTime()
         val texture = checkNotNull(output)
         val bytes = checkNotNull(pixelBytes)
         val packed = bytes.asIntBuffer()
@@ -248,6 +295,7 @@ internal class AndroidLiveRifeProgram(
         GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, width, height, GLES20.GL_RGBA,
             GLES20.GL_UNSIGNED_BYTE, bytes)
         GlUtil.checkGlError()
+        pairWorkNanos += System.nanoTime() - uploadStart
         lastPts = pts
         inFlight = true
         val now = System.nanoTime()
@@ -255,20 +303,62 @@ internal class AndroidLiveRifeProgram(
             sampleStart = pts
             sampleWallTime = now
         }
-        if (interpolated) synthesized++
+        if (interpolated) {
+            synthesized++
+            onSynthesizedFrame(pts)
+        }
         sampleFrames++
         val span = pts - sampleStart
         if (detachReason != null || span >= 600_000) {
             val wall = now - sampleWallTime
             report(RifeSample(synthesized, if (span > 0 && sampleFrames >= 2) (sampleFrames - 1) * 1_000_000.0 / span else null,
                 if (wall > 0L) (synthesized - sampledSynthesized) * 1_000_000_000.0 / wall else null,
-                lastInferenceNanos, detachReason))
+                lastInferenceNanos, detachReason, width, height,
+                if (automatic) resolvedTargetFps else targetFps ?: observedInputFps?.times(2.0), observedInputFps))
             sampleStart = pts
             sampleFrames = 1
             sampleWallTime = now
             sampledSynthesized = synthesized
         }
         outputListener.onOutputFrameAvailable(texture, pts)
+    }
+
+    private fun resetCadence() {
+        intervalCount = 0
+        intervalIndex = 0
+        observedInputFps = null
+        resolvedTargetFps = if (automatic) null else targetFps
+    }
+
+    private fun observeInputInterval(intervalUs: Long) {
+        inputIntervals[intervalIndex] = intervalUs
+        intervalIndex = (intervalIndex + 1) % inputIntervals.size
+        intervalCount = (intervalCount + 1).coerceAtMost(inputIntervals.size)
+        if (intervalCount < inputIntervals.size || intervalIndex != 0) return
+        val sorted = inputIntervals.sorted()
+        val medianInterval = (sorted[3] + sorted[4]) / 2.0
+        val sourceRate = 1_000_000.0 / medianInterval
+        observedInputFps = sourceRate
+        if (sourceRate > 60.5) {
+            sourceOnly = true
+            detachReason = "实际输入超过 60 FPS，继续使用源帧率"
+            return
+        }
+        if (!automatic) return
+        val limit = checkNotNull(targetFps)
+        if (sourceRate >= limit * 0.99) {
+            sourceOnly = true
+            detachReason = "实际输入已达到显示屏帧率，无需补帧"
+            return
+        }
+        val nextTarget = minOf(sourceRate * 2.0, limit)
+        val previousTarget = resolvedTargetFps
+        if (previousTarget == null || abs(nextTarget - previousTarget) / previousTarget > 0.1) {
+            resolvedTargetFps = nextTarget
+            // Re-anchor only at an input boundary; never generate behind the last output.
+            originPts = previousPts
+            gridIndex = 1L
+        }
     }
 
     private fun read(texture: GlTextureInfo, frame: IntArray) {
@@ -314,14 +404,19 @@ internal class AndroidLiveRifeProgram(
         catch (failure: Exception) {
             failed = true
             errorExecutor.execute { errorListener.onError(VideoFrameProcessingException.from(failure)) }
+        } catch (failure: OutOfMemoryError) {
+            failed = true
+            errorExecutor.execute { errorListener.onError(VideoFrameProcessingException("实时补帧内存不足", failure)) }
         }
     }
 
     data class RifeSample(val synthesized: Long, val graphFps: Double?, val generationFps: Double?,
-        val inferenceNanos: Long?, val failure: String?)
+        val inferenceNanos: Long?, val failure: String?, val inputWidth: Int, val inputHeight: Int,
+        val targetFps: Double?, val inputFps: Double?)
 
     companion object {
         private const val MAX_INTERVAL_US = 150_000L
+        private const val MAX_PAIR_WORK_NANOS = 200_000_000L
         private const val NONE = Long.MIN_VALUE
     }
 }

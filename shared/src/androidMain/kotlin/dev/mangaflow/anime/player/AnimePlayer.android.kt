@@ -189,8 +189,24 @@ internal class AndroidAnimePlayer(
     private var enhancementEffect: AndroidAnime4KEffect? = null
     private var realtimeLoading: Job? = null
     private var realtimeModel: AndroidRealtimeVideoModel? = null
+    private var realtimeRetirement: Job? = null
     private var motionLoading: Job? = null
-    private var motionModel: AndroidLiveRifeVulkan? = null
+    private data class FailedMotion(val session: Long, val intent: Long, val request: AnimeRealtimeFrameRequest,
+        val state: AnimeRealtimeMotionState)
+    /** Resource pressure can temporarily remove a request; it must not clear a real failure. */
+    private var failedMotion: FailedMotion? = null
+    @Volatile private var motionModel: AndroidLiveRifeVulkan? = null
+    private var motionRetirement: Job? = null
+    private val motionOutputs = MotionOutputReceipts()
+    private var lastMotionSample: AndroidLiveRifeProgram.RifeSample? = null
+    private var lastMotionSampleAt: Long? = null
+    private var motionObservedEpoch: Long? = null
+    private var motionGuardEpoch: Long? = null
+    private var motionReject: ((String) -> Unit)? = null
+    private var motionStableFlowSince: Long? = null
+    private var motionLowOutputSince: Long? = null
+    private var motionNoOutputSince: Long? = null
+    private var motionLastReleasedFrames: Long? = null
     private var motionEffect: Effect? = null
     private var baseVideoEffects: List<Effect> = emptyList()
     @Volatile private var preparedVideo: AndroidPreparedWindow? = null
@@ -223,6 +239,62 @@ internal class AndroidAnimePlayer(
     private var activity: Activity? = null
     private var localLease: AnimeLocalMediaLease? = null
     override val reportsFirstFrame = true
+
+    /** A bounded bridge from GL-generated PTS to the final video sink's release callback. */
+    private class MotionOutputReceipts {
+        data class Snapshot(val epoch: Long, val frames: Long, val generated: Long)
+        private val lock = Any()
+        private var owner: ExoPlayer? = null
+        private var program: Any? = null
+        private var epoch = 0L
+        private var accepting = false
+        private var released = 0L
+        private var generated = 0L
+        private val pending = linkedSetOf<Long>()
+
+        fun activate(exo: ExoPlayer, token: Any, current: () -> Boolean) = synchronized(lock) {
+            if (!current()) return@synchronized
+            owner = exo
+            program = token
+            resetLocked(accept = true)
+        }
+        fun queue(token: Any, pts: Long) = synchronized(lock) {
+            if (program !== token || !accepting) return@synchronized
+            if (pending.add(pts)) generated++
+            while (pending.size > 512) pending.remove(pending.first())
+        }
+        fun release(exo: ExoPlayer, pts: Long) = synchronized(lock) {
+            if (owner !== exo || !accepting) return@synchronized
+            if (pending.remove(pts)) released++
+            // Older generated frames skipped downstream can no longer be released in this timeline.
+            while (pending.firstOrNull()?.let { it < pts } == true) pending.remove(pending.first())
+        }
+        fun snapshot(token: Any): Snapshot? = synchronized(lock) {
+            if (program === token && accepting) Snapshot(epoch, released, generated) else null
+        }
+        fun isCurrent(token: Any, snapshot: Snapshot): Boolean = synchronized(lock) {
+            program === token && accepting && epoch == snapshot.epoch
+        }
+        fun currentSnapshot(): Snapshot? = synchronized(lock) {
+            if (program != null && accepting) Snapshot(epoch, released, generated) else null
+        }
+        fun reset(token: Any) = synchronized(lock) {
+            if (program === token) resetLocked(accept = true)
+        }
+        fun seek() = synchronized(lock) { resetLocked(accept = false) }
+        fun clear() = synchronized(lock) {
+            owner = null
+            program = null
+            resetLocked(accept = false)
+        }
+        private fun resetLocked(accept: Boolean) {
+            epoch++
+            pending.clear()
+            released = 0L
+            generated = 0L
+            accepting = accept
+        }
+    }
 
     override suspend fun cacheStartup(asset: AnimePlaybackAsset, byteLimit: Long, validUntil: Long): Long =
         prepareStartupCache(AnimeStartupCacheRequest(asset, 0L, 30_000L, byteLimit, validUntil)).bytes
@@ -714,7 +786,10 @@ internal class AndroidAnimePlayer(
         // so synthesized frames are counted too. A release is not a physical Present receipt.
         exo.setVideoFrameMetadataListener { presentationTimeUs, releaseTimeNs, _, _ ->
             if (releaseTimeNs != C.TIME_UNSET &&
-                lastPresentationTimeUs.getAndSet(presentationTimeUs) != presentationTimeUs) releases.incrementAndGet()
+                lastPresentationTimeUs.getAndSet(presentationTimeUs) != presentationTimeUs) {
+                releases.incrementAndGet()
+                motionOutputs.release(exo, presentationTimeUs)
+            }
         }
         val observer = object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) { synchronize(generation, exo) }
@@ -900,19 +975,29 @@ internal class AndroidAnimePlayer(
     }
 
     private fun clearRealtimeVideoModel() {
-        realtimeLoading?.cancel()
+        val loading = realtimeLoading
+        loading?.cancel()
         realtimeLoading = null
-        retireEnhancement(realtimeModel)
+        val model = realtimeModel
         realtimeModel = null
+        realtimeRetirement = retireEnhancement(model, loading, realtimeRetirement)
     }
 
-    private fun retireEnhancement(owner: AutoCloseable?) {
-        if (owner == null) return
-        playerScope.launch(start = CoroutineStart.UNDISPATCHED) {
+    private fun retireEnhancement(owner: AutoCloseable?, loading: Job? = null, previous: Job? = null): Job? {
+        if (owner == null && loading == null) return previous
+        return playerScope.launch(start = CoroutineStart.UNDISPATCHED) {
             // Vulkan retirement can wait for an in-flight GL submission. Release its
             // permit after native cleanup even when this player scope is being closed.
-            withContext(NonCancellable + Dispatchers.IO) { runCatching { owner.close() } }
+            withContext(NonCancellable + Dispatchers.IO) {
+                previous?.join()
+                loading?.join()
+                runCatching { owner?.close() }
+            }
         }
+    }
+
+    private suspend fun closeOpeningEnhancement(owner: AutoCloseable?) {
+        if (owner != null) withContext(NonCancellable + Dispatchers.IO) { runCatching { owner.close() } }
     }
 
     private fun updateVideoEffects(exo: ExoPlayer) {
@@ -920,101 +1005,167 @@ internal class AndroidAnimePlayer(
     }
 
     private fun clearRealtimeMotion() {
-        motionLoading?.cancel()
+        val loading = motionLoading
+        loading?.cancel()
         motionLoading = null
         motionEffect = null
-        retireEnhancement(motionModel)
+        val model = motionModel
         motionModel = null
+        motionOutputs.clear()
+        motionReject = null
+        lastMotionSample = null
+        lastMotionSampleAt = null
+        motionObservedEpoch = null
+        resetMotionProgress()
+        motionRetirement = retireEnhancement(model, loading, motionRetirement)
+    }
+
+    private suspend fun awaitDecodedVideo(current: () -> Boolean): AnimePlayerState? {
+        fun ended(value: AnimePlayerState) = value.hasVideoTracks == false ||
+            value.phase in setOf(AnimePlayerPhase.ERROR, AnimePlayerPhase.ENDED, AnimePlayerPhase.RELEASED)
+        // Loading/pausing before the first frame is owned by the player, not by the GPU
+        // initialization timeout. This wait holds no enhancement session or reservation.
+        val ready = state.first { !current() || ended(it) || it.firstFrameRendered == true }
+        if (!current() || ended(ready)) return null
+        val dimensions = withTimeoutOrNull(10_000L) {
+            state.first { !current() || ended(it) || it.videoWidth != null && it.videoHeight != null }
+        } ?: error("尚未取得解码尺寸")
+        return dimensions.takeIf { current() && !ended(it) }
     }
 
     private fun applyRealtimeMotion(generation: Long, exo: ExoPlayer, revision: Long) {
         val wanted = options.realtimeFrames ?: return
-        if (!foreground && !state.value.inPictureInPicture) return
-        fun current() = isCurrent(generation) && engine.value === exo && revision == enhancementRevision &&
-            options.realtimeFrames == wanted && !nativeVideoOnly && !nativeVideoRecoveryPending &&
-            (foreground || state.value.inPictureInPicture)
-        fun publishMotion(phase: AnimeVideoEnhancementPhase, detail: String, sample: AndroidLiveRifeProgram.RifeSample? = null) {
-            publish(generation) { it.copy(realtimeMotion = AnimeRealtimeMotionState(wanted.model.title, phase, detail,
-                sample?.synthesized ?: 0L, sample?.graphFps, sample?.generationFps, sample?.inferenceNanos)) }
+        if (state.value.hasVideoTracks == false ||
+            state.value.phase in setOf(AnimePlayerPhase.ERROR, AnimePlayerPhase.ENDED, AnimePlayerPhase.RELEASED)) return
+        val motionSession = state.value.sessionGeneration
+        val intent = options.realtimeMotionIntent
+        failedMotion?.takeIf { it.session == motionSession && it.intent == intent && it.request == wanted }?.let { failure ->
+            publish(generation) { it.copy(realtimeMotion = failure.state) }
+            return
         }
+        if (motionLoading?.isActive == true || motionModel != null ||
+            !foreground && !state.value.inPictureInPicture) return
+        fun current() = isCurrent(generation) && engine.value === exo && revision == enhancementRevision &&
+            options.realtimeFrames == wanted && options.realtimeMotionIntent == intent &&
+            !nativeVideoOnly && !nativeVideoRecoveryPending &&
+            (foreground || state.value.inPictureInPicture)
+        fun motionState(phase: AnimeVideoEnhancementPhase, detail: String, sample: AndroidLiveRifeProgram.RifeSample?,
+            outputFrames: Long?) = AnimeRealtimeMotionState(wanted.model.title, phase, detail,
+                sample?.synthesized ?: 0L, sample?.graphFps, sample?.generationFps, sample?.inferenceNanos,
+                inputWidth = sample?.inputWidth?.takeIf { it > 0 }, inputHeight = sample?.inputHeight?.takeIf { it > 0 },
+                targetFps = sample?.targetFps?.takeIf { it.isFinite() && it > 0.0 }, outputInterpolatedFrames = outputFrames)
+        fun publishMotion(phase: AnimeVideoEnhancementPhase, detail: String, sample: AndroidLiveRifeProgram.RifeSample? = null,
+            outputFrames: Long? = null) {
+            if (!current()) return
+            publish(generation) { it.copy(realtimeMotion = motionState(phase, detail, sample, outputFrames)) }
+        }
+        fun rejectMotion(detail: String, sample: AndroidLiveRifeProgram.RifeSample? = null, outputFrames: Long? = null) {
+            if (!current()) return
+            // Releasing a GPU reservation updates resources.usage, which reapplies foreground
+            // policy. Latch before releasing so that refresh cannot reopen this failed request.
+            failedMotion = FailedMotion(motionSession, intent, wanted,
+                motionState(AnimeVideoEnhancementPhase.UNAVAILABLE, detail, sample, outputFrames))
+            motionReject = null
+            motionEffect = null
+            try { updateVideoEffects(exo) }
+            catch (_: Exception) { recoverNativeVideo(generation, exo) }
+            finally { clearRealtimeMotion() }
+            publishMotion(AnimeVideoEnhancementPhase.UNAVAILABLE, detail, sample, outputFrames)
+        }
+        val previousPictureRetirement = realtimeRetirement
+        val previousMotionRetirement = motionRetirement
         motionLoading = playerScope.launch(Dispatchers.Main.immediate) {
+            val loadingJob = currentCoroutineContext()[Job]
             var opening: AndroidLiveRifeVulkan? = null
             try {
                 publishMotion(AnimeVideoEnhancementPhase.WAITING, "原帧率可播，正在确认 Vulkan 和当前片源")
-                val dimensions = withTimeoutOrNull(10_000L) {
-                    state.first { it.videoWidth != null && it.videoHeight != null && it.firstFrameRendered == true }
-                }
-                    ?: error("尚未取得解码尺寸")
+                val dimensions = awaitDecodedVideo(::current) ?: return@launch
                 if (!current()) return@launch
                 AndroidLiveRifeVulkan.memoryBudget(checkNotNull(dimensions.videoWidth), checkNotNull(dimensions.videoHeight))
-                // Some streams publish their format rate after the first decoded frame.
-                // Keep the original video playing while the same live request waits for it.
-                val video = if (wanted.automatic && dimensions.sourceFps?.let { it.isFinite() && it > 0.0 } != true) {
-                    publishMotion(AnimeVideoEnhancementPhase.WAITING, "等待片源帧率，原帧率继续播放")
-                    state.first { !current() || it.firstFrameRendered == true &&
-                        it.videoWidth != null && it.videoHeight != null &&
-                        it.sourceFps?.let { rate -> rate.isFinite() && rate > 0.0 } == true }
-                } else dimensions
-                if (!current()) return@launch
-                val width = checkNotNull(video.videoWidth)
-                val height = checkNotNull(video.videoHeight)
-                val sourceRate = video.sourceFps?.takeIf { it.isFinite() && it > 0.0 }
-                val target = if (wanted.automatic) {
-                    val source = sourceRate ?: error("尚未取得片源帧率，请选择明确的补帧目标")
-                    val display = displayRefreshHz() ?: error("尚未取得当前屏幕刷新率，请选择明确的补帧目标")
-                    minOf(source * 2, display, 120.0)
-                } else wanted.targetFps
-                require(sourceRate == null || sourceRate <= 60.0 && (target == null || target > sourceRate)) {
-                    "实时补帧需要高于当前源帧率的目标，并支持最高 60 FPS 的片源"
+                val width = checkNotNull(dimensions.videoWidth)
+                val height = checkNotNull(dimensions.videoHeight)
+                val sourceRate = dimensions.sourceFps?.takeIf { it.isFinite() && it > 0.0 }
+                require(sourceRate == null || sourceRate <= 60.5) {
+                    "实时补帧支持最高 60 fps 输入，当前保持源帧率"
                 }
+                require(wanted.automatic || wanted.targetFps == null || sourceRate == null || wanted.targetFps > sourceRate) {
+                    "当前源帧率已达到所选目标，无需补帧"
+                }
+                val displayRate = if (wanted.automatic) {
+                    displayRefreshHz() ?: run {
+                        // The activity/display can attach after native first frame. Keep this
+                        // request waiting for the observed value instead of failing it once.
+                        publishMotion(AnimeVideoEnhancementPhase.WAITING, "等待显示屏信息，原帧率继续播放")
+                        state.first { !current() || displayRefreshHz() != null }
+                        if (!current()) return@launch
+                        checkNotNull(displayRefreshHz())
+                    }
+                } else null
+                // AUTO obtains 2x cadence from real input timestamps inside the RIFE program.
+                // Format.frameRate may remain unset for HLS/TS and must not block processing.
+                val target = if (wanted.automatic) minOf(checkNotNull(displayRate), 120.0) else wanted.targetFps
+                // A previous close may still own its GPU reservation after a quick settings change.
+                // Wait for that exact retirement, never repeatedly reopen an overloaded renderer.
+                previousPictureRetirement?.join()
+                previousMotionRetirement?.join()
+                if (!current()) return@launch
                 withContext(Dispatchers.IO) { opening = AndroidLiveRifeVulkan.open(context, wanted.model, width, height) }
                 if (!current()) return@launch
                 val active = checkNotNull(opening)
                 motionModel = active
                 opening = null
+                motionReject = { detail -> rejectMotion(detail, lastMotionSample,
+                    state.value.realtimeMotion?.outputInterpolatedFrames) }
+                val programRevision = AtomicLong(0L)
                 motionEffect = GlEffect { _, hdr ->
+                    val program = programRevision.incrementAndGet()
+                    val outputToken = Any()
+                    motionOutputs.activate(exo, outputToken) { current() && motionModel === active }
                     if (hdr) {
                         playerScope.launch(Dispatchers.Main) {
-                            if (current() && motionModel === active) {
-                                motionEffect = null
-                                try { updateVideoEffects(exo) }
-                                catch (_: Exception) { recoverNativeVideo(generation, exo) }
-                                finally { clearRealtimeMotion() }
-                                publishMotion(AnimeVideoEnhancementPhase.UNAVAILABLE, "HDR 原片保持源帧率")
-                            }
+                            if (current() && motionModel === active && programRevision.get() == program)
+                                rejectMotion("HDR 原片保持源帧率")
                         }
                         androidx.media3.effect.PassthroughShaderProgram()
-                    } else AndroidLiveRifeProgram(active, target) { sample ->
+                    } else AndroidLiveRifeProgram(active, target, automatic = wanted.automatic,
+                        onSynthesizedFrame = { pts -> motionOutputs.queue(outputToken, pts) },
+                        onReset = { motionOutputs.reset(outputToken) }) report@{ sample ->
+                        // Snapshot on this report's cadence so an older generated count is never
+                        // paired with a newer (and potentially larger) released-output count.
+                        val output = motionOutputs.snapshot(outputToken) ?: return@report
+                        val observedAt = SystemClock.elapsedRealtime()
                         val timeline = state.value.timelineGeneration
                         playerScope.launch(Dispatchers.Main) {
-                            if (!current() || motionModel !== active || state.value.timelineGeneration != timeline) return@launch
+                            if (!current() || motionModel !== active || programRevision.get() != program ||
+                                state.value.timelineGeneration != timeline || !motionOutputs.isCurrent(outputToken, output)) return@launch
+                            lastMotionSample = sample
+                            lastMotionSampleAt = observedAt
+                            motionObservedEpoch = output.epoch
                             if (sample.failure != null) {
-                                motionEffect = null
-                                try { updateVideoEffects(exo) }
-                                catch (_: Exception) { recoverNativeVideo(generation, exo) }
-                                finally { clearRealtimeMotion() }
-                                publishMotion(AnimeVideoEnhancementPhase.UNAVAILABLE, sample.failure, sample)
+                                rejectMotion(sample.failure, sample, output.frames)
                             } else if (sample.synthesized > 0) {
-                                publishMotion(AnimeVideoEnhancementPhase.ACTIVE, "Vulkan 已生成补帧画面", sample)
+                                publishMotion(AnimeVideoEnhancementPhase.ACTIVE, "Vulkan 已生成补帧画面", sample, output.frames)
+                            } else if (sample.graphFps?.let { it.isFinite() && it > 0.0 } == true) {
+                                publishMotion(AnimeVideoEnhancementPhase.ACTIVE, "静止画面或切换镜头时保留原帧", sample, output.frames)
                             }
                         }
                     }
                 }
                 updateVideoEffects(exo)
-                publishMotion(AnimeVideoEnhancementPhase.CONFIGURED, "模型已就绪，等待带时间戳的补帧输出")
+                publishMotion(AnimeVideoEnhancementPhase.CONFIGURED, if (wanted.automatic)
+                    "正在读取画面节奏，原帧率继续播放" else "正在接入补帧，原帧率继续播放")
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (_: LinkageError) {
-                if (current()) publishMotion(AnimeVideoEnhancementPhase.UNAVAILABLE, "Vulkan 组件不可用，原帧率继续播放")
+                rejectMotion("Vulkan 组件不可用，原帧率继续播放")
+            } catch (_: OutOfMemoryError) {
+                rejectMotion("当前内存不足以实时补帧，已恢复源帧率")
             } catch (failure: Exception) {
-                if (current()) {
-                    motionEffect = null
-                    retireEnhancement(motionModel)
-                    motionModel = null
-                    publishMotion(AnimeVideoEnhancementPhase.UNAVAILABLE,
-                        failure.message?.take(100) ?: "实时补帧未能启用，原帧率继续播放")
-                }
-            } finally { retireEnhancement(opening) }
+                rejectMotion(failure.message?.take(100) ?: "实时补帧未能启用，原帧率继续播放")
+            } finally {
+                closeOpeningEnhancement(opening)
+                if (motionLoading === loadingJob) motionLoading = null
+            }
         }
     }
 
@@ -1025,17 +1176,19 @@ internal class AndroidAnimePlayer(
         val backend = if (model.engineId == EnhancementEngineIds.ANDROID_CUGAN_VIDEO) "ncnn Vulkan" else "NNAPI 硬件"
         fun current() = isCurrent(generation) && engine.value === exo && enhancementRevision == revision &&
             options.enhancementModel == model && !nativeVideoOnly && !nativeVideoRecoveryPending
+        val previousPictureRetirement = realtimeRetirement
+        val previousMotionRetirement = motionRetirement
         realtimeLoading = playerScope.launch(Dispatchers.Main.immediate) {
             var opening: AndroidRealtimeVideoModel? = null
             try {
                 publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(AnimeVideoEnhancementMode.MODEL,
                     AnimeVideoEnhancementPhase.WAITING, "原画可播，正在准备 $backend 模型")) }
-                val video = withTimeoutOrNull(10_000L) {
-                    state.first { it.videoWidth != null && it.videoHeight != null && it.firstFrameRendered == true }
-                }
-                    ?: error("当前视频尺寸尚未确认")
+                val video = awaitDecodedVideo(::current) ?: return@launch
                 val width = checkNotNull(video.videoWidth)
                 val height = checkNotNull(video.videoHeight)
+                previousPictureRetirement?.join()
+                previousMotionRetirement?.join()
+                if (!current()) return@launch
                 withContext(Dispatchers.Default) { opening = AndroidRealtimeVideoModel.open(context, model, width, height) }
                 if (!current()) return@launch
                 val active = checkNotNull(opening)
@@ -1083,15 +1236,23 @@ internal class AndroidAnimePlayer(
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 if (current()) {
-                    retireEnhancement(realtimeModel)
-                    realtimeModel = null
-                    publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(AnimeVideoEnhancementMode.MODEL,
+                    baseVideoEffects = emptyList()
+                    try { updateVideoEffects(exo) }
+                    catch (_: Exception) { recoverNativeVideo(generation, exo) }
+                    finally { clearRealtimeVideoModel() }
+                    if (current()) publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(AnimeVideoEnhancementMode.MODEL,
                         AnimeVideoEnhancementPhase.UNAVAILABLE, "$backend 未能启用，原画继续播放。" + (failure.message?.take(140) ?: ""))) }
                 }
             } catch (_: LinkageError) {
-                if (current()) publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(AnimeVideoEnhancementMode.MODEL,
-                    AnimeVideoEnhancementPhase.UNAVAILABLE, "$backend 组件不可用，原画继续播放")) }
-            } finally { retireEnhancement(opening) }
+                if (current()) {
+                    baseVideoEffects = emptyList()
+                    try { updateVideoEffects(exo) }
+                    catch (_: Exception) { recoverNativeVideo(generation, exo) }
+                    finally { clearRealtimeVideoModel() }
+                    if (current()) publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(AnimeVideoEnhancementMode.MODEL,
+                        AnimeVideoEnhancementPhase.UNAVAILABLE, "$backend 组件不可用，原画继续播放")) }
+                }
+            } finally { closeOpeningEnhancement(opening) }
         }
     }
 
@@ -1363,6 +1524,67 @@ internal class AndroidAnimePlayer(
             )
         }
         if (exo.playbackState == Player.STATE_READY) recoveryNotice = null
+        checkRealtimeMotionProgress(exo, now)
+    }
+
+    private fun resetMotionProgress() {
+        motionGuardEpoch = null
+        motionStableFlowSince = null
+        motionLowOutputSince = null
+        motionNoOutputSince = null
+        motionLastReleasedFrames = null
+    }
+
+    /** Judge the combined chain by final releases, not the sum of optimistic per-model budgets. */
+    private fun checkRealtimeMotionProgress(exo: ExoPlayer, now: Long) {
+        val reject = motionReject
+        val snapshot = state.value
+        val receipts = motionOutputs.currentSnapshot()
+        val sample = lastMotionSample?.takeIf { motionObservedEpoch == receipts?.epoch }
+        val metrics = snapshot.frameMetrics
+        val output = metrics?.outputFps
+        val buffered = (exo.bufferedPosition - exo.currentPosition).coerceAtLeast(0L)
+        val flowing = motionModel != null && motionEffect != null && reject != null && receipts != null &&
+            receipts.generated > 0L &&
+            canReportLiveEnhancement(exo) && !snapshot.isBuffering && !snapshot.playbackSuppressed &&
+            snapshot.firstFrameRendered == true && buffered >= (3_000L * exo.playbackParameters.speed).toLong()
+        if (!flowing || metrics == null || output == null || !output.isFinite() || metrics.windowDurationMs < 1_000L) {
+            resetMotionProgress()
+            return
+        }
+        if (motionGuardEpoch != receipts?.epoch) {
+            resetMotionProgress()
+            motionGuardEpoch = receipts?.epoch
+        }
+        val stableSince = motionStableFlowSince ?: now.also { motionStableFlowSince = it }
+        val released = receipts?.frames
+        val advanced = released != null && released > (motionLastReleasedFrames ?: 0L)
+        motionLastReleasedFrames = released
+        val freshSample = lastMotionSampleAt?.let {
+            now - it in 0L..maxOf(2_000L, (1_500.0 / snapshot.speed).toLong())
+        } == true
+        val generating = freshSample && sample?.generationFps?.let { it.isFinite() && it > 0.0 } == true
+        // The first generated frame can stall downstream before the program reaches its
+        // first reporting interval. Its queued PTS is already real evidence in this epoch.
+        val waitingForFirstReport = sample == null && (released == 0L || output == 0.0)
+        if ((generating || waitingForFirstReport) && !advanced) {
+            val waitingSince = motionNoOutputSince ?: now.also { motionNoOutputSince = it }
+            if (now - waitingSince >= 12_000L) {
+                reject?.invoke(if (waitingForFirstReport) "未确认补帧画面输出，已恢复源帧率"
+                    else "持续生成但未有新的补帧画面输出，已恢复源帧率")
+                return
+            }
+        } else motionNoOutputSince = null
+        val sourceRate = snapshot.sourceFps?.takeIf { it.isFinite() && it > 0.0 }
+            ?: sample?.inputFps?.takeIf { it.isFinite() && it > 0.0 }
+        if (now - stableSince < 4_000L || metrics.windowDurationMs < 4_000L || sourceRate == null ||
+            output >= sourceRate * exo.playbackParameters.speed * 0.90) {
+            motionLowOutputSince = null
+            return
+        }
+        val lowSince = motionLowOutputSince ?: now.also { motionLowOutputSince = it }
+        if (now - lowSince >= 2_500L)
+            reject?.invoke("当前输出跟不上源帧率，已恢复源帧率")
     }
 
     private fun displayRefreshHz(): Double? =
@@ -1561,7 +1783,7 @@ internal class AndroidAnimePlayer(
         }
         if (previous.videoEnhancement != next.videoEnhancement || previous.enhancementScale != next.enhancementScale ||
             previous.preparedVideoModel != next.preparedVideoModel || previous.enhancementModel != next.enhancementModel ||
-            previous.realtimeFrames != next.realtimeFrames) {
+            previous.realtimeFrames != next.realtimeFrames || previous.realtimeMotionIntent != next.realtimeMotionIntent) {
             discardPreparedVideo(retainReusable = true)
             val exo = engine.value
             if (exo != null) applyVideoEnhancement(nativeGeneration, exo)
@@ -1631,11 +1853,21 @@ internal class AndroidAnimePlayer(
     }
 
     override fun setPlayingNative(playing: Boolean) {
-        if (!playing) { clearLiveEnhancement(); frameWindow.reset() }
+        if (!playing) { clearLiveEnhancement(); frameWindow.reset(); resetMotionProgress() }
         engine.value?.playWhenReady = playing
     }
     override fun seekNative(positionMs: Long) {
         frameWindow.reset()
+        motionOutputs.seek()
+        lastMotionSample = null
+        lastMotionSampleAt = null
+        motionObservedEpoch = null
+        resetMotionProgress()
+        fun clearSample(value: AnimeRealtimeMotionState) = value.copy(synthesizedFrames = 0L, graphFps = null,
+            generationFps = null, inferenceNanos = null, inputWidth = null, inputHeight = null,
+            targetFps = null, outputInterpolatedFrames = null)
+        mutableState.value = state.value.copy(realtimeMotion = state.value.realtimeMotion?.let(::clearSample))
+        failedMotion = failedMotion?.let { it.copy(state = clearSample(it.state)) }
         discardPreparedVideo()
         resetBufferingObservation(); nativeFrameWaitSince = null
         clearLiveEnhancement()

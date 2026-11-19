@@ -28,8 +28,10 @@ import dev.mangaflow.enhancement.ReaderEnhancementState
 import dev.mangaflow.enhancement.animeEnhancementSessionKey
 import dev.mangaflow.enhancement.engine.EngineInventory
 import dev.mangaflow.experience.ExperienceResources
+import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.platform.monotonicTimeMillis
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTextButton
@@ -226,7 +228,7 @@ private fun AnimeEnhancementStatus(
                 AnimeMetricGrid(listOf(
                     (if (playback?.preEnhanced == true) "增强文件帧率" else "源视频帧率") to
                         animeFps(playback?.sourceFps.takeIf { hasSession }),
-                    "目标帧率" to animeFps(metrics?.targetFps),
+                    "所选帧率目标" to animeFps(metrics?.targetFps),
                     (if (currentFps == null && estimatedFps != null) "滤镜估计" else "视频输出") to
                         animeFps(currentFps ?: estimatedFps),
                     "前方缓冲" to animeSeconds(playback?.bufferedAheadMs?.takeIf { hasSession && it >= 0 }?.div(1000.0)),
@@ -294,12 +296,20 @@ private fun AnimeEnhancementStatus(
                 effect?.filteredFps?.let { AnimeMetricRow("滤镜输出估计", formatDecimal(it, 1) + " FPS") }
                 playback?.realtimeMotion?.let { motion ->
                     AnimeMetricRow("实时补帧 · ${motion.modelName}", motion.detail)
+                    dimensions(motion.inputWidth, motion.inputHeight)?.let {
+                        AnimeMetricRow("补帧输入", it)
+                        if (platformKind == PlatformKind.ANDROID) EnhancementQuiet(
+                            "同时开启时先按原分辨率补帧，再做画质增强。1080p 是补帧输入范围，实际速度取决于设备与组合负载。")
+                    }
+                    motion.targetFps?.let { AnimeMetricRow("本次处理目标", animeFps(it)) }
                     AnimeMetricGrid(listOf(
-                        "实际生成帧" to animeCount(motion.synthesizedFrames),
-                        "输出时间轴" to (motion.graphFps?.takeIf { playing }?.let { formatDecimal(it, 1) + " FPS" } ?: "—"),
-                        "实际生成速度" to (motion.generationFps?.takeIf { playing }?.let { formatDecimal(it, 1) + " 帧/s" } ?: "—"),
-                        "单帧端到端处理" to animeMillis(motion.inferenceNanos?.div(1_000_000.0)),
+                        "已生成插值帧 · 累计" to animeCount(motion.synthesizedFrames),
+                        "处理时间轴帧率" to (motion.graphFps?.takeIf { playing }?.let { formatDecimal(it, 1) + " FPS" } ?: "—"),
+                        "插值生成速度" to (motion.generationFps?.takeIf { playing }?.let { formatDecimal(it, 1) + " 帧/s" } ?: "—"),
+                        "单次插值推理" to animeMillis(motion.inferenceNanos?.div(1_000_000.0)),
                     ))
+                    AnimeMetricRow("已送至视频输出的插值帧 · 累计", animeCount(motion.outputInterpolatedFrames))
+                    EnhancementQuiet("视频输出计数来自生成帧的输出释放回调，不是屏幕呈现回执。处理时间轴按帧时间戳计算；实测输出帧率见播放页，不能由累计生成数或目标值代替。")
                 }
                 if (prepared != null) {
                     AnimeMetricRow("预处理模型", prepared.modelName)

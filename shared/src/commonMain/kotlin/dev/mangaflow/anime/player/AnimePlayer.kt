@@ -113,6 +113,13 @@ data class AnimeRealtimeMotionState(
     val graphFps: Double? = null,
     val generationFps: Double? = null,
     val inferenceNanos: Long? = null,
+    /** Measured at the interpolation program's actual input, before subsequent upscaling. */
+    val inputWidth: Int? = null,
+    val inputHeight: Int? = null,
+    /** Resolved from this program's source timestamps/display ceiling; never an output receipt. */
+    val targetFps: Double? = null,
+    /** Interpolated PTS matched by the final video-output release callback; not physical Present. */
+    val outputInterpolatedFrames: Long? = null,
 )
 
 /** mpv property observations; filter throughput and delayed-frame estimates are not display presentation. */
@@ -156,6 +163,8 @@ data class AnimePlayerOptions(
     val bufferForwardBytes: Long = 64L * 1024L * 1024L,
     val bufferBackBytes: Long = 8L * 1024L * 1024L,
     val bufferRefillNearTarget: Boolean = true,
+    /** Raw user viewing intent; resource-driven projection changes do not increment it. */
+    val realtimeMotionIntent: Long = 0L,
 ) {
     /** A small refill band preserves the saved low/high watermarks and bounds request churn. */
     val effectiveBufferRefillMs: Int get() = if (!bufferRefillNearTarget) bufferMinMs else
@@ -426,7 +435,8 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
             this.options = options
             if (previous.videoEnhancement != options.videoEnhancement || previous.enhancementScale != options.enhancementScale ||
                 previous.enhancementModel != options.enhancementModel || previous.realtimeFrames != options.realtimeFrames ||
-                previous.preparedVideoModel != options.preparedVideoModel)
+                previous.preparedVideoModel != options.preparedVideoModel ||
+                previous.realtimeMotionIntent != options.realtimeMotionIntent)
                 mutableState.value = mutableState.value.copy(frameMetrics = null)
             if (previous.videoEnhancement != options.videoEnhancement || previous.enhancementScale != options.enhancementScale ||
                 previous.enhancementModel != options.enhancementModel) {

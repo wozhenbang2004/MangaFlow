@@ -24,9 +24,11 @@ import dev.mangaflow.enhancement.*
 import dev.mangaflow.enhancement.engine.*
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.platform.monotonicTimeMillis
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.SettingsToggle
 import dev.mangaflow.ui.motion.*
@@ -263,17 +265,68 @@ internal fun EnhancementSettingsContent(
                     })
             }
             EnhancementPage.QUALITY_OPTIONS -> EnhancementQualityOptions(content, draft, inventory, ::change)
-            EnhancementPage.FRAME -> AnimeEnhancementFrames(draft, inventory, ::change,
-                onOpenEngines = { onPageChange(EnhancementPage.FRAME_ENGINES) },
-                onOpenQuality = { onPageChange(EnhancementPage.FRAME_OPTIONS) }) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Box(Modifier.weight(1f)) { AnimeTextField(fpsDraft, { fpsDraft = it }, "自定义 FPS") }
-                    MotionTextButton(onClick = {
-                        val fps = fpsDraft.toIntOrNull()
-                        if (fps == null || fps <= 0) notice = "帧率须为大于零的整数。"
-                        else change(draft.copy(customFps = fps))
-                    }) { Text("保存") }
+            EnhancementPage.FRAME -> {
+                AnimeEnhancementFrames(draft, inventory, ::change,
+                    onOpenEngines = { onPageChange(EnhancementPage.FRAME_ENGINES) },
+                    onOpenQuality = { onPageChange(EnhancementPage.FRAME_OPTIONS) }) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(Modifier.weight(1f)) { AnimeTextField(fpsDraft, { fpsDraft = it }, "自定义 FPS") }
+                        MotionTextButton(onClick = {
+                            val fps = fpsDraft.toIntOrNull()
+                            if (fps == null || fps <= 0) notice = "帧率须为大于零的整数。"
+                            else change(draft.copy(customFps = fps))
+                        }) { Text("保存") }
+                    }
+                }
+                animePlayback?.takeIf { activeKey != null && it.assetKey != null &&
+                    activeKey == animeEnhancementSessionKey(it) }?.let { current ->
+                    val currentPolicy = center.settings.policy(content, activeKey)
+                    val motion = current.realtimeMotion
+                    val flowing = current.isPlaying && !current.isBuffering && !current.playbackSuppressed &&
+                        current.hasVideoTracks != false && current.firstFrameRendered != false
+                    EnhancementDivider()
+                    Text("当前播放", style = MaterialTheme.typography.titleSmall)
+                    EnhancementValue("补帧状态", when {
+                        !currentPolicy.realtimeInterpolationEnabled -> "已关闭"
+                        currentPolicy.frameMode == FrameMode.ORIGINAL -> "原始帧率"
+                        motion?.phase == AnimeVideoEnhancementPhase.FAILED -> "未成功"
+                        motion?.phase == AnimeVideoEnhancementPhase.UNAVAILABLE -> "使用原帧率"
+                        motion?.phase == AnimeVideoEnhancementPhase.WAITING -> "正在准备"
+                        motion?.phase == AnimeVideoEnhancementPhase.CONFIGURED -> "已配置，等待输出"
+                        motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && !flowing -> "已接通，等待播放"
+                        motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && (motion.graphFps ?: 0.0) > 0.0 &&
+                            (motion.synthesizedFrames == 0L || motion.generationFps == 0.0) -> "保留原帧"
+                        motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && (motion.outputInterpolatedFrames ?: 0L) > 0L -> "正在补帧"
+                        motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && motion.synthesizedFrames > 0L &&
+                            motion.outputInterpolatedFrames == 0L -> "已生成，等待视频输出"
+                        motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && motion.synthesizedFrames > 0L -> "已生成插值帧"
+                        else -> "尚无运行回执"
+                    })
+                    motion?.detail?.takeIf { it.isNotBlank() }?.let {
+                        EnhancementQuiet(it, error = motion?.phase == AnimeVideoEnhancementPhase.FAILED)
+                    }
+                    motion?.let { state ->
+                        state.outputInterpolatedFrames?.takeIf { it >= 0L }?.let { output ->
+                            EnhancementValue("插值帧 · 累计", "已生成 ${state.synthesizedFrames} / 视频输出 $output")
+                        }
+                    }
+                    if (motion?.inputWidth != null && motion.inputHeight != null) {
+                        EnhancementValue("补帧输入", "${motion.inputWidth} × ${motion.inputHeight}")
+                        val enhanced = current.videoEnhancement
+                        if (enhanced.phase == AnimeVideoEnhancementPhase.ACTIVE &&
+                            (enhanced.observation?.submittedFrames ?: 0L) > 0L &&
+                            enhanced.outputWidth != null && enhanced.outputHeight != null)
+                            EnhancementValue("画质提交尺寸", "${enhanced.outputWidth} × ${enhanced.outputHeight}")
+                        if (platformKind == PlatformKind.ANDROID) EnhancementQuiet(
+                            "同时开启时，先按原分辨率补帧，再做画质增强。1080p 是补帧输入范围；增强需要处理补帧后的更多画面，实际速度取决于设备与组合负载。")
+                    }
+                    motion?.targetFps?.takeIf { it.isFinite() && it > 0.0 }?.let {
+                        EnhancementValue("本次处理目标", formatDecimal(it, 1) + " FPS")
+                    }
+                    current.frameMetrics?.outputFps?.takeIf { flowing && it.isFinite() && it >= 0.0 }?.let {
+                        EnhancementValue("实测视频输出", formatDecimal(it, 1) + " FPS")
+                    }
                 }
             }
             EnhancementPage.FRAME_OPTIONS -> EnhancementFrameOptions(draft, ::change)

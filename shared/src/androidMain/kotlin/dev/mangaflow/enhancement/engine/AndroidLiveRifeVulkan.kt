@@ -28,6 +28,7 @@ internal class AndroidRifeVulkanModels(context: Context) {
         SOURCE, when {
             !hardware -> EngineReadiness.UNSUPPORTED
             !ready.installed || ready.pendingRemoval -> EngineReadiness.NOT_INSTALLED
+            ready.requiresUpdate -> EngineReadiness.FAILED
             model == null -> EngineReadiness.NEEDS_MODELS
             else -> EngineReadiness.READY_FOR_TRIAL
         }, when {
@@ -36,9 +37,9 @@ internal class AndroidRifeVulkanModels(context: Context) {
             ready.requiresUpdate -> "组件需要更新至 1.2.0；已下载的 RIFE 权重保留，更新后支持原尺寸 1080p SDR 输入"
             !ready.installed -> "先安装签名 ncnn Vulkan 组件，再准备 RIFE 4.6 权重"
             model == null -> "下载并校验官方 RIFE 4.6 ncnn 参数和权重"
-            else -> "支持最高 1080p SDR 原尺寸输入；按实际画面申请资源，推理超预算时恢复源帧率，4K 输入暂不支持"
+            else -> "接受最高 1080p SDR 原尺寸输入，先补帧再画质增强；这是输入范围，实时速度取决于设备与组合负载，超预算保留原帧率"
         }, setOf(1), setOf(EngineContent.VIDEO), canInstall = hardware && !ready.pendingRemoval &&
-            (!ready.installed || model == null), supportsInterpolation = true, realtime = true,
+            (!ready.installed || ready.requiresUpdate || model == null), supportsInterpolation = true, realtime = true,
         downloadBytes = MODEL_BYTES.takeIf { ready.installed && model == null },
     )
 
@@ -55,6 +56,7 @@ internal class AndroidRifeVulkanModels(context: Context) {
     }
 
     suspend fun open(expected: EngineModel): Long {
+        check(!ready.requiresUpdate) { "组件需要更新至 1.2.0；请在补帧组件中更新，已下载的 RIFE 权重会保留" }
         require(model() == expected) { "RIFE 4.6 Vulkan 参数或权重尚未通过本机校验" }
         runtime.ensureLoaded(PanelRuntimeId.CUGAN)
         currentCoroutineContext().ensureActive()
