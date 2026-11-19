@@ -414,7 +414,7 @@ internal fun AnimeWorkspace(
                         onRestorePlayback = controller::restorePreviousPlayback,
                         onPlayDownload = ::playDownload,
                         onSources = ::showSources,
-                        onEpisode = ::play, modifier = Modifier.fillMaxSize())
+                        onEpisode = { requestPlayback(it, null) }, modifier = Modifier.fillMaxSize())
                 } else {
                     val shownState = shown.detailState
                     val shownDetail = shownState?.detail
