@@ -90,7 +90,8 @@ struct Model {
     ncnn::VkAllocator* staging;
     ncnn::Net net;
     ncnn::Mat first, second, timestep;
-    std::vector<jint> pixels;
+    std::unique_ptr<jint[]> pixels;
+    int pixel_capacity = 0;
 };
 
 struct ScopedPath {
@@ -103,8 +104,8 @@ struct ScopedPath {
 };
 
 bool load_input(JNIEnv* env, jintArray pixels, int width, int height, int padded_width, int padded_height,
-    std::vector<jint>& scratch, ncnn::Mat& rgb) {
-    env->GetIntArrayRegion(pixels, 0, width * height, scratch.data());
+    jint* scratch, ncnn::Mat& rgb) {
+    env->GetIntArrayRegion(pixels, 0, width * height, scratch);
     if (env->ExceptionCheck()) return false;
     rgb.create(padded_width, padded_height, 3);
     if (rgb.empty()) return false;
@@ -168,10 +169,14 @@ Java_dev_mangaflow_enhancement_engine_AndroidRifeVulkanJni_infer(
     auto* model = reinterpret_cast<Model*>(handle);
     const int padded_width = (width + 31) / 32 * 32;
     const int padded_height = (height + 31) / 32 * 32;
-    try { model->pixels.resize(pixels); }
-    catch (const std::bad_alloc&) { return -2; }
-    if (!load_input(env, previous, width, height, padded_width, padded_height, model->pixels, model->first) ||
-        !load_input(env, next, width, height, padded_width, padded_height, model->pixels, model->second)) return -2;
+    if (pixels > model->pixel_capacity) {
+        auto replacement = std::unique_ptr<jint[]>(new (std::nothrow) jint[pixels]);
+        if (!replacement) return -2;
+        model->pixels = std::move(replacement);
+        model->pixel_capacity = pixels;
+    }
+    if (!load_input(env, previous, width, height, padded_width, padded_height, model->pixels.get(), model->first) ||
+        !load_input(env, next, width, height, padded_width, padded_height, model->pixels.get(), model->second)) return -2;
     model->timestep.create(padded_width, padded_height, 1);
     if (model->timestep.empty()) return -2;
     model->timestep.fill(timestep);
@@ -211,7 +216,7 @@ Java_dev_mangaflow_enhancement_engine_AndroidRifeVulkanJni_infer(
                 channel_byte(red[i]) << 16 | channel_byte(green[i]) << 8 | channel_byte(blue[i]));
         }
     }
-    env->SetIntArrayRegion(destination, 0, pixels, model->pixels.data());
+    env->SetIntArrayRegion(destination, 0, pixels, model->pixels.get());
     return env->ExceptionCheck() ? -1 : 0;
 }
 
