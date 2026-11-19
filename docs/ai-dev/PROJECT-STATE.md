@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Android 补帧组件 CI 编译修复 · 2026-11-20
+
+用户连续反馈“ci 失败了”。实际读取 Android 0.1.428 [run 44564555438](https://github.com/wozhenbang2004/MangaFlow/actions/runs/44564555438/job/135702625372) 和 0.1.427 [run 44562696707](https://github.com/wozhenbang2004/MangaFlow/actions/runs/44562696707/job/135695990035) 的失败日志：两次 APK assemble 已成功，均在可选 Vulkan 组件编译时因 `rife_jni.cpp:117` 对 `jint*` 调用 `scratch.data()` 失败，后续签名和发布未执行。`b8fbd4b` 将临时像素容器改成无异常分配的自有数组时漏改了这一处行首地址；本批只改为 `scratch + y * width`，保留像素内容、容量复用、JNI 异常和所有权规则。读取反馈时0.1.429尚在执行，不能标为已失败或已成功；其代码仍含同一遗漏。
+
+沿现有流程进行源码与差异复核，由root唯一集成并守护最新main提交；正常CI只确认启动。没有测试、本地编译/构建、媒体探针或设备操作，不用跳过原生组件或放宽失败条件掩盖错误；当前编译修复与已提交的ANIME-LOAD-01开播接口修复一并交付，构建与设备播放结果分别等待对应证据。
+
 ## Android 开播阻断修复 · 2026-11-20
 
 用户“现在呢”后提供两张实际失败截图，AniCh与金牌均报 `getBackBufferDurationUs not implemented`；安装版本未知。原话、依据和修复边界见 [ANIME-LOAD-01](../design/anime-redesign-20261119.md#android-开播接口回归--anime-load-01--2026-11-20)。已在最新main `582e112` 上修复Android自定义LoadControl的Java默认方法转发遗漏，显式覆盖Media3 1.11.1实际使用的全部现代接口，保留每player allocator记账与当前动态缓冲策略；并行合入的缓存异常隔离和本机初始化错误分类完整保留。

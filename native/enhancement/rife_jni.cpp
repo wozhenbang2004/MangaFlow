@@ -114,7 +114,7 @@ bool load_input(JNIEnv* env, jintArray pixels, int width, int height, int padded
         plane.fill(0.f);
         for (int y = 0; y < height; ++y) {
             float* target = plane.row(y);
-            const jint* source = scratch.data() + y * width;
+            const jint* source = scratch + y * width;
             for (int x = 0; x < width; ++x)
                 target[x] = ((static_cast<unsigned>(source[x]) >> (16 - channel * 8)) & 255u) * (1.f / 255.f);
         }
