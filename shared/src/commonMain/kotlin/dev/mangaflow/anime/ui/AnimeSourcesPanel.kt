@@ -159,8 +159,18 @@ internal fun AnimeSourcesPanel(
         id !in boundIds && id !in candidateSourceIds && progress.phase != AnimeAssociationPhase.LINKED
     }
     val canAutoPlay = focusEpisode != null && episodeLines.isNotEmpty() && controller.hasAutomaticPlaybackLine(focusEpisode.id)
-    val measuring = focusEpisode != null && state.measuringEpisodeSourcesId == focusEpisode.id
+    val probeEpisode = focusEpisode ?: state.detail?.episodes?.firstOrNull { episode ->
+        episode.kind == AnimeEpisodeKind.MAIN && state.episodeOptions[episode.id].orEmpty().any { it.confirmed }
+    }
+    val measuring = probeEpisode != null && state.measuringEpisodeSourcesId == probeEpisode.id
     val motion = LocalMotionEnabled.current
+    // Opening the source sheet automatically verifies a small amount of actual media data.
+    // Catalog updates trigger another pass; the controller caches each line/route for five minutes.
+    LaunchedEffect(visible, subjectId, probeEpisode?.id, state.episodeOptions) {
+        if (visible && subjectId != null && probeEpisode != null &&
+            !state.resolving && !state.autoMatching && !recovering)
+            controller.measureEpisodeSources(probeEpisode.id)
+    }
     LaunchedEffect(visible, subjectId, manageExpanded) {
         if (visible && manageExpanded && subjectId != null && state.sourceResults.isEmpty()) controller.searchSources()
     }
@@ -212,13 +222,13 @@ internal fun AnimeSourcesPanel(
                         if (!context.isNullOrBlank()) Text(context, style = MaterialTheme.typography.labelSmall,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    if (!previewing && focusEpisode != null && (canAutoPlay || measuring)) {
-                        if (measuring) Box(Modifier.size(44.dp).semantics { contentDescription = "正在测量各来源取址时间" },
+                    if (!previewing && probeEpisode != null) {
+                        if (measuring) Box(Modifier.size(44.dp).semantics { contentDescription = "正在预探测来源画质与媒体网络" },
                             contentAlignment = Alignment.Center) { MotionBusyIndicator(Modifier.size(17.dp), strokeWidth = 1.5.dp) }
-                        else MotionIconButton(onClick = { controller.measureEpisodeSources(focusEpisode.id) },
+                        else MotionIconButton(onClick = { controller.measureEpisodeSources(probeEpisode.id, force = true) },
                             enabled = visible && state.measuringEpisodeSourcesId == null && !state.resolving && !state.autoMatching,
-                            modifier = Modifier.size(44.dp), tooltip = "测本集线路取址时间") {
-                            Icon(Icons.Outlined.Speed, "测本集线路取址时间", Modifier.size(20.dp),
+                            modifier = Modifier.size(44.dp), tooltip = "重新探测画质与网络") {
+                            Icon(Icons.Outlined.Speed, "重新探测画质与网络", Modifier.size(20.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
@@ -621,12 +631,14 @@ internal fun AnimeSourcesPanel(
                                 result to result.items.distinctBy { it.referenceKey() }.filterNot { title ->
                                     val key = title.referenceKey()
                                     key in candidateKeys || key in linkedKeys
-                                }
+                                }.sortedByDescending { title -> subject?.let { autoPlaySubjectCandidate(it, title) } == true }
                             }
                             val results = searchRows.filter { (result, rows) -> rows.isNotEmpty() || result.hasMore || result.loadingMore }
                             items(results, key = { "search:" + it.first.providerId }) { (result, rows) ->
                                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                                    AnimeSectionTitle(result.name, "${rows.size} 个候选")
+                                    val relevant = rows.count { title -> subject?.let { autoPlaySubjectCandidate(it, title) } == true }
+                                    AnimeSectionTitle(result.name,
+                                        if (relevant > 0) "$relevant 个相关 · ${rows.size} 个候选" else "${rows.size} 个候选")
                                     rows.forEach { title ->
                                         val detail = listOfNotNull(title.year?.toString(),
                                             title.episodeCount?.let { "$it 集" },

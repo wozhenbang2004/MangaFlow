@@ -230,6 +230,14 @@ internal data class AnimePlaybackMeasurements(
     val declaredQuality: String? = null,
     val playbackObservedAt: Long? = null,
     val addressObservedAt: Long? = null,
+    /** A bounded media response is not a decoded first frame or sustained download rate. */
+    val mediaObservedAt: Long? = null,
+    val mediaHttpStatus: Int? = null,
+    val mediaVerified: Boolean? = null,
+    val mediaFailure: String? = null,
+    val mediaQuality: String? = null,
+    val mediaSampleBytesPerSecond: Long? = null,
+    val mediaSampleMs: Long? = null,
 )
 
 internal data class AnimeWorkPlaybackMeasurements(

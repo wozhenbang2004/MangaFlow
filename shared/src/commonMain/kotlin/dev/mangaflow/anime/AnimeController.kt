@@ -1482,7 +1482,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     internal fun hasAutomaticPlaybackLine(episodeId: String): Boolean = automaticPlaybackLines(episodeId).isNotEmpty()
 
     private fun automaticPlaybackLines(episodeId: String, snapshot: AnimeScreenState = mutableState.value) =
-        confirmedPlaybackLines(episodeId, snapshot).filter { canAttemptPlaybackLine(episodeId, it, snapshot) }
+        confirmedPlaybackLines(episodeId, snapshot).filter {
+            canAttemptPlaybackLine(episodeId, it, snapshot) && recentPlaybackLineFailure(episodeId, it, snapshot) == null
+        }
 
     internal fun recentPlaybackLineFailure(episodeId: String, option: AnimeEpisodeOption,
         snapshot: AnimeScreenState = mutableState.value): String? {
@@ -1539,7 +1541,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val episodes = detail.episodes.associateBy { it.id }
         val confirmedByEpisode = mutableMapOf<String, List<AnimeEpisodeOption>>()
         val samples = mutableMapOf<String, AnimeWorkPlaybackMeasurements>()
-        val order = compareBy<AnimePlaybackMeasurements> { it.playbackObservedAt ?: 0L }.thenBy { it.updatedAt }
+        val order = compareBy<AnimePlaybackMeasurements> { it.playbackObservedAt ?: 0L }
+            .thenBy { it.mediaObservedAt ?: it.addressObservedAt ?: 0L }.thenBy { it.updatedAt }
         for ((key, receipt) in playbackMeasurements) {
             if (key.subjectId != detail.subject.id) continue
             val episode = episodes[key.episodeId] ?: continue
@@ -1563,13 +1566,20 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val now = wallTimeMillis()
         val played = data.playbackObservedAt?.takeIf { now - it in 0L until 30 * 60_000L }
         val resolved = data.addressObservedAt?.takeIf { now - it in 0L until 5 * 60_000L }
-        if (played == null && resolved == null) return null
-        return data.copy(updatedAt = maxOf(played ?: 0L, resolved ?: 0L),
+        val media = data.mediaObservedAt?.takeIf { now - it in 0L until 5 * 60_000L }
+        if (played == null && resolved == null && media == null) return null
+        return data.copy(updatedAt = maxOf(played ?: 0L, resolved ?: 0L, media ?: 0L),
             width = data.width.takeIf { played != null }, height = data.height.takeIf { played != null },
             firstFrameMs = data.firstFrameMs.takeIf { played != null },
             measuredBytesPerSecond = data.measuredBytesPerSecond.takeIf { played != null },
             addressMs = data.addressMs.takeIf { resolved != null }, declaredQuality = data.declaredQuality.takeIf { resolved != null },
-            playbackObservedAt = played, addressObservedAt = resolved)
+            playbackObservedAt = played, addressObservedAt = resolved,
+            mediaObservedAt = media, mediaHttpStatus = data.mediaHttpStatus.takeIf { media != null },
+            mediaVerified = data.mediaVerified.takeIf { media != null },
+            mediaFailure = data.mediaFailure.takeIf { media != null },
+            mediaQuality = data.mediaQuality.takeIf { media != null },
+            mediaSampleBytesPerSecond = data.mediaSampleBytesPerSecond.takeIf { media != null },
+            mediaSampleMs = data.mediaSampleMs.takeIf { media != null })
     }
 
     private fun storePlaybackMeasurements(key: PlaybackHistoryKey, option: AnimeEpisodeOption,
@@ -1588,16 +1598,25 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         return fairPlaybackOptions(subjectId, episodeId, automaticPlaybackLines(episodeId))
     }
 
-    /** Explicitly checks the normal address resolver for one confirmed line per source. No video is played. */
-    internal fun measureEpisodeSources(episodeId: String) {
+    /** A source sheet can read bounded headers/manifest data without opening the player.
+     * A failed HTTP request is evidence for this exact episode and route, never proof that a whole site is offline. */
+    internal fun measureEpisodeSources(episodeId: String, force: Boolean = false) {
         val detail = mutableState.value.detail ?: return
         if (sourceMeasurementsJob?.isActive == true) return
         if (playbackBusy()) {
-            notice("正在加载视频，缓冲后可测本集线路。")
+            if (force) notice("正在加载视频，缓冲后可测本集线路。")
             return
         }
-        val options = fairPlaybackOptions(detail.subject.id, episodeId, automaticPlaybackLines(episodeId)).distinctBy { it.sourceId }
+        val options = fairPlaybackOptions(detail.subject.id, episodeId, confirmedPlaybackLines(episodeId))
+            .distinctBy { it.sourceId }
         if (options.isEmpty()) return
+        val pending = options.filter { option ->
+            val key = playbackHistoryKey(detail.subject.id, episodeId, option)
+            val previous = key?.let { currentPlaybackMeasurements(it, option) }
+            force || previous == null || (previous.mediaObservedAt == null &&
+                !(previous.addressObservedAt != null && previous.addressMs == null))
+        }
+        if (pending.isEmpty()) return
         val detailOwner = detailGeneration
         val generation = ++sourceMeasurementsGeneration
         mutableState.update { it.copy(measuringEpisodeSourcesId = episodeId) }
@@ -1606,7 +1625,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             try {
                 val permits = Semaphore(2)
                 coroutineScope {
-                    options.forEach { option -> launch {
+                    pending.forEach { option -> launch {
                         permits.withPermit {
                             if (!current()) return@withPermit
                             val line = currentPlaybackLine(episodeId, option) ?: return@withPermit
@@ -1617,19 +1636,42 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 it.title.sourceId == line.sourceId && it.title.id == line.catalog.id && it.title.url == line.catalog.url
                             } ?: return@withPermit
                             val startedAt = monotonicTimeMillis()
+                            var resolveFailure: Exception? = null
                             val asset = try { withTimeoutOrNull(5_000L) { provider.resolve(catalog, line.episode) } }
                                 catch (cancel: CancellationException) { throw cancel }
-                                catch (_: DownloadRouteException) { return@withPermit }
-                                catch (_: Exception) { null }
+                                catch (failure: Exception) { resolveFailure = failure; null }
                             if (!current() || discoverySourceRevision(line.sourceId) != revision ||
                                 playbackHistoryRoute(line.sourceId) != key.route || currentPlaybackLine(episodeId, line) == null)
                                 return@withPermit
                             if (asset != null && (asset.sourceId != line.sourceId || asset.sourceEpisodeId != line.episode.id ||
-                                    asset.sourceRevision != revision || asset.route != key.route || asset.expiresAt?.let { it <= wallTimeMillis() } == true))
-                                return@withPermit
+                                    asset.sourceRevision != revision || asset.route != key.route ||
+                                    asset.expiresAt?.let { it <= wallTimeMillis() } == true)) return@withPermit
                             val elapsed = (monotonicTimeMillis() - startedAt).coerceAtLeast(0L)
-                            storePlaybackMeasurements(key, line) { it.copy(addressMs = elapsed.takeIf { asset != null },
-                                declaredQuality = asset?.let(::declaredPlaybackQuality), addressObservedAt = wallTimeMillis()) }
+                            val addressAt = wallTimeMillis()
+                            if (asset == null) {
+                                val code = (resolveFailure as? AnimeSourceException)?.httpStatus
+                                val reason = code?.let { "HTTP $it · 取址失败" }
+                                    ?: (resolveFailure?.message ?: "本集取址未完成")
+                                storePlaybackMeasurements(key, line) { it.copy(addressMs = null, declaredQuality = null,
+                                    addressObservedAt = addressAt, mediaObservedAt = null, mediaVerified = null,
+                                    mediaFailure = reason) }
+                                if (code in setOf(401, 403, 404, 410) && current()) rememberPlaybackFailure(key,
+                                    AnimePlaybackFailure(line.sourceId, line.sourceName, "取播放地址", reason))
+                                return@withPermit
+                            }
+                            val media = inspectAnimeMediaBeforePlayback(asset)
+                            if (!current() || discoverySourceRevision(line.sourceId) != revision ||
+                                playbackHistoryRoute(line.sourceId) != key.route || currentPlaybackLine(episodeId, line) == null)
+                                return@withPermit
+                            storePlaybackMeasurements(key, line) { it.copy(addressMs = elapsed,
+                                declaredQuality = declaredPlaybackQuality(asset), addressObservedAt = addressAt,
+                                mediaObservedAt = media.observedAt, mediaHttpStatus = media.httpStatus,
+                                mediaVerified = media.verified, mediaFailure = media.failure,
+                                mediaQuality = media.quality, mediaSampleBytesPerSecond = media.sampleBytesPerSecond,
+                                mediaSampleMs = media.elapsedMs) }
+                            if (media.httpStatus in setOf(401, 403, 404, 410) && current()) rememberPlaybackFailure(key,
+                                AnimePlaybackFailure(line.sourceId, line.sourceName, "验证媒体",
+                                    "HTTP ${media.httpStatus} · ${media.failure ?: "当前线路不可访问"}"))
                         }
                     } }
                 }
@@ -1658,7 +1700,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     private fun currentPlaybackFailure(key: PlaybackHistoryKey): AnimePlaybackFailure? {
         val receipt = playbackFailures[key] ?: return null
-        val validFor = if (receipt.failure.unsupported) 30 * 60_000L else 60_000L
+        val validFor = when {
+            receipt.failure.unsupported -> 30 * 60_000L
+            listOf("HTTP 401", "HTTP 403", "HTTP 404", "HTTP 410").any { it in receipt.failure.reason } -> 5 * 60_000L
+            else -> 60_000L
+        }
         return receipt.failure.takeIf { wallTimeMillis() - receipt.observedAt in 0L until validFor }
     }
 
@@ -1745,12 +1791,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 frame != null && frame <= 2_000L -> 0
                 frame != null && frame <= 5_000L -> 1
                 sample?.playbackObservedAt != null -> 2
-                sample?.addressMs != null -> 3
-                sample?.addressObservedAt != null -> 5
-                else -> 4
+                sample?.mediaVerified == true -> 3
+                sample?.addressMs != null && sample.mediaFailure == null -> 4
+                sample?.mediaFailure != null || sample?.addressObservedAt != null -> 6
+                else -> 5
             }
         }.thenByDescending { samples[it]?.height ?: 0 }
-            .thenByDescending { samples[it]?.measuredBytesPerSecond ?: 0L }
+            .thenByDescending { samples[it]?.measuredBytesPerSecond ?: samples[it]?.mediaSampleBytesPerSecond ?: 0L }
             .thenBy { samples[it]?.firstFrameMs ?: Long.MAX_VALUE }
             .thenBy { samples[it]?.addressMs ?: Long.MAX_VALUE }
             .thenBy { priority(it.sourceId) }
