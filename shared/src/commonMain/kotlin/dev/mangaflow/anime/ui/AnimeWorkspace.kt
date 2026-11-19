@@ -74,6 +74,7 @@ internal fun AnimeWorkspace(
     requestedDestination: AnimeWorkspaceDestination = AnimeWorkspaceDestination.HOME,
     navigationRequest: Int = 0,
     onDestinationChange: (AnimeWorkspaceDestination) -> Unit = {},
+    onOpenMangaDownloads: () -> Unit = {},
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
     val playbackPhase by controller.playbackPhase.collectAsStateWithLifecycle()
@@ -128,6 +129,10 @@ internal fun AnimeWorkspace(
     var sourcesVisible by remember { mutableStateOf(false) }
     var sourceManagerVisible by remember { mutableStateOf(false) }
     var downloadsVisible by remember { mutableStateOf(false) }
+    var storageVisible by remember { mutableStateOf(false) }
+    var storagePresent by remember { mutableStateOf(false) }
+    var storageModelsVisible by remember { mutableStateOf(false) }
+    var storageDestination by remember { mutableStateOf<String?>(null) }
     var browseCandidate by remember { mutableStateOf<AnimeSourceTitle?>(null) }
     var pendingAssociation by remember { mutableStateOf<AnimeSourceAssociation?>(null) }
     var sourceEpisode by remember { mutableStateOf<AnimeEpisode?>(null) }
@@ -144,7 +149,8 @@ internal fun AnimeWorkspace(
             AnimeRoute("detail:" + (state.detail?.subject?.id ?: openingSubject?.id.orEmpty()), 1, state, detailHistory.size)
         else -> AnimeRoute("home", 0)
     }
-    val overlayVisible = downloadsVisible || sourcesVisible || sourceManagerVisible || trackingVisible || reviewsVisible
+    val overlayVisible = downloadsVisible || sourcesVisible || sourceManagerVisible || trackingVisible || reviewsVisible ||
+        storagePresent || storageModelsVisible
     val displayedDestination = when {
         sourceManagerVisible -> AnimeWorkspaceDestination.SOURCES
         downloadsVisible -> AnimeWorkspaceDestination.DOWNLOADS
@@ -159,6 +165,7 @@ internal fun AnimeWorkspace(
     LaunchedEffect(active, route.key, page, directoryOpen) {
         toolsVisible = false
         pendingTool = null
+        if (!active) { storageVisible = false; storageModelsVisible = false; storageDestination = null }
     }
     val currentPlaybackVisibility by rememberUpdatedState(onPlaybackVisibility)
     LaunchedEffect(playing) { currentPlaybackVisibility(playing) }
@@ -501,7 +508,8 @@ internal fun AnimeWorkspace(
                         onRestorePlayback = controller::restorePreviousPlayback,
                         onPlayDownload = ::playDownload,
                         onSources = ::showSources,
-                        onEpisode = { requestPlayback(it, null) }, modifier = Modifier.fillMaxSize())
+                        onEpisode = { requestPlayback(it, null) }, modifier = Modifier.fillMaxSize(),
+                        onStorage = { storagePresent = true; storageVisible = true })
                 } else {
                     val shownState = shown.detailState
                     val shownDetail = shownState?.detail
@@ -669,6 +677,27 @@ internal fun AnimeWorkspace(
             onUndo = controller::undo, onDismiss = controller::dismissNotice)
     }
 
+    if (storagePresent) {
+        val context = dev.mangaflow.platform.LocalMangaContext.current
+        val services = remember(context) { dev.mangaflow.MangaApplicationServices.get(context) }
+        StorageManagementDialog(storageVisible, backdrop, services.library, services.repository, active,
+            onDismiss = { storageVisible = false },
+            onDownloads = { storageDestination = "manga"; storageVisible = false },
+            onAnimeDownloads = { storageDestination = "anime"; storageVisible = false },
+            onModels = { storageDestination = "models"; storageVisible = false },
+            onClosed = {
+                val destination = storageDestination
+                storageDestination = null
+                storagePresent = false
+                if (active) when (destination) {
+                    "anime" -> downloadsVisible = true
+                    "models" -> storageModelsVisible = true
+                    "manga" -> onOpenMangaDownloads()
+                    else -> Unit
+                }
+            })
+    }
+    dev.mangaflow.reader.panels.PanelModelsDialog(storageModelsVisible, backdrop) { storageModelsVisible = false }
     AnimeDownloadsPanel(downloadsVisible, controller, state, backdrop,
         onDismiss = { downloadsVisible = false }, onPlay = ::playDownload)
     AnimeSourceManager(sourceManagerVisible, state, controller, backdrop,

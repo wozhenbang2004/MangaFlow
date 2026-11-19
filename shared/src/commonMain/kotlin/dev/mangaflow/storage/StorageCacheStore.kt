@@ -25,13 +25,28 @@ internal enum class CacheArea(val label: String) {
 internal enum class CacheBackend { COIL, SCRIPT, JM, PANEL, CATALOG, ANIME, AUXILIARY }
 
 /** The player retains its own journal and open spans; the shared cache coordinator never deletes its files. */
-internal data class AnimeDiskCacheUsage(val bytes: Long, val revision: Long, val active: Boolean, val accessedAt: Long)
+internal data class AnimeDiskCacheEntry(
+    val key: String,
+    val bytes: Long,
+    val revision: Long,
+    val accessedAt: Long,
+    val protected: Boolean,
+    val subjectId: String = "",
+    val episodeId: String = "",
+    val sourceId: String = "",
+    val subjectTitle: String = "",
+    val episodeTitle: String = "",
+)
+internal data class AnimeDiskCacheUsage(val bytes: Long, val revision: Long, val active: Boolean, val accessedAt: Long,
+    val entries: List<AnimeDiskCacheEntry> = emptyList())
 internal interface AnimeDiskCacheOwner {
     fun snapshot(): AnimeDiskCacheUsage
     fun resize(bytes: Long, canResize: () -> Boolean = { true },
         commitResize: ((() -> Unit) -> Boolean) = { publish -> publish(); true })
     /** Null means the reviewed revision changed or playback still owns the cache. */
     fun clear(expectedRevision: Long, canClear: () -> Boolean = { true }): Long?
+    /** Per-resource tokens let one reviewed cleanup retire several unrelated, unchanged entries. */
+    fun clearEntry(expected: AnimeDiskCacheEntry, canClear: () -> Boolean = { true }): Long? = null
 }
 
 /** Exact cache identities only. No cookies, request headers, source code or account records. */
@@ -42,7 +57,8 @@ internal data class CacheResource(
     val auxiliaryOwnerId: String = "",
 )
 internal data class StoredCacheItem(val resource: CacheResource, val bytes: Long, val modifiedAt: Long,
-    val protected: Boolean = false, val auxiliaryEntry: AuxiliaryCacheEntry? = null)
+    val protected: Boolean = false, val auxiliaryEntry: AuxiliaryCacheEntry? = null,
+    val animeEntry: AnimeDiskCacheEntry? = null)
 internal data class StorageCacheSnapshot(val items: List<StoredCacheItem>, val coilUnclassifiedBytes: Long,
     val auxiliaryBytes: Long, val catalogBytes: Long, val catalogReclaimableBytes: Long,
     val indexBytes: Long, val temporaryBytes: Long, val budgetBytes: Long, val pending: Boolean, val legacyReclaimable: Boolean,
@@ -431,8 +447,20 @@ class StorageCacheStore private constructor(context: PlatformContext) {
         val now = wallTimeMillis()
         val videoOwner = synchronized(lock) { animeCache }
         val video = videoOwner?.snapshot()
-        val videoBytes = video?.bytes ?: ownedVideoBytes(StorageFile(root, "anime-stream-v1"))
-        if (videoBytes > 0L) {
+        val videoBytes = video?.bytes ?: listOf("anime-stream-v1", "anime-stream-cache")
+            .sumOf { ownedVideoBytes(StorageFile(root, it)) }
+        if (video != null) {
+            video.entries.filter { it.bytes > 0L }.forEach { entry ->
+                val resource = CacheResource(identity(CacheBackend.ANIME, entry.key), CacheBackend.ANIME,
+                    entry.key, CacheArea.ANIME, sourceId = entry.sourceId, accessedAt = entry.accessedAt, used = true)
+                items += StoredCacheItem(resource, entry.bytes, entry.revision, entry.protected, animeEntry = entry)
+            }
+            // A backend may still be restoring its metadata; unclassified bytes remain visible and protected.
+            val unclassified = (videoBytes - video.entries.sumOf { it.bytes }).coerceAtLeast(0L)
+            if (unclassified > 0L) items += StoredCacheItem(CacheResource("anime:unclassified", CacheBackend.ANIME,
+                "anime-unclassified", CacheArea.ANIME, accessedAt = video.accessedAt, used = true),
+                unclassified, video.revision, protected = true)
+        } else if (videoBytes > 0L) {
             val resource = CacheResource("anime:stream", CacheBackend.ANIME, "anime-stream-v1",
                 CacheArea.ANIME, accessedAt = video?.accessedAt ?: 0L, used = true)
             // modifiedAt is an owner revision for this aggregate, never a guessed file timestamp.
@@ -484,22 +512,37 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                 val backend = if (catalogue) CacheBackend.CATALOG else CacheBackend.AUXILIARY
                 val key = owner.ownerId + ":" + entry.key
                 val resource = CacheResource(identity(backend, key), backend, key,
-                    if (owner.ownerId in setOf("enhancement-v1", "enhanced-video-v1")) CacheArea.ENHANCEMENT else CacheArea.DATA,
-                    mangaId = if (catalogue) entry.key else "", accessedAt = if (catalogue)
+                    if (owner.ownerId in setOf("enhancement-v1", "enhanced-video-v1", "anime-online-windows")) CacheArea.ENHANCEMENT else CacheArea.DATA,
+                    mangaId = if (catalogue) entry.key else if (entry.content in setOf("manga", "adult_manga")) entry.workId else "",
+                    chapterId = if (entry.content in setOf("manga", "adult_manga")) entry.partId else "", sourceId = entry.sourceId,
+                    accessedAt = if (catalogue)
                         catalogAccess(entry.key).takeIf { it > 0L } ?: entry.modifiedAt else entry.modifiedAt,
                     used = true, auxiliaryOwnerId = owner.ownerId)
                 items += StoredCacheItem(resource, entry.bytes, entry.modifiedAt,
-                    protected = catalogue && (protectedCatalog(entry.key) || catalogStore.isWriting(entry.key)),
+                    protected = entry.protected || catalogue && (protectedCatalog(entry.key) || catalogStore.isWriting(entry.key)),
                     auxiliaryEntry = entry)
                 present += resource.id
             }
         }
         val catalogBytes = (catalogStore.sizeBytes() - items.filter { it.resource.backend == CacheBackend.CATALOG }
             .sumOf { it.bytes }).coerceAtLeast(0L)
-        // Cold/unrecognized owners are measured but never reported as safely reclaimable.
-        val auxiliary = (listOf("browse-cache", "metadata-cache", "site-rankings", "anime-metadata").sumOf { folder ->
-            StorageFile(root, folder).listFiles().orEmpty().sumOf { if (it.isFile) it.length() else 0L }
-        } - items.filter { it.resource.backend == CacheBackend.AUXILIARY }.sumOf { it.bytes }).coerceAtLeast(0L)
+        // Count each family's remainder independently: enhancement bytes cannot offset data bytes.
+        val auxiliary = mapOf("browse-cache" to "browse", "metadata-cache" to "metadata",
+            "site-rankings" to "rankings", "anime-metadata" to "anime-metadata").entries.sumOf { (folder, ownerId) ->
+            val measured = StorageFile(root, folder).listFiles().orEmpty().sumOf { if (it.isFile) it.length() else 0L }
+            (measured - items.filter { it.resource.auxiliaryOwnerId == ownerId }.sumOf { it.bytes }).coerceAtLeast(0L)
+        }
+        // A cold owner or an unfinished write still owns its files; counting never grants deletion permission.
+        listOf("enhancement-v1", "enhanced-video-v1", "anime-online-windows").forEach { ownerId ->
+            val remaining = (ownedVideoBytes(StorageFile(root, ownerId)) -
+                items.filter { it.resource.auxiliaryOwnerId == ownerId }.sumOf { it.bytes }).coerceAtLeast(0L)
+            if (remaining > 0L) {
+                val key = "$ownerId:@unowned"
+                val resource = CacheResource(identity(CacheBackend.AUXILIARY, key), CacheBackend.AUXILIARY,
+                    key, CacheArea.ENHANCEMENT, used = true, auxiliaryOwnerId = ownerId)
+                items += StoredCacheItem(resource, remaining, 0L, protected = true)
+            }
+        }
         val total = StorageCacheSnapshot(items, unknown, auxiliary, catalogBytes, 0L,
             index.baseFile.length(), imageFiles.filterNot { it.name.matches(Regex("[a-f0-9]{64}\\.[01]")) }.sumOf { it.length() } +
                 listOf("script-decoded", "jm-decoded", "reader-panels").sumOf { folder ->
@@ -561,7 +604,13 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                     actual != null
                 } else if (resource.backend == CacheBackend.ANIME) {
                     val owner = synchronized(lock) { animeCache }
-                    val actual = if (item.protected) null else owner?.clear(item.modifiedAt) { synchronized(lock) { maintenanceAllowed(maintenanceFence) } }
+                    val actual = try {
+                        if (item.protected) null else if (item.animeEntry != null)
+                            owner?.clearEntry(item.animeEntry) { synchronized(lock) { maintenanceAllowed(maintenanceFence) } }
+                        else owner?.clear(item.modifiedAt) { synchronized(lock) { maintenanceAllowed(maintenanceFence) } }
+                    } catch (cancel: CancellationException) { throw cancel }
+                    catch (failure: AuxiliaryCacheRemovalException) { freed += failure.freedBytes; failed++; null }
+                    catch (_: Exception) { failed++; null }
                     if (actual != null) removedBytes = actual
                     actual != null
                 } else if (resource.backend == CacheBackend.COIL) {

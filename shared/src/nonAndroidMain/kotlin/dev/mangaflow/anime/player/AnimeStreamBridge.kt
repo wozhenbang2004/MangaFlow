@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import okio.Buffer
+import okio.IOException
 
 internal interface AnimeLoopbackConnection {
     fun read(buffer: ByteArray): Int
@@ -58,6 +59,8 @@ internal class AnimeStreamBridge private constructor(
     parentScope: CoroutineScope,
     private val startup: AnimeBufferedStartup?,
     startupByteLimit: Long?,
+    cache: AnimeStreamCache?,
+    private val preparationOnly: Boolean,
 ) {
     private enum class Kind { AUTO, MANIFEST, MEDIA, KEY, SUBTITLE }
     private data class Resource(
@@ -81,6 +84,9 @@ internal class AnimeStreamBridge private constructor(
     private var failureRetryable: Boolean? = null
     val lastFailureRetryable: Boolean? get() = synchronized(lock) { failureRetryable }
     private var attempt = 0L
+    private val releaseCache = runCatching { cache?.retain(asset) }.getOrNull()
+    private val cache = cache.takeIf { releaseCache != null }
+    private val bypassedCacheResources = mutableSetOf<String>()
 
     fun beginAttempt() = synchronized(lock) {
         attempt++
@@ -102,6 +108,7 @@ internal class AnimeStreamBridge private constructor(
         client.close()
         scope.cancel()
         synchronized(lock) { resources.clear() }
+        releaseCache?.invoke()
     }
 
     private fun register(resource: Resource): String = synchronized(lock) {
@@ -121,6 +128,12 @@ internal class AnimeStreamBridge private constructor(
     private suspend fun handle(connection: AnimeLoopbackConnection) {
         val output = ResponseWriter(connection)
         val ownedAttempt = synchronized(lock) { attempt }
+        var cacheWriter: AnimeStreamCacheWriter? = null
+        fun save(bytes: ByteArray, count: Int = bytes.size) {
+            val writer = cacheWriter ?: return
+            try { writer.append(bytes, count) }
+            catch (_: Exception) { runCatching { writer.close() }; cacheWriter = null }
+        }
         try {
             val request = readRequest(connection)
             if (request.method !in setOf("GET", "HEAD")) {
@@ -136,6 +149,37 @@ internal class AnimeStreamBridge private constructor(
             val range = request.headers["range"]
             require(range == null || Regex("bytes=(?:[0-9]+-[0-9]*|-[0-9]+)").matches(range)) {
                 "播放器发送了不支持的 Range 请求"
+            }
+            val resourceKey = resource.url.toString()
+            val disk = if (resource.kind in setOf(Kind.MEDIA, Kind.AUTO) && '?' !in request.target &&
+                synchronized(lock) { resourceKey !in bypassedCacheResources }) {
+                try { cache?.read(asset, resourceKey, range) }
+                catch (_: Exception) { synchronized(lock) { bypassedCacheResources += resourceKey }; null }
+            } else null
+            if (disk != null) {
+                try {
+                    val headers = linkedMapOf("Content-Type" to disk.contentType,
+                        "Content-Length" to (disk.end - disk.start + 1L).toString(),
+                        "Accept-Ranges" to "bytes", "Cache-Control" to "private, no-store")
+                    if (range != null) headers["Content-Range"] = "bytes ${disk.start}-${disk.end}/${disk.total}"
+                    output.headers(if (range == null) 200 else 206, headers)
+                    if (request.method == "GET") {
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val count = try { disk.read(buffer) } catch (_: Exception) {
+                                synchronized(lock) { bypassedCacheResources += resourceKey }
+                                // A response already in flight cannot be replaced. The existing native IO retry
+                                // opens a new bridge request, which now bypasses this exact damaged resource.
+                                throw IOException("番剧缓存读取失败，将重新读取原始视频")
+                            }
+                            if (count < 0) break
+                            warmReads?.admit(count)
+                            output.bytes(buffer, count)
+                        }
+                    }
+                } finally { disk.close() }
+                return
             }
             val buffered = startup?.takeIf {
                 monotonicTimeMillis() < it.validUntil && resource.kind == Kind.MEDIA &&
@@ -219,7 +263,12 @@ internal class AnimeStreamBridge private constructor(
                                 }
                                 require(contentType != "audio/x-scpls") { "当前线路不是受支持的视频清单" }
                                 if (contentType.contains("mpegurl")) { manifest = true; classified = true }
-                                if (classified && !manifest) output.headers(received.code, responseHeaders(received, false))
+                                if (classified && !manifest) {
+                                    output.headers(received.code, responseHeaders(received, false))
+                                    if (resource.kind == Kind.MEDIA) cacheWriter = runCatching {
+                                        cache?.write(asset, resource.url.toString(), received)
+                                    }.getOrNull()
+                                }
                                 true
                             }
                         }
@@ -238,13 +287,16 @@ internal class AnimeStreamBridge private constructor(
                                 if (manifest) manifestBody.writeAll(prefix)
                                 else {
                                     output.headers(response!!.code, responseHeaders(response!!, false))
-                                    output.bytes(prefix.readByteArray())
+                                    cacheWriter = runCatching { cache?.write(asset, resource.url.toString(), response!!) }.getOrNull()
+                                    val bytes = prefix.readByteArray()
+                                    save(bytes)
+                                    output.bytes(bytes)
                                 }
                             }
                         } else if (manifest) {
                             manifestBody.write(bytes, 0, count)
                             require(manifestBody.size <= MAX_MANIFEST_BYTES) { "播放清单超过可解析大小" }
-                        } else output.bytes(bytes, count)
+                        } else { save(bytes, count); output.bytes(bytes, count) }
                     },
                 )
                 if (redirect != null) {
@@ -286,6 +338,7 @@ internal class AnimeStreamBridge private constructor(
             }
             if (!output.started) runCatching { output.error(502, "Unable to read this playback resource") }
         } finally {
+            runCatching { cacheWriter?.close() }
             connection.close()
         }
     }
@@ -322,6 +375,16 @@ internal class AnimeStreamBridge private constructor(
     private fun rewriteManifest(resource: Resource, base: HttpUrl, text: String): String {
         require(text.trimStart('\uFEFF', ' ', '\r', '\n').startsWith("#EXTM3U")) { "来源返回的内容不是有效 HLS 清单" }
         require(!text.contains("#EXT-X-CONTENT-STEERING:")) { "当前线路使用了内容转向服务，请选择其他线路" }
+        if (preparationOnly) {
+            val lines = text.lineSequence().map(String::trim).toList()
+            val variants = lines.count { it.startsWith("#EXT-X-STREAM-INF:") }
+            require(variants <= 1) { "多画质清单不能确认预处理与当前解码使用同一视频轨" }
+            require(variants == 1 || "#EXT-X-ENDLIST" in lines) { "在线预处理需要时间轴已封闭的点播片源" }
+            require(lines.none { it == "#EXT-X-DISCONTINUITY" || it.startsWith("#EXT-X-GAP") ||
+                it.startsWith("#EXT-X-KEY:") && it.substringAfter(':').trim() != "METHOD=NONE" }) {
+                "当前片源存在时间轴中断、缺段或加密，原画继续播放"
+            }
+        }
         val variables = resource.variables.toMutableMap()
         text.lineSequence().filter { it.startsWith("#EXT-X-DEFINE:") }.forEach { line ->
             val attributes = Regex("([A-Z0-9-]+)=\"([^\"]*)\"").findAll(line)
@@ -379,6 +442,21 @@ internal class AnimeStreamBridge private constructor(
 
     private suspend fun readWarmResource(resource: Resource, maximumBytes: Long): WarmResponse? {
         if (maximumBytes <= 0L) return null
+        val stored = runCatching { cache?.read(asset, resource.url.toString(), null) }.getOrNull()
+        if (stored != null) {
+            try {
+                if (stored.total > maximumBytes) return null
+                val body = Buffer()
+                val bytes = ByteArray(64 * 1024)
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val count = stored.read(bytes)
+                    if (count < 0) break
+                    body.write(bytes, 0, count)
+                }
+                return WarmResponse(resource.url, body.readByteArray(), stored.contentType)
+            } finally { stored.close() }
+        }
         var url = resource.url
         repeat(9) {
             val body = Buffer()
@@ -396,7 +474,16 @@ internal class AnimeStreamBridge private constructor(
             } else {
                 if (!accepted || body.size == 0L ||
                     response.header("Content-Length")?.toLongOrNull()?.let { it != body.size } == true) return null
-                return WarmResponse(url, body.readByteArray(), response.header("Content-Type"))
+                val bytes = body.readByteArray()
+                if (resource.kind in setOf(Kind.MEDIA, Kind.AUTO)) {
+                    // A fully received chunked resource has a known byte length even without an upstream header.
+                    val complete = response.copy(headers = response.headers.filterKeys { !it.equals("Content-Length", true) } +
+                        ("Content-Length" to bytes.size.toString()))
+                    runCatching { cache?.write(asset, resource.url.toString(), complete)?.let { writer ->
+                        try { writer.append(bytes, bytes.size) } finally { writer.close() }
+                    } }
+                }
+                return WarmResponse(url, bytes, response.header("Content-Type"))
             }
         }
         return null
@@ -411,7 +498,7 @@ internal class AnimeStreamBridge private constructor(
         var remaining = byteLimit
         var response = readWarmResource(resource, playlistBudget) ?: return null
         remaining -= response.bytes.size
-        var text = response.bytes.decodeToString()
+        val text = response.bytes.decodeToString()
         if (text.contains("#EXT-X-STREAM-INF:")) {
             val rewritten = rewriteManifest(resource, response.url, text)
             val variant = rewritten.lineSequence().firstOrNull { it.startsWith("http://127.0.0.1:") } ?: return null
@@ -419,14 +506,149 @@ internal class AnimeStreamBridge private constructor(
             resource = synchronized(lock) { resources[path] }?.takeIf { it.kind == Kind.MANIFEST } ?: return null
             response = readWarmResource(resource, minOf(playlistBudget, remaining)) ?: return null
             remaining -= response.bytes.size
-            text = response.bytes.decodeToString()
         }
-        val segment = parseAnimeHlsDownload(response.url, text).resources.firstOrNull { it.name.startsWith("segment-") }
+        val segment = parseAnimeHlsDownload(response.url, response.bytes.decodeToString()).resources.firstOrNull { it.name.startsWith("segment-") }
             ?: return null
         val segmentUrl = checkedUrl(segment.url)
         val media = readWarmResource(resource.copy(url = segmentUrl, kind = Kind.MEDIA), remaining) ?: return null
         if (!isAnimeStartupVideoPrefix(media.bytes)) return null
         return AnimeBufferedStartup(segmentUrl, media.bytes, media.contentType ?: "application/octet-stream", validUntil)
+    }
+
+    /** A duration is reported only after every required video/init/default-audio resource is resident. */
+    private suspend fun warmRange(request: AnimeStartupCacheRequest): AnimeStartupCacheResult {
+        val owner = cache ?: return AnimeStartupCacheResult(0L, detail = "当前平台没有可复用的原视频磁盘缓存")
+        fun current() = monotonicTimeMillis() < request.validUntil &&
+            asset.expiresAt?.let { it > dev.mangaflow.platform.wallTimeMillis() } != false
+        if (!current() || request.maximumBytes <= 0L || request.positionMs < 0L || request.targetDurationMs <= 0L)
+            return AnimeStartupCacheResult(0L)
+        val primary = checkedUrl(asset.url)
+        val hls = asset.mimeType?.contains("mpegurl", true) == true || primary.encodedPath.endsWith(".m3u8", true) ||
+            primary.encodedPath.endsWith(".m3u", true)
+        if (!hls) {
+            if (request.positionMs != 0L) return AnimeStartupCacheResult(0L,
+                detail = "视频文件的续播位置由原生预解码读取；没有按文件大小推算缓存秒数")
+            val range = "bytes=0-${request.maximumBytes - 1L}"
+            val initial = owner.read(asset, primary.toString(), range)
+            if (initial != null) {
+                try { return AnimeStartupCacheResult(initial.end - initial.start + 1L) }
+                finally { initial.close() }
+            }
+            var url = primary
+            repeat(9) {
+                var writer: AnimeStreamCacheWriter? = null
+                var accepted = false
+                try {
+                    val builder = Request.Builder().url(url).get().header("Accept-Encoding", "identity").header("Range", range)
+                    scopedHeaders(Resource(primary, asset.headers, primary, Kind.MEDIA), url).forEach { (name, value) -> builder.header(name, value) }
+                    val response = client.downloadWithHeaders(builder.build(), request.maximumBytes, onResponse = { response ->
+                        val length = response.header("Content-Length")?.toLongOrNull()
+                        accepted = response.code in setOf(200, 206) && length != null && length in 1L..request.maximumBytes &&
+                            response.header("Content-Encoding")?.equals("identity", true) != false
+                        if (accepted) writer = owner.write(asset, primary.toString(), response)
+                        accepted
+                    }, onChunk = { bytes, count -> check(current()) { "预读身份已过期" }; writer?.append(bytes, count) })
+                    writer?.close(); writer = null
+                    if (response.code in setOf(301, 302, 303, 307, 308)) {
+                        url = response.header("Location")?.let(url::resolve)?.let { checkedUrl(it.toString()) }
+                            ?: return AnimeStartupCacheResult(0L)
+                    } else {
+                        val retained = (if (accepted && current()) owner.read(asset, primary.toString(), range) else null)
+                            ?: return AnimeStartupCacheResult(0L, detail = "原视频字节未进入可复用缓存")
+                        try { return AnimeStartupCacheResult(retained.end - retained.start + 1L) }
+                        finally { retained.close() }
+                    }
+                } finally { writer?.close() }
+            }
+            return AnimeStartupCacheResult(0L)
+        }
+        var remaining = request.maximumBytes
+        var bytes = 0L
+        var resource = Resource(primary, asset.headers, primary, Kind.MANIFEST)
+        suspend fun playlist(value: Resource): WarmResponse? {
+            if (!current()) return null
+            val response = readWarmResource(value, minOf(256L * 1024L, remaining)) ?: return null
+            remaining -= response.bytes.size
+            return response
+        }
+        var response = playlist(resource) ?: return AnimeStartupCacheResult(0L)
+        val text = response.bytes.decodeToString()
+        var audio: Resource? = null
+        if (text.contains("#EXT-X-STREAM-INF:")) {
+            val lines = text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+            val variants = lines.withIndex().filter { it.value.startsWith("#EXT-X-STREAM-INF:") }
+            if (variants.size != 1) return AnimeStartupCacheResult(0L,
+                detail = "多画质主清单由播放器选择；当前不把任意画质的片段算作下一集已备")
+            fun attribute(line: String, name: String) = Regex("(?:^|,)$name=\"([^\"]+)\"")
+                .find(line.substringAfter(':'))?.groupValues?.get(1)
+            val variant = variants.single()
+            attribute(variant.value, "AUDIO")?.let { group ->
+                val selected = lines.filter { it.startsWith("#EXT-X-MEDIA:") &&
+                    it.contains("TYPE=AUDIO") && attribute(it, "GROUP-ID") == group && it.contains("DEFAULT=YES") }
+                    .singleOrNull() ?: return AnimeStartupCacheResult(0L, detail = "未能确定下一集的默认音轨")
+                attribute(selected, "URI")?.let { uri ->
+                    val url = response.url.resolve(uri)?.let { checkedUrl(it.toString()) } ?: return AnimeStartupCacheResult(0L)
+                    audio = resource.copy(url = url)
+                }
+            }
+            val uri = lines.getOrNull(variant.index + 1)?.takeUnless { it.startsWith('#') }
+                ?: return AnimeStartupCacheResult(0L)
+            val url = response.url.resolve(uri)?.let { checkedUrl(it.toString()) } ?: return AnimeStartupCacheResult(0L)
+            resource = resource.copy(url = url)
+            response = playlist(resource) ?: return AnimeStartupCacheResult(0L)
+        }
+        val resident = mutableSetOf<String>()
+        suspend fun retain(media: Resource): Boolean {
+            if (!current()) return false
+            if (media.url.toString() in resident) return true
+            val body = readWarmResource(media, remaining) ?: return false
+            remaining -= body.bytes.size
+            val actual = owner.read(asset, media.url.toString(), null) ?: return false
+            try {
+                if (actual.total != body.bytes.size.toLong()) return false
+                bytes += actual.total
+                resident += media.url.toString()
+                return true
+            } finally { actual.close() }
+        }
+        suspend fun mediaWindow(resource: Resource, response: WarmResponse): Long {
+            val plan = parseAnimeHlsDownload(response.url, response.bytes.decodeToString())
+            val byName = plan.resources.associateBy { it.name }
+            var initialization: String? = null
+            var cursor = 0L
+            var duration = 0L
+            var preparedUntil = request.positionMs
+            for (line in plan.playlist.lineSequence()) {
+                when {
+                    line.startsWith("#EXT-X-MAP:") -> initialization = Regex("URI=\"([^\"]+)\"").find(line)?.groupValues?.get(1)
+                    line.startsWith("#EXTINF:") -> duration = (line.substringAfter(':').substringBefore(',').toDouble() * 1000).toLong()
+                    line.isNotBlank() && !line.startsWith('#') -> {
+                        val end = cursor + duration
+                        if (end > request.positionMs && cursor < request.positionMs + request.targetDurationMs) {
+                            if (initialization != null) {
+                                val init = byName[initialization] ?: return preparedUntil - request.positionMs
+                                if (!retain(resource.copy(url = checkedUrl(init.url), kind = Kind.MEDIA))) return preparedUntil - request.positionMs
+                            }
+                            val segment = byName[line] ?: return preparedUntil - request.positionMs
+                            if (!retain(resource.copy(url = checkedUrl(segment.url), kind = Kind.MEDIA))) return preparedUntil - request.positionMs
+                            preparedUntil = end
+                        }
+                        cursor = end
+                        if (cursor >= request.positionMs + request.targetDurationMs) break
+                    }
+                }
+            }
+            return (preparedUntil - request.positionMs).coerceAtLeast(0L)
+        }
+        var duration = mediaWindow(resource, response)
+        if (audio != null) {
+            val track = checkNotNull(audio)
+            val audioList = playlist(track)
+            duration = minOf(duration, if (audioList == null) 0L else mediaWindow(track, audioList))
+        }
+        return if (current()) AnimeStartupCacheResult(bytes, duration,
+            if (duration < request.targetDurationMs) "实际已备范围受本次字节额度或可用存储限制" else null)
+        else AnimeStartupCacheResult(0L, detail = "预读身份已过期")
     }
 
     companion object {
@@ -439,8 +661,16 @@ internal class AnimeStreamBridge private constructor(
             finally { bridge.close() }
         }
 
+        suspend fun warmStartup(request: AnimeStartupCacheRequest, scope: CoroutineScope,
+            cache: AnimeStreamCache): AnimeStartupCacheResult {
+            val bridge = create(request.asset, scope, cache = cache)
+            try { return bridge.warmRange(request) }
+            finally { bridge.close() }
+        }
+
         suspend fun create(asset: AnimePlaybackAsset, scope: CoroutineScope, startup: AnimeBufferedStartup? = null,
-            startupByteLimit: Long? = null): AnimeStreamBridge {
+            startupByteLimit: Long? = null, cache: AnimeStreamCache? = null,
+            preparationOnly: Boolean = false): AnimeStreamBridge {
             var pending: AnimeStreamBridge? = null
             return try {
                 withContext(Dispatchers.IO) {
@@ -449,7 +679,7 @@ internal class AnimeStreamBridge private constructor(
                         "当前平台的统一路由暂不支持 DASH，请选择 HLS 或视频文件线路"
                     }
                     require(!primary.encodedPath.endsWith(".pls", true)) { "当前线路不是受支持的视频文件或 HLS 清单" }
-                    val bridge = AnimeStreamBridge(asset, scope, startup, startupByteLimit)
+                    val bridge = AnimeStreamBridge(asset, scope, startup, startupByteLimit, cache, preparationOnly)
                     try {
                         bridge.server = AnimeLoopbackServer(bridge.scope, bridge::handle)
                         pending = bridge
@@ -474,6 +704,7 @@ internal class AnimeStreamBridge private constructor(
                         if (bridge::server.isInitialized) bridge.server.close()
                         bridge.client.close()
                         bridge.scope.cancel()
+                        bridge.releaseCache?.invoke()
                         throw failure
                     }
                 }

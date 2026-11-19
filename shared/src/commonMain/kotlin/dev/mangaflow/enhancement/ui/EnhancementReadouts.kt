@@ -30,7 +30,8 @@ internal fun enhancementMetricIcon(metric: EnhancementMetric): ImageVector = whe
     EnhancementMetric.CACHE_HITS -> Icons.Outlined.Cached
     EnhancementMetric.PRESENTED_FPS, EnhancementMetric.MOTION_THROUGHPUT -> Icons.Outlined.Speed
     EnhancementMetric.MOTION_STATUS -> Icons.Outlined.SlowMotionVideo
-    EnhancementMetric.BUFFER -> Icons.Outlined.DataUsage
+    EnhancementMetric.BUFFER, EnhancementMetric.BUFFER_BYTES -> Icons.Outlined.DataUsage
+    EnhancementMetric.NEXT_EPISODE -> Icons.Outlined.SkipNext
     EnhancementMetric.PROCESS_CPU -> Icons.Outlined.Memory
     EnhancementMetric.PROCESS_MEMORY -> Icons.Outlined.Storage
     EnhancementMetric.THERMAL -> Icons.Outlined.Thermostat

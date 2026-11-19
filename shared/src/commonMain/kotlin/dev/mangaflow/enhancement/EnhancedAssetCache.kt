@@ -12,6 +12,7 @@ import dev.mangaflow.platform.storage.cacheDirectory
 import dev.mangaflow.platform.storage.syncStorageFile
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.storage.AuxiliaryCacheEntry
+import dev.mangaflow.storage.AuxiliaryCacheRemovalException
 import dev.mangaflow.storage.AuxiliaryDiskCacheOwner
 import dev.mangaflow.storage.StorageCacheStore
 import kotlinx.atomicfu.locks.synchronized
@@ -109,14 +110,15 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
     private val leaseLock = StorageLock()
     private val leases = mutableMapOf<String, Int>()
     private val lastAccess = mutableMapOf<String, Long>()
-    private val activeWork = mutableSetOf<String>()
+    private val activeWork = mutableMapOf<String, EnhancedAssetIdentity>()
     private val verified = mutableMapOf<String, String>()
     private val mutableRevision = MutableStateFlow<Map<String, Long>>(emptyMap())
+    private val storage = StorageCacheStore.get(app)
     /** A completed background chapter can wake a cache-only reader without starting inference. */
     val revision: StateFlow<Map<String, Long>> = mutableRevision.asStateFlow()
     override val ownerId: String = "enhancement-v1"
 
-    init { StorageCacheStore.get(app).registerAuxiliaryOwner(this) }
+    init { storage.registerAuxiliaryOwner(this) }
 
     suspend fun acquire(identity: EnhancedAssetIdentity): EnhancedAssetLease? = withContext(Dispatchers.IO) {
         mutation.withLock { acquireLocked(identity) }
@@ -129,7 +131,7 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
             val token = randomUuid()
             val directory = StorageFile(parent, ".work-$token")
             check(directory.mkdir()) { "无法建立增强工作目录" }
-            activeWork += token
+            activeWork[token] = identity
             EnhancedAssetWork(identity, directory, StorageFile(directory, "asset.${identity.outputFormat}"), token)
         }
     }
@@ -278,6 +280,7 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
                 val count = (leases[token] ?: 0) - 1
                 if (count <= 0) leases.remove(token) else leases[token] = count
             }
+            storage.cacheWorkFinished()
         }
         return EnhancedAssetLease(identity, file, width, height, hash, release = ::releaseLease,
             acquireRetention = {
@@ -297,6 +300,8 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
             StorageFile(root, namespace).listFiles().orEmpty().forEach { directory ->
                 if (directory.isDirectory && directory.name.matches(EnhancedAssetIdentity.DIGEST)) {
                     entry(namespace, directory.name)?.let(::add)
+                } else if (directory.isDirectory && directory.name.matches(WORK_DIRECTORY)) {
+                    workEntry(namespace, directory.name)?.let(::add)
                 }
             }
         }
@@ -314,22 +319,68 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
         val bytes = directoryBytes(directory)
         val modified = maxOf(asset.lastModified(), manifest.lastModified())
         val stamp = EnhancedAssetIdentity.digest("${meta}\u0000$bytes\u0000$modified")
-        return AuxiliaryCacheEntry(cacheToken(namespace, key), bytes, modified, stamp)
+        val fields = identityFields(meta.optString("identity"))?.takeIf { it[1] == namespace }
+        return AuxiliaryCacheEntry(cacheToken(namespace, key), bytes, modified, stamp,
+            protected = isLeased(namespace, key), content = namespace,
+            sourceId = fields?.get(2).orEmpty(), workId = fields?.get(4).orEmpty(), partId = fields?.get(5).orEmpty())
+    }
+
+    private fun workEntry(namespace: String, key: String): AuxiliaryCacheEntry? {
+        if (namespace !in EnhancedAssetIdentity.NAMESPACES || !key.matches(WORK_DIRECTORY)) return null
+        val directory = StorageFile(StorageFile(root, namespace), key)
+        if (!directory.isDirectory) return null
+        var bytes = 0L
+        var modified = 0L
+        val stamp = buildString {
+            fun visit(file: StorageFile, path: String) {
+                if (file.isFile) {
+                    val size = file.length()
+                    val time = file.lastModified()
+                    bytes += size; modified = maxOf(modified, time)
+                    append('|').append(path.length).append(':').append(path).append(':').append(size).append(':').append(time)
+                } else file.listFiles().orEmpty().sortedBy { it.name }.forEach { visit(it, "$path/${it.name}") }
+            }
+            visit(directory, "")
+        }
+        if (bytes <= 0L) return null
+        val owner = activeWork[key.removePrefix(".work-")]
+        return AuxiliaryCacheEntry(cacheToken(namespace, key), bytes, modified, EnhancedAssetIdentity.digest(stamp),
+            protected = owner != null, content = namespace, temporary = true,
+            sourceId = owner?.sourceId.orEmpty(), workId = owner?.workId.orEmpty(), partId = owner?.chapterId.orEmpty())
+    }
+
+    /** Read only the existing length-prefixed object fields; the digest remains the authoritative key. */
+    private fun identityFields(encoded: String): List<String>? {
+        val fields = mutableListOf<String>()
+        var offset = 0
+        repeat(7) {
+            val separator = encoded.indexOf(':', offset)
+            if (separator < offset) return null
+            val length = encoded.substring(offset, separator).toIntOrNull() ?: return null
+            if (length < 0 || length > encoded.length - separator - 1) return null
+            offset = separator + 1
+            fields += encoded.substring(offset, offset + length)
+            offset += length
+        }
+        return fields.takeIf { it[0] == "enhanced-asset-v1" && it[1] in EnhancedAssetIdentity.NAMESPACES }
     }
 
     private fun removeLocked(expected: AuxiliaryCacheEntry, canRemove: () -> Boolean): Long? {
         val namespace = expected.key.substringBefore(':')
         val key = expected.key.substringAfter(':', "")
-        if (namespace !in EnhancedAssetIdentity.NAMESPACES || !key.matches(EnhancedAssetIdentity.DIGEST) ||
-            isLeased(namespace, key) || !canRemove()) return null
-        val current = entry(namespace, key) ?: return null
+        val temporary = key.matches(WORK_DIRECTORY)
+        if (expected.protected || namespace !in EnhancedAssetIdentity.NAMESPACES ||
+            (!temporary && !key.matches(EnhancedAssetIdentity.DIGEST)) ||
+            isLeased(namespace, key) || temporary && key.removePrefix(".work-") in activeWork || !canRemove()) return null
+        val current = (if (temporary) workEntry(namespace, key) else entry(namespace, key)) ?: return null
         if (current != expected) return null
         val directory = assetDirectory(namespace, key)
         if (!canRemove() || isLeased(namespace, key)) return null
-        directory.deleteRecursively()
+        val removed = directory.deleteRecursively()
         val freed = (current.bytes - directoryBytes(directory)).coerceAtLeast(0L)
         if (freed > 0L) changed(namespace)
         verified.remove(expected.key); lastAccess.remove(expected.key)
+        if (!removed) throw AuxiliaryCacheRemovalException(freed)
         return freed
     }
 
@@ -343,6 +394,7 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
         if (work.token in activeWork && ownedWork(work)) {
             work.directory.deleteRecursively()
             activeWork.remove(work.token)
+            storage.cacheWorkFinished()
         }
     }
 
@@ -357,6 +409,7 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
     private fun cacheToken(namespace: String, key: String) = "$namespace:$key"
     private fun changed(namespace: String) {
         mutableRevision.value = mutableRevision.value + (namespace to ((mutableRevision.value[namespace] ?: 0L) + 1L))
+        storage.cacheWorkFinished()
     }
     private fun namespaces(namespace: String?) = namespace?.let(::setOf) ?: EnhancedAssetIdentity.NAMESPACES
     private fun directoryBytes(directory: StorageFile): Long = directory.listFiles().orEmpty().sumOf {
@@ -364,6 +417,7 @@ class EnhancedAssetCache private constructor(context: PlatformContext) : Auxilia
     }
 
     companion object {
+        private val WORK_DIRECTORY = Regex("\\.work-[A-Za-z0-9-]{1,64}")
         private val lock = StorageLock()
         private val instances = mutableMapOf<String, EnhancedAssetCache>()
         fun get(context: PlatformContext): EnhancedAssetCache = synchronized(lock) {

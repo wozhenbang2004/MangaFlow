@@ -104,6 +104,10 @@ data class AnimePlaybackAsset(
     val sessionEpoch: Long = 0L,
     val resolutions: List<AnimeResolution> = emptyList(),
     val startPositionMs: Long? = null,
+    /** Safe catalogue labels for native cache ownership; never persist signed URLs or credentials here. */
+    val subjectId: String = "",
+    val subjectTitle: String = "",
+    val episodeTitle: String = "",
 )
 
 enum class AnimeWatchStatus { WISH, WATCHING, COMPLETED, ON_HOLD, DROPPED }
@@ -266,6 +270,13 @@ data class AnimePlaybackSettings(
     val automaticRecoveryAttempts: Int = 2,
     val videoEnhancement: AnimeVideoEnhancementMode = AnimeVideoEnhancementMode.OFF,
     val preferredSourceHeight: Int = 0,
+    val bufferForwardMiB: Int? = null,
+    val bufferBackMiB: Int? = null,
+    val nextEpisodeLeadSeconds: Int? = null,
+    val nextEpisodeBufferSeconds: Int? = null,
+    val nextEpisodeCacheMiB: Int? = null,
+    val predecodeNextEpisode: Boolean = true,
+    val onlinePreparationSeconds: Int? = null,
 ) {
     fun validate(): AnimePlaybackSettings {
         require(skipOpeningSeconds >= 0 && skipEndingSeconds >= 0) { "跳过时长不能小于零。" }
@@ -276,15 +287,29 @@ data class AnimePlaybackSettings(
         }
         require(automaticRecoveryAttempts >= 0) { "自动恢复次数不能小于零。" }
         require(preferredSourceHeight in listOf(0, 480, 720, 1080, 2160)) { "未知的来源清晰度目标。" }
+        require(bufferForwardMiB == null || bufferForwardMiB > 0) { "前方缓冲容量必须大于零。" }
+        require(bufferBackMiB == null || bufferBackMiB >= 0) { "回看容量不能为负。" }
+        require(nextEpisodeLeadSeconds == null || nextEpisodeLeadSeconds >= 0) { "提前准备时长不能为负。" }
+        require(nextEpisodeBufferSeconds == null || nextEpisodeBufferSeconds >= 0) { "下一集缓冲时长不能为负。" }
+        require(nextEpisodeCacheMiB == null || nextEpisodeCacheMiB >= 0) { "下一集缓存容量不能为负。" }
+        require(onlinePreparationSeconds == null || onlinePreparationSeconds > 0) { "增强窗口时长必须大于零。" }
         return this
     }
 }
+
+enum class AnimePreparationPhase { WAITING, RESOLVING, CACHING, DECODING, READY, PARTIAL, FAILED }
 
 data class AnimeNextEpisodePreparation(
     val episodeId: String,
     val addressResolved: Boolean = false,
     val cachedBytes: Long = 0L,
     val startupFramePrepared: Boolean = false,
+    val phase: AnimePreparationPhase = AnimePreparationPhase.RESOLVING,
+    val positionMs: Long = 0L,
+    val bufferedDurationMs: Long? = null,
+    val targetDurationMs: Long = 0L,
+    val maximumBytes: Long = 0L,
+    val detail: String? = null,
 )
 
 enum class AnimeSourceMeasurementPhase { QUEUED, RUNNING, COMPLETE, UNAVAILABLE, CANCELLED }

@@ -1642,6 +1642,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             if (it != AnimeWorkspaceDestination.SOURCES) animeDestinationName = it.name
                                         },
                                         onPlaybackVisibility = { animeImmersive = it },
+                                        onOpenMangaDownloads = {
+                                            model.services.anime.closePlayback()
+                                            drawerAction = DrawerAction(DrawerValue.Closed, Section.DOWNLOADS, ContentProfile.ORDINARY)
+                                        },
                                     )
                                     Section.BOARDS -> {
                                         if (restrictedMode) Box(Modifier.fillMaxSize()) {
@@ -1799,7 +1803,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             changeSection(Section.ANIME)
                                         },
                                         active = rootActive && !searchVisible,
-                                        onOpenDownloads = { changeSection(Section.DOWNLOADS) })
+                                        onOpenDownloads = {
+                                            drawerAction = DrawerAction(DrawerValue.Closed, Section.DOWNLOADS,
+                                                if (contentProfile == ContentProfile.RESTRICTED) ContentProfile.RESTRICTED else ContentProfile.ORDINARY)
+                                        },
+                                        onOpenAnimeDownloads = { navigateAnime(AnimeWorkspaceDestination.DOWNLOADS) })
                                 }
                                 }
                                 }

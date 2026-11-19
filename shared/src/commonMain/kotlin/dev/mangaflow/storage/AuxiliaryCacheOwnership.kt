@@ -11,6 +11,14 @@ data class AuxiliaryCacheEntry(
     val bytes: Long,
     val modifiedAt: Long,
     val identity: String,
+    val protected: Boolean = false,
+    val content: String = "",
+    val workId: String = "",
+    val partId: String = "",
+    val sourceId: String = "",
+    val workTitle: String = "",
+    val partTitle: String = "",
+    val temporary: Boolean = false,
 )
 
 /** The repository keeps its own write lock and rechecks every reviewed identity before removal. */

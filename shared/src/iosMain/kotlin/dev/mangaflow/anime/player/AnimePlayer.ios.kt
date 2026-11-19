@@ -22,6 +22,8 @@ import platform.AVFAudio.AVAudioSessionModeMoviePlayback
 actual fun createAnimePlayer(context: PlatformContext, scope: CoroutineScope): AnimePlayer =
     AppleAnimePlayer(scope)
 
+actual fun initializeAnimeStorage(context: PlatformContext) = Unit
+
 private class AppleAnimePlayer(scope: CoroutineScope) : RoutedNativeAnimePlayer(scope) {
     override val externalSubtitles = false
     override val supportsVideoEnhancement get() = AppleAnimeEnhancementBridge.factory != null

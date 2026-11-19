@@ -22,6 +22,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
@@ -68,6 +70,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
     protected open val supportsVideoEnhancement: Boolean = false
     protected open val supportsModelEnhancement: Boolean = false
     protected open val supportsDecoderStartup: Boolean = false
+    protected open val streamCache: AnimeStreamCache? = null
     protected abstract suspend fun createBackend(): MediampPlayer
     protected open suspend fun createDecoderStartup(byteLimit: Long): MediampPlayer? = null
     protected open fun hasDecodedStartupFrame(backend: MediampPlayer, positionMs: Long): Boolean = false
@@ -91,6 +94,60 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
 
     private var startup: DecoderStartup? = null
     private var handoff: DecoderStartup? = null
+    private class RawStartup(val asset: AnimePlaybackAsset, val session: Long, val timeline: Long,
+        val validUntil: Long) {
+        var release: (() -> Unit)? = null
+        var expiry: Job? = null
+        var ready = false
+    }
+    private var rawStartup: RawStartup? = null
+
+    override suspend fun prepareStartupCache(request: AnimeStartupCacheRequest): AnimeStartupCacheResult = withContext(Dispatchers.Main.immediate) {
+        val cache = streamCache
+        if (cache == null) return@withContext if (request.positionMs == 0L)
+            AnimeStartupCacheResult(cacheStartup(request.asset, request.maximumBytes, request.validUntil))
+        else AnimeStartupCacheResult(0L, detail = "当前平台仅支持起始片段预读")
+        rawStartup?.let(::retireRawStartup)
+        val snapshot = state.value
+        val pending = RawStartup(request.asset, snapshot.sessionGeneration, snapshot.timelineGeneration, request.validUntil)
+        rawStartup = pending
+        fun current() = rawStartup === pending && foreground && state.value.sessionGeneration == pending.session &&
+            state.value.timelineGeneration == pending.timeline && monotonicTimeMillis() < pending.validUntil &&
+            pending.asset.expiresAt?.let { it > wallTimeMillis() } != false
+        try {
+            withContext(Dispatchers.IO) {
+                val release = cache.retain(request.asset)
+                try {
+                    val retained = withContext(Dispatchers.Main.immediate) {
+                        if (current()) { pending.release = release; true } else false
+                    }
+                    if (!retained) release()
+                } catch (failure: Throwable) { release(); throw failure }
+            }
+            if (!current()) return@withContext AnimeStartupCacheResult(0L)
+            val result = withContext(Dispatchers.IO) { AnimeStreamBridge.warmStartup(request, playerScope, cache) }
+            if (!current() || result.bytes <= 0L) return@withContext if (current()) result else AnimeStartupCacheResult(0L)
+            pending.ready = true
+            pending.expiry = playerScope.launch {
+                delay((pending.validUntil - monotonicTimeMillis()).coerceAtLeast(0L))
+                if (rawStartup === pending) retireRawStartup(pending)
+            }
+            result
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (failure: Exception) { AnimeStartupCacheResult(0L, detail = readablePlayerError(failure)) }
+        finally { if (!pending.ready || !currentCoroutineContext().isActive) retireRawStartup(pending) }
+    }
+
+    private fun retireRawStartup(pending: RawStartup) {
+        if (rawStartup === pending) rawStartup = null
+        pending.expiry?.cancel()
+        pending.expiry = null
+        val release = pending.release
+        pending.release = null
+        if (release != null) playerScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            withContext(NonCancellable + Dispatchers.IO) { release() }
+        }
+    }
 
     override suspend fun cacheStartup(asset: AnimePlaybackAsset, byteLimit: Long, validUntil: Long): Long {
         val media = AnimeStreamBridge.warmStartup(asset, playerScope, byteLimit, validUntil) ?: return 0L
@@ -119,7 +176,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
             val buffered = cachedStartup?.takeIf { (cachedAsset, media) ->
                 cachedAsset.sameStartupMedia(asset) && monotonicTimeMillis() < media.validUntil
             }?.second
-            val transport = AnimeStreamBridge.create(asset, playerScope, buffered, startupByteLimit = byteLimit)
+            val transport = AnimeStreamBridge.create(asset, playerScope, buffered, startupByteLimit = byteLimit, cache = streamCache)
             pending.transport = transport
             if (!preparing()) return@withContext false
             val backend = createDecoderStartup(byteLimit) ?: return@withContext false
@@ -151,12 +208,16 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
     }
 
     override fun discardStartup(asset: AnimePlaybackAsset?) = command(fatal = false) {
+        rawStartup?.takeIf { asset == null || it.asset.sameStartupMedia(asset) }?.let(::retireRawStartup)
         startup?.takeIf { asset == null || it.asset.sameStartupMedia(asset) }?.let(::retireDecoderStartup)
         handoff?.takeIf { asset == null || it.asset.sameStartupMedia(asset) }?.let(::retireDecoderStartup)
         if (asset == null || cachedStartup?.first?.sameStartupMedia(asset) == true) cachedStartup = null
     }
 
     override fun onPlaybackEnding(next: AnimePlayerRequest?) {
+        rawStartup?.takeUnless { pending -> next != null && next.localMedia == null && !next.bypassMediaCache &&
+            pending.ready && pending.asset.sameStartupMedia(next.asset) && monotonicTimeMillis() < pending.validUntil &&
+            pending.asset.expiresAt?.let { it > wallTimeMillis() } != false }?.let(::retireRawStartup)
         handoff?.let(::retireDecoderStartup)
         val pending = startup
         if (pending != null && next != null && startupCurrent(pending) && admits(pending, next)) {
@@ -167,7 +228,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
     }
 
     private fun startupCurrent(pending: DecoderStartup) = state.value.sessionGeneration == pending.session &&
-        state.value.timelineGeneration == pending.timeline && options == pending.options &&
+        state.value.timelineGeneration == pending.timeline && options.sameDecoderStartupOptions(pending.options) &&
         monotonicTimeMillis() < pending.validUntil && pending.asset.expiresAt?.let { it > wallTimeMillis() } != false
 
     private fun admits(pending: DecoderStartup, next: AnimePlayerRequest) = pending.ready && foreground &&
@@ -210,7 +271,8 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
             checkNotNull(warm.transport).also { bridge = it }
         } else if (request.localMedia == null) {
             validateAsset(request.asset)
-            AnimeStreamBridge.create(request.asset, playerScope, prepared).also {
+            AnimeStreamBridge.create(request.asset, playerScope, prepared,
+                cache = streamCache.takeUnless { request.bypassMediaCache }).also {
                 if (!isCurrent(generation)) { it.close(); return }
                 bridge = it
             }
@@ -229,6 +291,8 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
             } finally { pending?.close() }
             null
         }
+        // The opened stream now retains this asset itself, so a prepared raw-cache lease can hand off.
+        rawStartup?.let(::retireRawStartup)
         val native = warm?.backend ?: createBackend()
         try {
             currentCoroutineContext().ensureActive()
@@ -509,6 +573,13 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
         localLease = null
     }
 }
+
+/** Live byte/time budgets are applied at adoption; they do not invalidate an already decoded first frame. */
+internal fun AnimePlayerOptions.sameDecoderStartupOptions(other: AnimePlayerOptions): Boolean = copy(
+    bufferMinMs = other.bufferMinMs, bufferMaxMs = other.bufferMaxMs,
+    bufferStartMs = other.bufferStartMs, bufferRebufferMs = other.bufferRebufferMs,
+    bufferForwardBytes = other.bufferForwardBytes, bufferBackBytes = other.bufferBackBytes,
+) == other
 
 @Composable
 internal fun NativeAnimeSurface(player: AnimePlayer, modifier: Modifier) {

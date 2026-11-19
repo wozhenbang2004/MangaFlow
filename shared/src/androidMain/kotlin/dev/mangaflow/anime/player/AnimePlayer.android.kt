@@ -53,10 +53,8 @@ import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.TransferListener
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
-import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.DefaultRenderersFactory
-import androidx.media3.exoplayer.LoadControl
 import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.dash.DefaultDashChunkSource
 import androidx.media3.exoplayer.hls.HlsDataSourceFactory
@@ -81,6 +79,7 @@ import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
 import dev.mangaflow.platform.wallTimeMillis
 import java.io.IOException
+import java.util.WeakHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -108,11 +107,17 @@ import okhttp3.Response
 actual fun createAnimePlayer(context: PlatformContext, scope: CoroutineScope): AnimePlayer =
     AndroidAnimePlayer(context.applicationContext, scope)
 
+actual fun initializeAnimeStorage(context: PlatformContext) {
+    AndroidAnimeCache.get(context)
+}
+
 internal class AndroidAnimePlayer(
     private val context: PlatformContext,
     scope: CoroutineScope,
 ) : SessionAnimePlayer(scope) {
     val engine = MutableStateFlow<ExoPlayer?>(null)
+    private val loadControls = WeakHashMap<ExoPlayer, AndroidAnimeLoadControl>()
+    private var lastAcceptedForwardBytes = AnimePlayerOptions().bufferForwardBytes
     private var session: MediaSession? = null
     private var listener: Player.Listener? = null
     private var polling: Job? = null
@@ -171,6 +176,11 @@ internal class AndroidAnimePlayer(
     private var startupGeneration = 0L
     private var startup: Startup? = null
     private var startupExpiry: Job? = null
+    private class StartupCacheLease(val asset: AnimePlaybackAsset, val release: () -> Unit)
+    private var startupCacheGeneration = 0L
+    private var startupCacheRequest: AnimePlaybackAsset? = null
+    private var startupCacheLease: StartupCacheLease? = null
+    private var startupCacheExpiry: Job? = null
     private var remoteMediaPlan: RemoteMediaPlan? = null
     private var inspectedAfterParserError = false
     private var enhancementRevision = 0L
@@ -209,7 +219,47 @@ internal class AndroidAnimePlayer(
     override val reportsFirstFrame = true
 
     override suspend fun cacheStartup(asset: AnimePlaybackAsset, byteLimit: Long, validUntil: Long): Long =
-        cacheAndroidAnimeStartup(context, asset, byteLimit)
+        prepareStartupCache(AnimeStartupCacheRequest(asset, 0L, 30_000L, byteLimit, validUntil)).bytes
+
+    override suspend fun prepareStartupCache(request: AnimeStartupCacheRequest): AnimeStartupCacheResult =
+        withContext(Dispatchers.Main.immediate) {
+            discardStartupCacheNow()
+            if (request.validUntil <= SystemClock.elapsedRealtime())
+                return@withContext AnimeStartupCacheResult(0L, detail = "下一集准备已过期")
+            val attempt = startupCacheGeneration
+            startupCacheRequest = request.asset
+            var pending: (() -> Unit)? = null
+            var owner: StartupCacheLease? = null
+            var retained = false
+            try {
+                val release = withContext(Dispatchers.IO) {
+                    AndroidAnimeCache.get(context).acquire(request.asset).also { pending = it }
+                }
+                if (startupCacheGeneration != attempt)
+                    return@withContext AnimeStartupCacheResult(0L, detail = "下一集准备意图已变化")
+                val lease = StartupCacheLease(request.asset, release).also {
+                    owner = it
+                    startupCacheLease = it
+                    pending = null
+                }
+                startupCacheExpiry = playerScope.launch(Dispatchers.Main.immediate) {
+                    delay((request.validUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+                    if (startupCacheLease === lease) discardStartupCacheNow()
+                }
+                val result = cacheAndroidAnimeStartup(context, request)
+                if (startupCacheGeneration != attempt || startupCacheLease !== lease)
+                    return@withContext AnimeStartupCacheResult(0L, detail = "下一集准备已失效")
+                retained = true
+                result
+            } finally {
+                pending?.invoke()
+                if (!retained && owner != null && startupCacheLease === owner) discardStartupCacheNow()
+            }
+        }
+
+    override fun noteVideoPreparationIssue(detail: String?) {
+        mutableState.value = mutableState.value.copy(preparedVideoIssue = detail)
+    }
 
     override suspend fun prepareVideoWindow(request: AnimePreparedVideoRequest): Boolean {
         val generation = nativeGeneration
@@ -254,6 +304,7 @@ internal class AndroidAnimePlayer(
             if (byteLimit <= 0L || !foreground || state.value.isBuffering ||
                 validUntil <= SystemClock.elapsedRealtime()) return@withContext false
             discardStartupNow()
+            if (startupCacheRequest?.let { !isSameStartupAsset(it, asset) } == true) discardStartupCacheNow()
             val attempt = startupGeneration
             val preparedOptions = options
             startupRequest = asset
@@ -265,7 +316,8 @@ internal class AndroidAnimePlayer(
             try {
                 val next = AnimePlayerRequest(asset, positionMs.coerceAtLeast(0L), playWhenReady = false)
                 val remote = createRemoteMedia(next, gate).also { resources = it }
-                if (startupGeneration != attempt || !foreground || options != preparedOptions) return@withContext false
+                if (startupGeneration != attempt || !foreground || !sameStartupConfiguration(options, preparedOptions))
+                    return@withContext false
                 val exo = createEngine(gate).also { candidate = it }
                 val output = AndroidAnimeStartupSurface().also { surface = it }
                 val media = remote.plan.createSource(remote.plan.type, false)
@@ -309,7 +361,8 @@ internal class AndroidAnimePlayer(
                 val timeLeft = (validUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
                 val result = withTimeoutOrNull(timeLeft) { ready.await() } == true
                 if (!result || startup !== owner || exo.playerError != null ||
-                    state.value.isBuffering || !foreground || options != preparedOptions) return@withContext false
+                    state.value.isBuffering || !foreground || !sameStartupConfiguration(options, preparedOptions))
+                    return@withContext false
                 retained = true
                 startupExpiry = playerScope.launch(Dispatchers.Main.immediate) {
                     try { delay((validUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0L)) }
@@ -327,7 +380,18 @@ internal class AndroidAnimePlayer(
     override fun discardStartup(asset: AnimePlaybackAsset?) {
         playerScope.launch(Dispatchers.Main.immediate) {
             if (asset == null || startupRequest?.let { isSameStartupAsset(it, asset) } == true) discardStartupNow()
+            if (asset == null || startupCacheRequest?.let { isSameStartupAsset(it, asset) } == true) discardStartupCacheNow()
         }
+    }
+
+    private fun discardStartupCacheNow() {
+        ++startupCacheGeneration
+        startupCacheRequest = null
+        startupCacheExpiry?.cancel()
+        startupCacheExpiry = null
+        val previous = startupCacheLease
+        startupCacheLease = null
+        previous?.release?.invoke()
     }
 
     private fun discardStartupNow() {
@@ -343,10 +407,15 @@ internal class AndroidAnimePlayer(
     private fun isSameStartupAsset(left: AnimePlaybackAsset, right: AnimePlaybackAsset): Boolean =
         left.copy(title = "", resolutions = emptyList()) == right.copy(title = "", resolutions = emptyList())
 
+    private fun sameStartupConfiguration(left: AnimePlayerOptions, right: AnimePlayerOptions): Boolean =
+        left.copy(bufferMinMs = right.bufferMinMs, bufferMaxMs = right.bufferMaxMs,
+            bufferStartMs = right.bufferStartMs, bufferRebufferMs = right.bufferRebufferMs,
+            bufferForwardBytes = right.bufferForwardBytes, bufferBackBytes = right.bufferBackBytes) == right
+
     private fun takeStartup(request: AnimePlayerRequest): Startup? {
         val owner = startup
         if (owner == null || !owner.firstFrame || owner.positionMs != request.positionMs ||
-            request.bypassMediaCache || request.localMedia != null || options != owner.options ||
+            request.bypassMediaCache || request.localMedia != null || !sameStartupConfiguration(options, owner.options) ||
             !isSameStartupAsset(owner.asset, request.asset) || owner.player.playerError != null ||
             owner.player.playbackState != Player.STATE_READY || owner.player.currentPosition != request.positionMs ||
             owner.validUntil <= SystemClock.elapsedRealtime() ||
@@ -386,6 +455,9 @@ internal class AndroidAnimePlayer(
             return
         }
         adoptRemoteResources(remote)
+        // The active player already owns this exact asset before the speculative
+        // lease is relinquished, so a cache sweep cannot break the hand-off.
+        discardStartupCacheNow()
         prepareMedia(generation, remote.plan.createSource(remote.plan.type, false), remote.unsupportedSubtitle)
     }
 
@@ -395,11 +467,13 @@ internal class AndroidAnimePlayer(
             exo.removeListener(owner.listener)
             owner.surface.detach(exo)
             owner.surface.close()
+            loadControls[exo]?.update(options)
             owner.gate.promote()
             exo.setPriority(C.PRIORITY_PLAYBACK)
             exo.setWakeMode(C.WAKE_MODE_NETWORK)
             connectEngine(generation, exo)
             adoptRemoteResources(owner.resources)
+            discardStartupCacheNow()
         } catch (_: Exception) {
             runCatching { owner.close() }
             return false
@@ -433,7 +507,7 @@ internal class AndroidAnimePlayer(
         var pendingClient: OkHttpClient? = null
         try {
             val cacheOwner = withContext(Dispatchers.IO) {
-                AndroidAnimeCache.get(context).also { pendingLease = it.acquire() }
+                AndroidAnimeCache.get(context).also { pendingLease = it.acquire(asset) }
             }
             currentCoroutineContext().ensureActive()
 
@@ -574,14 +648,8 @@ internal class AndroidAnimePlayer(
     }
 
     private fun createEngine(gate: AndroidAnimeStartupGate? = null): ExoPlayer {
-        val control = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(options.bufferMinMs, options.bufferMaxMs, options.bufferStartMs, options.bufferRebufferMs)
-            .setTargetBufferBytes(64 * 1024 * 1024)
-            .setPrioritizeTimeOverSizeThresholds(false).build()
-        val loadControl = if (gate == null) control else object : LoadControl by control {
-            override fun shouldContinueLoading(parameters: LoadControl.Parameters): Boolean =
-                gate.allowsLoading && control.shouldContinueLoading(parameters)
-        }
+        val loadControl = AndroidAnimeLoadControl(options, gate, lastAcceptedForwardBytes)
+        lastAcceptedForwardBytes = loadControl.effectiveForwardBytes
         return ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true))
             .setLoadControl(loadControl)
             .setAudioAttributes(AudioAttributes.Builder()
@@ -589,7 +657,7 @@ internal class AndroidAnimePlayer(
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(if (gate == null) C.WAKE_MODE_NETWORK else C.WAKE_MODE_NONE)
             .setPriority(if (gate == null) C.PRIORITY_PLAYBACK else C.PRIORITY_PLAYBACK_PRELOAD)
-            .build()
+            .build().also { loadControls[it] = loadControl }
     }
 
     private fun connectEngine(generation: Long, exo: ExoPlayer) {
@@ -1179,6 +1247,7 @@ internal class AndroidAnimePlayer(
                 positionMs = exo.currentPosition.coerceAtLeast(0L),
                 durationMs = exo.duration.takeIf { it != C.TIME_UNSET && it >= 0 } ?: -1L,
                 bufferedMs = exo.bufferedPosition.takeIf { it != C.TIME_UNSET && it >= 0 } ?: -1L,
+                bufferMetrics = loadControls[exo]?.metrics(wallTimeMillis()),
                 speed = exo.playbackParameters.speed,
                 isBuffering = exo.playbackState == Player.STATE_BUFFERING,
                 playbackSuppressed = exo.playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE,
@@ -1390,6 +1459,18 @@ internal class AndroidAnimePlayer(
     override fun setVolumeNative(volume: Float) { engine.value?.volume = volume }
 
     override fun configureNative(previous: AnimePlayerOptions, next: AnimePlayerOptions) {
+        if (next.bufferForwardBytes in 1L until Runtime.getRuntime().maxMemory())
+            lastAcceptedForwardBytes = next.bufferForwardBytes
+        startup?.takeIf { sameStartupConfiguration(it.options, next) }?.player?.let { warm ->
+            loadControls[warm]?.update(next)
+        }
+        engine.value?.let { exo ->
+            loadControls[exo]?.let { control ->
+                control.update(next)
+                lastAcceptedForwardBytes = control.effectiveForwardBytes
+                mutableState.value = mutableState.value.copy(bufferMetrics = control.metrics(wallTimeMillis()))
+            }
+        }
         if (previous.videoEnhancement != next.videoEnhancement || previous.enhancementScale != next.enhancementScale ||
             previous.preparedVideoModel != next.preparedVideoModel || previous.enhancementModel != next.enhancementModel ||
             previous.realtimeFrames != next.realtimeFrames) {
@@ -1400,13 +1481,6 @@ internal class AndroidAnimePlayer(
                 next.videoEnhancement, if (next.videoEnhancement == AnimeVideoEnhancementMode.OFF)
                     AnimeVideoEnhancementPhase.OFF else AnimeVideoEnhancementPhase.WAITING,
             ))
-        }
-        if (engine.value != null && previous.copy(backgroundAudio = next.backgroundAudio,
-                automaticRecoveryAttempts = next.automaticRecoveryAttempts,
-                videoEnhancement = next.videoEnhancement, enhancementScale = next.enhancementScale,
-                preparedVideoModel = next.preparedVideoModel, enhancementModel = next.enhancementModel,
-                realtimeFrames = next.realtimeFrames) != next) {
-            mutableState.value = mutableState.value.copy(notice = "新的缓冲参数将在下次打开媒体时生效")
         }
     }
 
@@ -1529,6 +1603,17 @@ internal class AndroidAnimePlayer(
         releaseCache = null
     }
 
+    override fun onPlaybackEnding(next: AnimePlayerRequest?) {
+        // This hook also runs from the cancelled application scope's finalizer.
+        // Release synchronously; launching a new child there would never execute.
+        if (next == null) {
+            discardStartupNow()
+            discardStartupCacheNow()
+        } else if (next.localMedia != null || next.bypassMediaCache ||
+                startupCacheRequest?.let { !isSameStartupAsset(it, next.asset) } == true)
+            discardStartupCacheNow()
+    }
+
     internal fun backgroundServiceUnavailable() {
         mutableState.value = mutableState.value.copy(
             notice = "系统暂未允许后台播放服务，离开应用后可能暂停；可回到前台重试",
@@ -1586,7 +1671,7 @@ internal fun animeCacheDataSource(asset: AnimePlaybackAsset, cacheOwner: Android
         .setUpstreamDataSourceFactory(upstream)
         .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
         .setCacheKeyFactory { spec ->
-            animeCacheKey(asset, spec.uri)
+            cacheOwner.register(asset, animeCacheKey(asset, spec.uri))
         }
 
 internal fun animeCacheKey(asset: AnimePlaybackAsset, uri: Uri): String {

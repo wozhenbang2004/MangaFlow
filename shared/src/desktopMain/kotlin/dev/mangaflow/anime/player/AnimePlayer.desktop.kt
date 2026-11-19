@@ -23,6 +23,11 @@ import kotlin.math.abs
 actual fun createAnimePlayer(context: PlatformContext, scope: CoroutineScope): AnimePlayer =
     DesktopAnimePlayer(context, scope)
 
+actual fun initializeAnimeStorage(context: PlatformContext) {
+    DesktopAnimeStreamCache.get(context)
+    DesktopAnimeWindowFiles.get(context)
+}
+
 private class DesktopAnimePlayer(
     private val context: PlatformContext,
     scope: CoroutineScope,
@@ -31,12 +36,14 @@ private class DesktopAnimePlayer(
     override val supportsVideoEnhancement = true
     override val supportsModelEnhancement = System.getProperty("os.name", "").startsWith("Windows", ignoreCase = true)
     override val supportsDecoderStartup = System.getProperty("os.name", "").startsWith("Windows", ignoreCase = true)
+    override val streamCache by lazy { DesktopAnimeStreamCache.get(context) }
     private var warming = true
     private var videoBeforeBackground: String? = null
     private var enhancementMediaReady = false
     private var statisticsJob: Job? = null
     private var statisticsHandle: MPVHandle? = null
     private val videoRenderingActive = MutableStateFlow(false)
+    private var windowOwnsVideo = false
     private val animeJaNai = DesktopAnimeJaNai(File(context.dataRoot, "enhancement/engines"))
     private val nativeEnhancement = DesktopAnimeJaNaiEnhancement(
         runtime = animeJaNai,
@@ -61,6 +68,38 @@ private class DesktopAnimePlayer(
             }
         },
     )
+    private val onlinePreparation by lazy {
+        DesktopAnimeOnlinePreparation(context, playerScope, videoRenderingActive,
+            current = { window, handle ->
+                val snapshot = state.value
+                engine.value?.impl === handle && snapshot.sessionGeneration == window.sessionGeneration &&
+                    snapshot.timelineGeneration == window.timelineGeneration && options.preparedVideoModel == window.model &&
+                    (foreground || snapshot.inPictureInPicture) && request?.localMedia == null &&
+                    request?.asset?.let { asset -> asset.playbackIdentity() == window.asset.playbackIdentity() &&
+                        asset.url == window.asset.url && asset.headers == window.asset.headers } == true
+            },
+            suspendRealtime = { suspended ->
+                if (windowOwnsVideo != suspended) { windowOwnsVideo = suspended; applyVideoEnhancement() }
+            },
+            update = { window, issue -> mutableState.value = state.value.copy(preparedVideoWindow = window, preparedVideoIssue = issue) },
+        )
+    }
+
+    override suspend fun prepareVideoWindow(request: AnimePreparedVideoRequest): Boolean {
+        val handle = engine.value?.impl as? MPVHandle ?: return false
+        return onlinePreparation.prepare(request, handle)
+    }
+
+    override fun discardPreparedVideo() = command(fatal = false) { onlinePreparation.clear() }
+
+    override fun noteVideoPreparationIssue(detail: String?) = command(fatal = false) {
+        mutableState.value = state.value.copy(preparedVideoIssue = detail)
+    }
+
+    override fun seekNative(positionMs: Long) {
+        check(onlinePreparation.clear()) { "增强窗口尚未退出，请重新打开当前视频后定位" }
+        super.seekNative(positionMs)
+    }
 
     override suspend fun createBackend(): MediampPlayer = createMpv()
 
@@ -77,7 +116,11 @@ private class DesktopAnimePlayer(
                     configuration.realtimeFrames != null)
                 MpvMediampPlayerFactory().create(context, playerScope.coroutineContext) { handle ->
                     if (animeJaNai.usesNativeRuntime()) handle.option("hwdec", "d3d11va")
+                    if (configuration.preparedVideoModel != null && configuration.realtimeFrames == null &&
+                        configuration.enhancementModel?.engineId != EnhancementEngineIds.DESKTOP_REALTIME)
+                        check(handle.option("hwdec", "auto-copy")) { "播放器无法准备可复用的解码画面" }
                     handle.option("cache", "yes")
+                    check(handle.option("rebase-start-time", "yes")) { "播放器无法统一视频时间轴" }
                     // Start with a short current-media window; expand only after actual
                     // native readiness and the initial buffering period have completed.
                     handle.option("cache-secs", if (preroll) "0.25" else (configuration.bufferStartMs / 1000.0).toString())
@@ -85,8 +128,12 @@ private class DesktopAnimePlayer(
                     handle.option("cache-pause", if (preroll) "no" else "yes")
                     handle.option("cache-pause-initial", if (preroll) "no" else "yes")
                     handle.option("cache-pause-wait", (configuration.bufferStartMs / 1000.0).toString())
-                    handle.option("demuxer-max-bytes", (startupByteLimit ?: ACTIVE_FORWARD_BYTES).toString())
-                    handle.option("demuxer-max-back-bytes", if (preroll) "0" else ACTIVE_BACK_BYTES.toString())
+                    check(handle.option("demuxer-max-bytes", (startupByteLimit ?: configuration.bufferForwardBytes).toString())) {
+                        "播放器无法应用前方缓冲容量"
+                    }
+                    check(handle.option("demuxer-max-back-bytes", if (preroll) "0" else configuration.bufferBackBytes.toString())) {
+                        "播放器无法应用回看缓冲容量"
+                    }
                     if (preroll) check(handle.option("mute", "yes")) { "预解码播放器无法静音" }
                     handle.option("prefetch-playlist", "no")
                     handle.option("ytdl", "no")
@@ -109,13 +156,14 @@ private class DesktopAnimePlayer(
 
     override fun activateDecoderStartup(backend: MediampPlayer): Boolean {
         val handle = backend.impl as? MPVHandle ?: return false
-        return handle.setPropertyString("demuxer-max-bytes", ACTIVE_FORWARD_BYTES.toString()) &&
-            handle.setPropertyString("demuxer-max-back-bytes", ACTIVE_BACK_BYTES.toString()) &&
+        return handle.setPropertyString("demuxer-max-bytes", options.bufferForwardBytes.toString()) &&
+            handle.setPropertyString("demuxer-max-back-bytes", options.bufferBackBytes.toString()) &&
             handle.setPropertyBoolean("cache-pause", true) && handle.setPropertyBoolean("cache-pause-initial", true) &&
             handle.setPropertyBoolean("mute", false)
     }
 
     override fun onMediaOpeningNative() {
+        onlinePreparation.clear()
         warming = true
         enhancementMediaReady = false
         applyVideoEnhancement()
@@ -180,7 +228,15 @@ private class DesktopAnimePlayer(
                         )
                         if (alternateRuntime && handle.getPropertyBooleanOrNull("video-frame-info/interlaced") != null)
                             animeJaNai.confirmFirstFrame()
-                        fps to statistics
+                        val buffers = AnimeBufferMetrics(
+                            allocatedBytes = counter("demuxer-cache-state/total-bytes"),
+                            forwardBytes = counter("demuxer-cache-state/fw-bytes"),
+                            targetForwardBytes = counter("demuxer-max-bytes"),
+                            targetBackBytes = counter("demuxer-max-back-bytes"),
+                            sampledAtMillis = monotonicTimeMillis(),
+                            detail = "原生压缩包缓存估计；回看实际字节未单独公开，不含已解码画面或磁盘缓存",
+                        )
+                        Triple(fps, statistics, buffers)
                     }.getOrNull()
                 }
                 if (!isCurrent(generation) || engine.value?.impl !== handle) break
@@ -188,16 +244,25 @@ private class DesktopAnimePlayer(
                 val refreshHz = context.playbackDisplayRefreshHz?.invoke()
                 if (sample != null) {
                     publish(generation) { it.copy(sourceFps = sample.first, droppedFrames = sample.second.outputDroppedFrames,
-                        nativeVideoStatistics = sample.second, displayRefreshHz = refreshHz) }
+                        nativeVideoStatistics = sample.second, displayRefreshHz = refreshHz, bufferMetrics = sample.third) }
                 } else publish(generation) { it.copy(sourceFps = null, droppedFrames = null,
-                    nativeVideoStatistics = null, displayRefreshHz = refreshHz) }
+                    nativeVideoStatistics = null, displayRefreshHz = refreshHz, bufferMetrics = null) }
                 if (videoRenderingActive.value) delay(1_000L)
             }
         }
     }
 
     override fun configureNative(previous: AnimePlayerOptions, next: AnimePlayerOptions) {
-        if (previous != next) discardStartup()
+        if (!previous.sameDecoderStartupOptions(next)) discardStartup()
+        if (previous.preparedVideoModel != next.preparedVideoModel || previous.enhancementModel != next.enhancementModel ||
+            previous.videoEnhancement != next.videoEnhancement || previous.realtimeFrames != next.realtimeFrames) onlinePreparation.clear()
+        if (previous.preparedVideoModel != next.preparedVideoModel && next.preparedVideoModel != null) {
+            val handle = engine.value?.impl as? MPVHandle
+            if (next.realtimeFrames == null && next.enhancementModel?.engineId != EnhancementEngineIds.DESKTOP_REALTIME) {
+                if (handle != null && !handle.setPropertyString("hwdec", "auto-copy"))
+                    mutableState.value = state.value.copy(preparedVideoIssue = "当前内核未接受预处理解码方式，请重新打开当前视频")
+            } else mutableState.value = state.value.copy(preparedVideoIssue = "DirectML 实时补帧与在线增强窗口暂不能同时启用")
+        }
         applyBufferPolicy()
         applyVideoEnhancement()
     }
@@ -205,21 +270,21 @@ private class DesktopAnimePlayer(
     private fun applyVideoEnhancement() {
         val handle = engine.value?.impl as? MPVHandle
         enhancement.configure(
-            handle = handle.takeUnless { wantsNativeModel },
+            handle = handle.takeUnless { wantsNativeModel || windowOwnsVideo },
             generation = nativeGeneration,
             mode = options.videoEnhancement,
             scale = options.enhancementScale,
             model = options.enhancementModel.takeUnless { wantsNativeModel },
-            mediaReady = enhancementMediaReady,
+            mediaReady = enhancementMediaReady && !windowOwnsVideo,
         )
         nativeEnhancement.configure(
-            handle, nativeGeneration, options.videoEnhancement, enhancementMediaReady,
+            handle.takeUnless { windowOwnsVideo }, nativeGeneration, options.videoEnhancement, enhancementMediaReady && !windowOwnsVideo,
             options.enhancementModel.takeIf { wantsNativeModel }, options.realtimeFrames,
         )
     }
 
     override fun setForegroundNative(foreground: Boolean, backgroundAudio: Boolean) {
-        if (!foreground) discardStartup()
+        if (!foreground) { discardStartup(); onlinePreparation.clear() }
         val handle = engine.value?.impl as? MPVHandle ?: return
         if (!foreground && backgroundAudio && videoBeforeBackground == null) {
             val selection = handle.getPropertyString("vid") ?: "auto"
@@ -243,6 +308,8 @@ private class DesktopAnimePlayer(
         }
         val minimum = if (inactive || warming) 0 else options.bufferMinMs
         val accepted = listOf(
+            handle.setPropertyString("demuxer-max-bytes", options.bufferForwardBytes.toString()),
+            handle.setPropertyString("demuxer-max-back-bytes", options.bufferBackBytes.toString()),
             handle.setPropertyDouble("cache-secs", target / 1000.0),
             handle.setPropertyDouble("demuxer-readahead-secs", 0.0),
             handle.setPropertyDouble("demuxer-hysteresis-secs", minimum / 1000.0),
@@ -255,6 +322,7 @@ private class DesktopAnimePlayer(
     }
 
     override fun releaseNative() {
+        onlinePreparation.clear()
         videoRenderingActive.value = false
         statisticsJob?.cancel()
         statisticsJob = null
@@ -262,7 +330,7 @@ private class DesktopAnimePlayer(
         nativeEnhancement.release()
         enhancement.release()
         enhancementMediaReady = false
-        mutableState.value = state.value.copy(nativeVideoStatistics = null, sourceFps = null, droppedFrames = null,
+        mutableState.value = state.value.copy(nativeVideoStatistics = null, sourceFps = null, droppedFrames = null, bufferMetrics = null,
             videoEnhancement = AnimeVideoEnhancementState(
             mode = options.videoEnhancement,
             phase = AnimeVideoEnhancementPhase.OFF,
@@ -270,12 +338,9 @@ private class DesktopAnimePlayer(
         videoBeforeBackground = null
         warming = true
         super.releaseNative()
+        onlinePreparation.nativeClosed()
     }
 
-    private companion object {
-        const val ACTIVE_FORWARD_BYTES = 32L * 1024 * 1024
-        const val ACTIVE_BACK_BYTES = 8L * 1024 * 1024
-    }
 }
 
 @Composable

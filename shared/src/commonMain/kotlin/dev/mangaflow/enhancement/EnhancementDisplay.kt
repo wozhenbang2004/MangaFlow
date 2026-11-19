@@ -14,6 +14,8 @@ enum class EnhancementMetric(val reader: Boolean, val anime: Boolean, val resour
     MOTION_LATENCY(false, true),
     GPU_TIME(false, true),
     BUFFER(false, true),
+    BUFFER_BYTES(false, true),
+    NEXT_EPISODE(false, true),
     PROCESS_CPU(true, true, true),
     PROCESS_MEMORY(true, true, true),
     THERMAL(true, true, true);
@@ -33,6 +35,8 @@ enum class EnhancementMetric(val reader: Boolean, val anime: Boolean, val resour
         MOTION_LATENCY -> "单次补帧耗时"
         GPU_TIME -> "增强 GPU 耗时"
         BUFFER -> "播放缓冲"
+        BUFFER_BYTES -> "原生缓冲字节"
+        NEXT_EPISODE -> "下一集准备"
         PROCESS_CPU -> "进程 CPU"
         PROCESS_MEMORY -> "进程驻留内存"
         THERMAL -> "设备热压力"
@@ -40,6 +44,6 @@ enum class EnhancementMetric(val reader: Boolean, val anime: Boolean, val resour
 
     companion object {
         fun defaults(content: EnhancementContent): Set<EnhancementMetric> = if (content == EnhancementContent.ANIME)
-            setOf(QUALITY, PRESENTED_FPS, BUFFER, PREPARED) else setOf(QUALITY, PREPARED)
+            setOf(QUALITY, PRESENTED_FPS, BUFFER, NEXT_EPISODE, PREPARED) else setOf(QUALITY, PREPARED)
     }
 }

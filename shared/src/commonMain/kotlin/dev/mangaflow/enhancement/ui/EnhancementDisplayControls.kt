@@ -86,7 +86,8 @@ internal fun EnhancementDisplayControls(content: EnhancementContent) {
         val groups = listOf(
             "画质与准备" to listOf(EnhancementMetric.QUALITY, EnhancementMetric.DIMENSIONS,
                 EnhancementMetric.PREPARED, EnhancementMetric.TASKS, EnhancementMetric.PAGE_LATENCY,
-                EnhancementMetric.CACHE_HITS, EnhancementMetric.GPU_TIME, EnhancementMetric.BUFFER),
+                EnhancementMetric.CACHE_HITS, EnhancementMetric.GPU_TIME, EnhancementMetric.BUFFER,
+                EnhancementMetric.BUFFER_BYTES, EnhancementMetric.NEXT_EPISODE),
             "帧率与补帧" to listOf(EnhancementMetric.PRESENTED_FPS, EnhancementMetric.MOTION_STATUS,
                 EnhancementMetric.MOTION_THROUGHPUT, EnhancementMetric.MOTION_LATENCY),
             "设备" to listOf(EnhancementMetric.PROCESS_CPU, EnhancementMetric.PROCESS_MEMORY, EnhancementMetric.THERMAL),

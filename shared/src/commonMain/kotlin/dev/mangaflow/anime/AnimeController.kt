@@ -7,6 +7,8 @@ import dev.mangaflow.anime.player.AnimePlayerState
 import dev.mangaflow.anime.player.AnimeNativeVideoStatistics
 import dev.mangaflow.anime.player.AnimePlayerOptions
 import dev.mangaflow.anime.player.AnimePreparedVideoRequest
+import dev.mangaflow.anime.player.AnimeStartupCacheRequest
+import dev.mangaflow.anime.player.AnimeStartupCacheResult
 import dev.mangaflow.anime.player.AnimeVideoEnhancementMode
 import dev.mangaflow.anime.player.AnimeLocalMedia
 import dev.mangaflow.anime.player.createAnimePlayer
@@ -72,13 +74,13 @@ import kotlinx.datetime.toLocalDateTime
 import kotlin.time.Instant
 
 private val SOURCE_HEIGHT = Regex("""(?<!\d)([1-8]\d{2,3})\s*[pP](?!\d)""")
-private const val NEXT_EPISODE_CACHE_BYTES = 2L * 1024 * 1024
 private const val ONLINE_ANIME_SOURCE_BYTES = 24L * 1024 * 1024
 private const val ONLINE_ANIME_RESULT_BYTES = 64L * 1024 * 1024
 
 /** Application-owned data and playback. Screens keep only disclosure, drafts and scroll state. */
 class AnimeController(private val context: PlatformContext, private val scope: CoroutineScope,
-    downloadStore: () -> dev.mangaflow.anime.downloads.AnimeDownloadStore) {
+    downloadStore: () -> dev.mangaflow.anime.downloads.AnimeDownloadStore,
+    videoPreparationStore: () -> VideoPreparationStore) {
     private val enhancementCenter by lazy { EnhancementCenter.get(context) }
     private var observedEnhancementSession: String? = null
     private var observedEnhancementTimeline = -1L
@@ -88,6 +90,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private var onlineVideoTimeline: Pair<Long, Long>? = null
     private var onlineVideoNotBefore = 0L
     private var onlineVideoCost = 0L
+    private var onlineVideoWindowTarget = 0L
     private val metadata = AnimeMetadataRepository(context)
     private val sources = AnimeSourceRepository(context)
     private val unifiedSearch = AnimeUnifiedSearch(scope, metadata, sources)
@@ -116,9 +119,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         it.setPlaybackBusy(playbackBusy())
     } }
     val downloads get() = downloadsOwner.value
-    private val enhancementsOwner = lazy { VideoPreparationStore(context, downloads, enhancementCenter).also {
-        enhancementCenter.attachVideoPreparation(it)
-    } }
+    private val enhancementsOwner = lazy { videoPreparationStore() }
     val enhancements get() = enhancementsOwner.value
     val sourceHomes: Map<String, String> get() = sources.providers.associate { it.id to it.homeUrl } +
         dev.mangaflow.anime.sources.lanerc.LANERC_SOURCE_DIRECTORY.filter { descriptor ->
@@ -275,10 +276,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private data class PreparationTarget(
         val subjectId: String, val episodeId: String, val option: AnimeEpisodeOption,
         val revision: String, val route: DownloadRouteSnapshot, val preferredHeight: Int, val timelineGeneration: Long,
+        val settings: AnimePlaybackSettings,
+        val budget: AnimePreparationBudget,
     )
     private data class PreparedPlayback(
         val target: PreparationTarget, val asset: AnimePlaybackAsset, val validUntil: Long,
         var decoderAsset: AnimePlaybackAsset? = null,
+        var cacheAsset: AnimePlaybackAsset? = null,
     )
     private data class ResolvedPlaybackOption(val option: AnimeEpisodeOption, val asset: AnimePlaybackAsset, val revision: String?)
 
@@ -290,6 +294,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             combine(enhancementCenter.settings.state, enhancementCenter.settings.sessions,
                 enhancementCenter.resources.usage, enhancementCenter.inventory) { _, _, _, _ -> Unit }.collect {
                 playerInstance?.configure(playerOptions(mutableState.value.settings))
+            }
+        }
+        scope.launch {
+            enhancementCenter.resources.state.collect {
+                playerInstance?.configure(playerOptions(mutableState.value.settings))
+                invalidatePreparation()
             }
         }
         scope.launch {
@@ -309,6 +319,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         )).await()
                     }
                     val settingsChanged = mutableState.value.settings != stored.settings
+                    val preparationChanged = !mutableState.value.settings.sameNextPreparation(stored.settings)
                     val sourceHeightChanged = mutableState.value.settings.preferredSourceHeight != stored.settings.preferredSourceHeight
                     val bindingsChanged = previousBindings != stored.bindings
                     previousBindings = stored.bindings
@@ -348,6 +359,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         } == true,
                     ) }
                     if (settingsChanged) playerInstance?.configure(playerOptions(stored.settings))
+                    if (preparationChanged) {
+                        clearPreparation()
+                        active?.nextPreparationNotBefore = 0L
+                    }
                     if (bindingsChanged) rebuildOptions()
                     if (sourceHeightChanged) mutableState.value.detail?.let { startSourceAggregation(it) }
                     val owner = nativeDiscussionOwner
@@ -2574,7 +2589,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         pending = null
         val position = if (choice.positionMs > 0 || !choice.useSourceStart) choice.positionMs
             else choice.asset.startPositionMs?.coerceAtLeast(0) ?: 0L
-        active = ActivePlayback(choice.detail, choice.episode, choice.option, choice.asset,
+        val labelledAsset = choice.asset.copy(subjectId = choice.detail.subject.id,
+            subjectTitle = choice.detail.subject.title, episodeTitle = choice.episode.title)
+        active = ActivePlayback(choice.detail, choice.episode, choice.option, labelledAsset,
             nextEpoch, engine.state.value.sessionGeneration + 1, library.state.value.restoreEpoch,
             openedAt = monotonicTimeMillis(),
             sourceRevision = choice.sourceRevision, localMedia = choice.localMedia, openingSkipped = position > 0,
@@ -2591,7 +2608,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             playbackResolutions = choice.asset.resolutions, selectedResolutionId = choice.resolutionId ?:
                 choice.asset.resolutions.singleOrNull { item -> item.url == choice.asset.url }?.id) }
         engine.configure(playerOptions(mutableState.value.settings))
-        engine.open(AnimePlayerRequest(choice.asset, position, choice.playWhenReady, choice.localMedia,
+        engine.open(AnimePlayerRequest(labelledAsset, position, choice.playWhenReady, choice.localMedia,
             bypassMediaCache = choice.bypassMediaCache))
     }
 
@@ -2699,11 +2716,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (!value) flushPlayback()
         playerInstance?.setForeground(value)
         if (!value) {
-            cacheNextJob?.cancel()
-            releasePreparedDecoder()
+            clearPreparation()
             cancelOnlineVideo(clear = true)
         }
-        if (!value && (!mutableState.value.settings.backgroundAudio || prepared == null)) clearPreparation()
         if (value && discoveryVisible) ensureDiscovery()
         else if (!value) discoveryLoads.visible(emptySet())
     }
@@ -2807,9 +2822,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     recoveryOptions.clear()
                 }
                 if (!playingSteadily) {
-                    cacheNextJob?.cancel()
-                    if (!snapshot.ended) releasePreparedDecoder()
-                    if (preparationTarget != null && prepared == null) clearPreparation()
+                    if (!snapshot.ended && preparationTarget != null) {
+                        clearPreparation()
+                        owner.nextPreparationNotBefore = now + 1_000L
+                    }
                 }
                 if (snapshot.isPlaying) {
                     val settings = mutableState.value.settings
@@ -2826,7 +2842,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     }
                     if (stableFor >= 2_000L && foreground && owner.localMedia == null && settings.prepareNextEpisode &&
                         preparationTarget == null && now >= owner.nextPreparationNotBefore && !mutableState.value.resolving &&
-                        !mutableState.value.sleepAtEpisodeEnd && (snapshot.durationMs <= 0 || remaining <= 45_000L)) {
+                        !mutableState.value.sleepAtEpisodeEnd && snapshot.durationMs > 0L &&
+                        remaining <= preparationBudget(settings).nextEpisodeLeadMs) {
                         prepareNext(owner, snapshot.timelineGeneration)
                     }
                 }
@@ -2888,12 +2905,21 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val revision = discoverySourceRevision(option.sourceId) ?: return
         val route = playbackHistoryRoute(option.sourceId) ?: return
         val engine = playerInstance ?: return
+        val settings = mutableState.value.settings
+        val budget = preparationBudget(settings)
         val target = PreparationTarget(subjectId, next.id, option, revision, route,
-            mutableState.value.settings.preferredSourceHeight, timelineGeneration)
+            settings.preferredSourceHeight, timelineGeneration, settings, budget)
         val generation = resolveGeneration
         preparationTarget = target
-        mutableState.update { it.copy(nextEpisodePreparation = AnimeNextEpisodePreparation(next.id)) }
+        mutableState.update { it.copy(nextEpisodePreparation = AnimeNextEpisodePreparation(next.id,
+            targetDurationMs = budget.nextEpisodeDurationMs, maximumBytes = budget.nextEpisodeBytes)) }
+        fun publish(change: (AnimeNextEpisodePreparation) -> AnimeNextEpisodePreparation) {
+            if (preparationTarget !== target || active !== owner) return
+            mutableState.update { state -> if (preparationTarget !== target || active !== owner) state else
+                state.copy(nextEpisodePreparation = state.nextEpisodePreparation?.takeIf { it.episodeId == next.id }?.let(change)) }
+        }
         prepareJob = scope.launch(start = CoroutineStart.LAZY) {
+            var failed = false
             try {
                 val policy = ExperiencePolicyStore.get(context)
                 val asset = withTimeoutOrNull(8_000L) {
@@ -2904,62 +2930,108 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     !preparationStillCurrent(target)) return@launch
                 check(asset.sourceId == option.sourceId && asset.sourceEpisodeId == option.episode.id &&
                     asset.sourceRevision == revision && asset.route == route)
+                val currentPlayback = engine.state.value
+                val endingSkip = (settings.skipEndingSeconds * 1_000L)
+                    .takeIf { it in 1L until currentPlayback.durationMs } ?: 0L
+                val remainingMs = (currentPlayback.durationMs - endingSkip - currentPlayback.positionMs).coerceAtLeast(0L)
+                val speed = currentPlayback.speed.toDouble().takeIf { it.isFinite() && it > 0.0 } ?: 1.0
+                val untilSwitch = (remainingMs / speed).toLong()
+                val retention = untilSwitch.coerceAtMost(Long.MAX_VALUE - monotonicTimeMillis() - 30_000L) + 30_000L
                 val lifetime = asset.expiresAt?.let { expiry ->
                     val now = wallTimeMillis()
                     check(expiry > now)
-                    minOf(60_000L, expiry - now - 2_000L)
-                } ?: 60_000L
+                    minOf(retention, expiry - now - 2_000L)
+                } ?: retention
                 check(lifetime > 0L)
-                val ready = PreparedPlayback(target, asset, monotonicTimeMillis() + lifetime)
+                val canonical = asset.copy(episodeId = next.id, title = owner.detail.subject.title + " · " + next.title,
+                    subjectId = subjectId, subjectTitle = owner.detail.subject.title, episodeTitle = next.title)
+                val ready = PreparedPlayback(target, canonical, monotonicTimeMillis() + lifetime)
                 prepared = ready
-                mutableState.update { it.copy(nextEpisodePreparation = AnimeNextEpisodePreparation(next.id, addressResolved = true)) }
+                publish { it.copy(addressResolved = true, phase = AnimePreparationPhase.WAITING) }
                 cacheNextJob = launch(start = CoroutineStart.UNDISPATCHED) nextMedia@{
                     try {
-                        val canonical = asset.copy(episodeId = next.id, title = owner.detail.subject.title + " · " + next.title)
                         val startup = preferredSourceAsset(canonical, option.episode, target.preferredHeight)
-                        fun mayPrepare() = foreground && !playbackBusy() && preparationTarget === target &&
-                            freshPreparation(ready) && active === owner
-                        val bytes = try { withTimeoutOrNull(minOf(lifetime, 8_000L)) {
-                            policy.withPrefetchAdmission(option.sourceId, NEXT_EPISODE_CACHE_BYTES, { false }) {
-                                if (mayPrepare()) engine.cacheStartup(startup, NEXT_EPISODE_CACHE_BYTES, ready.validUntil)
-                                else 0L
-                            }
-                        } ?: 0L } catch (cancel: CancellationException) { throw cancel }
-                        catch (_: Exception) { 0L }
-                        if (bytes > 0L && mayPrepare()) {
-                            mutableState.update { it.copy(nextEpisodePreparation = AnimeNextEpisodePreparation(
-                                next.id, addressResolved = true, cachedBytes = bytes)) }
-                        }
-                        val timeLeft = ready.validUntil - monotonicTimeMillis()
-                        if (timeLeft <= 0L || !mayPrepare()) return@nextMedia
+                        ready.cacheAsset = startup
                         val resume = library.progressFor(subjectId, next.id)?.takeUnless { it.completed }?.positionMs
                         val position = resume?.takeIf { it > 0L } ?: startup.startPositionMs?.coerceAtLeast(0L) ?: 0L
-                        val decoded = withTimeoutOrNull(minOf(timeLeft, 7_000L)) {
-                            policy.withPrefetchAdmission(option.sourceId, NEXT_EPISODE_CACHE_BYTES, { false }) {
+                        fun mayPrepare() = foreground && !playbackBusy() && preparationTarget === target &&
+                            freshPreparation(ready) && active === owner
+                        publish { it.copy(positionMs = position) }
+                        val pauseReason = when {
+                            budget.nextEpisodeBytes <= 0L -> "下一集缓存容量为 0，仅保留已解析的地址。"
+                            policy.state.value.prefetchBytes < budget.nextEpisodeBytes ->
+                                "共享预读预算不足以容纳所设容量；已保留设置，可在体验设置调整总预算。"
+                            else -> null
+                        }
+                        if (pauseReason != null) {
+                            publish { it.copy(phase = AnimePreparationPhase.PARTIAL, detail = pauseReason) }
+                            return@nextMedia
+                        }
+                        val result = if (budget.nextEpisodeDurationMs == 0L) AnimeStartupCacheResult(0L,
+                            detail = "下一集原片预读已关闭。") else try {
+                            withTimeoutOrNull(minOf(lifetime, 30_000L)) {
+                                policy.withPrefetchAdmission(option.sourceId, budget.nextEpisodeBytes, { false },
+                                    onWaiting = { wait -> if (wait != null) publish { it.copy(
+                                        phase = AnimePreparationPhase.WAITING, detail = "等待共享预读资源，优先当前播放。") } }) {
+                                    if (!mayPrepare()) return@withPrefetchAdmission AnimeStartupCacheResult(0L,
+                                        detail = "当前播放需要资源，已暂停下一集准备。")
+                                    publish { it.copy(phase = AnimePreparationPhase.CACHING, detail = null) }
+                                    engine.prepareStartupCache(AnimeStartupCacheRequest(startup, position,
+                                        budget.nextEpisodeDurationMs, budget.nextEpisodeBytes, ready.validUntil))
+                                }
+                            } ?: AnimeStartupCacheResult(0L, detail = "下一集原片准备超时，已写入的缓存仍保留。")
+                        } catch (cancel: CancellationException) { throw cancel }
+                        catch (_: Exception) { AnimeStartupCacheResult(0L, detail = "下一集原片暂未准备完成，仍可正常切集。") }
+                        if (!mayPrepare()) return@nextMedia
+                        publish { it.copy(cachedBytes = result.bytes, bufferedDurationMs = result.bufferedDurationMs,
+                            phase = AnimePreparationPhase.PARTIAL, detail = result.detail) }
+                        val timeLeft = ready.validUntil - monotonicTimeMillis()
+                        if (timeLeft <= 0L) return@nextMedia
+                        val decoded = settings.predecodeNextEpisode && withTimeoutOrNull(minOf(timeLeft, 12_000L)) {
+                            policy.withPrefetchAdmission(option.sourceId, budget.nextEpisodeBytes, { false },
+                                onWaiting = { wait -> if (wait != null) publish { it.copy(
+                                    phase = AnimePreparationPhase.WAITING, detail = "等待首帧准备资源，原片缓存已保留。") } }) {
                                 policy.withDecodeAdmission(optional = true, promoted = { false }) {
-                                    mayPrepare() && engine.prepareStartup(startup, position, NEXT_EPISODE_CACHE_BYTES, ready.validUntil)
+                                    if (!mayPrepare()) return@withDecodeAdmission false
+                                    publish { it.copy(phase = AnimePreparationPhase.DECODING, detail = null) }
+                                    engine.prepareStartup(startup, position, budget.nextEpisodeBytes, ready.validUntil)
                                 }
                             }
                         } == true
                         if (decoded) {
-                            if (mayPrepare()) {
-                                ready.decoderAsset = startup
-                                mutableState.update { it.copy(nextEpisodePreparation = AnimeNextEpisodePreparation(
-                                    next.id, addressResolved = true, cachedBytes = bytes, startupFramePrepared = true)) }
-                            } else engine.discardStartup(startup)
+                            if (mayPrepare()) ready.decoderAsset = startup else engine.discardStartup(startup)
                         }
+                        if (!mayPrepare()) return@nextMedia
+                        val cacheReady = budget.nextEpisodeDurationMs == 0L ||
+                            result.bufferedDurationMs?.let { it >= budget.nextEpisodeDurationMs } == true
+                        val complete = cacheReady && (!settings.predecodeNextEpisode || decoded)
+                        publish { it.copy(startupFramePrepared = decoded,
+                            phase = if (complete) AnimePreparationPhase.READY else AnimePreparationPhase.PARTIAL,
+                            detail = when {
+                                settings.predecodeNextEpisode && !decoded -> "首帧尚未就绪；已准备的原片仍保留。"
+                                result.detail != null -> result.detail
+                                !cacheReady && result.bufferedDurationMs == null -> "已缓存的字节不能换算为可靠时长。"
+                                !cacheReady -> "已准备部分原片，达到本次容量或可用片段边界。"
+                                else -> null
+                            }) }
                     } catch (cancel: CancellationException) {
                         throw cancel
                     } catch (_: Exception) {
                         // A failed optional transfer must leave the resolved address available.
+                        publish { it.copy(phase = AnimePreparationPhase.PARTIAL,
+                            detail = "媒体准备暂未完成，已解析的播放地址仍可使用。") }
                     }
                 }
                 delay(lifetime)
             } catch (cancel: CancellationException) { throw cancel }
             catch (_: Exception) {
-                if (preparationTarget === target) owner.nextPreparationNotBefore = monotonicTimeMillis() + 30_000L
+                if (preparationTarget === target) {
+                    failed = true
+                    owner.nextPreparationNotBefore = monotonicTimeMillis() + 30_000L
+                    publish { it.copy(phase = AnimePreparationPhase.FAILED, detail = "下一集地址未能准备，稍后自动重试。") }
+                }
             } finally {
-                if (preparationTarget === target) releasePreparation()
+                if (preparationTarget === target) releasePreparation(keepStatus = failed)
             }
         }
         prepareJob?.start()
@@ -2969,14 +3041,20 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         fairPlaybackOptions(subjectId, episodeId, automaticPlaybackLines(episodeId))
             .firstOrNull()
 
-    private fun preparationStillCurrent(target: PreparationTarget): Boolean =
-        mutableState.value.detail?.subject?.id == target.subjectId && mutableState.value.settings.prepareNextEpisode &&
+    private fun preparationStillCurrent(target: PreparationTarget): Boolean {
+        val budget = preparationBudget()
+        return target.budget.nextEpisodeLeadMs == budget.nextEpisodeLeadMs &&
+            target.budget.nextEpisodeDurationMs == budget.nextEpisodeDurationMs &&
+            target.budget.nextEpisodeBytes == budget.nextEpisodeBytes &&
+            mutableState.value.detail?.subject?.id == target.subjectId && mutableState.value.settings.prepareNextEpisode &&
+            mutableState.value.settings.sameNextPreparation(target.settings) &&
             mutableState.value.settings.preferredSourceHeight == target.preferredHeight &&
             playerInstance?.state?.value?.timelineGeneration == target.timelineGeneration &&
             active?.let(::nextEpisode)?.id == target.episodeId &&
             target.route == playbackHistoryRoute(target.option.sourceId) &&
             target.revision == discoverySourceRevision(target.option.sourceId) &&
             defaultPreparationOption(target.subjectId, target.episodeId) == target.option
+    }
 
     private fun freshPreparation(value: PreparedPlayback): Boolean =
         monotonicTimeMillis() < value.validUntil && (value.asset.expiresAt?.let { it > wallTimeMillis() } != false) &&
@@ -2987,28 +3065,31 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     private fun releasePreparedDecoder() {
-        prepared?.decoderAsset?.let { asset ->
-            playerInstance?.discardStartup(asset)
+        prepared?.let { ready ->
+            listOfNotNull(ready.decoderAsset, ready.cacheAsset).distinctBy { it.id }.forEach { asset ->
+                playerInstance?.discardStartup(asset)
+            }
             prepared?.decoderAsset = null
+            prepared?.cacheAsset = null
             mutableState.update { it.copy(nextEpisodePreparation =
                 it.nextEpisodePreparation?.copy(startupFramePrepared = false)) }
         }
     }
 
-    private fun releasePreparation(keepDecoder: PreparedPlayback? = null) {
+    private fun releasePreparation(keepDecoder: PreparedPlayback? = null, keepStatus: Boolean = false) {
         if (keepDecoder == null || keepDecoder !== prepared) releasePreparedDecoder()
         preparationTarget = null
         prepareJob = null
         cacheNextJob?.cancel()
         cacheNextJob = null
         prepared = null
-        mutableState.update { it.copy(nextEpisodePreparation = null) }
+        if (!keepStatus) mutableState.update { it.copy(nextEpisodePreparation = null) }
     }
 
     private fun clearPreparation(keepDecoder: PreparedPlayback? = null) {
-        val job = prepareJob ?: return
+        val job = prepareJob
         releasePreparation(keepDecoder)
-        job.cancel()
+        job?.cancel()
     }
 
     private fun hasRetryableAssociation(snapshot: AnimeScreenState, episodeId: String) =
@@ -3076,10 +3157,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         library.updateSettings(change)
         val settings = library.state.value.settings
         playerInstance?.configure(playerOptions(settings))
-        if (!settings.prepareNextEpisode || preparationTarget?.preferredHeight?.let { it != settings.preferredSourceHeight } == true)
+        if (!settings.prepareNextEpisode || preparationTarget?.settings?.let { !it.sameNextPreparation(settings) } == true)
             clearPreparation()
         active?.nextPreparationNotBefore = 0L
     }
+
+    fun preparationBudget(settings: AnimePlaybackSettings = mutableState.value.settings): AnimePreparationBudget =
+        resolveAnimePreparationBudget(settings, enhancementCenter.resources.state.value,
+            enhancementCenter.resources.usage.value.resources)
 
     private fun playerOptions(settings: AnimePlaybackSettings): AnimePlayerOptions {
         val snapshot = playerInstance?.state?.value?.takeIf { value -> active?.let { belongsTo(it, value) } != false }
@@ -3099,6 +3184,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         // A candidate model is not a prepared frame. The Android shader chooses a matching
         // cached frame before its CNN; all other frames retain the selected realtime path.
         val realtimeEnabled = active?.localMedia?.enhancedVersion != true
+        val preparation = preparationBudget(settings)
         return AnimePlayerOptions(
         backgroundAudio = settings.backgroundAudio,
         bufferMinMs = settings.bufferMinMs,
@@ -3111,6 +3197,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         enhancementModel = selected.model.takeIf { realtimeEnabled },
         preparedVideoModel = prepared,
         realtimeFrames = realtimeFrames,
+        bufferForwardBytes = preparation.forwardBytes,
+        bufferBackBytes = preparation.backBytes,
         )
     }
 
@@ -3177,11 +3265,15 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     private fun preferredOnlineModel(policy: EnhancementPolicy, mode: AnimeVideoEnhancementMode): EngineModel? {
-        if (platformKind != PlatformKind.ANDROID ||
-            policy.tier == QualityTier.ORIGINAL || PreparationMode.SMART !in policy.preparation ||
+        if (policy.tier == QualityTier.ORIGINAL || PreparationMode.SMART !in policy.preparation ||
             policy.cacheMiB < 16) return null
+        val engines = when (platformKind) {
+            PlatformKind.ANDROID -> setOf(EnhancementEngineIds.ANDROID_CUGAN_VIDEO, EnhancementEngineIds.ANDROID_VIDEO_ONNX)
+            PlatformKind.DESKTOP -> setOf(EnhancementEngineIds.VIDEOJANAI)
+            else -> return null
+        }
         val candidates = enhancementCenter.inventory.value.models.filter { model ->
-            model.engineId in setOf(EnhancementEngineIds.ANDROID_CUGAN_VIDEO, EnhancementEngineIds.ANDROID_VIDEO_ONNX) &&
+            model.engineId in engines &&
                 EngineContent.VIDEO in model.contents && model.nativeScale == policy.scale
         }
         if (policy.modelId != null) return candidates.firstOrNull { it.id == policy.modelId }
@@ -3198,67 +3290,119 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     private fun prepareOnlineVideo(owner: ActivePlayback, snapshot: AnimePlayerState, stableFor: Long) {
         val engine = playerInstance ?: return
-        val model = playerOptions(mutableState.value.settings).preparedVideoModel
+        val configuration = playerOptions(mutableState.value.settings)
+        val model = configuration.preparedVideoModel
+        val windowTarget = preparationBudget().onlineWindowMs
         val timeline = snapshot.sessionGeneration to snapshot.timelineGeneration
-        if (onlineVideoTimeline != timeline || onlineVideoModel != model) {
+        if (onlineVideoTimeline != timeline || onlineVideoModel != model || onlineVideoWindowTarget != windowTarget) {
             onlineVideoTimeline = timeline
             onlineVideoModel = model
             onlineVideoNotBefore = 0L
             onlineVideoCost = 0L
+            onlineVideoWindowTarget = windowTarget
             cancelOnlineVideo(clear = true)
         }
         val resources = enhancementCenter.resources.usage.value.resources
         if (!foreground || playbackBusy(snapshot) || resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2 ||
             snapshot.phase == AnimePlayerPhase.ERROR || snapshot.ended || owner.localMedia != null) {
             cancelOnlineVideo(clear = true)
+            engine.noteVideoPreparationIssue(when {
+                resources.memoryPressure == true -> "内存压力较高，暂缓在线增强准备。"
+                (resources.thermalPressure ?: 0) >= 2 -> "设备温度较高，暂缓在线增强准备。"
+                playbackBusy(snapshot) -> "优先恢复当前播放，稍后再准备增强片段。"
+                else -> null
+            })
             return
         }
         if (!snapshot.isPlaying || snapshot.playbackSuppressed) {
             cancelOnlineVideo(clear = false)
             return
         }
-        if (model == null || stableFor < 2_000L || onlineVideoJob?.isActive == true || snapshot.durationMs <= 0L ||
-            snapshot.hasVideoTracks == false || owner.asset.expiresAt?.let { it - wallTimeMillis() < 30_000L } == true) return
+        val session = animeEnhancementSessionKey(snapshot)
+        val policy = enhancementCenter.settings.policy(EnhancementContent.ANIME, session)
+        if (model == null) {
+            engine.noteVideoPreparationIssue(when {
+                policy.tier == QualityTier.ORIGINAL -> null
+                PreparationMode.SMART !in policy.preparation -> "在线预处理未开启。"
+                policy.cacheMiB < 16 -> "增强缓存预算不足，在线预处理需要至少 16 MiB。"
+                configuration.realtimeFrames != null -> "当前使用实时补帧；这条处理路径暂不同时准备在线增强窗口。"
+                configuration.videoEnhancement == AnimeVideoEnhancementMode.MODEL -> "当前使用实时模型增强；在线窗口准备暂缓。"
+                policy.modelId != null -> "所选模型当前走实时或离线路径，不能生成在线预处理窗口。"
+                else -> "尚无兼容的在线预处理模型；实时增强按当前设置继续。"
+            })
+            return
+        }
+        if (stableFor < 2_000L || onlineVideoJob?.isActive == true) return
+        if (snapshot.durationMs <= 0L || snapshot.hasVideoTracks == false ||
+            owner.asset.expiresAt?.let { it - wallTimeMillis() < 30_000L } == true) {
+            engine.noteVideoPreparationIssue("当前媒体时长、视频轨或地址有效期不足以准备增强窗口。")
+            return
+        }
         val path = owner.asset.url.substringBefore('?')
         val supportedMedia = owner.asset.mimeType == "video/mp4" || owner.asset.mimeType?.contains("mpegurl", true) == true ||
             path.endsWith(".mp4", true) || path.endsWith(".m3u8", true)
-        if (!supportedMedia) return
+        if (!supportedMedia) {
+            engine.noteVideoPreparationIssue("当前片源格式未接通在线预处理，原视频继续播放。")
+            return
+        }
         val width = snapshot.videoWidth ?: return
         val height = snapshot.videoHeight ?: return
         val pixels = width.toLong() * height * model.nativeScale * model.nativeScale
-        if (pixels !in 1L..2_200_000L || snapshot.sourceFps?.let { it > 60.0 } == true) return
+        val pixelLimit = if (platformKind == PlatformKind.ANDROID) 2_200_000L else 8_847_360L
+        val durationRange = if (platformKind == PlatformKind.ANDROID) 5_000L..15_000L else 1_000L..30_000L
+        if (pixels !in 1L..pixelLimit || snapshot.sourceFps?.let { it > 60.0 } == true || windowTarget !in durationRange) {
+            engine.noteVideoPreparationIssue(when {
+                pixels !in 1L..pixelLimit -> "${width}×${height} 放大 ${model.nativeScale} 倍后的输出超过当前在线处理容量；可降低倍率，或使用实时／离线增强。"
+                windowTarget !in durationRange -> "当前内核在线片段支持 ${durationRange.first / 1000}–${durationRange.last / 1000} 秒；已保留所设时长。"
+                else -> "当前在线预处理支持不超过 60 fps 的源视频。"
+            })
+            return
+        }
         val now = monotonicTimeMillis()
         if (snapshot.preparedVideoWindow?.let { snapshot.positionMs >= it.endMs } == true) engine.discardPreparedVideo()
         if (now < onlineVideoNotBefore ||
             snapshot.preparedVideoWindow?.let { it.endMs > snapshot.positionMs + 2_000L } == true) return
-        val lead = (onlineVideoCost * snapshot.speed.toDouble() + 5_000).toLong().coerceIn(5_000L, 15_000L)
-        val duration = (15_000L * 320 * 180 / pixels).coerceIn(5_000L, 15_000L)
+        val lead = (onlineVideoCost * snapshot.speed.toDouble() + 5_000).toLong().coerceAtLeast(5_000L)
+        val duration = windowTarget
         val start = snapshot.positionMs + lead
         val end = minOf(start + duration, snapshot.durationMs)
-        if (end - start < 5_000L) return
-        val session = animeEnhancementSessionKey(snapshot)
-        val policy = enhancementCenter.settings.policy(EnhancementContent.ANIME, session)
+        if (end - start < durationRange.first) return
         val budgets = enhancementCenter.resources
         val sourceBudget = minOf(ONLINE_ANIME_SOURCE_BYTES, budgets.state.value.prefetchBytes)
-        if (sourceBudget < 1024L * 1024) return
+        if (sourceBudget < 1024L * 1024) {
+            engine.noteVideoPreparationIssue("共享原片预读预算不足，暂缓增强窗口准备。")
+            return
+        }
+        val resultBudget = policy.cacheMiB.toLong() * 1024L * 1024L
         val request = AnimePreparedVideoRequest(owner.asset, timeline.first, timeline.second, start, end, width, height, model,
-            sourceBudget, minOf(ONLINE_ANIME_RESULT_BYTES, policy.cacheMiB.toLong() * 1024 * 1024))
+            sourceBudget, if (platformKind == PlatformKind.DESKTOP) resultBudget else minOf(ONLINE_ANIME_RESULT_BYTES, resultBudget))
         val release = budgets.tryAcquireEnhancement(priority = 1, estimatedBytes = 160L * 1024 * 1024,
-            sharedRealtimeOwner = "anime-player") ?: return
+            sharedRealtimeOwner = "anime-player") ?: run {
+            engine.noteVideoPreparationIssue("等待增强处理资源，当前原视频继续播放。")
+            return
+        }
+        engine.noteVideoPreparationIssue(null)
         onlineVideoNotBefore = now + 5_000L
         onlineVideoJob = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            fun current() = active === owner && onlineVideoTimeline == timeline && onlineVideoModel == model &&
+                onlineVideoWindowTarget == windowTarget && engine.state.value.sessionGeneration == timeline.first &&
+                engine.state.value.timelineGeneration == timeline.second
             var finished = false
             try {
-                finished = withTimeoutOrNull(25_000L) {
+                finished = withTimeoutOrNull(if (platformKind == PlatformKind.DESKTOP) 60_000L else 25_000L) {
                     budgets.withPrefetchAdmission(owner.asset.sourceId, sourceBudget, { false }) {
-                        active === owner && !playbackBusy() && engine.prepareVideoWindow(request)
+                        current() && !playbackBusy() && engine.prepareVideoWindow(request)
                     }
-                } == true
+                }?.also { prepared -> if (!prepared && current() && engine.state.value.preparedVideoIssue == null)
+                    engine.noteVideoPreparationIssue("这段增强尚未准备好，当前播放继续使用可用画面。") }
+                    ?: false.also { if (current())
+                        engine.noteVideoPreparationIssue("在线增强准备超时，稍后按实际耗时调整提前量。") }
             } catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { /* The original running stream remains the fallback. */ }
+            catch (_: Exception) { if (current() && engine.state.value.preparedVideoIssue == null)
+                engine.noteVideoPreparationIssue("在线增强暂未完成，原视频继续播放。") }
             finally {
                 release()
-                if (onlineVideoTimeline == timeline && onlineVideoModel == model) {
+                if (current()) {
                     onlineVideoCost = monotonicTimeMillis() - now
                     onlineVideoNotBefore = monotonicTimeMillis() + if (finished) 1_000L else 10_000L
                 }

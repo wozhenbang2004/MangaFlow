@@ -72,8 +72,16 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
         dev.mangaflow.anime.downloads.AnimeDownloadStore(application, scope).also { it.setForeground(animeForeground) }
     }
     val animeDownloads get() = animeDownloadsOwner.value
+    private val animeEnhancementsOwner = lazy {
+        val center = dev.mangaflow.enhancement.EnhancementCenter.get(application)
+        dev.mangaflow.enhancement.VideoPreparationStore(application, animeDownloads, center).also {
+            center.attachVideoPreparation(it)
+        }
+    }
+    val animeEnhancements get() = animeEnhancementsOwner.value
     private val animeOwner = lazy {
-        AnimeController(application, scope, downloadStore = { animeDownloads }).also { controller ->
+        AnimeController(application, scope, downloadStore = { animeDownloads },
+            videoPreparationStore = { animeEnhancements }).also { controller ->
             controller.setForeground(animeForeground)
             relayLink.updateSources(bodySources.entries.value.filter { it.enabled && !it.removed && it.isInstalled }
                 .associate { it.source.id to it.source.homeUrl } + controller.sourceHomes)
@@ -165,6 +173,11 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
             }
         }
         scope.launch(Dispatchers.IO) { steamWallpaperClient }
+        // Register persisted enhanced media even before the anime workspace is opened.
+        scope.launch(Dispatchers.IO) {
+            animeEnhancements
+            dev.mangaflow.anime.player.initializeAnimeStorage(application)
+        }
         dev.mangaflow.anime.sources.AnimeMetadataCache.get(application)
         dev.mangaflow.storage.StorageCacheStore.get(application).apply {
             registerAuxiliaryOwner(browseCache.cacheOwner)

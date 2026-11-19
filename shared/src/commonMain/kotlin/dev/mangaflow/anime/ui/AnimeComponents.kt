@@ -295,6 +295,7 @@ internal fun AnimeTextField(
     secret: Boolean = false,
     enabled: Boolean = true,
     onSubmit: (() -> Unit)? = null,
+    emptyHint: String? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -309,7 +310,11 @@ internal fun AnimeTextField(
             .background(colors.onSurface.copy(alpha = .045f)).padding(horizontal = 14.dp, vertical = 13.dp)
             .semantics { contentDescription = placeholder },
         decorationBox = { field ->
-            Box { field() }
+            Box {
+                if (value.isEmpty() && emptyHint != null) Text(emptyHint,
+                    style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                field()
+            }
         })
     }
 }

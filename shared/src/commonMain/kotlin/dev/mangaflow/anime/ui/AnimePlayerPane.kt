@@ -80,6 +80,7 @@ internal fun AnimePlayerPane(
     onSources: (AnimeEpisode?) -> Unit,
     onEpisode: (AnimeEpisode) -> Unit,
     modifier: Modifier = Modifier,
+    onStorage: () -> Unit = {},
 ) {
     val fillVideo = fullscreen || playback.inPictureInPicture
     val detail = state.detail
@@ -458,7 +459,9 @@ internal fun AnimePlayerPane(
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 AnimePlaybackStatus(playback.takeIf { target == null && it.assetKey != null &&
                                     it.episodeId == state.selectedEpisodeId }, quiet = !showChrome,
-                                    observing = active && !obscured && !settingsPresent, modifier = Modifier.weight(1f))
+                                    observing = active && !obscured && !settingsPresent, modifier = Modifier.weight(1f),
+                                    nextPreparation = state.nextEpisodePreparation,
+                                    nextPreparationEnabled = state.settings.prepareNextEpisode)
                                 if (showChrome) MotionIconButton(onClick = { showEnhancement(EnhancementPage.DISPLAY) },
                                     modifier = Modifier.size(44.dp),
                                     enabled = active && !locked && !obscured && !settingsPresent,
@@ -496,7 +499,8 @@ internal fun AnimePlayerPane(
         }
         if (!playback.inPictureInPicture) AnimePlayerSettings(settingsVisible, settingsSection, controller, state, playback, backdrop,
             onDismiss = { settingsVisible = false; interact() }, onClosed = { settingsPresent = false },
-            onPlayDownload = onPlayDownload, onSources = onSources, initialEnhancementPage = settingsEnhancementPage)
+            onPlayDownload = onPlayDownload, onSources = onSources, initialEnhancementPage = settingsEnhancementPage,
+            onStorage = onStorage)
       }
     }
 }
@@ -678,14 +682,23 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
 }
 
 internal fun animePreparationLabel(preparation: AnimeNextEpisodePreparation): String = when {
-    preparation.startupFramePrepared -> "起播帧已解码"
-    preparation.cachedBytes > 0L -> {
-        val size = if (preparation.cachedBytes >= 1024L) "${preparation.cachedBytes / 1024L} KiB"
-            else "${preparation.cachedBytes} B"
-        "起始媒体已写入缓存 · $size"
-    }
+    preparation.phase == AnimePreparationPhase.WAITING -> "等待准备资源"
+    preparation.phase == AnimePreparationPhase.RESOLVING -> "正在解析地址"
+    preparation.phase == AnimePreparationPhase.CACHING -> "正在预读原片"
+    preparation.phase == AnimePreparationPhase.DECODING -> "正在准备首帧"
+    preparation.phase == AnimePreparationPhase.FAILED -> "准备未完成"
+    preparation.startupFramePrepared -> "首帧已备"
+    preparation.bufferedDurationMs != null -> "原片已备 ${animeTime(preparation.bufferedDurationMs)}"
+    preparation.cachedBytes > 0L -> "原片已备 ${animeBytes(preparation.cachedBytes)}"
     preparation.addressResolved -> "播放地址已解析"
-    else -> "正在解析播放地址"
+    else -> "等待准备"
+}
+
+internal fun animeBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L * 1024L -> dev.mangaflow.platform.formatDecimal(bytes / (1024.0 * 1024.0 * 1024.0), 1) + " GiB"
+    bytes >= 1024L * 1024L -> dev.mangaflow.platform.formatDecimal(bytes / (1024.0 * 1024.0), 1) + " MiB"
+    bytes >= 1024L -> dev.mangaflow.platform.formatDecimal(bytes / 1024.0, 1) + " KiB"
+    else -> "$bytes B"
 }
 
 @Composable

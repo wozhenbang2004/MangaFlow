@@ -11,6 +11,7 @@ import dev.mangaflow.json.JSONObject
 import dev.mangaflow.platform.*
 import dev.mangaflow.platform.storage.*
 import dev.mangaflow.storage.AuxiliaryCacheEntry
+import dev.mangaflow.storage.AuxiliaryCacheRemovalException
 import dev.mangaflow.storage.AuxiliaryDiskCacheOwner
 import dev.mangaflow.storage.StorageCacheStore
 import kotlinx.atomicfu.locks.synchronized
@@ -74,11 +75,12 @@ class VideoPreparationStore(
     private val verifiedOutputs = mutableMapOf<String, String>()
     private val ready = CompletableDeferred<Unit>()
     private val mutableState = MutableStateFlow(VideoPreparationState())
+    private val storage = StorageCacheStore.get(app)
     val state: StateFlow<VideoPreparationState> = mutableState.asStateFlow()
     override val ownerId = "enhanced-video-v1"
 
     init {
-        StorageCacheStore.get(app).registerAuxiliaryOwner(this)
+        storage.registerAuxiliaryOwner(this)
         scope.launch {
             try {
                 root.listFiles().orEmpty().filter { it.isDirectory && it.name.matches(DIGEST) }.forEach { folder ->
@@ -274,7 +276,10 @@ class VideoPreparationStore(
                     } finally { temp.delete() }
                 }
             }
-            try { task.await() } finally { synchronized(lock) { activeJobs.remove(id) } }
+            try { task.await() } finally {
+                synchronized(lock) { activeJobs.remove(id) }
+                storage.cacheWorkFinished()
+            }
         } catch (cancel: CancellationException) { throw cancel }
         catch (error: Exception) { synchronized(lock) { publish(error.message ?: "增强未完成，原视频仍可播放") } }
     }
@@ -336,19 +341,32 @@ class VideoPreparationStore(
     }
 
     override suspend fun snapshot(): List<AuxiliaryCacheEntry> = withContext(Dispatchers.IO) {
-        ready.await(); synchronized(lock) { records.values.filter { it.phase == EnhancementTaskPhase.COMPLETED }.mapNotNull(::cacheEntry) }
+        ready.await(); synchronized(lock) {
+            val entries = records.values.mapNotNull(::cacheEntry)
+            // Interrupted output and unknown manifests still occupy space. Only the owner can classify them.
+            val unclassified = (directoryBytes(root) - entries.sumOf { it.bytes }).coerceAtLeast(0L)
+            if (unclassified == 0L) entries else entries + AuxiliaryCacheEntry("@unclassified", unclassified,
+                root.lastModified(), "unclassified:$unclassified:${root.lastModified()}", protected = true)
+        }
     }
     override suspend fun remove(expected: AuxiliaryCacheEntry, canRemove: () -> Boolean): Long? = withContext(Dispatchers.IO) {
         ready.await(); synchronized(lock) {
             val row = records[expected.key] ?: return@synchronized null
-            if (!canRemove() || (readers[row.id] ?: 0) > 0 || row.id in activeJobs || cacheEntry(row) != expected) return@synchronized null
-            if (!directory(row.id).deleteRecursively()) return@synchronized null
-            records.remove(row.id); verifiedOutputs.remove(row.id); publish(); expected.bytes
+            if (expected.protected || !canRemove() || (readers[row.id] ?: 0) > 0 || row.id in activeJobs || cacheEntry(row) != expected) return@synchronized null
+            val folder = directory(row.id)
+            val removed = folder.deleteRecursively()
+            val freed = (expected.bytes - directoryBytes(folder)).coerceAtLeast(0L)
+            if (!removed) throw AuxiliaryCacheRemovalException(freed)
+            records.remove(row.id); verifiedOutputs.remove(row.id); publish(); storage.cacheWorkFinished(); freed
         }
     }
     fun removeVersion(id: String): Job = scope.launch {
+        ready.await()
         val entry = synchronized(lock) { records[id]?.let(::cacheEntry) } ?: return@launch
-        if (remove(entry) { true } == null) synchronized(lock) { publish("该版本正在播放或处理，稍后再清理") }
+        try {
+            if (remove(entry) { true } == null) synchronized(lock) { publish("该版本正在播放或处理，稍后再清理") }
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { synchronized(lock) { publish("增强版本未完全清理，请刷新用量后重试") } }
     }
 
     suspend fun usage(): EnhancedAssetUsage = withContext(Dispatchers.IO) {
@@ -366,19 +384,43 @@ class VideoPreparationStore(
             records.values.toList().filter { (readers[it.id] ?: 0) == 0 && it.id !in activeJobs }.forEach { row ->
                 val folder = directory(row.id)
                 val bytes = directoryBytes(folder)
-                if (folder.deleteRecursively()) { records.remove(row.id); verifiedOutputs.remove(row.id); freed += bytes }
+                val removed = folder.deleteRecursively()
+                freed += (bytes - directoryBytes(folder)).coerceAtLeast(0L)
+                if (removed) { records.remove(row.id); verifiedOutputs.remove(row.id) }
             }
-            publish(); freed
+            publish(); storage.cacheWorkFinished(); freed
         }
     }
 
     private fun cacheEntry(row: VideoEnhancementVersion): AuxiliaryCacheEntry? {
-        val file = output(row)
-        if (!file.isFile) return null
-        return AuxiliaryCacheEntry(row.id, directoryBytes(directory(row.id)), file.lastModified(),
-            "${row.generation}:${row.outputDigest}:${row.bytes}")
+        val folder = directory(row.id)
+        if (!folder.isDirectory) return null
+        var bytes = 0L
+        var modified = 0L
+        val stamp = buildString {
+            append(row.generation).append(':').append(row.phase).append(':').append(row.outputDigest)
+            fun visit(file: StorageFile, path: String) {
+                if (file.isFile) {
+                    val size = file.length()
+                    val time = file.lastModified()
+                    bytes += size; modified = maxOf(modified, time)
+                    append('|').append(path.length).append(':').append(path).append(':').append(size).append(':').append(time)
+                } else file.listFiles().orEmpty().sortedBy { it.name }.forEach { visit(it, "$path/${it.name}") }
+            }
+            visit(folder, "")
+        }
+        if (bytes <= 0L) return null
+        val original = downloads.state.value.entries.firstOrNull { it.id == row.downloadId }
+        return AuxiliaryCacheEntry(row.id, bytes, modified, EnhancedAssetIdentity.digest(stamp),
+            protected = (readers[row.id] ?: 0) > 0 || row.id in activeJobs,
+            content = "anime", workId = original?.subject?.id.orEmpty(), partId = original?.episode?.id.orEmpty(),
+            sourceId = original?.sourceId.orEmpty(), workTitle = original?.subject?.title.orEmpty(),
+            partTitle = original?.episode?.title.orEmpty(), temporary = row.phase != EnhancementTaskPhase.COMPLETED)
     }
-    private fun release(id: String) { val n = (readers[id] ?: 1) - 1; if (n <= 0) readers.remove(id) else readers[id] = n }
+    private fun release(id: String) {
+        val n = (readers[id] ?: 1) - 1
+        if (n <= 0) { readers.remove(id); storage.cacheWorkFinished() } else readers[id] = n
+    }
     private fun directory(id: String) = StorageFile(root, id.also { require(it.matches(DIGEST)) })
     private fun output(row: VideoEnhancementVersion) = StorageFile(directory(row.id), "enhanced.${row.container.extension}")
     private fun publish(notice: String? = mutableState.value.notice) {

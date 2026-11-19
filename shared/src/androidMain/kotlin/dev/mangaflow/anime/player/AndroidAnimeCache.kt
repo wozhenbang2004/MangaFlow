@@ -8,15 +8,18 @@ import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheEvictor
 import androidx.media3.datasource.cache.CacheSpan
+import androidx.media3.datasource.cache.ContentMetadataMutations
 import androidx.media3.datasource.cache.SimpleCache
+import dev.mangaflow.anime.AnimePlaybackAsset
 import dev.mangaflow.platform.wallTimeMillis
+import dev.mangaflow.storage.AnimeDiskCacheEntry
 import dev.mangaflow.storage.AnimeDiskCacheOwner
 import dev.mangaflow.storage.AnimeDiskCacheUsage
+import dev.mangaflow.storage.AuxiliaryCacheRemovalException
 import dev.mangaflow.storage.StorageCacheStore
 import java.io.File
 import java.util.TreeSet
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -25,11 +28,13 @@ import java.util.concurrent.atomic.AtomicLong
  */
 internal class AndroidAnimeCache private constructor(context: Context) : AnimeDiskCacheOwner {
     private val revision = AtomicLong(0)
-    private val sessions = AtomicInteger(0)
     private val accessed = AtomicLong(wallTimeMillis())
+    private val activeAssets = mutableMapOf<String, Int>()
+    private val keyRevisions = mutableMapOf<String, Long>()
+    private val metadata = mutableMapOf<String, AssetMetadata>()
     private val store = StorageCacheStore.get(context)
-    private val evictor = AdjustableAnimeEvictor(canTrim = { sessions.get() == 0 }) {
-        revision.incrementAndGet()
+    private val evictor = AdjustableAnimeEvictor(canTrim = { key -> !protected(key) }) { key ->
+        keyRevisions[key] = revision.incrementAndGet()
         accessed.set(wallTimeMillis())
         store.cacheWorkFinished()
     }
@@ -40,44 +45,68 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
 
     init { store.attachAnimeCache(this) }
 
-    /** Acquired on IO before any new session can read or write the cache. */
-    fun acquire(): () -> Unit {
+    /** Acquired on IO before a player or startup writer can touch this asset's spans. */
+    fun acquire(asset: AnimePlaybackAsset): () -> Unit {
+        val identity = asset.playbackIdentity()
         synchronized(cache) {
-            sessions.incrementAndGet()
+            activeAssets[identity] = (activeAssets[identity] ?: 0) + 1
             revision.incrementAndGet()
             accessed.set(wallTimeMillis())
         }
         val released = AtomicBoolean(false)
         return {
             if (released.compareAndSet(false, true)) {
-                sessions.decrementAndGet()
-                revision.incrementAndGet()
-                accessed.set(wallTimeMillis())
+                synchronized(cache) {
+                    val remaining = (activeAssets[identity] ?: 1) - 1
+                    if (remaining <= 0) activeAssets.remove(identity) else activeAssets[identity] = remaining
+                    revision.incrementAndGet()
+                    accessed.set(wallTimeMillis())
+                }
                 store.cacheWorkFinished()
             }
         }
+    }
+
+    /** The key stays opaque. Native metadata stores object labels, never URLs or headers. */
+    fun register(asset: AnimePlaybackAsset, key: String): String = synchronized(cache) {
+        val value = AssetMetadata(asset.playbackIdentity(), asset.subjectId, asset.episodeId, asset.sourceId,
+            asset.subjectTitle, asset.episodeTitle.ifBlank { asset.title })
+        if (readMetadata(key) != value) {
+            metadata[key] = value
+            keyRevisions[key] = revision.incrementAndGet()
+            // Classification failure must not prevent raw playback. The in-process lease remains valid.
+            runCatching {
+                cache.applyContentMetadataMutations(key, ContentMetadataMutations()
+                    .set(META_ASSET, value.asset)
+                    .set(META_SUBJECT, value.subjectId)
+                    .set(META_EPISODE, value.episodeId)
+                    .set(META_SOURCE, value.sourceId)
+                    .set(META_SUBJECT_TITLE, value.subjectTitle)
+                    .set(META_EPISODE_TITLE, value.episodeTitle))
+            }
+        }
+        key
     }
 
     override fun snapshot(): AnimeDiskCacheUsage = synchronized(cache) {
         AnimeDiskCacheUsage(
             bytes = cache.cacheSpace,
             revision = revision.get(),
-            active = sessions.get() > 0,
+            active = activeAssets.isNotEmpty(),
             accessedAt = accessed.get(),
+            entries = cache.keys.mapNotNull(::entry),
         )
     }
 
     override fun resize(bytes: Long, canResize: () -> Boolean, commitResize: (() -> Unit) -> Boolean) {
         synchronized(cache) {
-            // An active player owns its spans. Its final release schedules one new sweep;
-            // do not self-schedule repeated failed resizes while playback remains active.
-            if (sessions.get() > 0) return
+            // Active assets keep their spans; other episodes can already release shared space.
             if (!evictor.resize(cache, bytes.coerceAtLeast(0L), canResize, commitResize)) store.cacheWorkFinished()
         }
     }
 
     override fun clear(expectedRevision: Long, canClear: () -> Boolean): Long? = synchronized(cache) {
-        if (sessions.get() > 0 || revision.get() != expectedRevision || !canClear()) return@synchronized null
+        if (activeAssets.isNotEmpty() || revision.get() != expectedRevision || !canClear()) return@synchronized null
         val before = cache.cacheSpace
         cache.keys.toList().forEach { key -> if (canClear()) cache.removeResource(key) }
         val freed = (before - cache.cacheSpace).coerceAtLeast(0L)
@@ -86,7 +115,52 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
         freed
     }
 
+    override fun clearEntry(expected: AnimeDiskCacheEntry, canClear: () -> Boolean): Long? = synchronized(cache) {
+        val current = entry(expected.key) ?: return@synchronized null
+        if (current.protected || current != expected || !canClear()) return@synchronized null
+        val before = cache.cacheSpace
+        try { cache.removeResource(expected.key) }
+        catch (_: Exception) { throw AuxiliaryCacheRemovalException((before - cache.cacheSpace).coerceAtLeast(0L)) }
+        val freed = (before - cache.cacheSpace).coerceAtLeast(0L)
+        store.cacheWorkFinished()
+        freed
+    }
+
+    private fun entry(key: String): AnimeDiskCacheEntry? {
+        val spans = cache.getCachedSpans(key)
+        val bytes = spans.sumOf { it.length }
+        if (bytes <= 0L) return null
+        val owner = readMetadata(key)
+        return AnimeDiskCacheEntry(key, bytes, keyRevisions[key] ?: 0L,
+            spans.maxOfOrNull { it.lastTouchTimestamp } ?: 0L, protected(key),
+            owner.subjectId, owner.episodeId, owner.sourceId, owner.subjectTitle, owner.episodeTitle)
+    }
+
+    /** Called only under SimpleCache's monitor, including its eviction callbacks. */
+    private fun protected(key: String): Boolean {
+        // The empty check also avoids accessing cache during its initialization callbacks.
+        if (activeAssets.isEmpty()) return false
+        val identity = readMetadata(key).asset
+        return identity.isBlank() || (activeAssets[identity] ?: 0) > 0
+    }
+
+    private fun readMetadata(key: String): AssetMetadata = metadata.getOrPut(key) {
+        val value = cache.getContentMetadata(key)
+        AssetMetadata(value.get(META_ASSET, "").orEmpty(), value.get(META_SUBJECT, "").orEmpty(),
+            value.get(META_EPISODE, "").orEmpty(), value.get(META_SOURCE, "").orEmpty(),
+            value.get(META_SUBJECT_TITLE, "").orEmpty(), value.get(META_EPISODE_TITLE, "").orEmpty())
+    }
+
+    private data class AssetMetadata(val asset: String, val subjectId: String, val episodeId: String,
+        val sourceId: String, val subjectTitle: String, val episodeTitle: String)
+
     companion object {
+        private const val META_ASSET = "custom_mangaflow_asset"
+        private const val META_SUBJECT = "custom_mangaflow_subject"
+        private const val META_EPISODE = "custom_mangaflow_episode"
+        private const val META_SOURCE = "custom_mangaflow_source"
+        private const val META_SUBJECT_TITLE = "custom_mangaflow_subject_title"
+        private const val META_EPISODE_TITLE = "custom_mangaflow_episode_title"
         @Volatile private var instance: AndroidAnimeCache? = null
         @Synchronized fun get(context: Context): AndroidAnimeCache =
             instance ?: AndroidAnimeCache(context.applicationContext).also { instance = it }
@@ -94,7 +168,7 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
 }
 
 /** Callbacks and eviction are serialized by SimpleCache's own monitor. */
-private class AdjustableAnimeEvictor(private val canTrim: () -> Boolean, private val changed: () -> Unit) : CacheEvictor {
+private class AdjustableAnimeEvictor(private val canTrim: (String) -> Boolean, private val changed: (String) -> Unit) : CacheEvictor {
     // Reopening a cache must not delete a user's larger cache before the storage
     // controller restores its configured budget.
     @Volatile var targetBytes: Long = Long.MAX_VALUE
@@ -112,31 +186,33 @@ private class AdjustableAnimeEvictor(private val canTrim: () -> Boolean, private
     }
     override fun onSpanAdded(cache: Cache, span: CacheSpan) {
         if (spans.add(span)) bytes += span.length
-        changed()
+        changed(span.key)
         evict(cache, 0L)
     }
     override fun onSpanRemoved(cache: Cache, span: CacheSpan) {
         if (spans.remove(span)) bytes = (bytes - span.length).coerceAtLeast(0L)
-        changed()
+        changed(span.key)
     }
     override fun onSpanTouched(cache: Cache, oldSpan: CacheSpan, newSpan: CacheSpan) {
         spans.remove(oldSpan)
         spans.add(newSpan)
-        changed()
+        changed(newSpan.key)
     }
     fun resize(cache: Cache, requested: Long, canResize: () -> Boolean, commitResize: (() -> Unit) -> Boolean): Boolean {
         // Do not publish a provisional quota: a stale sweep must not leave its old
         // limit installed for subsequent native writes after its eviction was stopped.
         if (!evict(cache, 0L, requested, canResize) || !canResize()) return false
+        // A soft target still applies while protected spans exceed it. Their release triggers a sweep.
         return commitResize { targetBytes = requested }
     }
     private fun evict(cache: Cache, incoming: Long, limit: Long = targetBytes,
         canEvict: () -> Boolean = { true }): Boolean {
         val available = (limit - incoming).coerceAtLeast(0L)
         while (bytes > available && spans.isNotEmpty()) {
-            if (!canTrim() || !canEvict()) return false
-            cache.removeSpan(spans.first())
+            if (!canEvict()) return false
+            val removable = spans.firstOrNull { canTrim(it.key) } ?: break
+            cache.removeSpan(removable)
         }
-        return canTrim() && canEvict()
+        return canEvict()
     }
 }

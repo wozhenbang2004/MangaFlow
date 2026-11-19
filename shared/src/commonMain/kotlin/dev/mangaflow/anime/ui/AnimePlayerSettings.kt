@@ -40,7 +40,7 @@ import dev.mangaflow.ui.motion.*
 import kotlin.math.roundToInt
 
 internal enum class AnimePlayerPanel {
-    GENERAL, VIDEO, VIDEO_SOURCE, AUDIO, SUBTITLES, SPEED, SLEEP, SKIP, BUFFER, DOWNLOADS,
+    GENERAL, VIDEO, VIDEO_SOURCE, AUDIO, SUBTITLES, SPEED, SLEEP, SKIP, PREPARATION, BUFFER, NEXT_PREPARATION, DOWNLOADS,
     DANMAKU, DANMAKU_SEARCH, DANMAKU_DISPLAY, DANMAKU_ACCESS,
 }
 
@@ -58,6 +58,7 @@ internal fun AnimePlayerSettings(
     onPlayDownload: (AnimeDownloadSelection) -> Unit,
     onSources: (AnimeEpisode) -> Unit,
     initialEnhancementPage: EnhancementPage = EnhancementPage.QUALITY,
+    onStorage: () -> Unit = {},
 ) {
     var section by remember { mutableStateOf(initialSection) }
     val enhancementNavigation = remember { EnhancementNavigation(initialEnhancementPage) }
@@ -74,21 +75,37 @@ internal fun AnimePlayerSettings(
     var startDraft by remember { mutableStateOf("") }
     var rebufferDraft by remember { mutableStateOf("") }
     var retryDraft by remember { mutableStateOf("") }
+    var forwardDraft by remember { mutableStateOf("") }
+    var backDraft by remember { mutableStateOf("") }
+    var leadDraft by remember { mutableStateOf("") }
+    var nextSecondsDraft by remember { mutableStateOf("") }
+    var nextCacheDraft by remember { mutableStateOf("") }
+    var onlineDraft by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var pendingDownload by remember { mutableStateOf<AnimeDownloadSelection?>(null) }
     var pendingSourceEpisode by remember { mutableStateOf<AnimeEpisode?>(null) }
+    var pendingStorage by remember { mutableStateOf(false) }
+    var videoReturnSection by remember { mutableStateOf(AnimePlayerPanel.GENERAL) }
     LaunchedEffect(visible, initialSection, initialEnhancementPage) {
         if (visible) {
             section = initialSection; error = null; pendingDownload = null; pendingSourceEpisode = null
+            pendingStorage = false; videoReturnSection = AnimePlayerPanel.GENERAL
             enhancementNavigation.reset(initialEnhancementPage)
             speedDraft = playback.speed.toString(); holdDraft = state.settings.longPressSpeed.toString()
             openingDraft = state.settings.skipOpeningSeconds.toString(); endingDraft = state.settings.skipEndingSeconds.toString()
             minimumDraft = bufferSeconds(state.settings.bufferMinMs); maximumDraft = bufferSeconds(state.settings.bufferMaxMs)
             startDraft = bufferSeconds(state.settings.bufferStartMs); rebufferDraft = bufferSeconds(state.settings.bufferRebufferMs)
             retryDraft = state.settings.automaticRecoveryAttempts.toString(); minutesDraft = ""
+            forwardDraft = state.settings.bufferForwardMiB?.toString().orEmpty()
+            backDraft = state.settings.bufferBackMiB?.toString().orEmpty()
+            leadDraft = state.settings.nextEpisodeLeadSeconds?.toString().orEmpty()
+            nextSecondsDraft = state.settings.nextEpisodeBufferSeconds?.toString().orEmpty()
+            nextCacheDraft = state.settings.nextEpisodeCacheMiB?.toString().orEmpty()
+            onlineDraft = state.settings.onlinePreparationSeconds?.toString().orEmpty()
         }
     }
     val capabilities = playback.capabilities
+    val preparationBudget = controller.preparationBudget()
     val target = state.playbackTarget
     val currentMedia = playback.takeIf {
         target == null && state.selectedEpisodeId != null && it.episodeId == state.selectedEpisodeId && it.assetKey != null
@@ -104,6 +121,8 @@ internal fun AnimePlayerSettings(
     val scrollKey = if (section == AnimePlayerPanel.VIDEO) "video:${enhancementPage.name}" else section.name
     val sectionScroll = remember(scrollKey) { sectionScrolls.getOrPut(scrollKey) { LazyListState() } }
     fun show(next: AnimePlayerPanel) {
+        if (next == AnimePlayerPanel.VIDEO && section != AnimePlayerPanel.VIDEO_SOURCE)
+            videoReturnSection = if (section == AnimePlayerPanel.PREPARATION) AnimePlayerPanel.PREPARATION else AnimePlayerPanel.GENERAL
         if (next == AnimePlayerPanel.VIDEO && section == AnimePlayerPanel.GENERAL)
             enhancementNavigation.reset()
         section = next; error = null
@@ -116,18 +135,22 @@ internal fun AnimePlayerSettings(
     }
     val enhancementParent = enhancementNavigation.parent
     val backLabel = when {
+        section in setOf(AnimePlayerPanel.BUFFER, AnimePlayerPanel.NEXT_PREPARATION) -> "返回播放准备"
         section == AnimePlayerPanel.VIDEO_SOURCE -> "返回画质"
         section == AnimePlayerPanel.VIDEO && enhancementParent != null -> "返回${enhancementParent.titleFor(enhancementSessionKey != null)}"
+        section == AnimePlayerPanel.VIDEO && videoReturnSection == AnimePlayerPanel.PREPARATION -> "返回播放准备"
         section in setOf(AnimePlayerPanel.DANMAKU_SEARCH, AnimePlayerPanel.DANMAKU_DISPLAY,
             AnimePlayerPanel.DANMAKU_ACCESS) -> "返回弹幕设置"
         else -> "返回播放设置"
     }
     fun back() {
         when {
+            section in setOf(AnimePlayerPanel.BUFFER, AnimePlayerPanel.NEXT_PREPARATION) -> show(AnimePlayerPanel.PREPARATION)
             section == AnimePlayerPanel.VIDEO_SOURCE -> {
                 enhancementNavigation.reset(); show(AnimePlayerPanel.VIDEO)
             }
             section == AnimePlayerPanel.VIDEO && enhancementParent != null -> { enhancementNavigation.back(); error = null }
+            section == AnimePlayerPanel.VIDEO -> show(videoReturnSection)
             section in setOf(AnimePlayerPanel.DANMAKU_SEARCH, AnimePlayerPanel.DANMAKU_DISPLAY,
                 AnimePlayerPanel.DANMAKU_ACCESS) -> show(AnimePlayerPanel.DANMAKU)
             else -> show(AnimePlayerPanel.GENERAL)
@@ -136,11 +159,14 @@ internal fun AnimePlayerSettings(
     EnhancementPanelHost(visible, backdrop, onDismiss, maximumWidth = 480.dp, onClosed = {
         val request = pendingDownload
         val sourceEpisode = pendingSourceEpisode
+        val storage = pendingStorage
         pendingDownload = null
         pendingSourceEpisode = null
+        pendingStorage = false
         onClosed()
         if (request != null) onPlayDownload(request)
         else if (sourceEpisode != null) onSources(sourceEpisode)
+        else if (storage) onStorage()
     }, surface = { modifier, body -> AnimePanelSurface(backdrop, modifier) { body() } }) {
             MotionBackHandler(visible && section != AnimePlayerPanel.GENERAL, state = null, onBack = ::back)
             val panelHeight = LocalMangaWindow.current.panelHeight
@@ -162,6 +188,8 @@ internal fun AnimePlayerSettings(
                         AnimePlayerPanel.SLEEP -> "睡眠计时"
                         AnimePlayerPanel.SKIP -> "片头与片尾"
                         AnimePlayerPanel.BUFFER -> "缓冲与恢复"
+                        AnimePlayerPanel.PREPARATION -> "播放准备"
+                        AnimePlayerPanel.NEXT_PREPARATION -> "下一集准备"
                         AnimePlayerPanel.DOWNLOADS -> "离线下载"
                         AnimePlayerPanel.DANMAKU -> "弹幕"
                         AnimePlayerPanel.DANMAKU_SEARCH -> "匹配本集弹幕"
@@ -223,14 +251,8 @@ internal fun AnimePlayerSettings(
                             item { AnimeSectionTitle("连续播放") }
                             item { SettingsToggle("自动播放下一集", state.settings.autoPlayNext, Icons.Outlined.PlayCircleOutline,
                                 onCheckedChange = { enabled -> controller.updatePlaybackSettings { it.copy(autoPlayNext = enabled) } }) }
-                            item { SettingsToggle("提前准备下一集", state.settings.prepareNextEpisode, Icons.Outlined.DownloadForOffline,
-                                onCheckedChange = { enabled -> controller.updatePlaybackSettings { it.copy(prepareNextEpisode = enabled) } }) }
-                            state.nextEpisodePreparation?.let { preparation ->
-                                val next = state.detail?.episodes?.firstOrNull { it.id == preparation.episodeId }
-                                if (next != null) item {
-                                    AnimeQuietLabel("${animeEpisodeLabel(next)} · ${animePreparationLabel(preparation)}")
-                                }
-                            }
+                            item { AnimePlayerSettingLink(Icons.Outlined.DataUsage, "播放准备",
+                                "当前缓冲、下一集与增强片段") { show(AnimePlayerPanel.PREPARATION) } }
                             item { SettingsToggle("失败后尝试已确认的来源", state.settings.automaticSourceRecovery, Icons.Outlined.SwapHoriz,
                                 onCheckedChange = { enabled -> controller.updatePlaybackSettings { it.copy(automaticSourceRecovery = enabled) } }) }
                             if (AnimePlayerCapability.BACKGROUND_AUDIO in capabilities) item {
@@ -250,7 +272,6 @@ internal fun AnimePlayerSettings(
                             item { AnimePlayerSettingLink(Icons.Outlined.DownloadForOffline, "离线任务", "查看") {
                                 show(AnimePlayerPanel.DOWNLOADS)
                             } }
-                            item { AnimePlayerSettingLink(Icons.Outlined.Tune, "缓冲与恢复", "高级") { show(AnimePlayerPanel.BUFFER) } }
                         }
                         AnimePlayerPanel.VIDEO -> {
                             item(key = "enhancement-center") {
@@ -392,6 +413,65 @@ internal fun AnimePlayerSettings(
                                     skipEndingSeconds = ending) }; error = null }
                             }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("应用跳过设置") } }
                         }
+                        AnimePlayerPanel.PREPARATION -> {
+                            item { AnimePlayerSettingLink(Icons.Outlined.DataUsage, "当前缓冲与恢复",
+                                currentMedia?.bufferedAheadMs?.takeIf { it >= 0L }?.let { "已缓冲 ${animeTime(it)}" }
+                                    ?: "查看真实缓冲与容量") { show(AnimePlayerPanel.BUFFER) } }
+                            item { AnimePlayerSettingLink(Icons.Outlined.SkipNext, "下一集准备",
+                                state.nextEpisodePreparation?.let(::animePreparationLabel)
+                                    ?: if (state.settings.prepareNextEpisode) "播放接近结尾时准备" else "已关闭") {
+                                show(AnimePlayerPanel.NEXT_PREPARATION)
+                            } }
+                            item { AnimePlayerSettingLink(Icons.Outlined.Layers, "增强片段",
+                                currentMedia?.preparedVideoWindow?.let { "已备 ${animeTime(it.endMs - it.startMs)}" }
+                                    ?: currentMedia?.preparedVideoIssue ?: "画质模型与预处理状态") {
+                                enhancementNavigation.reset(EnhancementPage.PREPARATION)
+                                show(AnimePlayerPanel.VIDEO)
+                            } }
+                            item { AnimePlayerSettingLink(Icons.Outlined.Storage, "缓存管理", "原片、增强结果与离线下载") {
+                                pendingStorage = true; onDismiss()
+                            } }
+                            item { AnimeSectionTitle("在线增强窗口") }
+                            item { AnimeTextField(onlineDraft, { onlineDraft = it; error = null }, "每段目标时长（秒）",
+                                emptyHint = "自动 · ${preparationBudget.onlineWindowMs / 1000L}") }
+                            item { AnimeQuietLabel("清空使用自动值。实际处理受所选模型、输出尺寸和内核能力限制，原因显示在增强状态中。") }
+                            item { MotionButton(onClick = {
+                                val value = onlineDraft.trim().takeIf { it.isNotEmpty() }?.toIntOrNull()
+                                if (onlineDraft.isNotBlank() && (value == null || value <= 0)) error = "时长须为正整数，或清空使用自动。"
+                                else { controller.updatePlaybackSettings { it.copy(onlinePreparationSeconds = value) }; error = null }
+                            }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("保存窗口时长") } }
+                        }
+                        AnimePlayerPanel.NEXT_PREPARATION -> {
+                            item { SettingsToggle("提前准备下一集", state.settings.prepareNextEpisode, Icons.Outlined.DownloadForOffline,
+                                onCheckedChange = { enabled -> controller.updatePlaybackSettings { it.copy(prepareNextEpisode = enabled) } }) }
+                            state.nextEpisodePreparation?.let { preparation -> item {
+                                AnimeSectionTitle("当前准备", state.detail?.episodes?.firstOrNull {
+                                    it.id == preparation.episodeId }?.let(::animeEpisodeLabel))
+                                AnimeQuietLabel(animePreparationLabel(preparation))
+                                AnimeQuietLabel("从 ${animeTime(preparation.positionMs)} 准备 · 原片 ${animeBytes(preparation.cachedBytes)} · 连续时长 ${
+                                    preparation.bufferedDurationMs?.let(::animeTime) ?: "—"}")
+                                preparation.detail?.let { Text(it, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                            } }
+                            item { AnimeTextField(leadDraft, { leadDraft = it; error = null }, "片尾前多久开始（秒）",
+                                emptyHint = "自动 · ${preparationBudget.nextEpisodeLeadMs / 1000L}") }
+                            item { AnimeTextField(nextSecondsDraft, { nextSecondsDraft = it; error = null }, "原片目标时长（秒）",
+                                emptyHint = "自动 · ${preparationBudget.nextEpisodeDurationMs / 1000L}") }
+                            item { AnimeTextField(nextCacheDraft, { nextCacheDraft = it; error = null }, "原片缓存容量（MiB）",
+                                emptyHint = "自动 · ${preparationBudget.nextEpisodeBytes / (1024L * 1024L)}") }
+                            item { SettingsToggle("提前解码起播首帧", state.settings.predecodeNextEpisode, Icons.Outlined.SlowMotionVideo,
+                                onCheckedChange = { enabled -> controller.updatePlaybackSettings { it.copy(predecodeNextEpisode = enabled) } }) }
+                            item { AnimeQuietLabel("清空使用自动值。预读保存原片，预解码准备真实起播帧；会从下一集的续看位置准备，当前播放优先。") }
+                            item { MotionButton(onClick = {
+                                fun optional(raw: String) = raw.trim().takeIf { it.isNotEmpty() }?.toIntOrNull()
+                                val lead = optional(leadDraft); val seconds = optional(nextSecondsDraft); val capacity = optional(nextCacheDraft)
+                                val invalid = listOf(leadDraft to lead, nextSecondsDraft to seconds, nextCacheDraft to capacity)
+                                    .any { (raw, value) -> raw.isNotBlank() && (value == null || value < 0) }
+                                if (invalid) error = "请输入非负整数，或清空使用自动。"
+                                else { controller.updatePlaybackSettings { it.copy(nextEpisodeLeadSeconds = lead,
+                                    nextEpisodeBufferSeconds = seconds, nextEpisodeCacheMiB = capacity) }; error = null }
+                            }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("保存下一集准备") } }
+                        }
                         AnimePlayerPanel.BUFFER -> {
                             item {
                                 AnimeSectionTitle("本集诊断", episode?.let(::animeEpisodeLabel))
@@ -418,6 +498,15 @@ internal fun AnimePlayerSettings(
                                 val speed = currentMedia?.downloadBytesPerSecond?.takeIf { it >= 0 }?.let(::animeSourceRate)
                                 AnimeQuietLabel("打开至首帧 ${firstFrame ?: "—"} · 已缓冲 ${buffered ?: "—"}")
                                 AnimeQuietLabel("实播传输速率 · ${speed ?: "—"}")
+                                currentMedia?.bufferMetrics?.let { metrics ->
+                                    AnimeQuietLabel("已分配缓冲 · ${metrics.allocatedBytes?.let(::animeBytes) ?: "—"}")
+                                    if (metrics.forwardBytes != null || metrics.backBytes != null)
+                                        AnimeQuietLabel("前方 ${metrics.forwardBytes?.let(::animeBytes) ?: "—"} · 回看 ${metrics.backBytes?.let(::animeBytes) ?: "—"}")
+                                    if (metrics.targetForwardBytes != null || metrics.targetBackBytes != null)
+                                        AnimeQuietLabel("内核容量目标 · 前方 ${metrics.targetForwardBytes?.let(::animeBytes) ?: "—"} · 回看 ${metrics.targetBackBytes?.let(::animeBytes) ?: "—"}")
+                                    metrics.detail?.let { Text(it, style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                }
                                 if (episode != null) MotionTextButton(onClick = {
                                     pendingSourceEpisode = episode
                                     onDismiss()
@@ -431,17 +520,27 @@ internal fun AnimePlayerSettings(
                                 item { AnimeTextField(maximumDraft, { maximumDraft = it; error = null }, "最大缓冲（秒）") }
                                 item { AnimeTextField(startDraft, { startDraft = it; error = null }, "起播缓冲（秒）") }
                                 item { AnimeTextField(rebufferDraft, { rebufferDraft = it; error = null }, "恢复缓冲（秒）") }
+                                item { AnimeTextField(forwardDraft, { forwardDraft = it; error = null }, "前方缓冲容量（MiB）",
+                                    emptyHint = "自动 · ${preparationBudget.forwardBytes / (1024L * 1024L)}") }
+                                item { AnimeTextField(backDraft, { backDraft = it; error = null }, "回看缓冲容量（MiB）",
+                                    emptyHint = "自动 · ${preparationBudget.backBytes / (1024L * 1024L)}") }
+                                item { AnimeQuietLabel("容量清空使用自动值。支持的参数会直接更新当前播放；内核限制显示在本集诊断中。") }
                             } else item { AnimeQuietLabel("当前内核自行管理缓冲，可调整单线路重试次数。") }
                             item { AnimeTextField(retryDraft, { retryDraft = it; error = null }, "单线路重试次数，0 关闭自动恢复") }
                             item { MotionButton(onClick = {
                                 val minimum = bufferMillis(minimumDraft); val maximum = bufferMillis(maximumDraft)
                                 val start = bufferMillis(startDraft); val rebuffer = bufferMillis(rebufferDraft)
                                 val retries = retryDraft.trim().toIntOrNull()
+                                val forward = forwardDraft.trim().takeIf { it.isNotEmpty() }?.toIntOrNull()
+                                val back = backDraft.trim().takeIf { it.isNotEmpty() }?.toIntOrNull()
                                 if (minimum == null || maximum == null || start == null || rebuffer == null || retries == null ||
-                                    retries < 0 || maximum <= 0 || maximum < minimum || minimum < start || minimum < rebuffer)
+                                    retries < 0 || maximum <= 0 || maximum < minimum || minimum < start || minimum < rebuffer ||
+                                    forwardDraft.isNotBlank() && (forward == null || forward <= 0) ||
+                                    backDraft.isNotBlank() && (back == null || back < 0))
                                     error = "最大缓冲 ≥ 最小缓冲 ≥ 起播及恢复缓冲，恢复次数不能为负。"
                                 else { controller.updatePlaybackSettings { it.copy(bufferMinMs = minimum,
                                     bufferMaxMs = maximum, bufferStartMs = start, bufferRebufferMs = rebuffer,
+                                    bufferForwardMiB = forward, bufferBackMiB = back,
                                     automaticRecoveryAttempts = retries) }; error = null }
                             }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("应用缓冲设置") } }
                         }

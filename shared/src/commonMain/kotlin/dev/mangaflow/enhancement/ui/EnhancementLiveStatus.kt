@@ -285,7 +285,11 @@ private fun AnimeEnhancementStatus(
                     AnimeMetricRow("预处理模型", prepared.modelName)
                     AnimeMetricRow("预处理耗时 / 缓存", animeMillis(prepared.processingMillis.toDouble()) +
                         " / " + enhancementBytes(prepared.bytes))
-                    AnimeMetricRow("已缓存 / 实际复用 · 帧", "${prepared.frames} / ${prepared.framesUsed}")
+                    if (prepared.usageIsSampled) {
+                        AnimeMetricRow("已缓存 · 帧", prepared.frames.toString())
+                        AnimeMetricRow("已确认复用 · 样本", prepared.framesUsed.toString())
+                        EnhancementQuiet("只累计实际视频输出中核对到的增强帧样本，不代表全部输出帧数或屏幕呈现帧率。")
+                    } else AnimeMetricRow("已缓存 / 实际复用 · 帧", "${prepared.frames} / ${prepared.framesUsed}")
                 }
                 EnhancementQuiet("提交频率不等于 GPU 完成或屏幕呈现帧率；提交尺寸对应处理缓冲区，不代表屏幕呈现分辨率。")
                 EnhancementDivider()

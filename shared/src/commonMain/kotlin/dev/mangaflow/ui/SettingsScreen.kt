@@ -193,6 +193,7 @@ fun SettingsScreen(
     openWebDavSettings: Boolean = false,
     onWebDavSettingsOpened: () -> Unit = {},
     onWebDavSettingsClosed: () -> Unit = {},
+    onOpenAnimeDownloads: () -> Unit = {},
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -660,11 +661,13 @@ fun SettingsScreen(
     StorageManagementDialog(showStorage, storageBackdrop, libraryStore, repository = sourceRepository, active = screenActive,
         onDismiss = { showStorage = false },
         onDownloads = { storageDestination = "downloads"; showStorage = false },
+        onAnimeDownloads = { storageDestination = "anime-downloads"; showStorage = false },
         onModels = { storageDestination = "models"; showStorage = false },
         onClosed = {
             val target = storageDestination
             storageDestination = null
             if (target == "downloads") onOpenDownloads()
+            if (target == "anime-downloads") onOpenAnimeDownloads()
             if (target == "models") showStorageModels = true
         })
     dev.mangaflow.reader.panels.PanelModelsDialog(showStorageModels, storageBackdrop) { showStorageModels = false }

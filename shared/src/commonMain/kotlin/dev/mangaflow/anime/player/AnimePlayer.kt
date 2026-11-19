@@ -28,6 +28,21 @@ data class AnimePlayerRequest(
     val bypassMediaCache: Boolean = false,
 )
 
+data class AnimeStartupCacheRequest(
+    val asset: AnimePlaybackAsset,
+    val positionMs: Long,
+    val targetDurationMs: Long,
+    val maximumBytes: Long,
+    val validUntil: Long,
+)
+
+/** Resident original-media bytes for the requested range; a transfer count is not a readiness count. */
+data class AnimeStartupCacheResult(
+    val bytes: Long,
+    val bufferedDurationMs: Long? = null,
+    val detail: String? = null,
+)
+
 data class AnimePreparedVideoRequest(
     val asset: AnimePlaybackAsset,
     val sessionGeneration: Long,
@@ -52,6 +67,7 @@ data class AnimePreparedVideoWindow(
     val processingMillis: Long,
     val framesUsed: Long = 0L,
     val lastUsedAt: Long = 0L,
+    val usageIsSampled: Boolean = false,
 )
 
 enum class AnimePlayerPhase { IDLE, OPENING, READY, ENDED, ERROR, RELEASED }
@@ -94,6 +110,17 @@ data class AnimeNativeVideoStatistics(
     val estimatedDelayedFrames: Long?,
 )
 
+/** Native compressed-buffer observations. Missing measurements are deliberately not inferred from targets. */
+data class AnimeBufferMetrics(
+    val allocatedBytes: Long? = null,
+    val forwardBytes: Long? = null,
+    val backBytes: Long? = null,
+    val targetForwardBytes: Long? = null,
+    val targetBackBytes: Long? = null,
+    val sampledAtMillis: Long? = null,
+    val detail: String? = null,
+)
+
 /** Buffer times are targets, not a claim about memory use or startup latency. */
 data class AnimePlayerOptions(
     val backgroundAudio: Boolean = false,
@@ -107,6 +134,8 @@ data class AnimePlayerOptions(
     val enhancementModel: EngineModel? = null,
     val preparedVideoModel: EngineModel? = null,
     val realtimeFrames: AnimeRealtimeFrameRequest? = null,
+    val bufferForwardBytes: Long = 64L * 1024L * 1024L,
+    val bufferBackBytes: Long = 8L * 1024L * 1024L,
 ) {
     fun requireValid() {
         require(if (videoEnhancement == AnimeVideoEnhancementMode.MODEL)
@@ -121,6 +150,7 @@ data class AnimePlayerOptions(
             "最大缓冲须不小于最小缓冲，最小缓冲须不小于起播和恢复缓冲"
         }
         require(automaticRecoveryAttempts >= 0) { "自动恢复次数不能为负" }
+        require(bufferForwardBytes > 0L && bufferBackBytes >= 0L) { "前方缓冲容量必须大于零，回看容量不能为负" }
     }
 }
 
@@ -173,6 +203,7 @@ data class AnimePlayerState(
     val preparedVideoIssue: String? = null,
     val realtimeMotion: AnimeRealtimeMotionState? = null,
     val nativeVideoStatistics: AnimeNativeVideoStatistics? = null,
+    val bufferMetrics: AnimeBufferMetrics? = null,
 ) {
     val ended: Boolean get() = phase == AnimePlayerPhase.ENDED
     val isPlaying: Boolean get() = phase == AnimePlayerPhase.READY && playWhenReady && !isBuffering
@@ -183,11 +214,14 @@ interface AnimePlayer {
     val state: StateFlow<AnimePlayerState>
     /** Optional original-media bytes confirmed in the backend's playback cache. */
     suspend fun cacheStartup(asset: AnimePlaybackAsset, byteLimit: Long, validUntil: Long): Long = 0L
+    suspend fun prepareStartupCache(request: AnimeStartupCacheRequest): AnimeStartupCacheResult =
+        AnimeStartupCacheResult(cacheStartup(request.asset, request.maximumBytes, request.validUntil))
     /** True requires a retained native backend with a decoded frame for the exact start position. */
     suspend fun prepareStartup(asset: AnimePlaybackAsset, positionMs: Long, byteLimit: Long, validUntil: Long): Boolean =
         false
     fun discardStartup(asset: AnimePlaybackAsset? = null) {}
     suspend fun prepareVideoWindow(request: AnimePreparedVideoRequest): Boolean = false
+    fun noteVideoPreparationIssue(detail: String?) {}
     fun discardPreparedVideo() {}
     fun open(request: AnimePlayerRequest)
     fun play()
@@ -207,6 +241,9 @@ interface AnimePlayer {
 }
 
 expect fun createAnimePlayer(context: PlatformContext, scope: CoroutineScope): AnimePlayer
+
+/** Registers persisted native cache ownership without constructing a playback session. */
+expect fun initializeAnimeStorage(context: PlatformContext)
 
 /** Surface only: app-owned playback survives disposal of the screen. */
 @Composable

@@ -29,6 +29,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.SingletonImageLoader
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.MangaApplicationServices
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
 import dev.mangaflow.experience.ExperiencePolicyStore
@@ -48,7 +49,7 @@ import kotlinx.coroutines.withContext
 
 private data class StorageClearPlan(val items: List<StoredCacheItem>, val legacy: Boolean,
     val estimatedBytes: Long, val label: String, val legacyRevision: Long?, val legacyStamp: String?)
-private data class StoragePane(val area: CacheArea?, val book: String?, val review: StorageClearPlan?, val snapshot: StorageCacheSnapshot?)
+private data class StoragePane(val area: CacheArea?, val book: String?, val source: String?, val review: StorageClearPlan?, val snapshot: StorageCacheSnapshot?)
 
 /** One retained panel; overview, drill-down and review share the same header and scroll owner. */
 @Composable
@@ -56,6 +57,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
     repository: dev.mangaflow.data.UnifiedMangaRepository?,
     active: Boolean = true,
     onDismiss: () -> Unit, onClosed: () -> Unit, onDownloads: () -> Unit, onModels: () -> Unit,
+    onAnimeDownloads: (() -> Unit)? = null,
 ) {
     val context = LocalMangaContext.current
     val store = remember(context) { StorageCacheStore.get(context) }
@@ -63,6 +65,8 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
     val scope = rememberCoroutineScope()
     val downloads = remember(context) { DownloadStore.get(context) }
     val entries by downloads.entries.collectAsStateWithLifecycle()
+    val animeDownloads = remember(context) { MangaApplicationServices.get(context).animeDownloads }
+    val animeDownloadState by animeDownloads.state.collectAsStateWithLifecycle()
     val models = remember(context) { PanelModelStore.get(context) }
     val runtimes = remember(context) { PanelRuntimeStore.get(context) }
     val modelStates by models.states.collectAsStateWithLifecycle()
@@ -76,6 +80,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
     var snapshot by remember { mutableStateOf<StorageCacheSnapshot?>(null) }
     var area by remember { mutableStateOf<CacheArea?>(null) }
     var book by remember { mutableStateOf<String?>(null) }
+    var source by remember { mutableStateOf<String?>(null) }
     var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
     var details by remember { mutableStateOf<Map<String, MangaDetail>>(emptyMap()) }
     var plan by remember { mutableStateOf<StorageClearPlan?>(null) }
@@ -83,14 +88,15 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
     var loading by remember { mutableStateOf(false) }
     var clearingMemory by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
-    var offlineBytes by remember { mutableLongStateOf(0L) }
+    var offlineBytes by remember { mutableStateOf<Long?>(null) }
+    var animeOfflineBytes by remember { mutableStateOf<Long?>(null) }
     var revision by remember { mutableIntStateOf(0) }
     val imageLoader = remember(context) { SingletonImageLoader.get(imagePlatformContext(context)) }
     val known = remember(favorites, history, entries, details) {
         (details.values.map { it.manga } + history.map { it.manga } + entries.map { it.manga } + favorites)
             .associateBy { it.id }
     }
-    LaunchedEffect(visible, active, revision, clearOperation?.id, clearOperation?.phase) {
+    LaunchedEffect(visible, active, revision, clearOperation?.id, clearOperation?.phase, animeDownloadState.loading) {
         if (!visible || !active || busy) return@LaunchedEffect
         loading = true
         try {
@@ -99,21 +105,32 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
             details = buildMap { for (id in ids) ReaderCatalogStore(context).read(id)?.let { put(id, it) } }
             // Title reads can restore owner memory; issue the review after those reads settle.
             snapshot = store.snapshot()
-            offlineBytes = withContext(Dispatchers.IO) { downloads.storageBytes() }
         } catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { notice = "用量读取未完成，点按刷新重试" }
         finally { loading = false }
     }
+    LaunchedEffect(visible, active, revision, entries.map { it.id to it.status },
+        animeDownloadState.entries.map { it.id to it.status }, animeDownloadState.loading) {
+        if (!visible || !active) return@LaunchedEffect
+        try { offlineBytes = withContext(Dispatchers.IO) { downloads.storageBytes() } }
+        catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { offlineBytes = null; notice = "漫画离线用量未能读取，点按刷新重试" }
+        try { animeOfflineBytes = animeDownloads.storageBytes() }
+        catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { animeOfflineBytes = null; notice = "番剧离线用量未能读取，点按刷新重试" }
+    }
     fun back() {
         when {
             plan != null -> plan = null
+            source != null -> { source = null }
             book != null -> { book = null }
             area != null -> { area = null; selected = emptySet() }
             else -> onDismiss()
         }
     }
     val scoped = snapshot?.items.orEmpty().filter { item ->
-        (area == null || item.resource.area == area) && (book == null || item.resource.mangaId.ifBlank { UNCLASSIFIED } == book)
+        (area == null || item.resource.area == area) && (book == null || item.storageBookId() == book) &&
+            (source == null || item.resource.sourceId == source)
     }
     val selectedInScope = scoped.filter { it.resource.id in selected }
     val chosen = if (selectedInScope.isEmpty()) scoped else selectedInScope
@@ -122,17 +139,20 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
     val scopeBytes = reclaimable.sumOf { it.bytes } +
         (if (includeLegacy) snapshot?.coilUnclassifiedBytes ?: 0L else 0L)
     val hasSelection = selectedInScope.isNotEmpty()
-    val bookTitle = book?.let { known[it]?.title ?: if (it == UNCLASSIFIED) "未归类图片" else "已缓存作品" }
+    val bookTitle = book?.let { storageBookTitle(it, area, scoped, known) }
+    val sourceTitle = source?.let { id -> animeDownloadState.entries.firstOrNull { it.sourceId == id }
+        ?.sourceName?.takeIf { it.isNotBlank() } ?: id.ifBlank { "未归类来源" } }
     val scopeLabel = if (hasSelection) "已选 ${selectedInScope.size} 项"
-        else bookTitle ?: area?.label ?: "全部缓存"
+        else if (sourceTitle != null) "$bookTitle · $sourceTitle" else bookTitle ?: area?.label ?: "全部缓存"
     val scopedArea = area
     val occupiedBytes = snapshot?.let { inventory ->
         when {
             hasSelection -> selectedInScope.sumOf { it.bytes }
             book != null -> scoped.sumOf { it.bytes }
             scopedArea != null -> inventory.areaBytes(scopedArea)
-            else -> inventory.totalBytes + offlineBytes + modelStates.values.sumOf { it.bytes } +
-                runtimeStates.values.sumOf { it.bytes }
+            offlineBytes != null && animeOfflineBytes != null -> inventory.totalBytes + offlineBytes!! + animeOfflineBytes!! +
+                modelStates.values.sumOf { it.bytes } + runtimeStates.values.sumOf { it.bytes }
+            else -> null
         }
     }
     fun previewClear() {
@@ -235,18 +255,20 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                             }
                         }
                     }
-                    MotionTabContent(StoragePane(area, book, plan, snapshot),
+                    MotionTabContent(StoragePane(area, book, source, plan, snapshot),
                         modifier = Modifier.weight(1f, fill = false).fillMaxWidth(),
-                        contentKey = { Triple(it.area, it.book, it.review != null) },
-                        order = { if (it.review != null) 3 else if (it.book != null) 2 else if (it.area != null) 1 else 0 },
+                        contentKey = { listOf(it.area, it.book, it.source, it.review != null) },
+                        order = { if (it.review != null) 4 else if (it.source != null) 3 else if (it.book != null) 2 else if (it.area != null) 1 else 0 },
                         fillContent = false, soft = true) { shown ->
                     val paneArea = shown.area
                     val paneBook = shown.book
+                    val paneSource = shown.source
                     val paneReview = shown.review
                     val paneSnapshot = shown.snapshot
                     val paneItems = paneSnapshot?.items.orEmpty().filter { item ->
                         (paneArea == null || item.resource.area == paneArea) &&
-                            (paneBook == null || item.resource.mangaId.ifBlank { UNCLASSIFIED } == paneBook)
+                            (paneBook == null || item.storageBookId() == paneBook) &&
+                            (paneSource == null || item.resource.sourceId == paneSource)
                     }
                     LazyColumn(Modifier.fillMaxWidth(), contentPadding = PaddingValues(bottom = 8.dp)) {
                         if (paneReview != null) {
@@ -258,14 +280,14 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                         StorageLine(kind.label, "${items.size} 项", storageBytes(items.sumOf { it.bytes }))
                                     }
                                     if (paneReview.legacy) StorageLine("旧版图片缓存", "无可靠作品归属，空闲时清理", storageBytes(paneSnapshot?.coilUnclassifiedBytes ?: 0L))
-                                    Text("当前阅读、播放缓冲、使用中的图片、下载断点与离线资料会保留。离线章节和模型由各自入口管理。",
+                                    Text("当前阅读、正在播放或准备的番剧片段、使用中的增强结果与处理文件会保留。漫画与番剧离线原片、下载断点和模型由各自入口管理。",
                                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                                 }
                             }
                         } else if (paneArea == null) {
                             items(CacheArea.entries, key = { it.name }) { kind ->
                                 StorageNavigationRow(kind.label, when (kind) {
-                                    CacheArea.ANIME -> "播放片段 · 播放中保留"
+                                    CacheArea.ANIME -> "按作品与剧集管理 · 使用中的片段保留"
                                     CacheArea.READING -> "原图 · 脚本与解密图片"
                                     CacheArea.ARTWORK -> "封面 · 用户头像"
                                     CacheArea.DATA -> "推荐 · 榜单 · 目录 · 评分与评论"
@@ -279,7 +301,11 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                 StorageLine("旧版图片缓存", if (paneSnapshot?.legacyReclaimable == true) "归属会在再次使用后补齐" else "正在使用，稍后可清理",
                                     storageBytes(paneSnapshot?.coilUnclassifiedBytes ?: 0L))
                             }
-                            item("offline") { StorageNavigationRow("离线下载", "独立保存", storageBytes(offlineBytes), Icons.Outlined.Download, true, onDownloads) }
+                            item("offline") { StorageNavigationRow("漫画离线下载", "独立保存 · 不自动回收",
+                                offlineBytes?.let(::storageBytes) ?: "—", Icons.Outlined.Download, !busy, onDownloads) }
+                            item("anime-offline") { StorageNavigationRow("番剧离线下载", "原视频与下载中内容 · 不自动回收",
+                                animeOfflineBytes?.let(::storageBytes) ?: "—", Icons.Outlined.Download,
+                                !busy && onAnimeDownloads != null, { onAnimeDownloads?.invoke() }) }
                             if (PanelReadingAvailable) item("models") { StorageNavigationRow("模型与组件", "按需下载", storageBytes(modelStates.values.sumOf { it.bytes } +
                                 runtimeStates.values.sumOf { it.bytes }), Icons.Outlined.Extension, !busy, onModels) }
                             item("backend-census") {
@@ -294,7 +320,8 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                         "番剧" to inventory.areaBytes(CacheArea.ANIME),
                                         "目录" to (inventory.items.filter { it.resource.backend == CacheBackend.CATALOG }
                                             .sumOf { it.bytes } + inventory.catalogBytes),
-                                        "数据" to (inventory.items.filter { it.resource.backend == CacheBackend.AUXILIARY }
+                                        "增强" to inventory.areaBytes(CacheArea.ENHANCEMENT),
+                                        "数据" to (inventory.items.filter { it.resource.backend == CacheBackend.AUXILIARY && it.resource.area == CacheArea.DATA }
                                             .sumOf { it.bytes } + inventory.auxiliaryBytes),
                                     )
                                     Column(Modifier.fillMaxWidth().padding(vertical = 7.dp),
@@ -342,40 +369,79 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                         }
                                     }
                                     if (paneSnapshot?.pending == true || (paneSnapshot?.totalBytes ?: 0L) > (paneSnapshot?.budgetBytes ?: Long.MAX_VALUE))
-                                        Text("使用中的内容保留，释放后继续回收", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                        Text("暂不能清理的内容已保留，条件允许后继续回收", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                                 }
                             }
                         } else if (paneArea == CacheArea.DATA) {
                             item("data") { StorageLine("资料与列表", "离线目录受保护", storageBytes(paneSnapshot?.areaBytes(CacheArea.DATA) ?: 0L)) }
-                        } else if (paneArea == CacheArea.ANIME) {
-                            item("anime-buffer") {
-                                StorageLine("播放缓存",
-                                    if (paneItems.any { it.protected }) "使用中或播放器尚未接管，暂不清理" else "可重新获取，不影响追番与续播记录",
-                                    storageBytes(paneSnapshot?.areaBytes(CacheArea.ANIME) ?: 0L))
-                            }
                         } else if (paneBook == null) {
-                            val groups = paneItems.groupBy { it.resource.mangaId.ifBlank { UNCLASSIFIED } }.entries.sortedByDescending { it.value.sumOf { row -> row.bytes } }
+                            val groups = paneItems.groupBy { it.storageBookId() }.entries.sortedByDescending { it.value.sumOf { row -> row.bytes } }
                             if (groups.isEmpty()) item("empty") { StorageEmpty(loading) }
                             items(groups, key = { it.key }) { group ->
-                                val manga = known[group.key]
-                                val chapters = group.value.map { it.resource.chapterId }.filter { it.isNotBlank() }.distinct().size
-                                StorageBookRow(manga, repository, if (group.key == UNCLASSIFIED) "未归类图片" else manga?.title ?: "已缓存作品",
-                                    if (chapters > 0) "$chapters 章 · ${group.value.size} 张" else "${group.value.size} 项",
+                                val anime = group.value.any { it.isAnimeStorage() }
+                                val manga = if (anime) null else known[group.key]
+                                val chapters = group.value.map { it.storagePartId() }.filter { it.isNotBlank() }.distinct().size
+                                val sources = group.value.map { it.resource.sourceId }.filter { it.isNotBlank() }.distinct().size
+                                val detail = when {
+                                    anime -> listOfNotNull(chapters.takeIf { it > 0 }?.let { "$it 集" },
+                                        sources.takeIf { it > 0 }?.let { "$it 个来源" }).joinToString(" · ").ifBlank { "缓存归属待恢复" }
+                                    paneArea == CacheArea.ENHANCEMENT -> "${group.value.size} 项增强与处理文件"
+                                    chapters > 0 -> "$chapters 章 · ${group.value.size} 张"
+                                    else -> "${group.value.size} 项"
+                                }
+                                val held = group.value.filter { it.protected }.sumOf { it.bytes }
+                                StorageBookRow(manga, repository, storageBookTitle(group.key, paneArea, group.value, known),
+                                    detail + if (held > 0L) " · 保留 ${storageBytes(held)}" else "",
                                     storageBytes(group.value.sumOf { it.bytes }), group.value.filterNot { it.protected }.let { rows -> rows.isNotEmpty() && rows.all { it.resource.id in selected } },
                                     group.value.all { it.protected }, onSelect = {
                                         val ids = group.value.filterNot { it.protected }.map { it.resource.id }.toSet()
                                         selected = if (ids.all { it in selected }) selected - ids else selected + ids
-                                    }, onOpen = { book = group.key })
+                                    }, onOpen = { book = group.key; source = null })
+                            }
+                        } else if (paneSource == null && paneItems.any { it.isAnimeStorage() } &&
+                            paneItems.map { it.resource.sourceId }.distinct().size > 1) {
+                            val groups = paneItems.groupBy { it.resource.sourceId }.entries
+                                .sortedByDescending { it.value.sumOf { row -> row.bytes } }
+                            items(groups, key = { it.key }) { group ->
+                                val title = animeDownloadState.entries.firstOrNull { it.sourceId == group.key }
+                                    ?.sourceName?.takeIf { it.isNotBlank() } ?: group.key.ifBlank { "未归类来源" }
+                                val episodes = group.value.map { it.storagePartId() }.filter { it.isNotBlank() }.distinct().size
+                                val held = group.value.filter { it.protected }.sumOf { it.bytes }
+                                val detail = (if (episodes > 0) "$episodes 集" else "未归类片段") +
+                                    if (held > 0L) " · 保留 ${storageBytes(held)}" else ""
+                                StorageBookRow(null, null, title, detail, storageBytes(group.value.sumOf { it.bytes }),
+                                    group.value.filterNot { it.protected }.let { rows -> rows.isNotEmpty() && rows.all { it.resource.id in selected } },
+                                    group.value.all { it.protected }, onSelect = {
+                                        val ids = group.value.filterNot { it.protected }.map { it.resource.id }.toSet()
+                                        selected = if (ids.all { it in selected }) selected - ids else selected + ids
+                                    }, onOpen = { source = group.key })
                             }
                         } else {
-                            val groups = paneItems.groupBy { it.resource.chapterId to it.resource.sourceId }.entries
+                            val groups = paneItems.groupBy { it.storagePartId() to it.resource.sourceId }.entries
                                 .sortedBy { details[paneBook]?.chapters?.firstOrNull { ch -> ch.id == it.key.first }?.index ?: Int.MAX_VALUE }
                             items(groups, key = { it.key.first + "\u0000" + it.key.second }) { group ->
                                 val chapter = details[paneBook]?.chapters?.firstOrNull { it.id == group.key.first || it.variants.any { variant -> variant.storageId == group.key.first } }
-                                val title = chapter?.title ?: if (group.key.first.isBlank()) "未归类图片" else "缓存章节"
-                                val source = repository?.sources?.firstOrNull { it.id == group.key.second }?.name ?: group.key.second.ifBlank { "未归类来源" }
-                                StorageSelectionRow(title, "$source · ${group.value.size} 张", storageBytes(group.value.sumOf { it.bytes }),
-                                    group.value.filterNot { it.protected }.all { it.resource.id in selected }, group.value.all { it.protected }) {
+                                val anime = group.value.any { it.isAnimeStorage() }
+                                val title = if (anime) {
+                                    group.value.firstNotNullOfOrNull { row ->
+                                        row.animeEntry?.episodeTitle?.takeIf { it.isNotBlank() }
+                                            ?: row.auxiliaryEntry?.partTitle?.takeIf { it.isNotBlank() }
+                                    } ?: if (group.key.first.isBlank()) "未归类番剧片段" else "已缓存剧集"
+                                } else {
+                                    chapter?.title ?: if (paneArea == CacheArea.ENHANCEMENT) "增强与处理文件"
+                                        else if (group.key.first.isBlank()) "未归类图片" else "缓存章节"
+                                }
+                                val source = (if (anime) animeDownloadState.entries.firstOrNull { it.sourceId == group.key.second }?.sourceName
+                                    else repository?.sources?.firstOrNull { it.id == group.key.second }?.name)
+                                    ?.takeIf { it.isNotBlank() } ?: group.key.second.ifBlank { "未归类来源" }
+                                val temporary = group.value.filter { it.auxiliaryEntry?.temporary == true }.sumOf { it.bytes }
+                                val held = group.value.filter { it.protected }.sumOf { it.bytes }
+                                val detail = "$source · ${group.value.size} ${if (anime || paneArea == CacheArea.ENHANCEMENT) "项" else "张"}" +
+                                    (if (temporary > 0L) " · 临时 ${storageBytes(temporary)}" else "") +
+                                    (if (held > 0L && group.value.any { !it.protected }) " · 保留 ${storageBytes(held)}" else "")
+                                StorageSelectionRow(title, detail, storageBytes(group.value.sumOf { it.bytes }),
+                                    group.value.filterNot { it.protected }.let { rows -> rows.isNotEmpty() && rows.all { it.resource.id in selected } },
+                                    group.value.all { it.protected }) {
                                     val ids = group.value.filterNot { it.protected }.map { it.resource.id }.toSet()
                                     selected = if (ids.all { it in selected }) selected - ids else selected + ids
                                 }
@@ -456,7 +522,7 @@ private fun StorageSelectionRow(title: String, detail: String, size: String, sel
 
 @Composable
 private fun StorageSelect(selected: Boolean, protected: Boolean, onSelect: () -> Unit) {
-    MotionIconButton(onSelect, enabled = !protected, modifier = Modifier.size(44.dp), tooltip = if (protected) "正在使用，已保护" else if (selected) "取消选择" else "选择清理") {
+    MotionIconButton(onSelect, enabled = !protected, modifier = Modifier.size(44.dp), tooltip = if (protected) "受保护，暂不能清理" else if (selected) "取消选择" else "选择清理") {
         Icon(if (protected) Icons.Outlined.Lock else if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
             if (protected) "受保护" else if (selected) "已选择" else "未选择", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
@@ -465,6 +531,26 @@ private fun StorageSelect(selected: Boolean, protected: Boolean, onSelect: () ->
 @Composable
 private fun StorageEmpty(loading: Boolean) { Text(if (loading) "正在统计…" else "暂无缓存", Modifier.padding(vertical = 24.dp),
     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+
+private fun StoredCacheItem.isAnimeStorage(): Boolean = resource.area == CacheArea.ANIME ||
+    resource.auxiliaryOwnerId in setOf("enhanced-video-v1", "anime-online-windows") || auxiliaryEntry?.content == "anime"
+
+private fun StoredCacheItem.storageBookId(): String = if (isAnimeStorage())
+    ANIME_BOOK_PREFIX + (animeEntry?.subjectId?.takeIf { it.isNotBlank() } ?: auxiliaryEntry?.workId.orEmpty())
+    else resource.mangaId.ifBlank { UNCLASSIFIED }
+
+private fun StoredCacheItem.storagePartId(): String = animeEntry?.episodeId?.takeIf { it.isNotBlank() }
+    ?: auxiliaryEntry?.partId?.takeIf { it.isNotBlank() } ?: resource.chapterId
+
+private fun storageBookTitle(id: String, area: CacheArea?, rows: List<StoredCacheItem>, known: Map<String, Manga>): String {
+    if (id.startsWith(ANIME_BOOK_PREFIX) || rows.any { it.isAnimeStorage() }) return rows.firstNotNullOfOrNull { row ->
+        row.animeEntry?.subjectTitle?.takeIf { it.isNotBlank() }
+            ?: row.auxiliaryEntry?.workTitle?.takeIf { it.isNotBlank() }
+    } ?: if (id == ANIME_BOOK_PREFIX) "未归类番剧" else "已缓存番剧"
+    return known[id]?.title ?: if (id == UNCLASSIFIED) {
+        if (area == CacheArea.ENHANCEMENT) "未归类增强内容" else "未归类图片"
+    } else "已缓存作品"
+}
 
 private fun areaIcon(area: CacheArea) = when (area) {
     CacheArea.ANIME -> Icons.Outlined.PlayCircleOutline
@@ -481,3 +567,4 @@ internal fun storageBytes(bytes: Long): String = when {
     else -> "$bytes B"
 }
 private const val UNCLASSIFIED = "\u0000unclassified"
+private const val ANIME_BOOK_PREFIX = "\u0000anime:"

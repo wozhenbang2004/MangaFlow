@@ -74,7 +74,9 @@ internal suspend fun prepareAndroidAnimeWindow(
     request: AnimePreparedVideoRequest,
 ): AndroidPreparedWindow = withContext(Dispatchers.IO) {
     val started = SystemClock.elapsedRealtime()
-    require(request.endMs - request.startMs in 5_000L..15_000L)
+    require(request.endMs - request.startMs in 5_000L..15_000L) {
+        "当前 Android 在线帧缓存支持 5–15 秒窗口；已保存的窗口目标保持不变"
+    }
     val asset = request.asset
     val path = Uri.parse(asset.url).path.orEmpty()
     val mimeType = when {
@@ -89,7 +91,7 @@ internal suspend fun prepareAndroidAnimeWindow(
     val outputHeight = Math.multiplyExact(height, scale)
     require(width >= SAMPLE_SIDE && height >= SAMPLE_SIDE &&
         outputWidth.toLong() * outputHeight <= MAX_OUTPUT_PIXELS && scale in setOf(1, 2, 4)) {
-        "当前画面尺寸超出在线帧缓存预算"
+        "当前在线帧缓存输出 ${outputWidth}×${outputHeight}，超过此图形路径的 220 万像素容量，或输入尺寸/倍率不受支持"
     }
     val vulkan = request.model.engineId == EnhancementEngineIds.ANDROID_CUGAN_VIDEO
     val cugan = if (vulkan) AndroidCuganVulkan(context, File(context.noBackupFilesDir, "enhancement")) else null
@@ -98,7 +100,7 @@ internal suspend fun prepareAndroidAnimeWindow(
     check(verifyModel()) { "预处理模型已变化" }
     if (!vulkan) PanelRuntimeStore.get(context).ensureLoaded(PanelRuntimeId.ONNX)
     val owner = AndroidAnimeCache.get(context)
-    val release = owner.acquire()
+    val release = owner.acquire(asset)
     val client = animeMediaHttpClient(asset, forPrefetch = true)
     val output = File(context.cacheDir, "anime-forward-${UUID.randomUUID()}.mp4")
     val job = currentCoroutineContext()
@@ -134,7 +136,8 @@ internal suspend fun prepareAndroidAnimeWindow(
                 AndroidRgbVideoProgram(session, width, height, scale, 64L * 1024 * 1024, job::ensureActive,
                     capture = { time, input, enhanced ->
                         job.ensureActive()
-                        check(captures.size < 900 && time !in captures) { "预处理帧时间不连续" }
+                        check(captures.size < 900) { "在线帧缓存达到 900 帧容量；请缩短准备窗口" }
+                        check(time !in captures) { "预处理帧时间不连续" }
                         enhanced.get(raw)
                         val compressed = compressFrame(raw)
                         check(bytes + compressed.size <= request.maximumResultBytes) { "在线帧缓存达到预算" }

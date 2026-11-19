@@ -413,6 +413,12 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("automaticRecoveryAttempts", value.automaticRecoveryAttempts)
         .put("videoEnhancement", value.videoEnhancement.name)
         .put("preferredSourceHeight", value.preferredSourceHeight)
+        .put("bufferForwardMiB", value.bufferForwardMiB).put("bufferBackMiB", value.bufferBackMiB)
+        .put("nextEpisodeLeadSeconds", value.nextEpisodeLeadSeconds)
+        .put("nextEpisodeBufferSeconds", value.nextEpisodeBufferSeconds)
+        .put("nextEpisodeCacheMiB", value.nextEpisodeCacheMiB)
+        .put("predecodeNextEpisode", value.predecodeNextEpisode)
+        .put("onlinePreparationSeconds", value.onlinePreparationSeconds)
 
     private fun decodeSettings(json: JSONObject): AnimePlaybackSettings {
         val defaults = AnimePlaybackSettings()
@@ -429,6 +435,13 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             bufferStartMs = json.optInt("bufferStartMs", defaults.bufferStartMs),
             bufferRebufferMs = json.optInt("bufferRebufferMs", defaults.bufferRebufferMs),
             automaticRecoveryAttempts = json.optInt("automaticRecoveryAttempts", defaults.automaticRecoveryAttempts),
+            bufferForwardMiB = if (json.has("bufferForwardMiB") && !json.isNull("bufferForwardMiB")) json.getInt("bufferForwardMiB") else null,
+            bufferBackMiB = if (json.has("bufferBackMiB") && !json.isNull("bufferBackMiB")) json.getInt("bufferBackMiB") else null,
+            nextEpisodeLeadSeconds = if (json.has("nextEpisodeLeadSeconds") && !json.isNull("nextEpisodeLeadSeconds")) json.getInt("nextEpisodeLeadSeconds") else null,
+            nextEpisodeBufferSeconds = if (json.has("nextEpisodeBufferSeconds") && !json.isNull("nextEpisodeBufferSeconds")) json.getInt("nextEpisodeBufferSeconds") else null,
+            nextEpisodeCacheMiB = if (json.has("nextEpisodeCacheMiB") && !json.isNull("nextEpisodeCacheMiB")) json.getInt("nextEpisodeCacheMiB") else null,
+            predecodeNextEpisode = json.optBoolean("predecodeNextEpisode", defaults.predecodeNextEpisode),
+            onlinePreparationSeconds = if (json.has("onlinePreparationSeconds") && !json.isNull("onlinePreparationSeconds")) json.getInt("onlinePreparationSeconds") else null,
             preferredSourceHeight = json.optInt("preferredSourceHeight", defaults.preferredSourceHeight)
                 .takeIf { it in listOf(0, 480, 720, 1080, 2160) } ?: defaults.preferredSourceHeight,
             videoEnhancement = AnimeVideoEnhancementMode.entries.firstOrNull {

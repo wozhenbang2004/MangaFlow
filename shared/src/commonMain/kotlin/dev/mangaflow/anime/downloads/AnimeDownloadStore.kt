@@ -81,6 +81,14 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
     private var activeGeneration: String? = null
     private var activeJob: Job? = null
 
+    /** Explicit originals and partial downloads are counted separately from disposable player caches. */
+    suspend fun storageBytes(): Long = withContext(Dispatchers.IO) {
+        ready.await()
+        fun bytes(file: StorageFile): Long = if (file.isFile) file.length()
+            else file.listFiles().orEmpty().sumOf(::bytes)
+        bytes(root)
+    }
+
     private data class Record(
         val entry: AnimeDownloadEntry,
         val generation: String,

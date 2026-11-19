@@ -6,6 +6,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.anime.player.AnimePlayerPhase
+import dev.mangaflow.anime.AnimeNextEpisodePreparation
 import dev.mangaflow.anime.player.AnimePlayerState
 import dev.mangaflow.anime.player.AnimeVideoEnhancementPhase
 import dev.mangaflow.enhancement.EnhancementCenter
@@ -30,6 +31,8 @@ internal fun AnimePlaybackStatus(
     quiet: Boolean,
     observing: Boolean,
     modifier: Modifier = Modifier,
+    nextPreparation: AnimeNextEpisodePreparation? = null,
+    nextPreparationEnabled: Boolean = true,
 ) {
     val context = LocalMangaContext.current
     val center = remember(context) { EnhancementCenter.get(context) }
@@ -45,13 +48,14 @@ internal fun AnimePlaybackStatus(
     val policy = key?.let { sessions[it]?.takeIf { value -> value.content == EnhancementContent.ANIME }?.policy }
         ?: defaults.getValue(EnhancementContent.ANIME)
     val reason = key?.let { telemetry.sessions[it]?.takeIf { value -> value.content == EnhancementContent.ANIME }?.reason }
-    val readouts = animeEnhancementReadouts(current, metrics, policy, usage.resources, reason) +
+    val readouts = animeEnhancementReadouts(current, metrics, policy, usage.resources, reason, nextPreparation, nextPreparationEnabled) +
         enhancementResourceReadouts(metrics, center.resources, observing)
     EnhancementReadouts(readouts, quiet, modifier)
 }
 
 private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<EnhancementMetric>,
-    policy: EnhancementPolicy, resources: ExperienceResources, reason: String?): List<EnhancementReadout> = buildList {
+    policy: EnhancementPolicy, resources: ExperienceResources, reason: String?,
+    nextPreparation: AnimeNextEpisodePreparation?, nextPreparationEnabled: Boolean): List<EnhancementReadout> = buildList {
     val flowing = playback?.let { it.isPlaying && !it.playbackSuppressed &&
         it.hasVideoTracks != false && it.firstFrameRendered != false } == true
     val effect = playback?.videoEnhancement
@@ -141,13 +145,29 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
         val value = buffer?.let { formatDecimal(it / 1000.0, 1) + " s" } ?: "—"
         add(EnhancementReadout(EnhancementMetric.BUFFER, "缓冲 $value", "播放器前方连续缓冲 $value"))
     }
+    if (EnhancementMetric.BUFFER_BYTES in metrics) {
+        val bytes = playback?.bufferMetrics?.allocatedBytes
+        add(EnhancementReadout(EnhancementMetric.BUFFER_BYTES, "缓冲占用 ${bytes?.let(::animeBytes) ?: "—"}",
+            listOfNotNull("播放器已分配的压缩缓冲 ${bytes?.let(::animeBytes) ?: "无观测"}，不代表磁盘缓存或解码帧队列",
+                playback?.bufferMetrics?.detail).joinToString("，")))
+    }
+    if (EnhancementMetric.NEXT_EPISODE in metrics) {
+        val value = when {
+            playback == null -> "下一集 —"
+            !nextPreparationEnabled -> "下一集准备关闭"
+            nextPreparation != null -> "下一集 · ${animePreparationLabel(nextPreparation)}"
+            else -> "下一集待准备"
+        }
+        add(EnhancementReadout(EnhancementMetric.NEXT_EPISODE, value,
+            listOfNotNull(value, nextPreparation?.detail).joinToString("，")))
+    }
     if (EnhancementMetric.PREPARED in metrics) {
         val prepared = if (playback != null && window != null)
             (window.endMs - maxOf(window.startMs, playback.positionMs)).coerceAtLeast(0L) else null
         val value = when {
             playback == null -> "已备 —"
             prepared != null -> "已备 ${formatDecimal(prepared / 1000.0, 1)} s"
-            playback.preparedVideoIssue != null -> "准备异常"
+            playback.preparedVideoIssue != null -> "预处理暂不可用"
             else -> "未备片段"
         }
         add(EnhancementReadout(EnhancementMetric.PREPARED, value,
