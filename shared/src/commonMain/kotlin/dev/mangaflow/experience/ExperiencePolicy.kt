@@ -323,11 +323,12 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     fun startReading(): () -> Unit = retainActivity(reader = true)
 
     /** Enhancement shares these observations and this admission owner with reading/downloads. */
-    internal fun enhancementWaitReason(priority: Int, estimatedBytes: Long = 0L): String? = synchronized(lock) {
-        enhancementWaitReasonLocked(priority, estimatedBytes)
+    internal fun enhancementWaitReason(priority: Int, estimatedBytes: Long = 0L, running: Boolean = false): String? = synchronized(lock) {
+        enhancementWaitReasonLocked(priority, estimatedBytes, running = running)
     }
 
-    private fun enhancementWaitReasonLocked(priority: Int, estimatedBytes: Long, sharedRealtimeOwner: String? = null): String? {
+    private fun enhancementWaitReasonLocked(priority: Int, estimatedBytes: Long,
+        sharedRealtimeOwner: String? = null, running: Boolean = false): String? {
         val current = mutableState.value
         val now = monotonicTimeMillis()
         return when {
@@ -339,7 +340,10 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             platformKind == PlatformKind.DESKTOP && current.foreground && priority >= 1 && interactionUntil > now -> "当前交互优先"
             platformKind == PlatformKind.DESKTOP && priority >= 1 && readerWaiting -> "当前可见图片优先"
             priority >= 2 && (readerUsers > 0 || readerWaiting) -> "当前阅读优先"
-            priority >= 1 && resources.cpuLoad?.let { it >= .92 } == true -> "等待 CPU 负载回落"
+            // An admitted CPU model raises this observation itself. Repeated cancellation
+            // would discard every prepared page; CPU load gates starts, while live work
+            // still yields to foreground, memory, thermal and storage protection above.
+            !running && priority >= 1 && resources.cpuLoad?.let { it >= .92 } == true -> "等待 CPU 负载回落"
             estimatedBytes > 0 && resources.availableMemoryBytes?.let {
                 estimatedBytes > (it - enhancementReservedBytes).coerceAtLeast(0L) / 2L
             } == true -> "等待可用内存"
