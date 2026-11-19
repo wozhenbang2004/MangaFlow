@@ -4,6 +4,8 @@ import dev.mangaflow.enhancement.engine.EngineOutput
 import dev.mangaflow.enhancement.engine.EngineProgress
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.platform.monotonicTimeMillis
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.storage.StorageLock
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.*
@@ -58,17 +60,22 @@ class EnhancementScheduler(
         var run: Deferred<EngineOutput>? = null,
         var pauseRequested: Boolean = false,
         var cancelRequested: Boolean = false,
+        var lastProgressPublishedAt: Long = 0L,
     )
     private val lock = StorageLock()
     private val entries = linkedMapOf<String, Entry>()
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val mutableState = MutableStateFlow<List<EnhancementTask>>(emptyList())
     val state: StateFlow<List<EnhancementTask>> = mutableState.asStateFlow()
+    private var stopResourceObservation: (() -> Unit)? = null
 
     init {
         scope.launch {
-            combine(resources.state, resources.usage, resources.admissionChanges) { _, _, _ -> Unit }.collect {
+            // Admission changes include resource samples, interaction and realtime ownership.
+            // Image/cache usage counters cannot change this queue's admission decision.
+            combine(resources.state, resources.admissionChanges) { _, _ -> Unit }.collect {
                 synchronized(lock) {
+                    if (stopResourceObservation == null) return@collect
                     entries.values.filter { it.run != null }.forEach { entry ->
                         resources.enhancementWaitReason(entry.task.priority.ordinal)?.let { reason ->
                             entry.run?.cancel(EnhancementYield(reason))
@@ -139,7 +146,7 @@ class EnhancementScheduler(
     }
 
     private suspend fun runQueue() {
-        while (currentCoroutineContext().isActive) {
+        try { while (currentCoroutineContext().isActive) {
             val picked = synchronized(lock) {
                 var chosen: Pair<Entry, () -> Unit>? = null
                 entries.values.filter { !it.result.isCompleted && !it.pauseRequested && it.run == null }
@@ -159,14 +166,22 @@ class EnhancementScheduler(
                     }
                 publish(); chosen
             }
-            if (picked == null) { withTimeoutOrNull(1_000L) { wake.receive() }; continue }
+            // A waiting queue retains the existing resource observer, so real changes wake it.
+            // An empty/paused queue has no periodic timer, filesystem sample or UI publication.
+            if (picked == null) { wake.receive(); continue }
             val (entry, release) = picked
-            val stopObserving = resources.startObserving()
             try {
                 val ctx = EnhancementJobContext(progress = { value -> synchronized(lock) {
                     if (!entry.cancelRequested && entry.isCurrent()) {
+                        val previousStage = entry.task.progress?.stage
                         entry.task = entry.task.copy(progress = value)
-                        publish()
+                        val now = monotonicTimeMillis()
+                        if (platformKind != PlatformKind.DESKTOP || previousStage != value.stage ||
+                            now - entry.lastProgressPublishedAt >= 100L ||
+                            value.total?.let { it > 0L && value.completed >= it } == true) {
+                            entry.lastProgressPublishedAt = now
+                            publish()
+                        }
                     }
                 } }, isCurrent = entry.isCurrent, admission = {
                     resources.enhancementWaitReason(entry.task.priority.ordinal)
@@ -208,13 +223,27 @@ class EnhancementScheduler(
                     entry.result.completeExceptionally(error); publish()
                 }
             } finally {
-                synchronized(lock) { entry.run = null }
-                release(); stopObserving()
+                synchronized(lock) { entry.run = null; publish() }
+                release()
+            }
+        } } finally {
+            synchronized(lock) {
+                stopResourceObservation?.invoke()
+                stopResourceObservation = null
             }
         }
     }
 
-    private fun publish() { mutableState.value = entries.values.map { it.task } }
+    private fun publish() {
+        val pending = entries.values.any { it.run != null ||
+            !it.result.isCompleted && !it.pauseRequested && !it.cancelRequested }
+        if (pending && stopResourceObservation == null) stopResourceObservation = resources.startObserving()
+        else if (!pending && stopResourceObservation != null) {
+            stopResourceObservation?.invoke()
+            stopResourceObservation = null
+        }
+        mutableState.value = entries.values.map { it.task }
+    }
     private fun trimHistory() {
         val finished = entries.values.filter { it.result.isCompleted }
         finished.take((finished.size - 80).coerceAtLeast(0)).forEach { entries.remove(it.task.id) }

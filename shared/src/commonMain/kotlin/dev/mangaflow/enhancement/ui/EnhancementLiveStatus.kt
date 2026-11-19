@@ -201,6 +201,15 @@ private fun AnimeEnhancementStatus(
                     " / " + animeCount(metrics?.repeatedFrames))
                 AnimeMetricRow("接收速度", playback?.downloadBytesPerSecond?.takeIf { hasSession && it >= 0 }
                     ?.let { enhancementBytes(it) + "/s" } ?: "—")
+                playback?.nativeVideoStatistics?.takeIf { hasSession }?.let { native ->
+                    AnimeMetricRow("解码器 / 视频输出", (native.hardwareDecoder ?: "—") + " / " + (native.videoOutput ?: "—"))
+                    AnimeMetricRow("解码 / 视频输出丢帧", animeCount(native.decoderDroppedFrames) + " / " +
+                        animeCount(native.outputDroppedFrames))
+                    AnimeMetricRow("滤镜输出估计", native.estimatedFilterFps?.takeIf { playing }
+                        ?.let { formatDecimal(it, 1) + " FPS" } ?: "—")
+                    AnimeMetricRow("输出延迟帧 · 估计", animeCount(native.estimatedDelayedFrames))
+                    EnhancementQuiet("来源：mpv 原生属性。输出延迟帧是内核估计；滤镜输出不等于屏幕呈现。")
+                }
                 EnhancementQuiet(when {
                     !hasSession -> "尚无本集数据。— 表示未采集，不代表数值为零。"
                     !playing -> "播放未在进行，实时呈现帧率暂不显示；已收到的累计数据保留。"

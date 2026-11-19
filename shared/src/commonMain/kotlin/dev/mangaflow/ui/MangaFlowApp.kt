@@ -6,10 +6,14 @@ import androidx.compose.material.icons.outlined.Tv
 
 import dev.mangaflow.data.sources.SourceFeature
 import dev.mangaflow.data.sources.BodySourceInfo
+import dev.mangaflow.account.CopyShelfSyncState
+import dev.chrisbanes.haze.HazeState
 
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import androidx.compose.foundation.layout.asPaddingValues
 
 import dev.mangaflow.data.chapterSourceMangaId
@@ -304,7 +308,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val windowSize = LocalMangaWindow.current
     val wallpaperContext = LocalContext.current.applicationContext
     val experience = remember(wallpaperContext) { ExperiencePolicyStore.get(wallpaperContext) }
-    val experienceBudget by experience.state.collectAsStateWithLifecycle()
+    val highRefreshPreference = remember(experience) {
+        experience.state.map { it.preferHighRefresh && it.refreshHz == null }.distinctUntilChanged()
+    }
+    val preferHighRefresh by highRefreshPreference.collectAsStateWithLifecycle(
+        initialValue = experience.state.value.let { it.preferHighRefresh && it.refreshHz == null },
+    )
     val experienceLifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(experience, experienceLifecycle) {
         experienceLifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -338,9 +347,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val refreshingDownloads by model.refreshingDownloads.collectAsStateWithLifecycle()
     val chapterPreparations by model.chapterPreparations.collectAsStateWithLifecycle()
     val account by model.account.collectAsStateWithLifecycle()
-    val copyShelfSync by model.copyShelfSync.state.collectAsStateWithLifecycle()
-    val siteSyncStates = model.services.adultShelfSync.mapValues { (id, controller) ->
-        androidx.compose.runtime.key(id) { controller.state.collectAsStateWithLifecycle().value }
+    val copyShelfSyncSnapshot = model.copyShelfSync.state.collectAsStateWithLifecycle()
+    val copyShelfSync by copyShelfSyncSnapshot
+    val copyShelfOwner by remember(copyShelfSyncSnapshot) { derivedStateOf { copyShelfSyncSnapshot.value.owner } }
+    val siteSyncSnapshots = model.services.adultShelfSync.mapValues { (id, controller) ->
+        androidx.compose.runtime.key(id) { controller.state.collectAsStateWithLifecycle() }
     }
     val copyShelfRemote by model.copyShelfRemote.collectAsStateWithLifecycle()
     val copyProgress by model.copyProgress.collectAsStateWithLifecycle()
@@ -429,15 +440,20 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         else model.clearCopyProgress()
     }
     LaunchedEffect(detail?.detail, adoptedResumeTargets) { model.reconcileCopyProgress() }
-    LaunchedEffect(account.profile?.username, copyShelfSync.owner, section, restrictedMode) {
+    LaunchedEffect(account.profile?.username, copyShelfOwner, section, restrictedMode) {
         if (!restrictedMode && section == Section.LIBRARY && account.profile != null &&
             copyShelfSync.owner == account.profile?.username && !copyShelfSync.favoritesReady &&
             !copyShelfSync.busy) model.copyShelfSync.checkInBackground()
     }
-    val displayedAccount = if (account.profile != null && copyShelfSync.owner == account.profile?.username && copyShelfSync.favoritesReady)
-        account.copy(favorites = copyShelfSync.cloudFavorites, favoritesHasMore = false,
-            favoritesLoading = copyShelfSync.checking, favoritesRefreshing = copyShelfSync.checking)
-    else account
+    val displayedAccount by remember(account, copyShelfSyncSnapshot) {
+        derivedStateOf {
+            val sync = copyShelfSyncSnapshot.value
+            if (account.profile != null && sync.owner == account.profile?.username && sync.favoritesReady)
+                account.copy(favorites = sync.cloudFavorites, favoritesHasMore = false,
+                    favoritesLoading = sync.checking, favoritesRefreshing = sync.checking)
+            else account
+        }
+    }
     val restrictedMetrics = remember(model) { MangaMetricState(model.metrics, { _ -> }, { _ -> }) }
     val displayedMetrics = if (restrictedMode) restrictedMetrics else metricState
     var drawerAction by remember { mutableStateOf<DrawerAction?>(null) }
@@ -738,14 +754,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val desktopDestinations = remember(profileSections, contentProfile) {
         profileSections.map { DesktopDestination(it.title(contentProfile), it.icon) }
     }
-    CopyShelfSyncSheet(
-        visible = copySyncOpen && account.profile != null && copyShelfSync.owner == account.profile?.username && !restrictedMode,
-        state = copyShelfSync, repository = model.repository, backdrop = drawerBackdrop,
-        onCheck = { model.copyShelfSync.check() }, onRetry = { model.copyShelfSync.check(it) },
-        onRetryWork = model.copyShelfSync::checkProgress, onCancel = model.copyShelfSync::cancel,
-        onImport = model.copyShelfSync::importFavorites,
-        onApply = model.copyShelfSync::applyMerge, onDismiss = { copySyncOpen = false },
-        focusMangaId = copySyncFocus,
+    CopyShelfSyncOverlay(
+        model = model, snapshot = copyShelfSyncSnapshot,
+        visible = copySyncOpen && account.profile != null && !restrictedMode,
+        accountOwner = account.profile?.username, backdrop = drawerBackdrop,
+        onDismiss = { copySyncOpen = false }, focusMangaId = copySyncFocus,
     )
     sourceManagement?.let { state ->
         val checkPreferences by model.services.sourceChecks.preferences.collectAsStateWithLifecycle()
@@ -824,7 +837,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     shelfSyncSource?.takeIf { restrictedMode }?.let { id ->
         val controller = model.services.adultShelfSync[id]
-        val syncState = siteSyncStates[id]
+        val syncState = siteSyncSnapshots[id]?.value
         if (controller != null && syncState != null) androidx.compose.runtime.key(id) {
             AdultShelfSyncSheet(state = syncState, sourceName = controller.provider.label, backdrop = drawerBackdrop,
                 onCheck = controller::check, onApply = controller::apply, onCancel = controller::cancel,
@@ -1006,7 +1019,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             ContentProfileSwitch(contentProfile, requestProfile, manageProfileSources,
                 compact = compact, enabled = !rootHandoff)
         },
-        modifier = Modifier.then(if (!experienceBudget.preferHighRefresh || experienceBudget.refreshHz != null) Modifier else
+        modifier = Modifier.then(if (!preferHighRefresh) Modifier else
             Modifier.preferredFrameRate(FrameRateCategory.High)).pointerInput(experience) {
             awaitPointerEventScope {
                 while (true) {
@@ -1692,7 +1705,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             if (restrictedMode && manga.sourceId in privateSourceIds && model.library.ready.value)
                                                 model.library.mergeFavorites(listOf(manga))
                                         },
-                                        siteSyncStates = if (restrictedMode) siteSyncStates else emptyMap(),
+                                        siteSyncStates = if (restrictedMode) siteSyncSnapshots.mapValues { it.value.value } else emptyMap(),
                                         onAdultProgressSync = if (restrictedMode) ({ adultProgressOpen = true }) else null,
                                         onSiteSync = if (restrictedMode) {
                                             { id -> shelfSyncSource = id; model.services.adultShelfSync[id]?.check() }
@@ -1979,6 +1992,29 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
 }
 }
 }
+}
+
+@Composable
+private fun CopyShelfSyncOverlay(
+    model: MangaViewModel,
+    snapshot: State<CopyShelfSyncState>,
+    visible: Boolean,
+    accountOwner: String?,
+    backdrop: HazeState,
+    onDismiss: () -> Unit,
+    focusMangaId: String?,
+) {
+    // Background merge/progress updates belong to this retained overlay, not the app shell.
+    val sync by snapshot
+    CopyShelfSyncSheet(
+        visible = visible && accountOwner != null && sync.owner == accountOwner,
+        state = sync, repository = model.repository, backdrop = backdrop,
+        onCheck = { model.copyShelfSync.check() }, onRetry = { model.copyShelfSync.check(it) },
+        onRetryWork = model.copyShelfSync::checkProgress, onCancel = model.copyShelfSync::cancel,
+        onImport = model.copyShelfSync::importFavorites,
+        onApply = model.copyShelfSync::applyMerge, onDismiss = onDismiss,
+        focusMangaId = focusMangaId,
+    )
 }
 
 @Composable

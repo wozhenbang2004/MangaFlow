@@ -15,6 +15,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
@@ -37,6 +38,8 @@ import coil3.request.ImageRequest
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
@@ -46,6 +49,8 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -68,6 +73,7 @@ internal data class ReaderSpreadViewport(val zoom: ZoomableState, val viewport: 
 private data class ReaderTile(val source: IntRect, val sample: Int)
 private data class DecodedReaderTile(val spec: ReaderTile, val bitmap: ImageBitmap, val notice: String? = null)
 private data class VerticalTileWindow(val requested: List<ReaderTile> = emptyList(), val visibleCount: Int = 0)
+private data class ReaderOriginalSource(val path: String, val diskCacheKey: String? = null)
 
 // Only relevant native changes restart pending work; already retained tiles keep their owner.
 private fun nativeDecodeChanges(policy: ExperiencePolicyStore) = policy.state.map {
@@ -75,29 +81,85 @@ private fun nativeDecodeChanges(policy: ExperiencePolicyStore) = policy.state.ma
 }.distinctUntilChanged()
 
 private suspend fun decodeReaderTiles(
-    policy: ExperiencePolicyStore, source: String, requested: List<ReaderTile>, retained: MutableMap<ReaderTile, ReaderRegion>,
+    policy: ExperiencePolicyStore, decoder: ReaderRegionDecoder, requested: List<ReaderTile>, retained: MutableMap<ReaderTile, ReaderRegion>,
     onDecoded: () -> Unit, onFailure: (Exception) -> Unit,
 ) = coroutineScope {
     val pending = requested.filterNot { it in retained }
+    if (pending.isEmpty()) return@coroutineScope
     val iterator = pending.iterator()
+    // Coalesce desktop arrivals into one immutable draw snapshot per requested frame.
+    // This clock only batches publications; it neither measures Present nor runs while idle.
+    val publications = if (platformKind == PlatformKind.DESKTOP) Channel<Unit>(Channel.CONFLATED) else null
+    val publisher = publications?.let { signals -> launch {
+        for (signal in signals) {
+            withFrameNanos { }
+            currentCoroutineContext().ensureActive()
+            while (signals.tryReceive().isSuccess) { /* The next snapshot includes these arrivals. */ }
+            onDecoded()
+        }
+    } }
     // Workers inherit the reader effect's UI context; only native decoding leaves it.
-    repeat(minOf(policy.tileDecodeParallelism, pending.size)) {
+    val workers = List(minOf(policy.tileDecodeParallelism, pending.size)) {
         launch {
             while (iterator.hasNext()) {
                 val tile = iterator.next()
                 try {
                     val region = policy.withTileDecodeAdmission {
                         withContext(Dispatchers.IO) {
-                            decodeNativeReaderRegion(source, tile.source, tile.sample, policy.state.value.runtime)
+                            decoder.decode(tile.source, tile.sample, policy.state.value.runtime)
                         }
                     }
                     currentCoroutineContext().ensureActive()
                     retained[tile] = region
-                    onDecoded()
+                    if (publications == null) onDecoded() else publications.trySend(Unit)
                 } catch (cancelled: CancellationException) { throw cancelled }
-                catch (failure: Exception) { onFailure(failure) }
+                catch (failure: Exception) {
+                    currentCoroutineContext().ensureActive()
+                    onFailure(failure)
+                }
             }
         }
+    }
+    try {
+        workers.joinAll()
+        publications?.close()
+        publisher?.join()
+    } finally {
+        publications?.cancel()
+        publisher?.cancel()
+    }
+}
+
+private suspend fun withReaderRegionDecoder(
+    source: ReaderOriginalSource, diskCache: DiskCache?, onFailure: (Exception) -> Unit,
+    block: suspend (ReaderRegionDecoder) -> Unit,
+) {
+    try {
+        var lease: DiskCache.Snapshot? = null
+        var decoder: ReaderRegionDecoder? = null
+        try {
+            // A sibling preview/dimension effect can release its snapshot before an
+            // uninterruptible native decode settles. Desktop's pooled handles therefore
+            // own an independent exact-key lease until every child and reader is closed.
+            if (platformKind == PlatformKind.DESKTOP && source.diskCacheKey != null) {
+                withContext(Dispatchers.IO) {
+                    lease = diskCache?.openSnapshot(source.diskCacheKey)
+                    check(lease?.data?.toString() == source.path) { "原图缓存已变化，当前显示预览" }
+                }
+            }
+            currentCoroutineContext().ensureActive()
+            val ownedDecoder = createReaderRegionDecoder(source.path)
+            decoder = ownedDecoder
+            block(ownedDecoder)
+        } finally {
+            withContext(NonCancellable + Dispatchers.IO) {
+                try { decoder?.close() } finally { lease?.close() }
+            }
+        }
+    } catch (cancelled: CancellationException) { throw cancelled }
+    catch (failure: Exception) {
+        currentCoroutineContext().ensureActive()
+        onFailure(failure)
     }
 }
 
@@ -120,30 +182,32 @@ internal fun PortableReaderZoomableImage(
     val preview = rememberAsyncImagePainter(model, imageLoader = loader)
     val result by preview.state.collectAsState()
     val success = (result as? AsyncImagePainter.State.Success)?.result
-    var path by remember(model) { mutableStateOf<String?>(null) }
+    var sourceFile by remember(model) { mutableStateOf<ReaderOriginalSource?>(null) }
     var original by remember(model) { mutableStateOf<IntSize?>(null) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     val tileState = remember(model) { mutableStateOf<List<DecodedReaderTile>>(emptyList()) }
     val zoom = spread?.zoom ?: state.zoomableState
     LaunchedEffect(model) { state.detailError = null; state.detailNotice = null }
     LaunchedEffect(result) { state.isImageDisplayed = success != null }
-    LaunchedEffect(model, success?.diskCacheKey, policy) {
+    LaunchedEffect(model, success?.diskCacheKey, policy, loader) {
         var snapshot: DiskCache.Snapshot? = null
         try {
             val data = (model as? ImageRequest)?.data ?: model
             val local = (data as? String)?.let(::readerFilePath)
-            val file = local ?: withContext(Dispatchers.IO) {
-                snapshot = loader.diskCache?.openSnapshot(success?.diskCacheKey ?: return@withContext null)
-                snapshot?.data?.toString()
+            val source = local?.let(::ReaderOriginalSource) ?: withContext(Dispatchers.IO) {
+                val key = success?.diskCacheKey ?: return@withContext null
+                snapshot = loader.diskCache?.openSnapshot(key)
+                snapshot?.data?.toString()?.let { ReaderOriginalSource(it, key) }
             }
-            path = file
-            if (file != null) policy.state.map { it.runtime.maxImageMiB }.distinctUntilChanged().collectLatest {
+            sourceFile = source
+            if (source != null) policy.state.map { it.runtime.maxImageMiB }.distinctUntilChanged().collectLatest {
                 try {
-                    val dimensions = withContext(Dispatchers.IO) { readNativeReaderSize(file, policy.state.value.runtime) }
+                    val dimensions = withContext(Dispatchers.IO) { readNativeReaderSize(source.path, policy.state.value.runtime) }
                     if (dimensions != original) tileState.value = emptyList()
                     original = dimensions
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (failure: Exception) {
+                    currentCoroutineContext().ensureActive()
                     tileState.value = emptyList()
                     original = null
                     state.detailError = failure.message ?: "原图细节暂时无法读取，当前显示预览"
@@ -151,7 +215,10 @@ internal fun PortableReaderZoomableImage(
             }
             awaitCancellation()
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { state.detailError = "原图细节暂时无法读取" }
+        catch (_: Exception) {
+            currentCoroutineContext().ensureActive()
+            state.detailError = "原图细节暂时无法读取"
+        }
         finally { withContext(NonCancellable + Dispatchers.IO) { snapshot?.close() } }
     }
     // Tile arrivals invalidate drawing only; the zoom content keeps one stable painter.
@@ -161,74 +228,80 @@ internal fun PortableReaderZoomableImage(
         zoom.contentAlignment = alignment
         zoom.setContentLocation(ZoomableContentLocation.scaledInsideAndCenterAligned(painter.intrinsicSize))
     }
-    LaunchedEffect(path, original, zoom, policy, spread, alignment) {
-        val file = path ?: return@LaunchedEffect
+    LaunchedEffect(sourceFile, original, zoom, policy, spread, alignment, loader) {
+        val source = sourceFile ?: return@LaunchedEffect
         val imageSize = original ?: return@LaunchedEffect
-        val retained = mutableMapOf<ReaderTile, ReaderRegion>()
-        var fallbackPixels = policy.state.value.runtime.fallbackDecodeMiPixels
-        snapshotFlow {
-            if (viewport.width <= 0 || viewport.height <= 0 || !state.isImageDisplayed) emptyList()
-            else runCatching {
-                with(zoom.coordinateSystem) {
-                    val bounds = unscaledContentBounds.rectIn(CoordinateSpace.ZoomableContent)
-                    if (bounds.width <= 0f || bounds.height <= 0f) emptyList()
-                    else {
-                        val a = SpatialOffset(Offset.Zero, CoordinateSpace.Viewport).offsetIn(CoordinateSpace.ZoomableContent)
-                        val b = SpatialOffset(Offset(viewport.width.toFloat(), viewport.height.toFloat()),
-                            CoordinateSpace.Viewport).offsetIn(CoordinateSpace.ZoomableContent)
-                        val view = spread?.viewport ?: viewport
-                        if (view.width <= 0 || view.height <= 0) return@runCatching emptyList<ReaderTile>()
-                        val pageBounds = if (spread == null) bounds else {
-                            val slot = spread.slot
-                            val fit = minOf(slot.width.toFloat() / imageSize.width, slot.height.toFloat() / imageSize.height)
-                            val drawn = IntSize((imageSize.width * fit).roundToInt(), (imageSize.height * fit).roundToInt())
-                            val offset = alignment.align(drawn, IntSize(slot.width, slot.height), LayoutDirection.Ltr)
-                            Rect(bounds.left + (slot.left + offset.x).toFloat() / view.width * bounds.width,
-                                bounds.top + (slot.top + offset.y).toFloat() / view.height * bounds.height,
-                                bounds.left + (slot.left + offset.x + drawn.width).toFloat() / view.width * bounds.width,
-                                bounds.top + (slot.top + offset.y + drawn.height).toFloat() / view.height * bounds.height)
+        withReaderRegionDecoder(source, loader.diskCache, onFailure = { failure ->
+            tileState.value = emptyList()
+            state.detailError = failure.message?.takeIf { "当前显示预览" in it }
+                ?: "原图细节暂时无法读取，当前显示预览"
+        }) { decoder ->
+            val retained = mutableMapOf<ReaderTile, ReaderRegion>()
+            var fallbackPixels = policy.state.value.runtime.fallbackDecodeMiPixels
+            snapshotFlow {
+                if (viewport.width <= 0 || viewport.height <= 0 || !state.isImageDisplayed) emptyList()
+                else runCatching {
+                    with(zoom.coordinateSystem) {
+                        val bounds = unscaledContentBounds.rectIn(CoordinateSpace.ZoomableContent)
+                        if (bounds.width <= 0f || bounds.height <= 0f) emptyList()
+                        else {
+                            val a = SpatialOffset(Offset.Zero, CoordinateSpace.Viewport).offsetIn(CoordinateSpace.ZoomableContent)
+                            val b = SpatialOffset(Offset(viewport.width.toFloat(), viewport.height.toFloat()),
+                                CoordinateSpace.Viewport).offsetIn(CoordinateSpace.ZoomableContent)
+                            val view = spread?.viewport ?: viewport
+                            if (view.width <= 0 || view.height <= 0) return@runCatching emptyList<ReaderTile>()
+                            val pageBounds = if (spread == null) bounds else {
+                                val slot = spread.slot
+                                val fit = minOf(slot.width.toFloat() / imageSize.width, slot.height.toFloat() / imageSize.height)
+                                val drawn = IntSize((imageSize.width * fit).roundToInt(), (imageSize.height * fit).roundToInt())
+                                val offset = alignment.align(drawn, IntSize(slot.width, slot.height), LayoutDirection.Ltr)
+                                Rect(bounds.left + (slot.left + offset.x).toFloat() / view.width * bounds.width,
+                                    bounds.top + (slot.top + offset.y).toFloat() / view.height * bounds.height,
+                                    bounds.left + (slot.left + offset.x + drawn.width).toFloat() / view.width * bounds.width,
+                                    bounds.top + (slot.top + offset.y + drawn.height).toFloat() / view.height * bounds.height)
+                            }
+                            if (view.width <= 0 || view.height <= 0 || pageBounds.width <= 0f || pageBounds.height <= 0f)
+                                return@runCatching emptyList<ReaderTile>()
+                            val viewportEnd = if (spread == null) b else SpatialOffset(
+                                Offset(view.width.toFloat(), view.height.toFloat()), CoordinateSpace.Viewport)
+                                .offsetIn(CoordinateSpace.ZoomableContent)
+                            val left = ((a.x - pageBounds.left) / pageBounds.width * imageSize.width).coerceIn(0f, imageSize.width.toFloat())
+                            val top = ((a.y - pageBounds.top) / pageBounds.height * imageSize.height).coerceIn(0f, imageSize.height.toFloat())
+                            val right = ((viewportEnd.x - pageBounds.left) / pageBounds.width * imageSize.width).coerceIn(left, imageSize.width.toFloat())
+                            val bottom = ((viewportEnd.y - pageBounds.top) / pageBounds.height * imageSize.height).coerceIn(top, imageSize.height.toFloat())
+                            // Scale comes from the entire viewport transform, not a clipped page region.
+                            val ratio = if (spread == null) maxOf((right - left) / viewport.width, (bottom - top) / viewport.height)
+                            else maxOf((viewportEnd.x - a.x) / view.width / pageBounds.width * imageSize.width,
+                                (viewportEnd.y - a.y) / view.height / pageBounds.height * imageSize.height)
+                            var sample = 1
+                            while (sample < 128 && sample * 2 <= ratio) sample *= 2
+                            originalTiles(imageSize, left, top, right, bottom, sample)
                         }
-                        if (view.width <= 0 || view.height <= 0 || pageBounds.width <= 0f || pageBounds.height <= 0f)
-                            return@runCatching emptyList<ReaderTile>()
-                        val viewportEnd = if (spread == null) b else SpatialOffset(
-                            Offset(view.width.toFloat(), view.height.toFloat()), CoordinateSpace.Viewport)
-                            .offsetIn(CoordinateSpace.ZoomableContent)
-                        val left = ((a.x - pageBounds.left) / pageBounds.width * imageSize.width).coerceIn(0f, imageSize.width.toFloat())
-                        val top = ((a.y - pageBounds.top) / pageBounds.height * imageSize.height).coerceIn(0f, imageSize.height.toFloat())
-                        val right = ((viewportEnd.x - pageBounds.left) / pageBounds.width * imageSize.width).coerceIn(left, imageSize.width.toFloat())
-                        val bottom = ((viewportEnd.y - pageBounds.top) / pageBounds.height * imageSize.height).coerceIn(top, imageSize.height.toFloat())
-                        // Scale comes from the entire viewport transform, not a clipped page region.
-                        val ratio = if (spread == null) maxOf((right - left) / viewport.width, (bottom - top) / viewport.height)
-                        else maxOf((viewportEnd.x - a.x) / view.width / pageBounds.width * imageSize.width,
-                            (viewportEnd.y - a.y) / view.height / pageBounds.height * imageSize.height)
-                        var sample = 1
-                        while (sample < 128 && sample * 2 <= ratio) sample *= 2
-                        originalTiles(imageSize, left, top, right, bottom, sample)
+                    }
+                }.getOrDefault(emptyList())
+            }.distinctUntilChanged().combine(nativeDecodeChanges(policy)) { requested, configuration -> requested to configuration }
+                .collectLatest { (requested, configuration) ->
+                    // A changed whole-image budget can change the actual output sample size.
+                    if (fallbackPixels != configuration.third) retained.clear()
+                    fallbackPixels = configuration.third
+                    retained.keys.retainAll(requested.toSet())
+                    tileState.value = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
+                    decodeReaderTiles(policy, decoder, requested, retained, onDecoded = {
+                        tileState.value = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
+                        state.detailNotice = retained.values.firstNotNullOfOrNull { it.notice }
+                    }, onFailure = { failure ->
+                        if (failure is ReaderDetailUnavailable) {
+                            state.detailError = null
+                            state.detailNotice = failure.message
+                        } else state.detailError = failure.message?.takeIf { "当前显示预览" in it }
+                            ?: "原图细节暂时无法读取，当前显示预览"
+                    })
+                    if (requested.isNotEmpty() && requested.all { it in retained }) {
+                        state.detailError = null
+                        state.detailNotice = retained.values.firstNotNullOfOrNull { it.notice }
                     }
                 }
-            }.getOrDefault(emptyList())
-        }.distinctUntilChanged().combine(nativeDecodeChanges(policy)) { requested, configuration -> requested to configuration }
-            .collectLatest { (requested, configuration) ->
-                // A changed whole-image budget can change the actual output sample size.
-                if (fallbackPixels != configuration.third) retained.clear()
-                fallbackPixels = configuration.third
-                retained.keys.retainAll(requested.toSet())
-                tileState.value = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
-                decodeReaderTiles(policy, file, requested, retained, onDecoded = {
-                    tileState.value = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
-                    state.detailNotice = retained.values.firstNotNullOfOrNull { it.notice }
-                }, onFailure = { failure ->
-                    if (failure is ReaderDetailUnavailable) {
-                        state.detailError = null
-                        state.detailNotice = failure.message
-                    } else state.detailError = failure.message?.takeIf { "当前显示预览" in it }
-                        ?: "原图细节暂时无法读取，当前显示预览"
-                })
-                if (requested.isNotEmpty() && requested.all { it in retained }) {
-                    state.detailError = null
-                    state.detailNotice = retained.values.firstNotNullOfOrNull { it.notice }
-                }
-            }
+        }
     }
     Image(painter, contentDescription,
         modifier.onSizeChanged { viewport = it }.then(if (spread == null)
@@ -295,67 +368,80 @@ internal fun PortableVerticalReaderTiles(
     val context = LocalMangaContext.current
     val policy = remember(context) { ExperiencePolicyStore.get(context) }
     val loader = SingletonImageLoader.get(imagePlatformContext(context))
-    var file by remember(page.url, diskCacheKey) { mutableStateOf<String?>(null) }
+    var sourceFile by remember(page.url, diskCacheKey) { mutableStateOf<ReaderOriginalSource?>(null) }
     var decoded by remember(page.url, diskCacheKey) { mutableStateOf<List<DecodedReaderTile>>(emptyList()) }
     val liveWindow by rememberUpdatedState(visibleWindow)
+    val liveDisplayWidth by rememberUpdatedState(displayWidth)
+    val liveDisplayHeight by rememberUpdatedState(displayHeight)
     val reportStatus by rememberUpdatedState(onDetailStatus)
     LaunchedEffect(page.url, diskCacheKey, loader) {
         var snapshot: DiskCache.Snapshot? = null
         try {
-            file = readerFilePath(page.url) ?: withContext(Dispatchers.IO) {
-                snapshot = loader.diskCache?.openSnapshot(diskCacheKey ?: page.url)
-                snapshot?.data?.toString()
+            sourceFile = readerFilePath(page.url)?.let(::ReaderOriginalSource) ?: withContext(Dispatchers.IO) {
+                val key = diskCacheKey ?: page.url
+                snapshot = loader.diskCache?.openSnapshot(key)
+                snapshot?.data?.toString()?.let { ReaderOriginalSource(it, key) }
             }
-            if (file == null) reportStatus(ReaderDetailStatus("原图缓存暂不可用，当前显示预览", true))
+            if (sourceFile == null) reportStatus(ReaderDetailStatus("原图缓存暂不可用，当前显示预览", true))
             awaitCancellation()
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (failure: Exception) { reportStatus(ReaderDetailStatus(failure.message ?: "原图细节暂时无法读取，当前显示预览", true)) }
+        catch (failure: Exception) {
+            currentCoroutineContext().ensureActive()
+            reportStatus(ReaderDetailStatus(failure.message ?: "原图细节暂时无法读取，当前显示预览", true))
+        }
         finally { withContext(NonCancellable + Dispatchers.IO) { snapshot?.close() } }
     }
-    LaunchedEffect(file, imageSize, displayWidth, displayHeight, policy) {
-        val source = file ?: return@LaunchedEffect
-        if (imageSize.width <= 0 || imageSize.height <= 0 || displayHeight <= 0) return@LaunchedEffect
-        val scale = imageSize.height.toDouble() / displayHeight
-        // libwebp's native crop origin is even-aligned; keep all platform band seams exact.
-        val sourceBand = maxOf(2, (1024 * scale).roundToInt() / 2 * 2)
-        val count = ceil(imageSize.height.toDouble() / sourceBand).toInt()
-        val retained = mutableMapOf<ReaderTile, ReaderRegion>()
-        var fallbackPixels = policy.state.value.runtime.fallbackDecodeMiPixels
-        snapshotFlow {
-            val window = liveWindow()
-            if (window == null || window.bottom <= window.top) VerticalTileWindow()
-            else {
-                val first = floor(window.top * scale / sourceBand).toInt().coerceIn(0, count - 1)
-                val last = floor((window.bottom - 1) * scale / sourceBand).toInt().coerceIn(first, count - 1)
-                var sample = 1
-                while (sample < 128 && sample * 2 <= imageSize.width.toFloat() / displayWidth.coerceAtLeast(1)) sample *= 2
-                // Decode the area being read before warming either neighboring band.
-                val bands = buildList {
-                    addAll(first..last)
-                    if (last < count - 1) add(last + 1)
-                    if (first > 0) add(first - 1)
+    LaunchedEffect(sourceFile, imageSize, policy, loader) {
+        val source = sourceFile ?: return@LaunchedEffect
+        if (imageSize.width <= 0 || imageSize.height <= 0) return@LaunchedEffect
+        withReaderRegionDecoder(source, loader.diskCache, onFailure = { failure ->
+            decoded = emptyList()
+            reportStatus(ReaderDetailStatus(failure.message ?: "原图细节暂时无法读取，当前显示预览", true))
+        }) { decoder ->
+            val retained = mutableMapOf<ReaderTile, ReaderRegion>()
+            var fallbackPixels = policy.state.value.runtime.fallbackDecodeMiPixels
+            snapshotFlow {
+                val window = liveWindow()
+                val width = liveDisplayWidth
+                val height = liveDisplayHeight
+                if (window == null || window.bottom <= window.top || width <= 0 || height <= 0) VerticalTileWindow()
+                else {
+                    val scale = imageSize.height.toDouble() / height
+                    // libwebp's native crop origin is even-aligned; keep all platform band seams exact.
+                    val sourceBand = maxOf(2, (1024 * scale).roundToInt() / 2 * 2)
+                    val count = ceil(imageSize.height.toDouble() / sourceBand).toInt()
+                    val first = floor(window.top * scale / sourceBand).toInt().coerceIn(0, count - 1)
+                    val last = floor((window.bottom - 1) * scale / sourceBand).toInt().coerceIn(first, count - 1)
+                    var sample = 1
+                    while (sample < 128 && sample * 2 <= imageSize.width.toFloat() / width) sample *= 2
+                    // Decode the area being read before warming either neighboring band.
+                    val bands = buildList {
+                        addAll(first..last)
+                        if (last < count - 1) add(last + 1)
+                        if (first > 0) add(first - 1)
+                    }
+                    VerticalTileWindow(bands.map { band -> ReaderTile(IntRect(0, band * sourceBand, imageSize.width,
+                        minOf((band + 1) * sourceBand, imageSize.height)), sample) }, last - first + 1)
                 }
-                VerticalTileWindow(bands.map { band -> ReaderTile(IntRect(0, band * sourceBand, imageSize.width,
-                    minOf((band + 1) * sourceBand, imageSize.height)), sample) }, last - first + 1)
-            }
-        }.distinctUntilChanged().combine(nativeDecodeChanges(policy)) { requested, configuration -> requested to configuration }
-            .collectLatest { (window, configuration) ->
-                val (requested, visibleCount) = window
-                if (fallbackPixels != configuration.third) retained.clear()
-                fallbackPixels = configuration.third
-                retained.keys.retainAll(requested.toSet())
-                val publishTiles = { decoded = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) } }
-                val reportFailure = { failure: Exception ->
-                    reportStatus(ReaderDetailStatus(failure.message ?: "原图细节暂时无法读取，当前显示预览", true))
+            }.distinctUntilChanged().combine(nativeDecodeChanges(policy)) { requested, configuration -> requested to configuration }
+                .collectLatest { (window, configuration) ->
+                    val (requested, visibleCount) = window
+                    if (fallbackPixels != configuration.third) retained.clear()
+                    fallbackPixels = configuration.third
+                    retained.keys.retainAll(requested.toSet())
+                    val publishTiles = { decoded = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) } }
+                    val reportFailure = { failure: Exception ->
+                        reportStatus(ReaderDetailStatus(failure.message ?: "原图细节暂时无法读取，当前显示预览", true))
+                    }
+                    publishTiles()
+                    // Complete the visible batch before spending capacity on neighboring bands.
+                    decodeReaderTiles(policy, decoder, requested.take(visibleCount), retained, publishTiles, reportFailure)
+                    decodeReaderTiles(policy, decoder, requested.drop(visibleCount), retained, publishTiles, reportFailure)
+                    if (requested.isNotEmpty() && requested.all { it in retained }) {
+                        reportStatus(retained.values.firstNotNullOfOrNull { it.notice }?.let { ReaderDetailStatus(it, false) })
+                    }
                 }
-                publishTiles()
-                // Complete the visible batch before spending capacity on neighboring bands.
-                decodeReaderTiles(policy, source, requested.take(visibleCount), retained, publishTiles, reportFailure)
-                decodeReaderTiles(policy, source, requested.drop(visibleCount), retained, publishTiles, reportFailure)
-                if (requested.isNotEmpty() && requested.all { it in retained }) {
-                    reportStatus(retained.values.firstNotNullOfOrNull { it.notice }?.let { ReaderDetailStatus(it, false) })
-                }
-            }
+        }
     }
     Canvas(Modifier.fillMaxSize()) {
         val width = minOf(displayWidth.toFloat(), displayHeight.toFloat() * imageSize.width / imageSize.height)

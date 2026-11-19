@@ -209,6 +209,9 @@ data class ExperienceUsage(
     val decodedPageP90Bytes: Long? = null,
     val decodedPageMaxBytes: Long? = null,
     val decodedSampleCount: Int = 0,
+    val activeEnhancements: Int = 0,
+    /** Active native playback reservations, not a count of completed GPU frames. */
+    val activeRealtimeRenderers: Int = 0,
 )
 
 data class ExperienceCacheAreaUsage(

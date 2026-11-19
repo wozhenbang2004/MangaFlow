@@ -683,10 +683,12 @@ fun DownloadsScreen(
                             }
                         }
                         orderedBooks.getValue(pageFilter).forEach { (mangaId, chapterIds) ->
-                            val chapters = chapterIds.mapNotNull(entriesById::get)
                             val expanded = if (desktopSplit) mangaId == inspectedBook
-                                else mangaId in expandedBooks && chapters.size > 1
+                                else mangaId in expandedBooks && chapterIds.size > 1
                             item(key = "work:$mangaId", contentType = "download-work") {
+                                // Byte progress changes the entry map, not the directory. Resolve
+                                // rows only when this work is composed, including lazy prefetch.
+                                val chapters = chapterIds.mapNotNull(entriesById::get)
                                 val placement = Modifier.animateItem(
                                     fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
                                     placementSpec = if (motion) tween(MangaMotion.Content) else null,
@@ -715,7 +717,8 @@ fun DownloadsScreen(
                                     }
                                 }
                             }
-                            if (expanded && !desktopSplit) items(chapters.chunked(downloadChapterColumns),
+                            if (expanded && !desktopSplit) items(
+                                chapterIds.mapNotNull(entriesById::get).chunked(downloadChapterColumns),
                                 key = { "chapters:" + it.first().id }, contentType = { "download-chapter-grid" }) { row ->
                                 Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {

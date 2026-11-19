@@ -48,6 +48,7 @@ fun main() {
     check(cache.isDirectory || cache.mkdirs()) { "无法创建漫流缓存目录：$cache" }
     val context = object : PlatformContext(data.absolutePath, cache.absolutePath) {}
     initializeMangaFlow(context)
+    val performance = DesktopPerformance(context)
     val windowPreferences = DesktopWindowPreferences(context)
     var lastModel: MangaViewModel? = null
     try {
@@ -96,6 +97,10 @@ fun main() {
                 state = windowState,
                 onPreviewKeyEvent = { event ->
                     when {
+                        event.key == Key.F12 && event.isCtrlPressed && event.isShiftPressed -> {
+                            if (event.type == KeyEventType.KeyUp) performance.togglePanel()
+                            true
+                        }
                         event.key == Key.F11 -> {
                             // Commit on release: holding F11 cannot toggle repeatedly.
                             if (event.type == KeyEventType.KeyUp) {
@@ -124,7 +129,11 @@ fun main() {
                         window.graphicsConfiguration?.device?.displayMode?.refreshRate
                             ?.takeIf { window.isShowing && it in 20..480 }?.toDouble()
                     }
-                    onDispose { context.playbackDisplayRefreshHz = null }
+                    val detachPerformance = performance.attach(window)
+                    onDispose {
+                        detachPerformance()
+                        context.playbackDisplayRefreshHz = null
+                    }
                 }
                 CompositionLocalProvider(LocalMangaContext provides context) {
                     MangaFlowTheme {
@@ -132,11 +141,13 @@ fun main() {
                         ProvideDesktopReaderKeyboard(context) {
                             MangaFlowHost(context, onModelReady = { model = it; lastModel = it })
                         }
+                        DesktopPerformanceSurface(performance)
                     }
                 }
             }
         }
     } finally {
+        runBlocking(Dispatchers.IO) { performance.close() }
         // Reader disposal can publish its final position after the window-close preflight.
         val saved = runBlocking(Dispatchers.IO) { lastModel?.library?.flushPendingWrites() ?: flushLocalPreferences() }
         // Embedded website/video windows belong to this application process.

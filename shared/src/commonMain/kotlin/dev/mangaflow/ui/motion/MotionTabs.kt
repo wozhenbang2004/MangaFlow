@@ -25,6 +25,7 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
@@ -34,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -96,28 +98,31 @@ internal fun MotionNavigationColumn(
             }
         }
     }
-    Column(modifier.fillMaxWidth().padding(vertical = 3.dp).drawBehind {
-        if (heights.size != itemCount) return@drawBehind
+    Column(modifier.fillMaxWidth().padding(vertical = 3.dp).drawWithCache {
+        if (heights.size != itemCount) return@drawWithCache onDrawBehind { }
         var y = 0f
         val gap = 6.dp.roundToPx().toFloat()
-        val starts = (0 until itemCount).map { i ->
+        val starts = FloatArray(itemCount) { i ->
             y.also { y += heights.getValue(i) + gap }
         }
-        val ends = starts.mapIndexed { i, start -> start + heights.getValue(i) }
-        fun interpolate(position: Float, values: List<Float>): Float {
+        val ends = FloatArray(itemCount) { i -> starts[i] + heights.getValue(i) }
+        val restingHeight = heights.getValue(index).toFloat().coerceAtLeast(1f)
+        val cornerRadius = CornerRadius(14.dp.toPx())
+        fun interpolate(position: Float, values: FloatArray): Float {
             val value = position.coerceIn(0f, itemCount - 1f)
             val from = value.toInt()
             val to = (from + 1).coerceAtMost(itemCount - 1)
             return values[from] + (values[to] - values[from]) * (value - from)
         }
-        val start = interpolate(top.value, starts)
-        val end = interpolate(bottom.value - 1f, ends)
-        val restingHeight = heights.getValue(index).toFloat().coerceAtLeast(1f)
-        // A long jump should travel between rows, not turn into a full-column selection panel.
-        val height = (end - start).coerceIn(restingHeight * .9f, restingHeight * 1.22f)
-        val offset = ((start + end - height) / 2f).coerceIn(0f, (size.height - height).coerceAtLeast(0f))
-        drawRoundRect(indicator, topLeft = Offset(0f, offset), size = Size(size.width, height),
-            cornerRadius = CornerRadius(14.dp.toPx()))
+        onDrawBehind {
+            val start = interpolate(top.value, starts)
+            val end = interpolate(bottom.value - 1f, ends)
+            // A long jump should travel between rows, not turn into a full-column selection panel.
+            val height = (end - start).coerceIn(restingHeight * .9f, restingHeight * 1.22f)
+            val offset = ((start + end - height) / 2f).coerceIn(0f, (size.height - height).coerceAtLeast(0f))
+            drawRoundRect(indicator, topLeft = Offset(0f, offset), size = Size(size.width, height),
+                cornerRadius = cornerRadius)
+        }
     }.selectableGroup(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         repeat(itemCount) { i -> item(i, Modifier.onSizeChanged { heights[i] = it.height }) }
     }
@@ -169,11 +174,16 @@ internal fun MotionTabs(
         itemContent == null && density.fontScale > 1.3f
     val height = maxOf(controlHeight ?: if (compact) 38.dp else 48.dp,
         with(density) { fontSize.toDp() * (if (wrapLabels) 2.6f else 1.3f) + 16.dp })
-    val labelWidths = labels.map { label ->
-        maxOf(
-            textMeasurer.measure(label, textStyle.copy(fontWeight = selectedFontWeight), maxLines = 1).size.width,
-            textMeasurer.measure(label, textStyle.copy(fontWeight = unselectedFontWeight), maxLines = 1).size.width,
-        ).toFloat()
+    // Keep font resolution observable while reusing metrics through spring/color frames.
+    val labelWidths by remember(labels, textMeasurer, textStyle, selectedFontWeight, unselectedFontWeight) {
+        derivedStateOf {
+            labels.map { label ->
+                maxOf(
+                    textMeasurer.measure(label, textStyle.copy(fontWeight = selectedFontWeight), maxLines = 1).size.width,
+                    textMeasurer.measure(label, textStyle.copy(fontWeight = unselectedFontWeight), maxLines = 1).size.width,
+                ).toFloat()
+            }
+        }
     }
     LaunchedEffect(motion, labels.size) {
         snapshotFlow { latest.value }.collect { target ->
@@ -199,62 +209,66 @@ internal fun MotionTabs(
     }
     Row(modifier.fillMaxWidth().height(height)
         .clip(if (compact) RectangleShape else RoundedCornerShape(14.dp)).background(track)
-        .drawBehind {
+        .drawWithCache {
             val slot = size.width / labels.size
-            if (compact && tabWidths.size != labels.size) return@drawBehind
+            if (compact && tabWidths.size != labels.size) return@drawWithCache onDrawBehind { }
             var x = if (compact) 10.dp.toPx() else 0f
-            val centers = labels.indices.map { i ->
+            val centers = FloatArray(labels.size) { i ->
                 if (compact) {
                     val width = tabWidths.getValue(i).toFloat()
                     (x + width / 2f).also { x += width + 22.dp.toPx() }
                 } else slot * (i + .5f)
             }
-            fun interpolate(position: Float, values: List<Float>): Float {
+            fun interpolate(position: Float, values: FloatArray): Float {
                 val value = position.coerceIn(0f, labels.lastIndex.toFloat())
                 val from = value.toInt()
                 val to = (from + 1).coerceAtMost(labels.lastIndex)
                 return values[from] + (values[to] - values[from]) * (value - from)
             }
-            val widths = labels.indices.map { i ->
+            val widths = FloatArray(labels.size) { i ->
                 (labelWidths[i] + (if (treatment == MotionTabTreatment.Underline) 4.dp else 24.dp).toPx()).coerceAtMost(
                     if (compact) labelWidths[i] + 24.dp.toPx() else (slot - 6.dp.toPx()).coerceAtLeast(1f),
                 )
             }
             val inset = 4.dp.toPx().coerceAtMost(slot / 2f)
             val fillSegment = fullWidthIndicator && !compact
-            val start = if (fillSegment) left.value.coerceIn(0f, labels.size.toFloat()) * slot + inset
-                else interpolate(left.value, centers) - interpolate(left.value, widths) / 2f
-            val end = if (fillSegment) right.value.coerceIn(0f, labels.size.toFloat()) * slot - inset
-                else interpolate(right.value - 1f, centers) + interpolate(right.value - 1f, widths) / 2f
-            val width = (end - start).coerceAtLeast(2.dp.toPx())
-            val restingWidth = if (fillSegment) slot - inset * 2f else widths[index]
-            val stretch = (width / restingWidth.coerceAtLeast(1f) - 1f).coerceAtLeast(0f)
-            val h = (indicatorHeight?.toPx() ?: if (treatment == MotionTabTreatment.Underline) 2.dp.toPx()
-                else if (fillSegment) size.height - 8.dp.toPx()
-                else (if (compact) 28.dp else 32.dp).toPx()).coerceAtLeast(1f) *
-                (1f - .06f * stretch).coerceAtLeast(.8f)
-            val topLeft = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - end else start,
-                if (treatment == MotionTabTreatment.Underline) size.height - h - 5.dp.toPx() else (size.height - h) / 2)
-            val pillSize = Size(width, h)
-            val radius = CornerRadius(indicatorCornerRadius?.toPx()
-                ?: if (treatment == MotionTabTreatment.Soft) 10.dp.toPx() else h / 2)
-            val tint = when (treatment) {
-                MotionTabTreatment.Underline, MotionTabTreatment.Soft -> indicator
-                MotionTabTreatment.Capsule -> if (underline || compact) foreground.copy(alpha = .065f) else indicator
-            }
-            drawRoundRect(tint,
-                topLeft = topLeft, size = pillSize, cornerRadius = radius, alpha = selectionAlpha)
-            // A small glass rim on the flat navigation surface; text stays outside the material.
-            // Backdrop blur/refraction remains in the existing floating controls over artwork.
-            if (liquid && treatment == MotionTabTreatment.Capsule) {
-                drawRoundRect(Brush.linearGradient(
-                    listOf(Color.White.copy(alpha = if (light) .52f else .10f), Color.Transparent,
-                        foreground.copy(alpha = .025f)),
-                    start = topLeft, end = topLeft + Offset(width * .35f, h)),
+            val rimColors = listOf(Color.White.copy(alpha = if (light) .52f else .10f), Color.Transparent,
+                foreground.copy(alpha = .025f))
+            val rimStroke = Stroke(.6.dp.toPx())
+            onDrawBehind {
+                val start = if (fillSegment) left.value.coerceIn(0f, labels.size.toFloat()) * slot + inset
+                    else interpolate(left.value, centers) - interpolate(left.value, widths) / 2f
+                val end = if (fillSegment) right.value.coerceIn(0f, labels.size.toFloat()) * slot - inset
+                    else interpolate(right.value - 1f, centers) + interpolate(right.value - 1f, widths) / 2f
+                val width = (end - start).coerceAtLeast(2.dp.toPx())
+                val restingWidth = if (fillSegment) slot - inset * 2f else widths[index]
+                val stretch = (width / restingWidth.coerceAtLeast(1f) - 1f).coerceAtLeast(0f)
+                val h = (indicatorHeight?.toPx() ?: if (treatment == MotionTabTreatment.Underline) 2.dp.toPx()
+                    else if (fillSegment) size.height - 8.dp.toPx()
+                    else (if (compact) 28.dp else 32.dp).toPx()).coerceAtLeast(1f) *
+                    (1f - .06f * stretch).coerceAtLeast(.8f)
+                val topLeft = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - end else start,
+                    if (treatment == MotionTabTreatment.Underline) size.height - h - 5.dp.toPx() else (size.height - h) / 2)
+                val pillSize = Size(width, h)
+                val radius = CornerRadius(indicatorCornerRadius?.toPx()
+                    ?: if (treatment == MotionTabTreatment.Soft) 10.dp.toPx() else h / 2)
+                val tint = when (treatment) {
+                    MotionTabTreatment.Underline, MotionTabTreatment.Soft -> indicator
+                    MotionTabTreatment.Capsule -> if (underline || compact) foreground.copy(alpha = .065f) else indicator
+                }
+                drawRoundRect(tint,
                     topLeft = topLeft, size = pillSize, cornerRadius = radius, alpha = selectionAlpha)
+                // A small glass rim on the flat navigation surface; text stays outside the material.
+                // Backdrop blur/refraction remains in the existing floating controls over artwork.
+                if (liquid && treatment == MotionTabTreatment.Capsule) {
+                    drawRoundRect(Brush.linearGradient(
+                        rimColors,
+                        start = topLeft, end = topLeft + Offset(width * .35f, h)),
+                        topLeft = topLeft, size = pillSize, cornerRadius = radius, alpha = selectionAlpha)
+                }
+                if (treatment == MotionTabTreatment.Capsule) drawRoundRect(foreground.copy(alpha = if (liquid) .07f else .04f),
+                    topLeft = topLeft, size = pillSize, cornerRadius = radius, style = rimStroke, alpha = selectionAlpha)
             }
-            if (treatment == MotionTabTreatment.Capsule) drawRoundRect(foreground.copy(alpha = if (liquid) .07f else .04f),
-                topLeft = topLeft, size = pillSize, cornerRadius = radius, style = Stroke(.6.dp.toPx()), alpha = selectionAlpha)
         }.padding(horizontal = if (compact) 10.dp else 0.dp).selectableGroup(),
         horizontalArrangement = if (compact) Arrangement.spacedBy(22.dp) else Arrangement.Start,
         verticalAlignment = Alignment.CenterVertically,
@@ -269,10 +283,7 @@ internal fun MotionTabs(
                 if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-label")
             // Reserve both weights so selecting a compact tab cannot shift its neighbours.
             val labelWidth = if (compact && itemContent == null) with(density) {
-                maxOf(
-                    textMeasurer.measure(label, textStyle.copy(fontWeight = selectedFontWeight), maxLines = 1).size.width,
-                    textMeasurer.measure(label, textStyle.copy(fontWeight = unselectedFontWeight), maxLines = 1).size.width,
-                ).toDp()
+                labelWidths[i].toDp()
             } else 0.dp
             val tab = if (compact) Modifier.onSizeChanged { tabWidths[i] = it.width }
                 else Modifier.weight(1f)

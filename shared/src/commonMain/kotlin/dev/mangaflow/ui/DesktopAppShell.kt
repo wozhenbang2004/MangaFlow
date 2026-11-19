@@ -36,6 +36,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -46,6 +47,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.constrainWidth
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.SearchTarget
 import dev.mangaflow.platform.PlatformKind
@@ -79,13 +81,19 @@ internal fun DesktopNavigationWorkspace(
             content()
         } else {
             val motion = LocalMotionEnabled.current
-            val width by animateDpAsState(
+            val width = animateDpAsState(
                 if (expanded) (204.dp + 24.dp * (LocalMangaWindow.current.fontScale - 1f)).coerceAtMost(240.dp) else 64.dp,
                 if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
                 label = "desktop-navigation-width",
             )
             Row(Modifier.fillMaxSize()) {
-                if (visible) LiquidGlassSurface(backdrop, Modifier.width(width).fillMaxHeight().padding(start = 8.dp, top = 8.dp, bottom = 8.dp),
+                if (visible) LiquidGlassSurface(backdrop, Modifier.layout { measurable, constraints ->
+                    // Width changes must remeasure the workspace, but they do not need
+                    // to recompose the navigation, its glass styles and every action.
+                    val pixels = constraints.constrainWidth(width.value.roundToPx())
+                    val placeable = measurable.measure(constraints.copy(minWidth = pixels, maxWidth = pixels))
+                    layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
+                }.fillMaxHeight().padding(start = 8.dp, top = 8.dp, bottom = 8.dp),
                     cornerRadius = 20.dp, role = GlassSurfaceRole.DRAWER, elevation = 0.dp) {
                     Column(Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 8.dp)) {
                         Row(Modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically) {

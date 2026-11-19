@@ -86,6 +86,10 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
         }
     }
     val anime: AnimeController get() = animeOwner.value
+
+    /** Diagnostics must not initialize an unused anime controller or native player. */
+    fun peekAnimeNativeVideoStatistics() =
+        if (animeOwner.isInitialized()) animeOwner.value.peekNativeVideoStatistics() else null
     // One process-owned Steam client restores encrypted refresh credentials on application
     // startup rather than waiting for the wallpaper screen to be opened.
     private val steamOwner = lazy { dev.mangaflow.storage.createSteamWallpaperClient(application) }

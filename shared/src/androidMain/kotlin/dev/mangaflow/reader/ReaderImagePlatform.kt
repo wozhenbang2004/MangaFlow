@@ -48,6 +48,8 @@ internal actual suspend fun readNativeReaderSize(path: String, runtime: Experien
 internal actual fun readerFilePath(uri: String): String? =
     if (uri.startsWith("file:")) runCatching { File(URI(uri)).absolutePath }.getOrNull() else null
 
+internal actual fun createReaderRegionDecoder(path: String): ReaderRegionDecoder = StatelessReaderRegionDecoder(path)
+
 @Suppress("DEPRECATION")
 internal actual suspend fun decodeNativeReaderRegion(
     path: String, bounds: IntRect, sampleSize: Int, runtime: ExperienceRuntimePreferences,

@@ -4,6 +4,8 @@ import kotlinx.serialization.json.*
 import kotlin.math.ceil
 import dev.mangaflow.net.retryAfterMillis
 import dev.mangaflow.reader.ReaderRecoveryPreferences
+import dev.mangaflow.platform.storage.StorageLock
+import kotlinx.atomicfu.locks.synchronized
 
 internal fun encodeExperienceOverrides(o: ExperienceOverrides) = buildJsonObject {
     put("prefetch", o.prefetchMode.name)
@@ -131,6 +133,10 @@ internal class ExperienceMeasurements {
     private var request95: Long? = null
     private var frame95: Double? = null
     private var frame99: Double? = null
+    private var decode95: Long? = null
+    private var decodeQueue95: Long? = null
+    private var decodedPage90: Long? = null
+    private var decodedPageMax: Long? = null
 
     fun recordImage(elapsed: Long, memory: Boolean, disk: Boolean, prefetch: Boolean, key: String, bytes: Long?) {
         imageRequests++
@@ -155,20 +161,24 @@ internal class ExperienceMeasurements {
     fun recordDecodeQueue(elapsedMillis: Long) {
         decodeQueues.addLast(elapsedMillis.coerceAtLeast(0L))
         if (decodeQueues.size > 180) decodeQueues.removeFirst()
+        decodeQueue95 = percentile(decodeQueues, .95)
     }
     fun recordDecode(elapsedMillis: Long, bytes: Long, optional: Boolean) {
         decodeDurations.addLast(elapsedMillis.coerceAtLeast(0L))
         if (decodeDurations.size > 180) decodeDurations.removeFirst()
+        decode95 = percentile(decodeDurations, .95)
         if (bytes > 0L) {
             decodedBytes += bytes
             decodedSizes.addLast(bytes)
             if (decodedSizes.size > 32) decodedSizes.removeFirst()
+            decodedPage90 = percentile(decodedSizes, .9)
+            decodedPageMax = decodedSizes.maxOrNull()
         }
         if (optional) optionalDecodes++
     }
     /** A conservative recent output estimate; not a claimed page allocation or cache hit. */
     fun estimatedDecodedPageBytes(): Long =
-        maxOf(4L * EXPERIENCE_MIB, percentile(decodedSizes, .9) ?: 4L * EXPERIENCE_MIB)
+        maxOf(4L * EXPERIENCE_MIB, decodedPage90 ?: 4L * EXPERIENCE_MIB)
 
     fun recordTransfer(bytes: Long, elapsed: Long) {
         transferBytes += bytes.coerceAtLeast(0L)
@@ -183,16 +193,62 @@ internal class ExperienceMeasurements {
         frame99 = percentile(frames, .99)?.div(1_000_000.0)
         return true
     }
+    fun recordFrameSummary(p95Nanos: Long, p99Nanos: Long) {
+        frame95 = p95Nanos / 1_000_000.0
+        frame99 = p99Nanos / 1_000_000.0
+    }
     fun usage(previous: ExperienceUsage) = previous.copy(
         imageRequests = imageRequests, memoryHits = memoryHits, diskHits = diskHits,
         prefetchedPages = prefetchedPages, prefetchHits = prefetchHits,
         requestP95Millis = request95, transferredBytes = transferBytes, transferMillis = transferMillis,
-        decodeP95Millis = percentile(decodeDurations, .95), decodeQueueP95Millis = percentile(decodeQueues, .95),
+        decodeP95Millis = decode95, decodeQueueP95Millis = decodeQueue95,
         decodedBytes = decodedBytes, optionalDecodes = optionalDecodes,
-        decodedPageP90Bytes = percentile(decodedSizes, .9), decodedPageMaxBytes = decodedSizes.maxOrNull(),
+        decodedPageP90Bytes = decodedPage90, decodedPageMaxBytes = decodedPageMax,
         decodedSampleCount = decodedSizes.size,
         frameP95Millis = frame95, frameP99Millis = frame99,
     )
     private fun percentile(values: Collection<Long>, fraction: Double): Long? =
         if (values.isEmpty()) null else values.sorted()[(ceil(values.size * fraction).toInt() - 1).coerceIn(0, values.size - 1)]
+}
+
+/** Render callbacks only append; copying/sorting happens on the policy worker, at most twice a second. */
+internal class DesktopFrameWorkWindow {
+    private val lock = StorageLock()
+    private val values = LongArray(360)
+    private var count = 0
+    private var cursor = 0
+    private var budget = 0L
+    private var lastSampleAt = 0L
+    private var nextPublicationAt = 0L
+    private var publicationPending = false
+
+    data class Snapshot(val p95Nanos: Long, val p99Nanos: Long, val budgetNanos: Long, val sampledAt: Long)
+
+    fun record(durationNanos: Long, frameBudgetNanos: Long, now: Long): Boolean = synchronized(lock) {
+        if (durationNanos <= 0L || frameBudgetNanos <= 0L) return@synchronized false
+        // Do not mix monitors or carry old animation work into a new interaction after idle.
+        if (now - lastSampleAt > 500L || budget != frameBudgetNanos) { count = 0; cursor = 0 }
+        budget = frameBudgetNanos
+        lastSampleAt = now
+        values[cursor] = durationNanos
+        cursor = (cursor + 1) % values.size
+        count = minOf(count + 1, values.size)
+        if (publicationPending || now < nextPublicationAt || count < 10) false
+        else {
+            publicationPending = true
+            nextPublicationAt = now + 500L
+            true
+        }
+    }
+
+    fun snapshot(): Snapshot? {
+        val captured = synchronized(lock) {
+            publicationPending = false
+            if (count < 10) return null
+            Triple(values.copyOf(count), budget, lastSampleAt)
+        }
+        val sorted = captured.first.also { it.sort() }
+        fun percentile(percent: Int) = sorted[((sorted.size * percent + 99) / 100 - 1).coerceIn(sorted.indices)]
+        return Snapshot(percentile(95), percentile(99), captured.second, captured.third)
+    }
 }

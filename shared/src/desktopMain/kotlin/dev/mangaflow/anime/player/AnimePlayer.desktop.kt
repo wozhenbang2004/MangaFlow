@@ -5,9 +5,15 @@ import androidx.compose.ui.Modifier
 import dev.mangaflow.enhancement.engine.DesktopAnimeJaNai
 import dev.mangaflow.enhancement.engine.EnhancementEngineIds
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.platform.monotonicTimeMillis
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.openani.mediamp.MediampPlayer
 import org.openani.mediamp.mpv.MPVHandle
@@ -28,9 +34,15 @@ private class DesktopAnimePlayer(
     private var warming = true
     private var videoBeforeBackground: String? = null
     private var enhancementMediaReady = false
+    private var statisticsJob: Job? = null
+    private var statisticsHandle: MPVHandle? = null
+    private val videoRenderingActive = MutableStateFlow(false)
     private val animeJaNai = DesktopAnimeJaNai(File(context.dataRoot, "enhancement/engines"))
     private val nativeEnhancement = DesktopAnimeJaNaiEnhancement(
-        animeJaNai, playerScope, { context.playbackDisplayRefreshHz?.invoke() },
+        runtime = animeJaNai,
+        scope = playerScope,
+        renderingActive = videoRenderingActive,
+        refreshHz = { context.playbackDisplayRefreshHz?.invoke() },
     ) { generation, value ->
         publish(generation) { it.copy(videoEnhancement = value) }
     }
@@ -39,6 +51,7 @@ private class DesktopAnimePlayer(
     private val enhancement = DesktopAnimeVideoEnhancement(
         context = context,
         scope = playerScope,
+        renderingActive = videoRenderingActive,
         isCurrentSession = { handle, generation, mode ->
             isCurrent(generation) && engine.value?.impl === handle && options.videoEnhancement == mode
         },
@@ -118,18 +131,68 @@ private class DesktopAnimePlayer(
 
     override fun onPlaybackStateNative() {
         val handle = engine.value?.impl as? MPVHandle
-        if (handle != null) {
-            if (animeJaNai.usesNativeRuntime() && handle.getPropertyBooleanOrNull("video-frame-info/interlaced") != null) {
-                animeJaNai.confirmFirstFrame()
-            }
-            val fps = handle.getPropertyString("container-fps")?.toDoubleOrNull()?.takeIf { it.isFinite() && it > 0 }
-            val dropped = handle.getPropertyLongOrNull("frame-drop-count")?.takeIf { it >= 0 }
-            mutableState.value = state.value.copy(sourceFps = fps, droppedFrames = dropped,
-                displayRefreshHz = context.playbackDisplayRefreshHz?.invoke())
+        val refreshHz = context.playbackDisplayRefreshHz?.invoke()
+        if (state.value.displayRefreshHz != refreshHz) {
+            mutableState.value = state.value.copy(displayRefreshHz = refreshHz)
         }
+        updateStatisticsObservation(handle)
         if (warming && state.value.phase == AnimePlayerPhase.READY && !state.value.isBuffering) {
             warming = false
             applyBufferPolicy()
+        }
+    }
+
+    private fun updateStatisticsObservation(handle: MPVHandle?) {
+        val rendering = handle != null && state.value.isPlaying && (foreground || state.value.inPictureInPicture)
+        videoRenderingActive.value = rendering
+        if (handle == null || !enhancementMediaReady) {
+            statisticsJob?.cancel()
+            statisticsJob = null
+            statisticsHandle = null
+            return
+        }
+        if (statisticsHandle === handle && statisticsJob?.isActive == true) return
+        statisticsJob?.cancel()
+        statisticsHandle = handle
+        val generation = nativeGeneration
+        statisticsJob = playerScope.launch(Dispatchers.Main.immediate) {
+            var initialSample = true
+            while (isCurrent(generation) && engine.value?.impl === handle) {
+                // A paused opening still needs source metadata once. Afterwards an inactive
+                // video suspends on playback state, with no periodic native reads or timer.
+                if (!initialSample) videoRenderingActive.first { it }
+                initialSample = false
+                val alternateRuntime = animeJaNai.usesNativeRuntime()
+                // The pinned native registry retains each read across teardown. A closed Kotlin
+                // handle is unavailable; it must not leave stale values on a replacement session.
+                val sample = withContext(Dispatchers.IO) {
+                    runCatching {
+                        fun counter(name: String) = handle.getPropertyLongOrNull(name)?.takeIf { it >= 0L }
+                        val fps = handle.getPropertyDoubleOrNull("container-fps")?.takeIf { it.isFinite() && it > 0 }
+                        val statistics = AnimeNativeVideoStatistics(
+                            sampledAtMillis = monotonicTimeMillis(),
+                            hardwareDecoder = handle.getPropertyString("hwdec-current")?.takeIf { it.isNotBlank() },
+                            videoOutput = handle.getPropertyString("current-vo")?.takeIf { it.isNotBlank() },
+                            decoderDroppedFrames = counter("decoder-frame-drop-count"),
+                            outputDroppedFrames = counter("frame-drop-count"),
+                            estimatedFilterFps = handle.getPropertyDoubleOrNull("estimated-vf-fps")?.takeIf { it.isFinite() && it > 0 },
+                            estimatedDelayedFrames = counter("vo-delayed-frame-count"),
+                        )
+                        if (alternateRuntime && handle.getPropertyBooleanOrNull("video-frame-info/interlaced") != null)
+                            animeJaNai.confirmFirstFrame()
+                        fps to statistics
+                    }.getOrNull()
+                }
+                if (!isCurrent(generation) || engine.value?.impl !== handle) break
+                // The display provider reads AWT state and remains on Main, unlike native properties.
+                val refreshHz = context.playbackDisplayRefreshHz?.invoke()
+                if (sample != null) {
+                    publish(generation) { it.copy(sourceFps = sample.first, droppedFrames = sample.second.outputDroppedFrames,
+                        nativeVideoStatistics = sample.second, displayRefreshHz = refreshHz) }
+                } else publish(generation) { it.copy(sourceFps = null, droppedFrames = null,
+                    nativeVideoStatistics = null, displayRefreshHz = refreshHz) }
+                if (videoRenderingActive.value) delay(1_000L)
+            }
         }
     }
 
@@ -167,6 +230,7 @@ private class DesktopAnimePlayer(
             }
         }
         applyBufferPolicy()
+        updateStatisticsObservation(handle)
     }
 
     private fun applyBufferPolicy() {
@@ -191,10 +255,15 @@ private class DesktopAnimePlayer(
     }
 
     override fun releaseNative() {
+        videoRenderingActive.value = false
+        statisticsJob?.cancel()
+        statisticsJob = null
+        statisticsHandle = null
         nativeEnhancement.release()
         enhancement.release()
         enhancementMediaReady = false
-        mutableState.value = state.value.copy(videoEnhancement = AnimeVideoEnhancementState(
+        mutableState.value = state.value.copy(nativeVideoStatistics = null, sourceFps = null, droppedFrames = null,
+            videoEnhancement = AnimeVideoEnhancementState(
             mode = options.videoEnhancement,
             phase = AnimeVideoEnhancementPhase.OFF,
         ))

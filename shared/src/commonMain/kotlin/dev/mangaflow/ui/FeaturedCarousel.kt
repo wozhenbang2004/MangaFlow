@@ -284,6 +284,13 @@ private fun DesktopFeaturedRecommendations(
         val gap = 12.dp
         val galleryHeight = cardHeight + 20.dp
         val cardWidth = ((maxWidth - 16.dp - gap * (perGroup - 1)) / perGroup).coerceAtLeast(1.dp)
+        // Decode dimensions have upward buckets; visible geometry still follows every resize.
+        fun decodePixels(size: Dp): Int = with(density) {
+            ((size.roundToPx().coerceAtLeast(1).toLong() + 127L) / 128L * 128L)
+                .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        }
+        val decodeWidth = decodePixels(cardWidth)
+        val decodeHeight = decodePixels(cardHeight)
         val inlineInformation = cardWidth >= 224.dp && fontScale <= 1.3f
         val titleLines = if (window.shortHeight || fontScale > 1.3f) 1 else 2
         val captionHeight = if (inlineInformation) 0.dp else
@@ -332,8 +339,7 @@ private fun DesktopFeaturedRecommendations(
                             Box(Modifier.weight(1f).fillMaxHeight()) {
                                 DesktopBrowseActions(desktopActions?.invoke(entry).orEmpty(), visible) {
                                     FeaturedManga(entry, repository, captionHeight, titleLines, inlineInformation,
-                                        with(density) { cardWidth.roundToPx() }.coerceAtLeast(1),
-                                        with(density) { cardHeight.roundToPx() }.coerceAtLeast(1),
+                                        decodeWidth, decodeHeight,
                                         color = color, atmosphere = color,
                                         onColor = { extracted[entry.coverUrl] = it }, onReady = {},
                                         modifier = Modifier.fillMaxSize().mangaCoverCard(22.dp),

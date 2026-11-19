@@ -54,6 +54,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var memoryExpiryWatcher: Job? = null
     private var cacheUsageJob: Job? = null
     private var cacheRevision = 0L
+    private var appliedCacheConfiguration: CacheConfiguration? = null
     private var sampledDiskBytes = 0L
     private var activeSavedTransfers = 0
     private var activePages = 0
@@ -69,6 +70,8 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var activeOptionalResolves = 0
     private var activeOptionalDecodes = 0
     private var framePressureUntil = 0L
+    private val desktopFrameWork = if (platformKind == PlatformKind.DESKTOP) DesktopFrameWorkWindow() else null
+    private var desktopFrameRecovery: Job? = null
     private var decodePressureUntil = 0L
     private var foregroundResolveWaiters = 0
     private var foregroundDecodeWaiters = 0
@@ -326,11 +329,15 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
 
     private fun enhancementWaitReasonLocked(priority: Int, estimatedBytes: Long, sharedRealtimeOwner: String? = null): String? {
         val current = mutableState.value
+        val now = monotonicTimeMillis()
         return when {
             resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2 -> "设备保护：内存或温度压力"
             storageLow || resources.freeDiskBytes?.let { it <= current.diskReserveBytes } == true -> "存储空间不足"
             platformKind != PlatformKind.DESKTOP && !current.foreground -> "返回应用后继续处理"
             realtimeEnhancementOwners.any { it != sharedRealtimeOwner } -> "当前播放优先"
+            platformKind == PlatformKind.DESKTOP && current.foreground && framePressureUntil > now -> "等待界面帧工作负载回落"
+            platformKind == PlatformKind.DESKTOP && current.foreground && priority >= 1 && interactionUntil > now -> "当前交互优先"
+            platformKind == PlatformKind.DESKTOP && priority >= 1 && readerWaiting -> "当前可见图片优先"
             priority >= 2 && (readerUsers > 0 || readerWaiting) -> "当前阅读优先"
             priority >= 1 && resources.cpuLoad?.let { it >= .92 } == true -> "等待 CPU 负载回落"
             estimatedBytes > 0 && resources.availableMemoryBytes?.let {
@@ -351,6 +358,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         if (activeEnhancements == 0) activeEnhancementSharedOwner = sharedRealtimeOwner
         activeEnhancements++
         enhancementReservedBytes += estimatedBytes.coerceAtLeast(0L)
+        updateUsage()
         var released = false
         val release: () -> Unit = {
             synchronized(lock) {
@@ -360,6 +368,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                     if (activeEnhancements == 0) activeEnhancementSharedOwner = null
                     enhancementReservedBytes = (enhancementReservedBytes - estimatedBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
                     revision.value++
+                    updateUsage()
                 }
             }
         }
@@ -369,7 +378,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     /** A native realtime renderer reserves the lane; queued optional GPU work yields. */
     internal fun setRealtimeEnhancement(owner: String, active: Boolean) = synchronized(lock) {
         val changed = if (active) realtimeEnhancementOwners.add(owner) else realtimeEnhancementOwners.remove(owner)
-        if (changed) revision.value++
+        if (changed) { revision.value++; updateUsage() }
     }
     private fun retainActivity(reader: Boolean): () -> Unit {
         synchronized(lock) {
@@ -1087,6 +1096,40 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         }
     }
 
+    /**
+     * CPU render-callback work measured around the real desktop render delegate, never a
+     * frame-clock interval or GPU Present time. The EDT scene callback only appends to a fixed ring.
+     */
+    fun recordDesktopFrameWork(durationNanos: Long, frameBudgetNanos: Long) {
+        val window = desktopFrameWork ?: return
+        if (!window.record(durationNanos, frameBudgetNanos, monotonicTimeMillis())) return
+        scope.launch {
+            val sample = window.snapshot() ?: return@launch
+            synchronized(lock) {
+                val now = monotonicTimeMillis()
+                if (now - sample.sampledAt > 1_000L) return@synchronized
+                measurements.recordFrameSummary(sample.p95Nanos, sample.p99Nanos)
+                updateUsage()
+                if (foregroundUsers > 0 && sample.p95Nanos > sample.budgetNanos * .85) {
+                    val newlyBusy = framePressureUntil <= now
+                    framePressureUntil = now + 3_000L
+                    if (newlyBusy) publish()
+                    if (desktopFrameRecovery == null) desktopFrameRecovery = scope.launch {
+                        while (true) {
+                            val remaining = synchronized(lock) {
+                                (framePressureUntil - monotonicTimeMillis()).also {
+                                    if (it <= 0L) { desktopFrameRecovery = null; publish() }
+                                }
+                            }
+                            if (remaining <= 0L) break
+                            delay(remaining)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private fun budget(o: ExperienceOverrides = mutableOverrides.value, selectedMode: ExperienceMode = mode): ExperienceBudget {
         val mode = selectedMode
         val desktop = platformKind == PlatformKind.DESKTOP
@@ -1329,21 +1372,46 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         )
     }
 
+    private data class CacheConfiguration(
+        val memory: ExperienceMemoryCache?,
+        val fraction: Double,
+        val memoryBytes: Long?,
+        val diskBytes: Long,
+        val idleMinutes: Int,
+        val retentionHours: Int,
+        val memoryOutsideWindow: Boolean,
+        val diskOutsideWindow: Boolean,
+        val runtime: ExperienceRuntimePreferences,
+    )
+
     private fun publish() {
         val next = budget()
         mutableState.value = next
         revision.value++
         val memory = memoryCache
-        val version = ++cacheRevision
         val retention = mutableOverrides.value.contentCache
+        val configuration = CacheConfiguration(memory, next.memoryCacheFraction, next.memoryCacheBytes,
+            next.diskCacheBytes, retention.memoryIdleMinutes, retention.imageRetentionHours,
+            retention.memoryOutsideWindowCleanup, retention.diskOutsideWindowCleanup, next.runtime)
+        // Interaction/visibility/resource publications do not change cache configuration.
+        // Avoid a new expiry sweep, storage reconciliation and coroutine for every such event.
+        if (configuration == appliedCacheConfiguration) return
+        appliedCacheConfiguration = configuration
+        val version = ++cacheRevision
         scope.launch {
-            memory?.applyBudget(next.memoryCacheFraction, next.memoryCacheBytes, version, retention.memoryIdleMinutes)
-            refreshMemoryUsage()
-            val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
-            storage.setBudget(next.diskCacheBytes, version)
-            storage.setRetention(retention.imageRetentionHours, version)
-            storage.setRangeCleanup(retention.memoryOutsideWindowCleanup, retention.diskOutsideWindowCleanup, version)
-            storage.setRuntime(next.runtime, version)
+            try {
+                memory?.applyBudget(next.memoryCacheFraction, next.memoryCacheBytes, version, retention.memoryIdleMinutes)
+                refreshMemoryUsage()
+                val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
+                storage.setBudget(next.diskCacheBytes, version)
+                storage.setRetention(retention.imageRetentionHours, version)
+                storage.setRangeCleanup(retention.memoryOutsideWindowCleanup, retention.diskOutsideWindowCleanup, version)
+                storage.setRuntime(next.runtime, version)
+            } catch (failure: Throwable) {
+                // A later publication may retry a failed apply; never clear a newer intent.
+                synchronized(lock) { if (cacheRevision == version) appliedCacheConfiguration = null }
+                throw failure
+            }
         }
     }
 
@@ -1353,6 +1421,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             activeReaderImages = activeReaderImages, activePrefetch = activePrefetch,
             activeResolves = activeResolves, activeDecodes = activeDecodes,
             activeTileDecodes = activeTileDecodes, activePreparations = activePreparations,
+            activeEnhancements = activeEnhancements, activeRealtimeRenderers = realtimeEnhancementOwners.size,
             materializationBytes = materializationStreamingBytes,
             queuedTasks = queued, prefetchReservedBytes = prefetchReserved,
             throttledSources = sources.values.count { it.recoverAfter > monotonicTimeMillis() },

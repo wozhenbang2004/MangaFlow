@@ -21,10 +21,13 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import dev.mangaflow.platform.wallTimeMillis
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -34,6 +37,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
 /** The shared discovery/search view does not own a source or its request lifetime. */
@@ -144,6 +148,8 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
     private val suspendedSearches = mutableMapOf<String, BrowseState>()
     private val backgrounds = mutableMapOf<String, BrowseState>()
     private val requestSlots = Semaphore(3)
+    // A cancelled generation must settle before another merge uses Default capacity.
+    private val resultMergeMutex = Mutex()
 
     fun savedSelection(): List<String> = state.value.let { listOf(SAVED_SELECTION_V2, sourceId, it.query,
         it.searchTarget.name, it.mode.name, it.period.name, it.audience.name,
@@ -535,37 +541,61 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         val rows = existingRows.toMutableList()
         val lanes = (if (reset) emptyMap() else value.searchSources).toMutableMap()
         requested.forEach { (id, _) -> lanes[id] = (lanes[id] ?: FederatedSearchSource(id, infos.getValue(id).name)).copy(loading = true, error = null) }
-        fun publish() {
-            if (expected != generation || !active || owner != scopeKey()) return
-            val loading = lanes.values.any { it.loading }
-            val successes = lanes.values.any { !it.loading && it.error == null }
-            val distinct = rows.distinctBy { it.id }
-            val groups = if (value.isSearch) groupAdultSearch(distinct, state.value.sourceMatches) else emptyList()
-            val visible = if (value.isSearch) groups.map { it.manga } else if (value.mode == DiscoveryMode.RANKING)
-                distinct.sortedWith(compareBy { item -> sources.indexOfFirst { it.id == item.sourceId }.let {
-                    index -> if (index < 0) Int.MAX_VALUE else index
-                } }) else distinct
-            val observedTags = (value.availableTags + rows.flatMap { it.tags }.filter {
-                it.length in 1..48
-            }.map { name -> MangaTag(name, "label:" + normalizedBodySourceTitle(name)) })
-                .distinctBy { normalizedBodySourceTitle(it.name) }.take(160)
-            mutableState.value = selection(value).copy(items = visible, availableTags = observedTags,
-                page = if (reset) 0 else value.page + 1, loading = loading && rows.isEmpty(),
-                refreshing = loading && reset && rows.isNotEmpty(), loadingMore = loading && !reset,
-                hasMore = lanes.values.any { it.error == null && it.hasMore },
-                error = if (!loading && !successes && rows.isEmpty()) when {
-                    lanes.isNotEmpty() -> "当前来源暂时无法读取，请查看来源状态并重试。"
-                    value.mode == DiscoveryMode.RANKING && !value.isSearch -> null
-                    else -> "当前选择的来源未提供此列表。"
-                } else null,
-                failedPage = if (!loading && lanes.values.any { it.error != null }) 0 else null,
-                updatedAt = wallTimeMillis(), searchSources = lanes.toMap(),
-                sourceNextPages = lanes.mapNotNull { (id, lane) -> lane.nextPage?.let { id to it } }.toMap(),
-                sourceMatches = groups.associate { it.manga.id to it.matches },
-                sourceChoiceIds = groups.filter { it.needsChoice }.map { it.manga.id }.toSet())
+        val publicationBase = selection(value)
+        val sourceOrder = sources.withIndex().associate { it.value.id to it.index }
+        var publicationRevision = 0L
+        suspend fun publish() {
+            val revision = ++publicationRevision
+            resultMergeMutex.withLock {
+                if (expected != generation || !active || owner != scopeKey() || revision != publicationRevision) return@withLock
+                // All source callbacks mutate rows/lanes on the owner context. Only these
+                // detached snapshots cross to Default; queued obsolete merges are skipped.
+                val sourceRows = rows.toList()
+                val sourceLanes = lanes.toMap()
+                val previousMatches = state.value.sourceMatches
+                val merged = withContext(Dispatchers.Default) {
+                    val computation = currentCoroutineContext()
+                    val loading = sourceLanes.values.any { it.loading }
+                    val successes = sourceLanes.values.any { !it.loading && it.error == null }
+                    val distinct = sourceRows.distinctBy { computation.ensureActive(); it.id }
+                    val groups = if (value.isSearch) groupAdultSearch(distinct, previousMatches) else emptyList()
+                    computation.ensureActive()
+                    val visible = if (value.isSearch) groups.map { it.manga } else if (value.mode == DiscoveryMode.RANKING)
+                        distinct.sortedBy { sourceOrder[it.sourceId] ?: Int.MAX_VALUE } else distinct
+                    val observedTags = (value.availableTags.asSequence() + sourceRows.asSequence().flatMap { it.tags.asSequence() }
+                        .filter { it.length in 1..48 }
+                        .map { name ->
+                            computation.ensureActive()
+                            MangaTag(name, "label:" + normalizedBodySourceTitle(name))
+                        }).distinctBy { computation.ensureActive(); normalizedBodySourceTitle(it.name) }.take(160).toList()
+                    publicationBase.copy(items = visible, availableTags = observedTags,
+                        page = if (reset) 0 else value.page + 1, loading = loading && sourceRows.isEmpty(),
+                        refreshing = loading && reset && sourceRows.isNotEmpty(), loadingMore = loading && !reset,
+                        hasMore = sourceLanes.values.any { it.error == null && it.hasMore },
+                        error = if (!loading && !successes && sourceRows.isEmpty()) when {
+                            sourceLanes.isNotEmpty() -> "当前来源暂时无法读取，请查看来源状态并重试。"
+                            value.mode == DiscoveryMode.RANKING && !value.isSearch -> null
+                            else -> "当前选择的来源未提供此列表。"
+                        } else null,
+                        failedPage = if (!loading && sourceLanes.values.any { it.error != null }) 0 else null,
+                        searchSources = sourceLanes,
+                        sourceNextPages = sourceLanes.mapNotNull { (id, lane) -> lane.nextPage?.let { id to it } }.toMap(),
+                        sourceMatches = groups.associate { it.manga.id to it.matches },
+                        sourceChoiceIds = groups.filter { it.needsChoice }.map { it.manga.id }.toSet())
+                }
+                currentCoroutineContext().ensureActive()
+                if (expected == generation && active && owner == scopeKey() && revision == publicationRevision)
+                    mutableState.value = merged.copy(updatedAt = wallTimeMillis())
+            }
         }
-        // Keep visible content while an explicit refresh replaces source lanes independently.
-        publish()
+        // Mark the request immediately without regrouping already-published content on UI.
+        // New source results replace these lanes only after their bounded merge finishes.
+        mutableState.value = publicationBase.copy(items = value.items, sourceMatches = value.sourceMatches,
+            sourceChoiceIds = value.sourceChoiceIds, page = if (reset) 0 else value.page + 1,
+            loading = rows.isEmpty(), refreshing = reset && rows.isNotEmpty(), loadingMore = !reset,
+            hasMore = lanes.values.any { it.error == null && it.hasMore }, updatedAt = wallTimeMillis(),
+            searchSources = lanes.toMap(),
+            sourceNextPages = lanes.mapNotNull { (id, lane) -> lane.nextPage?.let { id to it } }.toMap())
         requestJob = scope.launch {
             try {
                 if (debounce) delay(450)

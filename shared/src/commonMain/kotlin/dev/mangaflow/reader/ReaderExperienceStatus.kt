@@ -84,7 +84,6 @@ internal fun ReaderExperienceStatus(
     visible: Boolean,
     sessionKey: Any,
     store: ExperiencePolicyStore,
-    budget: ExperienceBudget,
     standbys: List<ReaderSourceStandby>,
     alternativeCount: Int,
     backdrop: HazeState,
@@ -114,6 +113,8 @@ internal fun ReaderExperienceStatus(
     onOpenEnhancement: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
+    // Resource/status text updates are local to this indicator, not the reader and page tree.
+    val budget by store.state.collectAsStateWithLifecycle()
     val custom by store.overrides.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var changingSourceLock by remember(sessionKey) { mutableStateOf(false) }

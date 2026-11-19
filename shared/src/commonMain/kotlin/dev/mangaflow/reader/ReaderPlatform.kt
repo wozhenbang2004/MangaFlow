@@ -33,6 +33,20 @@ internal class ReaderDetailUnavailable(message: String) : Exception(message)
 internal data class ReaderRegion(val bitmap: ImageBitmap, val notice: String? = null)
 internal data class ReaderDetailStatus(val message: String, val retryable: Boolean)
 
+/** Owned by one displayed source image; close only after its decoding children settle. */
+internal interface ReaderRegionDecoder {
+    suspend fun decode(bounds: IntRect, sampleSize: Int, runtime: ExperienceRuntimePreferences): ReaderRegion
+    fun close() {}
+}
+
+/** Platforms without a reusable native reader retain their existing per-region implementation. */
+internal class StatelessReaderRegionDecoder(private val path: String) : ReaderRegionDecoder {
+    override suspend fun decode(bounds: IntRect, sampleSize: Int, runtime: ExperienceRuntimePreferences): ReaderRegion =
+        decodeNativeReaderRegion(path, bounds, sampleSize, runtime)
+}
+
+internal expect fun createReaderRegionDecoder(path: String): ReaderRegionDecoder
+
 @Composable
 fun rememberReaderImageState(zoomableState: ZoomableState = rememberZoomableState()): ReaderImageState =
     remember(zoomableState) { ReaderImageState(zoomableState) }

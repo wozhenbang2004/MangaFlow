@@ -315,7 +315,11 @@ fun DetailScreen(
     val dockDensity = LocalDensity.current
     var measuredDockHeight by remember(current.id, dockDensity) { mutableIntStateOf(0) }
     val window = LocalMangaWindow.current
-    val coverDecodeWidth = with(dockDensity) { (window.width * .5f).roundToPx() }.coerceIn(320, 1024)
+    val requestedCoverWidth = with(dockDensity) { (window.width * .5f).roundToPx() }.coerceIn(320, 1024)
+    // Resize the artwork continuously, but do not restart Coil for every window pixel.
+    // Round decode requests upward so the existing detail requirement is never reduced.
+    val coverDecodeWidth = if (platformKind == PlatformKind.DESKTOP)
+        ((requestedCoverWidth + 127) / 128 * 128).coerceAtMost(1024) else requestedCoverWidth
     val coverIdentity = repository?.let { mangaCoverIdentity(current, it) }
     val coverKey = coverIdentity?.cacheKey ?: current.coverUrl
     val coverRequest = remember(context, current.coverUrl, current.sourceUrl, current.id, coverIdentity, coverRetry, coverDecodeWidth) {

@@ -95,6 +95,8 @@ private class SoftShadowNode(var spec: SoftShadowElement) : DrawModifierNode, Mo
     private var cachedFontScale = 0f
     private var cachedDirection = LayoutDirection.Ltr
     private var maskScale = 1f
+    private var cachedTint = Color.Unspecified
+    private var colorFilter: ColorFilter? = null
 
     override fun ContentDrawScope.draw() {
         if (size.width <= 0f || size.height <= 0f) return drawContent()
@@ -139,17 +141,21 @@ private class SoftShadowNode(var spec: SoftShadowElement) : DrawModifierNode, Mo
             cachedDirection = layoutDirection
         }
         mask?.let { image ->
+            val tint = spec.color.copy(alpha = (spec.color.alpha * spec.strengthScale()).coerceIn(0f, 1f))
+            if (tint != cachedTint) {
+                cachedTint = tint
+                colorFilter = ColorFilter.tint(tint)
+            }
             drawImage(image, srcOffset = IntOffset.Zero, srcSize = IntSize(image.width, image.height),
                 dstOffset = IntOffset((-radius * 2f).roundToInt(), (-radius * 2f).roundToInt()),
                 dstSize = IntSize((image.width / maskScale).roundToInt(), (image.height / maskScale).roundToInt()),
-                colorFilter = ColorFilter.tint(spec.color.copy(alpha =
-                    (spec.color.alpha * spec.strengthScale()).coerceIn(0f, 1f))),
+                colorFilter = colorFilter,
                 filterQuality = FilterQuality.Low)
         }
         drawContent()
     }
 
-    override fun onDetach() { mask = null }
+    override fun onDetach() { mask = null; colorFilter = null; cachedTint = Color.Unspecified }
 }
 
 private val ShadowMaskPaint = Paint().apply { blendMode = BlendMode.Clear }

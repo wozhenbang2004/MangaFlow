@@ -4,6 +4,7 @@ import dev.mangaflow.anime.player.AnimePlayer
 import dev.mangaflow.anime.player.AnimePlayerPhase
 import dev.mangaflow.anime.player.AnimePlayerRequest
 import dev.mangaflow.anime.player.AnimePlayerState
+import dev.mangaflow.anime.player.AnimeNativeVideoStatistics
 import dev.mangaflow.anime.player.AnimePlayerOptions
 import dev.mangaflow.anime.player.AnimePreparedVideoRequest
 import dev.mangaflow.anime.player.AnimeVideoEnhancementMode
@@ -126,6 +127,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         "anime-bangumi" to "https://api.bgm.tv/", "anime-anilist" to "https://graphql.anilist.co/",
         "anime-danmaku-dandanplay" to "https://api.dandanplay.net/")
     private var playerInstance: AnimePlayer? = null
+    /** Diagnostic reads must never create a native player or start an anime session. */
+    fun peekNativeVideoStatistics(): AnimeNativeVideoStatistics? = playerInstance?.state?.value?.nativeVideoStatistics
     private val mutablePlaybackPhase = MutableStateFlow(AnimePlayerPhase.IDLE)
     internal val playbackPhase = mutablePlaybackPhase.asStateFlow()
     val player: AnimePlayer

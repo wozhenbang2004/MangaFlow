@@ -284,6 +284,20 @@ import kotlinx.coroutines.withContext
 import dev.mangaflow.reader.ReaderZoomableImage as ZoomableAsyncImage
 import dev.mangaflow.reader.rememberReaderImageState as rememberZoomableImageState
 
+/** Only policy fields that change the reader's behavior belong to its root composition. */
+private data class ReaderBehaviorBudget(
+    val standbySources: Int,
+    val crossChapter: Boolean,
+    val nextChapterPages: Int,
+    val recovery: ReaderRecoveryPreferences,
+    val enhancementAhead: Int,
+    val enhancementProtected: Boolean,
+)
+
+private fun ExperienceBudget.readerBehaviorBudget() = ReaderBehaviorBudget(
+    standbySources, crossChapter, runtime.nextChapterPages, recovery, prefetchAhead, protections.isNotEmpty(),
+)
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ReaderScreen(
@@ -333,7 +347,12 @@ fun ReaderScreen(
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     val adultImageContext = LocalContext.current
     val experience = remember(adultImageContext) { ExperiencePolicyStore.get(adultImageContext) }
-    val experienceBudget by experience.state.collectAsStateWithLifecycle()
+    val readerBudget = remember(experience) {
+        experience.state.map { it.readerBehaviorBudget() }.distinctUntilChanged()
+    }
+    val experienceBudget by readerBudget.collectAsStateWithLifecycle(
+        initialValue = experience.state.value.readerBehaviorBudget(),
+    )
     if (!libraryReady) {
         BackHandler(enabled = active, onBack = onBack)
         LibraryRestoreStatus(libraryStore)
@@ -538,10 +557,11 @@ fun ReaderScreen(
     val sharedPrefetchFailures = remember(sourceIdentity, pages, headers) { mutableStateMapOf<Int, String>() }
     val preparation by preparationTracker.state.collectAsStateWithLifecycle()
     LaunchedEffect(enhancement, pageIndex, preparation.direction, pages.size, readerForeground,
-        leavingReader, chapterChangeRequested, enhancementPolicy, experienceBudget) {
+        leavingReader, chapterChangeRequested, enhancementPolicy,
+        experienceBudget.enhancementAhead, experienceBudget.enhancementProtected) {
         enhancement.updateWindow(pageIndex, preparation.direction, pages.size,
             readerForeground && !leavingReader && !chapterChangeRequested,
-            enhancementPolicy, experienceBudget)
+            enhancementPolicy, experience.state.value)
     }
     LaunchedEffect(enhancement, pageIndex) { compareEnhancement = false }
     BackHandler(enabled = active && compareEnhancement) { compareEnhancement = false }
@@ -1128,7 +1148,7 @@ fun ReaderScreen(
                         },
                         // Do not consume the one-shot request before the view model owns this visible chapter.
                         nextChapterPages = if (experienceBudget.crossChapter && chapterVisibilityReported && nextChapter != null)
-                            experienceBudget.runtime.nextChapterPages else 0,
+                            experienceBudget.nextChapterPages else 0,
                         preferences = preferences, initialPage = pageIndex, initialPanel = cursor.panelIndex,
                         targetPage = targetPage,
                         onTargetConsumed = { targetPage = null; targetOffset = 0 },
@@ -1168,7 +1188,7 @@ fun ReaderScreen(
                         retryTargetIndex = currentPageRetryIndex, retryPulse = currentPageRetrySerial,
                         // Do not consume the one-shot request before the view model owns this visible chapter.
                         nextChapterPages = if (experienceBudget.crossChapter && chapterVisibilityReported && nextChapter != null)
-                            experienceBudget.runtime.nextChapterPages else 0,
+                            experienceBudget.nextChapterPages else 0,
                         onQuickSwitch = { failedIndex, variant -> repairs.select(failedIndex, variant) },
                         onRepairPage = openPageRepair,
                         onMoreSources = { anchor ->
@@ -1627,7 +1647,7 @@ fun ReaderScreen(
                 !showEnhancement && !compareEnhancement &&
                 !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking &&
                 !chapterChangeRequested && !showReaderActions && !readerActionsPresent && repairState.selection == null,
-            sessionKey = sourceIdentity, store = experience, budget = experienceBudget,
+            sessionKey = sourceIdentity, store = experience,
             standbys = currentSourceStandbys, alternativeCount = alternativeSources.size, backdrop = readerBackdrop,
             preparation = preparation,
             enhancement = enhancementState, enhancementPolicy = enhancementPolicy,

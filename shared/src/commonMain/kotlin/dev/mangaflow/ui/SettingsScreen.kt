@@ -143,6 +143,8 @@ import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.experience.ExperiencePolicyStore
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import dev.mangaflow.enhancement.ui.EnhancementCenterPanel
 import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
@@ -212,7 +214,10 @@ fun SettingsScreen(
     val routeStore = remember(context) { DownloadRoutingStore.get(context) }
     val routes by routeStore.state.collectAsStateWithLifecycle()
     val experienceStore = remember(context) { ExperiencePolicyStore.get(context) }
-    val experienceBudget by experienceStore.state.collectAsStateWithLifecycle()
+    val experienceModeFlow = remember(experienceStore) {
+        experienceStore.state.map { it.mode }.distinctUntilChanged()
+    }
+    val experienceMode by experienceModeFlow.collectAsStateWithLifecycle(initialValue = experienceStore.state.value.mode)
     val colors = MaterialTheme.colorScheme
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
@@ -501,7 +506,7 @@ fun SettingsScreen(
                     SettingsSection("应用", sourceBackdrop) {
                         SettingsLinkRow("画质与性能", "增强、补帧与提前处理", Icons.Outlined.Image,
                             inlineDetail = true) { showEnhancement = true }
-                        SettingsLinkRow("体验策略", experienceModeLabel(experienceBudget.mode), Icons.Outlined.Tune,
+                        SettingsLinkRow("体验策略", experienceModeLabel(experienceMode), Icons.Outlined.Tune,
                             inlineDetail = true) { showExperience = true }
                         SettingsLinkRow("网络与下载", networkRouteOverview(routes), Icons.Outlined.SwapVert,
                             inlineDetail = true) { showNetworkDownloads = true }

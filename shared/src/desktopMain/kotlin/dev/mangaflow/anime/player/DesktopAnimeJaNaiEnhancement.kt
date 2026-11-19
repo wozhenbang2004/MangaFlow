@@ -6,9 +6,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import org.openani.mediamp.mpv.MPVHandle
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -17,6 +21,7 @@ import kotlin.math.roundToInt
 internal class DesktopAnimeJaNaiEnhancement(
     private val runtime: DesktopAnimeJaNai,
     private val scope: CoroutineScope,
+    private val renderingActive: StateFlow<Boolean>,
     private val refreshHz: () -> Double?,
     private val update: (Long, AnimeVideoEnhancementState) -> Unit,
 ) {
@@ -58,18 +63,21 @@ internal class DesktopAnimeJaNaiEnhancement(
                 var overloadSamples = 0
                 while (target == next) {
                     val backend = next.handle
-                    inputWidth = dimension(backend, "video-params/w")
-                    inputHeight = dimension(backend, "video-params/h")
-                    val color = backend.getPropertyString("video-params/gamma")?.lowercase()
-                    val sourceFps = backend.getPropertyDoubleOrNull("container-fps")?.takeIf { it.isFinite() && it in 12.0..61.0 }
+                    val observation = withContext(Dispatchers.IO) { readObservation(backend) }
+                    if (target != next) return@launch
+                    inputWidth = observation.width
+                    inputHeight = observation.height
+                    val color = observation.color
+                    val sourceFps = observation.sourceFps
                     val width = inputWidth
                     val height = inputHeight
-                    val format = backend.getPropertyString("hwdec-current")
-                    val paused = backend.getPropertyBooleanOrNull("pause") == true
+                    val format = observation.hardwareDecoder
+                    val paused = observation.paused
                     when {
                         width == null || height == null || color.isNullOrBlank() || color in setOf("auto", "unknown") -> {
                             state(AnimeVideoEnhancementPhase.WAITING, "等待解码画面与色彩信息")
                             delay(400)
+                            renderingActive.first { it }
                             continue
                         }
                         color !in sdr || width.toLong() * height > 1920L * 1080L || sourceFps == null -> {
@@ -113,7 +121,7 @@ internal class DesktopAnimeJaNaiEnhancement(
                             state(AnimeVideoEnhancementPhase.UNAVAILABLE, runtime.unavailableReason())
                             return@launch
                         }
-                        val startPts = backend.getPropertyDoubleOrNull("video-pts")
+                        val startPts = observation.position
                         check(backend.command("vf", "add", native.filter)) { "原生滤镜无法加载" }
                         initialPts = startPts
                         outputDeadlineNanos = System.nanoTime() + 12_000_000_000L
@@ -123,11 +131,10 @@ internal class DesktopAnimeJaNaiEnhancement(
                     val receipt = withContext(Dispatchers.IO) {
                         runCatching { native.stats.takeIf { it.isFile && it.length() in 1L..32768L }?.readText() }.getOrNull()
                     }
-                    val outWidth = dimension(backend, "video-out-params/w")
-                    val outHeight = dimension(backend, "video-out-params/h")
-                    val position = backend.getPropertyDoubleOrNull("video-pts")
-                    val filteredFps = backend.getPropertyDoubleOrNull("estimated-vf-fps")
-                        ?.takeIf { it.isFinite() && it in 1.0..240.0 }
+                    val outWidth = observation.outputWidth
+                    val outHeight = observation.outputHeight
+                    val position = observation.position
+                    val filteredFps = observation.filteredFps
                     val modelReceipt = if (native.temporal) "Applied Temporal Model: ${native.weightName} ("
                         else "Applied Model: ${native.weightName};"
                     val modelApplied = native.weightName == null || (receipt?.contains(modelReceipt) == true &&
@@ -136,7 +143,7 @@ internal class DesktopAnimeJaNaiEnhancement(
                         filteredFps != null && filteredFps > sourceFps * 1.07)
                     val observed = modelApplied && interpolated && position != null && position != initialPts
                     if (observed) {
-                        val dropped = backend.getPropertyLongOrNull("frame-drop-count")
+                        val dropped = observation.droppedFrames
                         val previousDrops = lastDropCount
                         if (!paused && dropped != null && previousDrops != null && dropped - previousDrops >= 4) overloadSamples++
                         else overloadSamples = 0
@@ -166,12 +173,21 @@ internal class DesktopAnimeJaNaiEnhancement(
                         return@launch
                     }
                     delay(600)
+                    if (!renderingActive.value) {
+                        renderingActive.first { it }
+                        outputDeadlineNanos = System.nanoTime() + 12_000_000_000L
+                        lastDropCount = null
+                        overloadSamples = 0
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                clearFilter()
-                state(AnimeVideoEnhancementPhase.FAILED, "原生增强暂不可用，已请求恢复原画与源帧率")
+                currentCoroutineContext().ensureActive()
+                if (target == next) {
+                    clearFilter()
+                    state(AnimeVideoEnhancementPhase.FAILED, "原生增强暂不可用，已请求恢复原画与源帧率")
+                }
             }
         }
     }
@@ -192,6 +208,27 @@ internal class DesktopAnimeJaNaiEnhancement(
 
     private fun dimension(handle: MPVHandle, property: String): Int? =
         handle.getPropertyLongOrNull(property)?.takeIf { it in 1..32768 }?.toInt()
+
+    private data class Observation(
+        val width: Int?, val height: Int?, val color: String?, val sourceFps: Double?,
+        val hardwareDecoder: String?, val paused: Boolean, val outputWidth: Int?, val outputHeight: Int?,
+        val position: Double?, val filteredFps: Double?, val droppedFrames: Long?,
+    )
+
+    /** Native property reads may wait for mpv; their registry-owned lifetime is safe off the UI thread. */
+    private fun readObservation(handle: MPVHandle) = Observation(
+        width = dimension(handle, "video-params/w"),
+        height = dimension(handle, "video-params/h"),
+        color = handle.getPropertyString("video-params/gamma")?.lowercase(),
+        sourceFps = handle.getPropertyDoubleOrNull("container-fps")?.takeIf { it.isFinite() && it in 12.0..61.0 },
+        hardwareDecoder = handle.getPropertyString("hwdec-current"),
+        paused = handle.getPropertyBooleanOrNull("pause") == true,
+        outputWidth = dimension(handle, "video-out-params/w"),
+        outputHeight = dimension(handle, "video-out-params/h"),
+        position = handle.getPropertyDoubleOrNull("video-pts")?.takeIf(Double::isFinite),
+        filteredFps = handle.getPropertyDoubleOrNull("estimated-vf-fps")?.takeIf { it.isFinite() && it in 1.0..240.0 },
+        droppedFrames = handle.getPropertyLongOrNull("frame-drop-count")?.takeIf { it >= 0L },
+    )
 
     private fun rationalFactor(target: Double, source: Double): Pair<Int, Int>? {
         val ratio = target / source

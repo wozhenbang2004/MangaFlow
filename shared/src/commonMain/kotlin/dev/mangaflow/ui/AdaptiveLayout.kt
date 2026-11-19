@@ -5,7 +5,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
-import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
@@ -18,7 +18,9 @@ data class MangaWindowSize(val width: Dp, val height: Dp, val fontScale: Float) 
     val panelHeight: Dp get() = (height - 48.dp).coerceAtLeast(1.dp)
 }
 
-val LocalMangaWindow = staticCompositionLocalOf {
+// Window resizing and the desktop sidebar spring update this value every layout frame.
+// Track readers so those changes do not invalidate the entire application subtree.
+val LocalMangaWindow = compositionLocalOf {
     MangaWindowSize(360.dp, 640.dp, 1f)
 }
 

@@ -24,8 +24,15 @@ import java.io.RandomAccessFile
 import java.net.URI
 import java.nio.channels.ClosedByInterruptException
 import javax.imageio.ImageIO
+import javax.imageio.ImageReader
+import javax.imageio.event.IIOReadProgressListener
 import javax.imageio.stream.FileImageInputStream
 import com.luciad.imageio.webp.WebPReadParam
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.runInterruptible
+import kotlin.coroutines.CoroutineContext
 import kotlin.math.ceil
 
 @Composable
@@ -92,66 +99,227 @@ private class ReaderHeaderInput(private val file: RandomAccessFile) : FileImageI
     override fun length(): Long = readFile { file.length() }
 }
 
+internal actual fun createReaderRegionDecoder(path: String): ReaderRegionDecoder = DesktopReaderRegionDecoder(path)
+
 internal actual suspend fun decodeNativeReaderRegion(
     path: String, bounds: IntRect, sampleSize: Int, runtime: ExperienceRuntimePreferences,
 ): ReaderRegion {
-    val file = checkedReaderFile(path, runtime)
-    try {
-        ImageIO.createImageInputStream(file)?.use { input ->
-            val readers = ImageIO.getImageReaders(input)
-            if (readers.hasNext()) {
-                val reader = readers.next()
-                try {
-                    reader.setInput(input, true, true)
-                    if (reader.javaClass.name == "com.luciad.imageio.webp.WebPReader") {
-                        check(file.length() <= Int.MAX_VALUE.toLong()) { "WebP原图超过平台单次字节数组范围，当前显示预览" }
+    val decoder = createReaderRegionDecoder(path)
+    return try { decoder.decode(bounds, sampleSize, runtime) }
+    finally { decoder.close() }
+}
+
+/**
+ * One image effect owns these reusable readers. Admission stays in ExperiencePolicyStore;
+ * there is no global file/bitmap cache, and no native handle survives the image's effect.
+ */
+private class DesktopReaderRegionDecoder(private val path: String) : ReaderRegionDecoder {
+    private val lock = Any()
+    private val idle = ArrayDeque<DesktopReaderInput>()
+    private var stamp: Pair<Long, Long>? = null
+    private var orientation = 1
+    private var closed = false
+
+    override suspend fun decode(bounds: IntRect, sampleSize: Int, runtime: ExperienceRuntimePreferences): ReaderRegion {
+        val context = currentCoroutineContext()
+        val started = ReaderDecodeDiagnostics.begin()
+        var succeeded = false
+        try {
+            // Interruption releases blocking file IO; codec progress also requests cooperative abort.
+            val result = runInterruptible {
+                val file = checkedReaderFile(path, runtime)
+                synchronized(lock) {
+                    check(!closed) { "原图读取已结束" }
+                    val actual = file.length() to file.lastModified()
+                    if (stamp == null) {
+                        orientation = jpegOrientation(path)
+                        stamp = actual
+                    } else check(stamp == actual) { "原图文件已变化，请重新打开此页" }
+                }
+                context.ensureActive()
+                val input = try {
+                    val reused = synchronized(lock) {
+                        if (idle.isEmpty()) null else idle.removeFirst().also { DesktopReaderInputRetention.release(it.encodedBytes) }
                     }
-                    val width = reader.getWidth(0)
-                    val height = reader.getHeight(0)
-                    val orientation = jpegOrientation(path)
-                    val source = inverseOrientationBounds(bounds, width, height, orientation)
-                    val params = reader.defaultReadParam.apply {
-                        if (this is WebPReadParam) {
-                            // This provider ignores ImageReadParam.sourceRegion; use libwebp's real
-                            // crop/scaling options so long WebP strips never allocate the full image.
-                            isUseCropping = true
-                            cropLeft = source.left
-                            cropTop = source.top
-                            cropWidth = source.width
-                            cropHeight = source.height
-                            isUseScaling = sampleSize > 1
-                            scaledWidth = ceil(source.width.toDouble() / sampleSize.coerceAtLeast(1)).toInt()
-                            scaledHeight = ceil(source.height.toDouble() / sampleSize.coerceAtLeast(1)).toInt()
-                        } else {
-                            sourceRegion = java.awt.Rectangle(source.left, source.top, source.width, source.height)
-                            setSourceSubsampling(sampleSize.coerceAtLeast(1), sampleSize.coerceAtLeast(1), 0, 0)
+                    (reused ?: openReaderInput(file))?.also { ReaderDecodeDiagnostics.readerAcquired(reused != null) }
+                } catch (_: LinkageError) { null }
+                if (input == null) decodeSkiaRegion(file, bounds, sampleSize, runtime, context)
+                else {
+                    var decodedSuccessfully = false
+                    try {
+                        val result = input.decode(bounds, sampleSize, orientation, runtime, context)
+                        context.ensureActive()
+                        decodedSuccessfully = true
+                        result
+                    } catch (failure: LinkageError) {
+                        context.ensureActive()
+                        // Preserve the existing optional-codec fallback, with the same pixel bound.
+                        decodeSkiaRegion(file, bounds, sampleSize, runtime, context)
+                    } finally {
+                        val retained = synchronized(lock) {
+                            // This is an idle handle cache, not a second concurrency limit.
+                            if (decodedSuccessfully && input.canRetainAfterDecode && !closed && idle.size < 4 &&
+                                DesktopReaderInputRetention.retain(input.encodedBytes)) {
+                                idle.addLast(input); true
+                            } else false
                         }
+                        if (!retained) input.close()
                     }
-                    val decoded = reader.read(0, params) ?: error("原图区域暂时无法读取")
-                    return ReaderRegion(orient(decoded, orientation).composeBitmap(runtime.maxImageBytes))
-                } finally { reader.dispose() }
+                }
+            }
+            succeeded = true
+            return result
+        } finally { ReaderDecodeDiagnostics.finish(started, succeeded, !context.isActive) }
+    }
+
+    override fun close() {
+        val readers = synchronized(lock) {
+            closed = true
+            idle.toList().also { idle.clear() }
+        }
+        var failure: Throwable? = null
+        readers.forEach {
+            DesktopReaderInputRetention.release(it.encodedBytes)
+            try { it.close() } catch (cleanup: Throwable) {
+                if (failure == null) failure = cleanup else failure?.addSuppressed(cleanup)
             }
         }
-    } catch (_: LinkageError) { /* A missing optional ImageIO native binary cannot crash the reader. */ }
-    // Explicitly bound the non-region fallback; never decode an unbounded long image in memory.
+        failure?.let { throw it }
+    }
+}
+
+private fun openReaderInput(file: File): DesktopReaderInput? {
+    val input = ReaderHeaderInput(RandomAccessFile(file, "r"))
+    var reader: ImageReader? = null
+    try {
+        val readers = ImageIO.getImageReaders(input)
+        input.failure?.let { throw it }
+        if (!readers.hasNext()) { input.close(); return null }
+        reader = readers.next()
+        // Panning can revisit an earlier region; do not ask providers to discard seekable state.
+        reader.setInput(input, false, true)
+        val pinnedWebp = reader.javaClass.name == "com.luciad.imageio.webp.WebPReader"
+        if (pinnedWebp) {
+            check(file.length() <= Int.MAX_VALUE.toLong()) { "WebP原图超过平台单次字节数组范围，当前显示预览" }
+        }
+        // Pinned WebP 0.3.3 retains only encoded fData, not its returned pixel/raster buffers.
+        // JDK 21 PNG keeps theImage; JPEG clears image but still keeps target's full raster.
+        // Unknown providers are equally ineligible. This controls idle retention only;
+        // every provider keeps the same decode admission, region, sample and tile cache.
+        return DesktopReaderInput(reader, input, reader.getWidth(0), reader.getHeight(0),
+            encodedBytes = if (pinnedWebp) file.length() else 0L, canRetainAfterDecode = pinnedWebp)
+    } catch (failure: Throwable) {
+        try { reader?.dispose() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
+        try { input.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
+        throw failure
+    }
+}
+
+private class DesktopReaderInput(
+    private val reader: ImageReader, private val input: ReaderHeaderInput,
+    private val width: Int, private val height: Int,
+    val encodedBytes: Long,
+    val canRetainAfterDecode: Boolean,
+) {
+    fun decode(bounds: IntRect, sampleSize: Int, orientation: Int,
+        runtime: ExperienceRuntimePreferences, context: CoroutineContext): ReaderRegion {
+        val source = inverseOrientationBounds(bounds, width, height, orientation)
+        require(source.left >= 0 && source.top >= 0 && source.right <= width && source.bottom <= height &&
+            source.width > 0 && source.height > 0) { "原图区域无效" }
+        val sample = sampleSize.coerceAtLeast(1)
+        val params = reader.defaultReadParam.apply {
+            if (this is WebPReadParam) {
+                // libwebp must crop before allocating a long strip; sourceRegion is ignored.
+                isUseCropping = true
+                cropLeft = source.left
+                cropTop = source.top
+                cropWidth = source.width
+                cropHeight = source.height
+                isUseScaling = sample > 1
+                scaledWidth = ceil(source.width.toDouble() / sample).toInt()
+                scaledHeight = ceil(source.height.toDouble() / sample).toInt()
+            } else {
+                sourceRegion = java.awt.Rectangle(source.left, source.top, source.width, source.height)
+                setSourceSubsampling(sample, sample, 0, 0)
+            }
+        }
+        val cancellation = ReaderDecodeCancellation(context)
+        reader.addIIOReadProgressListener(cancellation)
+        try {
+            context.ensureActive()
+            val decoded = reader.read(0, params)
+            context.ensureActive()
+            input.failure?.let { throw it }
+            checkNotNull(decoded) { "原图区域暂时无法读取" }
+            val oriented = orient(decoded, orientation)
+            context.ensureActive()
+            return ReaderRegion(oriented.composeBitmap(runtime.maxImageBytes))
+        } finally { reader.removeIIOReadProgressListener(cancellation) }
+    }
+
+    fun close() { try { reader.dispose() } finally { input.close() } }
+}
+
+/** Bound the pinned WebP provider's known fData retention across all displayed image effects. */
+private object DesktopReaderInputRetention {
+    private val limit = minOf(Runtime.getRuntime().maxMemory() / 64L, 64L * 1_048_576L)
+    private var bytes = 0L
+    @Synchronized fun retain(size: Long): Boolean {
+        if (size > limit - bytes) return false
+        bytes += size
+        ReaderDecodeDiagnostics.retainedInputChanged(size)
+        return true
+    }
+    @Synchronized fun release(size: Long) {
+        bytes -= size
+        ReaderDecodeDiagnostics.retainedInputChanged(-size)
+    }
+}
+
+/** ImageIO's public cooperative-abort contract; unsupported native codecs still settle normally. */
+private class ReaderDecodeCancellation(private val context: CoroutineContext) : IIOReadProgressListener {
+    private fun check(source: ImageReader) { if (!context.isActive) source.abort() }
+    override fun imageStarted(source: ImageReader, imageIndex: Int) = check(source)
+    override fun imageProgress(source: ImageReader, percentageDone: Float) = check(source)
+    override fun imageComplete(source: ImageReader) = Unit
+    override fun sequenceStarted(source: ImageReader, minIndex: Int) = check(source)
+    override fun sequenceComplete(source: ImageReader) = Unit
+    override fun thumbnailStarted(source: ImageReader, imageIndex: Int, thumbnailIndex: Int) = check(source)
+    override fun thumbnailProgress(source: ImageReader, percentageDone: Float) = check(source)
+    override fun thumbnailComplete(source: ImageReader) = Unit
+    override fun readAborted(source: ImageReader) = Unit
+}
+
+private fun decodeSkiaRegion(file: File, bounds: IntRect, sampleSize: Int,
+    runtime: ExperienceRuntimePreferences, context: CoroutineContext): ReaderRegion {
+    // Skia may decode the whole source: keep the existing explicit pixel budget.
     val fallbackPixels = (runtime.fallbackDecodeMiPixels ?: 16).toLong() * 1_048_576L
     org.jetbrains.skia.Image.makeFromEncoded(file.readReaderBytes(runtime.maxImageBytes)).use { source ->
+        context.ensureActive()
         check(source.width > 0 && source.height > 0 && source.width.toLong() * source.height <= fallbackPixels) {
             "此格式尚无区域解码器，原图超过整图解码配置，当前显示预览"
         }
         require(bounds.left >= 0 && bounds.top >= 0 && bounds.right <= source.width &&
             bounds.bottom <= source.height && bounds.width > 0 && bounds.height > 0) { "原图区域无效" }
-        org.jetbrains.skia.Bitmap().use { bitmap ->
-            check(bitmap.allocN32Pixels(bounds.width, bounds.height)) { "原图区域无法分配" }
-            check(source.readPixels(bitmap, bounds.left, bounds.top)) { "原图区域暂时无法读取" }
-            org.jetbrains.skia.Image.makeFromBitmap(bitmap).use { region ->
-                val width = ceil(bounds.width.toDouble() / sampleSize.coerceAtLeast(1)).toInt().coerceAtLeast(1)
-                val height = ceil(bounds.height.toDouble() / sampleSize.coerceAtLeast(1)).toInt().coerceAtLeast(1)
-                org.jetbrains.skia.Surface.makeRasterN32Premul(width, height).use { surface ->
-                    surface.canvas.drawImageRect(region, org.jetbrains.skia.Rect.makeWH(width.toFloat(), height.toFloat()))
-                    return ReaderRegion(surface.makeImageSnapshot().toComposeImageBitmap())
-                }
+        // A draw of an undecodable lazy image can silently paint nothing. Preserve the
+        // old readPixels failure signal with a one-pixel target, not a full-size ROI copy.
+        org.jetbrains.skia.Bitmap().use { probe ->
+            check(probe.allocN32Pixels(1, 1) && source.readPixels(probe, bounds.left, bounds.top)) {
+                "原图区域暂时无法读取"
             }
+        }
+        context.ensureActive()
+        val width = ceil(bounds.width.toDouble() / sampleSize.coerceAtLeast(1)).toInt().coerceAtLeast(1)
+        val height = ceil(bounds.height.toDouble() / sampleSize.coerceAtLeast(1)).toInt().coerceAtLeast(1)
+        org.jetbrains.skia.Surface.makeRasterN32Premul(width, height).use { surface ->
+            // Draw the source region directly at its LOD size. The former full-resolution
+            // region bitmap plus makeFromBitmap copy amplified transient native memory.
+            surface.canvas.drawImageRect(source,
+                org.jetbrains.skia.Rect.makeLTRB(bounds.left.toFloat(), bounds.top.toFloat(),
+                    bounds.right.toFloat(), bounds.bottom.toFloat()),
+                org.jetbrains.skia.Rect.makeWH(width.toFloat(), height.toFloat()))
+            context.ensureActive()
+            return ReaderRegion(surface.makeImageSnapshot().toComposeImageBitmap())
         }
     }
 }

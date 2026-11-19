@@ -102,6 +102,8 @@ internal actual suspend fun readNativeReaderSize(path: String, runtime: Experien
     } finally { CFRelease(properties) }
 }
 
+internal actual fun createReaderRegionDecoder(path: String): ReaderRegionDecoder = StatelessReaderRegionDecoder(path)
+
 internal actual suspend fun decodeNativeReaderRegion(
     path: String, bounds: IntRect, sampleSize: Int, runtime: ExperienceRuntimePreferences,
 ): ReaderRegion = withSource(path, runtime) { source ->

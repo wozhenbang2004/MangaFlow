@@ -6,16 +6,21 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import org.openani.mediamp.mpv.MPVHandle
 import java.io.File
 
-/** Owns only this player's shader list. Calls and publication are confined to Main. */
+/** Owns only this player's shader list. Mutations/publication stay on Main; native observations use IO. */
 internal class DesktopAnimeVideoEnhancement(
     private val context: PlatformContext,
     private val scope: CoroutineScope,
+    private val renderingActive: StateFlow<Boolean>,
     private val isCurrentSession: (MPVHandle, Long, AnimeVideoEnhancementMode) -> Boolean,
     private val update: (Long, AnimeVideoEnhancementState) -> Unit,
 ) {
@@ -68,10 +73,15 @@ internal class DesktopAnimeVideoEnhancement(
                 var lastSampleTime: Double? = null
                 var budgetOverruns = 0
                 while (isCurrentSession(handle, generation, mode)) {
-                    val width = positiveDimension(handle, "video-params/w")
-                    val height = positiveDimension(handle, "video-params/h")
-                    val gamma = handle.getPropertyString("video-params/gamma")?.lowercase()
-                    val output = handle.getPropertyString("current-vo")
+                    // get_property synchronizes with mpv's engine and may wait behind GPU work.
+                    // In particular vo-passes can require hundreds of native calls per observation.
+                    val observed = withContext(Dispatchers.IO) { readObservation(handle, model, scale) }
+                    if (!isCurrentSession(handle, generation, mode) || this@DesktopAnimeVideoEnhancement.handle !== handle)
+                        return@launch
+                    val width = observed.width
+                    val height = observed.height
+                    val gamma = observed.gamma
+                    val output = observed.output
                     val unavailable = when {
                         width == null || height == null -> AnimeVideoEnhancementPhase.WAITING to "等待视频画面"
                         gamma in HDR_TRANSFERS -> AnimeVideoEnhancementPhase.UNAVAILABLE to
@@ -90,6 +100,7 @@ internal class DesktopAnimeVideoEnhancement(
                         configured = false
                         update(generation, state(mode, unavailable.first, unavailable.second, width, height))
                     } else {
+                        var shaderList = observed.shaderList
                         if (!configured) {
                             // Mediamp desktop's libmpv GPU renderer consumes these
                             // hooks. Keep its existing VO, color management and hwdec.
@@ -101,23 +112,22 @@ internal class DesktopAnimeVideoEnhancement(
                                 }
                             }
                             configured = true
+                            shaderList = withContext(Dispatchers.IO) { handle.getPropertyString("glsl-shaders") }
+                            if (!isCurrentSession(handle, generation, mode) || this@DesktopAnimeVideoEnhancement.handle !== handle)
+                                return@launch
                         }
-                        check(handle.getPropertyString("glsl-shaders") == expectedList) {
+                        check(shaderList == expectedList) {
                             "The renderer did not confirm the complete shader list"
                         }
                         val optional = model?.takeIf { Anime4KOptionalModels.supports(it.engineId) }
-                        val sample = when {
-                            optional != null -> readAnime4KPasses(handle, optional.title, scale)
-                            model != null -> readArtCnnPasses(handle, model.title)
-                            else -> null
-                        }
+                        val sample = observed.shaderPassNanos
                         if (sample == null) {
                             update(generation, state(mode, AnimeVideoEnhancementPhase.CONFIGURED,
                                 if (model == null) "播放器未反馈增强结果，尚不能确认是否生效"
                                 else "模型已加载，等待渲染器报告实际计算", width, height))
                         } else {
-                            val frameTime = handle.getPropertyDoubleOrNull("video-pts")?.takeIf(Double::isFinite)
-                            val sourceFps = handle.getPropertyDoubleOrNull("container-fps")?.takeIf { it.isFinite() && it > 0 }
+                            val frameTime = observed.videoPts
+                            val sourceFps = observed.sourceFps
                             if (frameTime != null && frameTime != lastSampleTime && sourceFps != null) {
                                 lastSampleTime = frameTime
                                 budgetOverruns = if (sample > 1_000_000_000.0 / sourceFps * .85) budgetOverruns + 1 else 0
@@ -137,11 +147,17 @@ internal class DesktopAnimeVideoEnhancement(
                     // Keep HDR / video-track changes gated without replacing the
                     // event listener owned by Mediamp's playback state machine.
                     delay(500L)
+                    if (!renderingActive.value) {
+                        renderingActive.first { it }
+                        lastSampleTime = null
+                        budgetOverruns = 0
+                    }
                 }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (_: Exception) {
-                if (isCurrentSession(handle, generation, mode)) {
+                currentCoroutineContext().ensureActive()
+                if (isCurrentSession(handle, generation, mode) && this@DesktopAnimeVideoEnhancement.handle === handle) {
                     val restored = clearOwnedShaders()
                     update(generation, state(mode, AnimeVideoEnhancementPhase.FAILED,
                         if (restored) "画质模型暂不可用，已恢复原始画质"
@@ -177,6 +193,27 @@ internal class DesktopAnimeVideoEnhancement(
 
     private fun positiveDimension(handle: MPVHandle, property: String): Int? =
         handle.getPropertyLongOrNull(property)?.takeIf { it in 1..Int.MAX_VALUE.toLong() }?.toInt()
+
+    private data class Observation(
+        val width: Int?, val height: Int?, val gamma: String?, val output: String?,
+        val shaderList: String?, val shaderPassNanos: Long?, val videoPts: Double?, val sourceFps: Double?,
+    )
+
+    private fun readObservation(handle: MPVHandle, model: EngineModel?, scale: Int): Observation {
+        val width = positiveDimension(handle, "video-params/w")
+        val height = positiveDimension(handle, "video-params/h")
+        val gamma = handle.getPropertyString("video-params/gamma")?.lowercase()
+        val output = handle.getPropertyString("current-vo")
+        val shaderList = handle.getPropertyString("glsl-shaders")
+        val passes = if (model != null && width != null && height != null &&
+            gamma in SDR_TRANSFERS && output == "libmpv" && !shaderList.isNullOrBlank()) {
+            if (Anime4KOptionalModels.supports(model.engineId)) readAnime4KPasses(handle, model.title, scale)
+            else readArtCnnPasses(handle, model.title)
+        } else null
+        return Observation(width, height, gamma, output, shaderList, passes,
+            if (passes != null) handle.getPropertyDoubleOrNull("video-pts")?.takeIf(Double::isFinite) else null,
+            if (passes != null) handle.getPropertyDoubleOrNull("container-fps")?.takeIf { it.isFinite() && it > 0 } else null)
+    }
 
     /** Scalar subproperties of mpv 0.40's latest fresh-render pass data. They aren't a display FPS counter. */
     private fun readArtCnnPasses(handle: MPVHandle, name: String): Long? {

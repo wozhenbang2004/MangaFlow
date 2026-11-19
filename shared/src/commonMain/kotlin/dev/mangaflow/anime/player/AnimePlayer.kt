@@ -83,6 +83,17 @@ data class AnimeRealtimeMotionState(
     val inferenceNanos: Long? = null,
 )
 
+/** mpv property observations; filter throughput and delayed-frame estimates are not display presentation. */
+data class AnimeNativeVideoStatistics(
+    val sampledAtMillis: Long,
+    val hardwareDecoder: String?,
+    val videoOutput: String?,
+    val decoderDroppedFrames: Long?,
+    val outputDroppedFrames: Long?,
+    val estimatedFilterFps: Double?,
+    val estimatedDelayedFrames: Long?,
+)
+
 /** Buffer times are targets, not a claim about memory use or startup latency. */
 data class AnimePlayerOptions(
     val backgroundAudio: Boolean = false,
@@ -161,6 +172,7 @@ data class AnimePlayerState(
     val preparedVideoWindow: AnimePreparedVideoWindow? = null,
     val preparedVideoIssue: String? = null,
     val realtimeMotion: AnimeRealtimeMotionState? = null,
+    val nativeVideoStatistics: AnimeNativeVideoStatistics? = null,
 ) {
     val ended: Boolean get() = phase == AnimePlayerPhase.ENDED
     val isPlaying: Boolean get() = phase == AnimePlayerPhase.READY && playWhenReady && !isBuffering
