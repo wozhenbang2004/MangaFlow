@@ -21,11 +21,16 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.platform.formatDecimal
+import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 
@@ -113,6 +118,11 @@ internal fun AnimeSourcesPanel(
     val previewing = preview != null || state.previewLoading || failedPreview != null
     val episodeLines = focusEpisode?.let { controller.confirmedPlaybackLines(it.id, state) }.orEmpty()
         .filter { it.catalog.referenceKey() in linkedKeys }
+    val rankedLines = if (visible) focusEpisode?.let { controller.rankedPlaybackLines(it.id) }.orEmpty() else emptyList()
+    val recommendedLine = rankedLines.firstOrNull()?.let { recommended ->
+        episodeLines.singleOrNull { controller.samePlaybackLine(it, recommended) }
+    }
+    val sourceOrder = rankedLines.map { it.sourceId }.distinct().withIndex().associate { it.value to it.index }
     val activeLine = state.selectedPlaybackOption.takeIf { state.selectedEpisodeId == focusEpisode?.id }?.let { current ->
         episodeLines.singleOrNull { controller.samePlaybackLine(it, current) }
     }
@@ -123,12 +133,9 @@ internal fun AnimeSourcesPanel(
     val orderedBindings = if (focusEpisode == null) bindings.sortedBy { it.catalog.sourceId != state.preferredSourceId }
         else bindings.sortedBy { binding ->
             val sourceId = binding.catalog.sourceId
-            val lines = episodeLines.filter { it.sourceId == sourceId }
             when {
-                !recovering && manualTarget == null && activeLine?.sourceId == sourceId -> 0
-                lines.any { controller.recentPlaybackLineFailure(focusEpisode.id, it, state) == null } -> 1
-                lines.isNotEmpty() -> 2
-                else -> 3
+                !recovering && manualTarget == null && activeLine?.sourceId == sourceId -> -1
+                else -> sourceOrder[sourceId] ?: Int.MAX_VALUE
             }
         }
     val matchesBySource = remember(state.episodeOptions, linkedKeys) {
@@ -162,6 +169,7 @@ internal fun AnimeSourcesPanel(
             sourceDetails = null
             websiteError = null
             if (owner != null && owner == controller.state.value.detail?.subject?.id) {
+                controller.cancelEpisodeSourceMeasurements()
                 closePreview()
                 if (requested != null && controller.currentVideoCandidates(listOf(requested)).isNotEmpty()) {
                     onOpenSourceWork?.invoke(requested)
@@ -277,7 +285,20 @@ internal fun AnimeSourcesPanel(
                         if (bindings.isEmpty()) item(key = "no-bindings") {
                             AnimeQuietLabel(if (state.sourceAggregationRunning) "正在核对片源" else "暂无已关联的片源")
                         } else item(key = "bound-heading") {
-                            AnimeSectionTitle("已关联的片源")
+                            val canMeasure = focusEpisode != null && episodeLines.isNotEmpty() &&
+                                controller.hasAutomaticPlaybackLine(focusEpisode.id)
+                            val measuring = focusEpisode != null && state.measuringEpisodeSourcesId == focusEpisode.id
+                            Column {
+                                AnimeSectionTitle("已关联的片源", action = if (focusEpisode != null && (canMeasure || measuring)) ({
+                                    MotionTextButton(onClick = { controller.measureEpisodeSources(focusEpisode.id) },
+                                        enabled = visible && canMeasure && state.measuringEpisodeSourcesId == null &&
+                                            !state.resolving && !state.autoMatching,
+                                        modifier = Modifier.heightIn(min = 44.dp)) {
+                                        Text(if (measuring) "正在测取址" else "测本集线路")
+                                    }
+                                }) else null)
+                                if (canMeasure || measuring) AnimeQuietLabel("每个来源测一条线路的取址耗时，首帧与传输速率在播放时记录。")
+                            }
                         }
                         items(orderedBindings, key = { "bound:" + it.catalog.referenceKey() }) { binding ->
                             val title = binding.catalog
@@ -291,13 +312,16 @@ internal fun AnimeSourcesPanel(
                                     controller.recentPlaybackLineFailure(episode.id, it, state)
                                 }
                             }.orEmpty()
-                            val lines = lineFailures.keys.sortedBy { lineFailures[it] != null }
+                            val lines = lineFailures.keys.sortedBy { option ->
+                                rankedLines.indexOfFirst { controller.samePlaybackLine(option, it) }.takeIf { it >= 0 } ?: Int.MAX_VALUE
+                            }
                             val attemptable = focusEpisode?.let { episode ->
                                 lines.filter { controller.canAttemptPlaybackLine(episode.id, it, state) }.toSet()
                             }.orEmpty()
                             val available = lines.filter { it in attemptable && lineFailures[it] == null }
                             val current = activeLine?.takeIf { it in lines }
                             val manual = manualLine?.takeIf { it in lines }
+                            val recommendation = recommendedLine?.takeIf { it in attemptable }
                             val expanded = sourceDetails == sourceId
                             val error = state.sourceCatalogErrors[sourceId]
                             val association = state.sourceAggregation[sourceId]
@@ -323,7 +347,7 @@ internal fun AnimeSourcesPanel(
                                 focusEpisode != null -> "本集尚未对应"
                                 else -> matchesBySource[sourceId]?.let { "已对应 $it 集" } ?: "尚未对应剧集"
                             }
-                            val line = if (showManual) manual else current
+                            val line = (if (showManual) manual else current) ?: recommendation ?: attemptable.singleOrNull()
                             val detail = listOfNotNull(stateLabel, line?.episode?.group?.let(::animeSourceGroupLabel),
                                 line?.episode?.edition?.takeIf(String::isNotBlank),
                                 "优先".takeIf { state.preferredSourceId == sourceId }).joinToString(" · ")
@@ -335,7 +359,11 @@ internal fun AnimeSourcesPanel(
                                         expandedSource = null
                                         mapping = null
                                         episodeQuery = ""
-                                    }, trailing = {
+                                    }, supporting = if (focusEpisode != null && !expanded && attemptable.isNotEmpty()) ({
+                                        if (line == null || line !in attemptable) AnimeQuietLabel("展开比较各线路实测")
+                                        else AnimePlaybackEvidence(controller.playbackMeasurements(focusEpisode.id, line),
+                                            recommended = line == recommendation)
+                                    }) else null, trailing = {
                                         if (showCurrent) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp),
                                             tint = MaterialTheme.colorScheme.primary)
                                         if (focusEpisode != null && !expanded && !sourceDisabled && available.size == 1) {
@@ -374,6 +402,10 @@ internal fun AnimeSourcesPanel(
                                                 onClickLabel = if (failure == null) "播放此线路" else "重试此线路",
                                                 enabled = canPlay,
                                                 onClick = { onPlay(focusEpisode.id, option) },
+                                                supporting = if (canPlay) ({
+                                                    AnimePlaybackEvidence(controller.playbackMeasurements(focusEpisode.id, option),
+                                                        recommended = option == recommendation, detailed = true)
+                                                }) else null,
                                                 trailing = {
                                                     Icon(when {
                                                         !canPlay -> Icons.Outlined.ErrorOutline
@@ -577,7 +609,7 @@ internal fun AnimeSourcesPanel(
 @Composable
 private fun AnimeSourceProviderRow(sourceId: String, title: String, detail: String, onClickLabel: String,
     onClick: () -> Unit, enabled: Boolean = true, trailing: (@Composable () -> Unit)? = null,
-    showMark: Boolean = true) {
+    showMark: Boolean = true, supporting: (@Composable () -> Unit)? = null) {
     val interaction = remember { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
@@ -597,11 +629,54 @@ private fun AnimeSourceProviderRow(sourceId: String, title: String, detail: Stri
                     color = colors.onSurface.copy(alpha = if (enabled) 1f else .55f))
                 if (detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall,
                     color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                supporting?.invoke()
             }
         }
         trailing?.invoke()
     }
 }
+
+@Composable
+private fun AnimePlaybackEvidence(measurements: AnimePlaybackMeasurements?, recommended: Boolean,
+    detailed: Boolean = false) {
+    val width = measurements?.width?.takeIf { it > 0 }
+    val height = measurements?.height?.takeIf { it > 0 }
+    val size = if (width != null && height != null) "实测 $width×$height"
+        else measurements?.declaredQuality?.takeIf(String::isNotBlank)?.let { "来源标注 $it" }
+    val address = measurements?.addressMs?.takeIf { it >= 0L }?.let { "历史取址 ${animePlaybackDurationLabel(it)}" }
+        ?: "上次未取得地址".takeIf { measurements?.addressObservedAt != null }
+    val firstFrame = measurements?.firstFrameMs?.takeIf { it >= 0L }?.let { "历史首帧 ${animePlaybackDurationLabel(it)}" }
+    val speed = measurements?.measuredBytesPerSecond?.takeIf { it > 0L }?.let {
+        val rate = when {
+            it >= 1024L * 1024L -> "${formatDecimal(it / (1024.0 * 1024.0), 1)} MiB/s"
+            it >= 1024L -> "${formatDecimal(it / 1024.0, 0)} KiB/s"
+            else -> "$it B/s"
+        }
+        "历史网速 $rate"
+    }
+    val metrics = listOfNotNull(size, address, firstFrame, speed)
+    val caption = when {
+        metrics.isEmpty() -> "暂无实测"
+        detailed -> listOf(size ?: "画质未测", address ?: "取址未测", firstFrame ?: "首帧未测", speed ?: "网速未测")
+            .joinToString(" · ")
+        else -> metrics.joinToString(" · ")
+    }
+    val colors = MaterialTheme.colorScheme
+    Text(buildAnnotatedString {
+        if (recommended) {
+            withStyle(SpanStyle(color = colors.primary)) { append("自动首选") }
+            append(" · ")
+        }
+        append(caption)
+    }, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+        maxLines = 3, overflow = TextOverflow.Ellipsis)
+    if (detailed && metrics.isNotEmpty()) measurements?.updatedAt?.takeIf { it > 0L }?.let {
+        AnimeQuietLabel("最近记录 ${formatInstantMillis(it, "MM-dd HH:mm")}")
+    }
+}
+
+private fun animePlaybackDurationLabel(value: Long): String =
+    if (value >= 1_000L) "${formatDecimal(value / 1_000.0, 1)} 秒" else "$value 毫秒"
 
 @Composable
 private fun AnimeSourceDisclosure(expanded: Boolean, label: String, onClick: () -> Unit) {

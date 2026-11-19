@@ -369,10 +369,13 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("updateText", binding.catalog.updateText).put("ratingText", binding.catalog.ratingText)
         .put("episodes", JSONObject(binding.episodeMappings)).put("preferred", binding.preferred)
         .put("group", binding.selectedGroup).put("automatic", binding.automatic)
+        .put("preferredExplicitly", binding.preferredExplicitly)
 
     private fun decodeBinding(json: JSONObject): AnimeSourceBinding {
         val ids = json.optJSONObject("externalIds") ?: JSONObject()
         val mappings = json.getJSONObject("episodes")
+        val preferred = json.optBoolean("preferred")
+        val automatic = json.optBoolean("automatic", false)
         return AnimeSourceBinding(json.getString("subject"), AnimeSourceTitle(
             json.getString("source"), json.getString("id"), json.getString("title"), json.getString("url"),
             json.optString("cover"), if (json.isNull("year")) null else json.getInt("year"),
@@ -380,7 +383,8 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             ids.keys().asSequence().associateWith { ids.getString(it) },
             updateText = json.optString("updateText"), ratingText = json.optString("ratingText")),
             mappings.keys().asSequence().associateWith { mappings.getString(it) },
-            json.optBoolean("preferred"), json.optString("group", null), automatic = json.optBoolean("automatic", false))
+            preferred, json.optString("group", null), automatic = automatic,
+            preferredExplicitly = preferred && json.optBoolean("preferredExplicitly", !automatic))
     }
 
     private fun encodeProgress(progress: AnimeWatchProgress) = JSONObject().put("episode", progress.episodeId)

@@ -143,6 +143,7 @@ data class AnimeSourceBinding(
     val selectedGroup: String? = null,
     /** Legacy bindings remain user-confirmed unless explicitly marked automatic. */
     val automatic: Boolean = false,
+    val preferredExplicitly: Boolean = false,
 )
 
 data class AnimeSourceResult(
@@ -219,6 +220,18 @@ data class AnimePlaybackFailure(
 
 internal enum class AnimeEpisodeAvailability { MATCHED, CHECKING, UNMATCHED, RECENTLY_FAILED, UPCOMING }
 
+internal data class AnimePlaybackMeasurements(
+    val updatedAt: Long,
+    val width: Int? = null,
+    val height: Int? = null,
+    val firstFrameMs: Long? = null,
+    val measuredBytesPerSecond: Long? = null,
+    val addressMs: Long? = null,
+    val declaredQuality: String? = null,
+    val playbackObservedAt: Long? = null,
+    val addressObservedAt: Long? = null,
+)
+
 enum class AnimeBrowseMode { POPULAR, NEWEST, CALENDAR }
 
 data class AnimePlaybackSettings(
@@ -276,6 +289,8 @@ data class AnimeScreenState(
     val episodeOptions: Map<String, List<AnimeEpisodeOption>> = emptyMap(),
     val selectedEpisodeId: String? = null,
     val selectedPlaybackOption: AnimeEpisodeOption? = null,
+    val measuringEpisodeSourcesId: String? = null,
+    val playbackMeasurementsRevision: Long = 0,
     val playbackFirstFrameMs: Long? = null,
     val playbackRouteMode: DownloadRouteMode? = null,
     val resolving: Boolean = false,

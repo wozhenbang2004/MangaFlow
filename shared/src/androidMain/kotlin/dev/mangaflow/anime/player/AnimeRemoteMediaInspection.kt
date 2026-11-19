@@ -14,7 +14,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 
-internal data class AnimeRemoteMediaInspection(val mediaType: Int? = null, val failure: String? = null)
+internal data class AnimeRemoteMediaInspection(
+    val mediaType: Int? = null,
+    val failure: String? = null,
+    val mayRefreshSource: Boolean = true,
+)
 
 /** Called only after a startup parser error, through the exact player's routed client. */
 internal suspend fun inspectAnimeRemoteMedia(client: OkHttpClient, url: String): AnimeRemoteMediaInspection? =
@@ -39,11 +43,16 @@ internal suspend fun inspectAnimeRemoteMedia(client: OkHttpClient, url: String):
 private const val ROOT_SAMPLE_BYTES = 4_096L
 
 private fun inspectResponse(response: Response): AnimeRemoteMediaInspection? {
-    if (response.code !in setOf(200, 206)) return AnimeRemoteMediaInspection(failure = when (response.code) {
-        401, 403 -> "来源拒绝了这条播放地址。"
-        404, 410 -> "来源上的视频地址已不存在。"
-        else -> "重新读取播放地址时，来源返回 HTTP ${response.code}。"
-    })
+    // Rejection of the diagnostic range alone does not establish what a normal GET returns.
+    if (response.code == 416) return null
+    if (response.code !in setOf(200, 206)) return AnimeRemoteMediaInspection(
+        failure = when (response.code) {
+            401, 403 -> "来源拒绝了这条播放地址。"
+            404, 410 -> "来源上的视频地址已不存在。"
+            else -> "重新读取播放地址时，来源返回 HTTP ${response.code}。"
+        },
+        mayRefreshSource = response.code in 500..599 && response.header("Retry-After") == null,
+    )
     if (response.code == 206 && response.header("Content-Range")?.startsWith("bytes 0-", ignoreCase = true) != true) return null
     if (response.header("Content-Encoding")?.equals("identity", ignoreCase = true) == false) return null
     val bytes = response.peekBody(ROOT_SAMPLE_BYTES).bytes()
@@ -58,9 +67,11 @@ private fun inspectResponse(response: Response): AnimeRemoteMediaInspection? {
     if (looksLikeVideoContainer(bytes)) return AnimeRemoteMediaInspection(mediaType = C.CONTENT_TYPE_OTHER)
     val responseType = response.header("Content-Type").orEmpty().substringBefore(';').trim().lowercase()
     if (text.startsWith("<!doctype html", ignoreCase = true) || text.startsWith("<html", ignoreCase = true) ||
-        (responseType == "text/html" && text.startsWith('<')) ||
-        (responseType == "application/json" && (text.startsWith('{') || text.startsWith('[')))) {
-        return AnimeRemoteMediaInspection(failure = "来源返回了网页或接口提示，该地址没有给出可播放的媒体。")
+        ((responseType == "text/html" || responseType == "application/xhtml+xml") && text.startsWith('<')) ||
+        ((responseType == "application/json" || responseType.endsWith("+json")) &&
+            (text.startsWith('{') || text.startsWith('[')))) {
+        return AnimeRemoteMediaInspection(failure = "来源返回了网页或接口提示，该地址没有给出可播放的媒体。",
+            mayRefreshSource = false)
     }
     return null
 }

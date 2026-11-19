@@ -231,7 +231,8 @@ internal class AndroidAnimePlayer(
                 }
             }
         val cacheFactory = DataSource.Factory {
-            if (cacheOwner.targetBytes > 0L) cacheDataSourceFactory.createDataSource() else upstream().createDataSource()
+            if (!request.bypassMediaCache && cacheOwner.targetBytes > 0L) cacheDataSourceFactory.createDataSource()
+            else upstream().createDataSource()
         }
         val subtitleParser = DefaultSubtitleParserFactory()
         val subtitles = mutableListOf<() -> MediaSource>()
@@ -255,7 +256,7 @@ internal class AndroidAnimePlayer(
             }
         }
         val contentType = Util.inferContentTypeForUriAndMimeType(Uri.parse(asset.url), asset.mimeType)
-        val plan = RemoteMediaPlan(contentType, cacheOwner.targetBytes > 0L) { type, bypassProgressiveCache ->
+        val plan = RemoteMediaPlan(contentType, !request.bypassMediaCache && cacheOwner.targetBytes > 0L) { type, bypassProgressiveCache ->
             val mime = when (type) {
                 C.CONTENT_TYPE_HLS -> MimeTypes.APPLICATION_M3U8
                 C.CONTENT_TYPE_DASH -> MimeTypes.APPLICATION_MPD
@@ -744,7 +745,8 @@ internal class AndroidAnimePlayer(
         if (!retryableNetwork || state.value.recoveryAttempt >= options.automaticRecoveryAttempts) {
             publish(generation) { it.copy(notice = it.notice.takeUnless { value -> value == recoveryNotice }) }
             recoveryNotice = null
-            fail(generation, playbackFailure(error, remoteMediaPlan?.type))
+            fail(generation, playbackFailure(error, remoteMediaPlan?.type),
+                refreshSourceOnStartupFailure = inspectedAfterParserError && mayRefreshStartupSource(error))
             return
         }
         val attempt = state.value.recoveryAttempt + 1
@@ -804,7 +806,8 @@ internal class AndroidAnimePlayer(
                     prepareOnEngine(generation, exo, media)
                 } else {
                     val failure = result?.failure?.let { IOException(it, error) } ?: playbackFailure(error, plan.type)
-                    fail(generation, failure)
+                    fail(generation, failure, refreshSourceOnStartupFailure =
+                        result?.mayRefreshSource != false && mayRefreshStartupSource(error))
                 }
             } catch (cancel: CancellationException) { throw cancel }
             catch (_: Exception) {
@@ -817,6 +820,14 @@ internal class AndroidAnimePlayer(
         }
         return true
     }
+
+    private fun mayRefreshStartupSource(error: PlaybackException): Boolean =
+        remoteMediaPlan != null && state.value.firstFrameRendered == false && state.value.hasVideoTracks != false &&
+            error.errorCode in setOf(
+                PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+                PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+                PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+            )
 
     private fun publishTracks(generation: Long, tracks: Tracks) {
         if (!isCurrent(generation)) return

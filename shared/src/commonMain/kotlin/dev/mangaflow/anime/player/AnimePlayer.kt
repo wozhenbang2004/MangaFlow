@@ -24,6 +24,7 @@ data class AnimePlayerRequest(
     val positionMs: Long = 0L,
     val playWhenReady: Boolean = true,
     val localMedia: AnimeLocalMedia? = null,
+    val bypassMediaCache: Boolean = false,
 )
 
 enum class AnimePlayerPhase { IDLE, OPENING, READY, ENDED, ERROR, RELEASED }
@@ -93,6 +94,8 @@ data class AnimePlayerState(
     val videoEnhancement: AnimeVideoEnhancementState = AnimeVideoEnhancementState(),
     /** A local renderer failure is not evidence that another provider should be selected. */
     val sourceRecoveryAllowed: Boolean = true,
+    /** The platform observed a first-start failure that can benefit from resolving the same line again. */
+    val refreshSourceOnStartupFailure: Boolean = false,
     /** null until track discovery; false requires observed audio tracks and no video group. */
     val hasVideoTracks: Boolean? = null,
     /** Native playback is temporarily suppressed, for example by audio focus loss. */
@@ -362,10 +365,11 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         if (isCurrent(generation)) mutableState.value = update(mutableState.value)
     }
 
-    protected fun fail(generation: Long, failure: Throwable, sourceRecoveryAllowed: Boolean = true) {
+    protected fun fail(generation: Long, failure: Throwable, sourceRecoveryAllowed: Boolean = true,
+        refreshSourceOnStartupFailure: Boolean = false) {
         publish(generation) {
             it.copy(phase = AnimePlayerPhase.ERROR, isBuffering = false, error = readablePlayerError(failure),
-                sourceRecoveryAllowed = sourceRecoveryAllowed)
+                sourceRecoveryAllowed = sourceRecoveryAllowed, refreshSourceOnStartupFailure = refreshSourceOnStartupFailure)
         }
     }
 
