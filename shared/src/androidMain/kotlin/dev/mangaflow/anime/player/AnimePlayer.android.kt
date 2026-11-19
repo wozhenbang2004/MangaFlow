@@ -115,6 +115,7 @@ internal class AndroidAnimePlayer(
     private var remoteMediaPlan: RemoteMediaPlan? = null
     private var inspectedAfterParserError = false
     private var enhancementRevision = 0L
+    private var lastEnhancementSubmissionAt: Long? = null
     private var enhancementRecoveryUsed = false
     private var nativeVideoRecoveryPending = false
     private var nativeVideoRecoveryFailed = false
@@ -418,6 +419,7 @@ internal class AndroidAnimePlayer(
 
     private fun applyVideoEnhancement(generation: Long, exo: ExoPlayer) {
         val revision = ++enhancementRevision
+        lastEnhancementSubmissionAt = null
         val mode = options.videoEnhancement
         val phase = when {
             mode == AnimeVideoEnhancementMode.OFF -> AnimeVideoEnhancementPhase.OFF
@@ -438,12 +440,24 @@ internal class AndroidAnimePlayer(
         try {
             val effects = if (mode == AnimeVideoEnhancementMode.OFF) emptyList() else listOf(
                 AndroidAnime4KEffect(mode) { observation, programIsCurrent ->
+                    val observedAt = SystemClock.elapsedRealtime()
                     // The callback originates on Media3's GL thread. Both backend and mode
                     // revision must still own this observation when Main finally consumes it.
                     playerScope.launch(Dispatchers.Main.immediate) {
                         if (!isCurrent(generation) || engine.value !== exo || enhancementRevision != revision ||
                             options.videoEnhancement != mode || nativeVideoOnly || !programIsCurrent()) return@launch
-                        publish(generation) { it.copy(videoEnhancement = observation) }
+                        val recent = observation.observation?.recentlySubmitting == true &&
+                            canReportLiveEnhancement(exo) &&
+                            SystemClock.elapsedRealtime() - observedAt < ANIME4K_ACTIVITY_TIMEOUT_MS
+                        val newWindow = lastEnhancementSubmissionAt == null
+                        lastEnhancementSubmissionAt = observedAt.takeIf { recent }
+                        val current = when {
+                            !recent -> observation.withoutLiveSample()
+                            newWindow -> observation.copy(observation = observation.observation?.copy(
+                                sampleFrames = null, sampleDurationMillis = null))
+                            else -> observation
+                        }
+                        publish(generation) { it.copy(videoEnhancement = current) }
                     }
                 },
             )
@@ -468,6 +482,7 @@ internal class AndroidAnimePlayer(
         nativeVideoRecoveryPending = true
         nativeVideoRestored = false
         enhancementRevision++
+        lastEnhancementSubmissionAt = null
         nativeVideoFallbackPhase = phase
         nativeVideoFallbackDetail = detail
         recovery?.cancel()
@@ -531,7 +546,26 @@ internal class AndroidAnimePlayer(
 
     internal fun updateVideoHost(token: Any, hasSize: Boolean) {
         if (hasSize) videoHosts.add(token) else videoHosts.remove(token)
-        if (videoHosts.isEmpty()) nativeFrameWaitSince = null
+        if (videoHosts.isEmpty()) {
+            nativeFrameWaitSince = null
+            clearLiveEnhancement()
+        }
+    }
+
+    private fun canReportLiveEnhancement(exo: ExoPlayer): Boolean =
+        videoHosts.isNotEmpty() && (foreground || state.value.inPictureInPicture) && exo.isPlaying
+
+    private fun clearLiveEnhancement() {
+        lastEnhancementSubmissionAt = null
+        publish(nativeGeneration) { previous ->
+            previous.copy(videoEnhancement = previous.videoEnhancement.withoutLiveSample())
+        }
+    }
+
+    private fun AnimeVideoEnhancementState.withoutLiveSample(): AnimeVideoEnhancementState {
+        val active = observation?.takeIf { it.recentlySubmitting } ?: return this
+        return copy(observation = active.copy(sampleFrames = null, sampleDurationMillis = null,
+            submitThreadCpuNanos = null, recentlySubmitting = false))
     }
 
     /** A visible, selected video track can reach READY before a frame reaches the surface. */
@@ -604,6 +638,7 @@ internal class AndroidAnimePlayer(
         val noProgressLimit = if (startup) 12_000L else 30_000L
         if (since == null || (now - bufferingProgressAt < noProgressLimit && now - since < 120_000L)) return
         bufferingTimedOut = true // Set before stop's synchronous callbacks can republish READY.
+        clearLiveEnhancement()
         var cancelled = false
         try { exo.stop() }
         catch (cancel: CancellationException) { cancelled = true; throw cancel }
@@ -624,6 +659,9 @@ internal class AndroidAnimePlayer(
         if (nativeVideoRecoveryPending || nativeVideoRecoveryFailed || bufferingTimedOut) return
         if (exo.playerError != null) return // The typed error callback alone owns recovery/error publication.
         val now = SystemClock.elapsedRealtime()
+        val enhancementActive = lastEnhancementSubmissionAt?.let { now - it < ANIME4K_ACTIVITY_TIMEOUT_MS } == true &&
+            canReportLiveEnhancement(exo)
+        if (!enhancementActive) lastEnhancementSubmissionAt = null
         val elapsed = now - lastSampleAt
         val speed = if (elapsed >= 1_000L) {
             val bytes = receivedBytes.get()
@@ -658,7 +696,8 @@ internal class AndroidAnimePlayer(
                 // the decoder format, never the 2x render target or a guessed fallback.
                 videoWidth = exo.videoFormat?.width?.takeIf { it > 0 },
                 videoHeight = exo.videoFormat?.height?.takeIf { it > 0 },
-                videoEnhancement = previous.videoEnhancement.let { enhancement ->
+                videoEnhancement = previous.videoEnhancement.let { last ->
+                    val enhancement = if (enhancementActive) last else last.withoutLiveSample()
                     if (enhancement.phase in setOf(AnimeVideoEnhancementPhase.OFF,
                             AnimeVideoEnhancementPhase.UNAVAILABLE, AnimeVideoEnhancementPhase.FAILED)) {
                         val width = exo.videoFormat?.width?.takeIf { it > 0 }
@@ -676,6 +715,7 @@ internal class AndroidAnimePlayer(
         if (!isCurrent(generation) || engine.value !== exo || lastPlaybackError === error) return
         if (nativeVideoRecoveryPending || nativeVideoRecoveryFailed || bufferingTimedOut) return
         lastPlaybackError = error
+        clearLiveEnhancement()
         val observation = state.value
         val sourceId = request?.asset?.sourceId
         val observedAt = System.currentTimeMillis()
@@ -857,6 +897,7 @@ internal class AndroidAnimePlayer(
     override fun setForegroundNative(foreground: Boolean, backgroundAudio: Boolean) {
         resetBufferingObservation()
         nativeFrameWaitSince = null
+        if (!foreground) clearLiveEnhancement()
         val exo = engine.value ?: return
         val videoDisabled = !foreground && backgroundAudio
         if ((C.TRACK_TYPE_VIDEO in exo.trackSelectionParameters.disabledTrackTypes) != videoDisabled) {
@@ -900,10 +941,12 @@ internal class AndroidAnimePlayer(
     }
 
     override fun setPlayingNative(playing: Boolean) {
+        if (!playing) clearLiveEnhancement()
         engine.value?.playWhenReady = playing
     }
     override fun seekNative(positionMs: Long) {
         resetBufferingObservation(); nativeFrameWaitSince = null
+        clearLiveEnhancement()
         engine.value?.seekTo(positionMs)
     }
     override fun setSpeedNative(speed: Float): Float {
@@ -923,6 +966,7 @@ internal class AndroidAnimePlayer(
         remoteMediaPlan = null
         inspectedAfterParserError = false
         enhancementRevision++
+        lastEnhancementSubmissionAt = null
         enhancementRecoveryUsed = false
         nativeVideoRecoveryPending = false
         nativeVideoRecoveryFailed = false

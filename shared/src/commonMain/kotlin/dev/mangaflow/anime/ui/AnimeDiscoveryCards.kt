@@ -31,6 +31,9 @@ import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.MangaLayout
+import dev.mangaflow.ui.ReviewSourceMark
+import dev.mangaflow.ui.detailMetricScore
+import dev.mangaflow.ui.mangaMetricValueStyle
 import dev.mangaflow.ui.motion.motionPress
 import kotlin.math.roundToInt
 
@@ -40,6 +43,8 @@ internal class AnimeDiscoveryScrolls(homeSourceState: MutableState<String?>) {
     val queries = mutableMapOf<String, AnimeDiscoveryQuery>()
     var featuredKey: String? = null
     var featuredSourceOrder: List<String> = emptyList()
+    var featuredSourceGroups: List<AnimeSearchGroup> = emptyList()
+    var updatedSourceGroups: List<AnimeSearchGroup> = emptyList()
     var homeSourceId by homeSourceState
     var automaticHomeSourceId by mutableStateOf<String?>(null)
     var expandedUpdates by mutableStateOf(false)
@@ -85,9 +90,13 @@ internal fun animeDiscoveryOrderLabel(order: AnimeDiscoveryOrder): String = when
     AnimeDiscoveryOrder.TRENDING -> "趋势"
 }
 
-internal fun animeDiscoveryCaption(query: AnimeDiscoveryQuery): String =
-    animeDiscoveryProviderLabel(query.provider) + " · " +
-        if (query.calendar) "放送日历" else animeDiscoveryOrderLabel(query.order)
+internal fun animeDiscoveryCaption(query: AnimeDiscoveryQuery): String = when {
+    query.calendar -> "Bangumi 放送日历"
+    query.order == AnimeDiscoveryOrder.RANK -> "Bangumi 评分榜"
+    query.order == AnimeDiscoveryOrder.TRENDING -> "AniList 趋势"
+    animeDiscoveryPeerQuery(query) != null -> "各站" + animeDiscoveryOrderLabel(query.order)
+    else -> animeDiscoveryOrderLabel(query.order) + " · " + animeDiscoveryProviderLabel(query.provider)
+}
 
 internal fun animeSeasonLabel(season: AnimeSeason): String = when (season) {
     AnimeSeason.WINTER -> "冬季"
@@ -110,7 +119,10 @@ private fun animeDecimal(value: Double): String {
 internal fun animeDiscoveryMetric(item: AnimeDiscoveryItem, query: AnimeDiscoveryQuery): String? = when {
     query.calendar -> item.airWeekday?.takeIf { it in 1..7 }
         ?.let { "周" + listOf("一", "二", "三", "四", "五", "六", "日")[it - 1] + "放送" }
-    query.order == AnimeDiscoveryOrder.POPULARITY -> item.popularity?.let { "人气 " + animeCompactCount(it) }
+    query.order == AnimeDiscoveryOrder.POPULARITY -> item.popularity?.let {
+        val source = item.discoveryProvider?.takeIf { query.combined }?.let(::animeDiscoveryProviderLabel)
+        listOfNotNull(source, "人气 " + animeCompactCount(it)).joinToString(" ")
+    }
     query.order == AnimeDiscoveryOrder.TRENDING -> item.trending?.let { "趋势 " + animeCompactCount(it) }
     query.order == AnimeDiscoveryOrder.RANK -> item.rank?.let { "评分榜 #$it" }
     else -> null
@@ -119,36 +131,57 @@ internal fun animeDiscoveryMetric(item: AnimeDiscoveryItem, query: AnimeDiscover
 /** Cover, press and typography adapt the existing anime tile; each card has one metadata line. */
 @Composable
 internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQuery,
-    modifier: Modifier = Modifier, list: Boolean = false, onOpen: () -> Unit) {
-    val rating = item.rating?.takeIf { it > 0 && it.isFinite() }
-        ?.let { animeDecimal(it) + if (item.ratingScale == 10) "" else "/${item.ratingScale}" }
+    modifier: Modifier = Modifier, list: Boolean = false, onScores: ((AnimeDiscoveryItem) -> Unit)? = null,
+    onOpen: () -> Unit) {
+    val provider = item.discoveryProvider ?: query.provider
+    val scores = item.sourceScores.ifEmpty {
+        item.rating?.let { listOf(AnimeSourceScore(provider, it, item.ratingScale)) }.orEmpty()
+    }.filter { it.rating.isFinite() && it.rating > 0 && it.rating <= it.scale }.distinctBy { it.provider }
     val caption = listOfNotNull(animeDiscoveryMetric(item, query), item.year?.toString(),
         item.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).take(2).joinToString(" · ")
-    AnimeCompactCoverCard(item.key, item.title, item.coverUrl, caption, animeDiscoverySourceId(query.provider),
-        badge = rating, badgeDescription = rating?.let { "评分 $it，满分 ${item.ratingScale}" },
-        description = listOfNotNull(item.title, animeDiscoveryProviderLabel(query.provider),
-            rating?.let { "评分 $it，满分 ${item.ratingScale}" }, caption.takeIf(String::isNotBlank)).joinToString("，"),
+    val showScores = onScores?.let { open -> { open(item.copy(sourceScores = scores)) } }
+    AnimeCompactCoverCard(item.key, item.title, item.coverUrl, caption, animeDiscoverySourceId(item.coverProvider ?: provider),
+        badge = if (scores.isEmpty()) null else ({ AnimeDiscoveryScores(scores, list, showScores) }),
+        description = listOfNotNull(item.title, caption.takeIf(String::isNotBlank)).joinToString("，"),
         modifier = modifier, list = list, onOpen = onOpen)
 }
 
 @Composable
 internal fun AnimeSourceDiscoveryCard(title: AnimeSourceTitle, modifier: Modifier = Modifier,
-    list: Boolean = false, sourceLabel: String? = null, onOpen: () -> Unit) {
+    list: Boolean = false, sourceLabel: String? = null,
+    cardKey: String = title.sourceId + ":" + title.id, onOpen: () -> Unit) {
     val metadata = listOfNotNull(title.year?.toString(), title.ratingText.takeIf(String::isNotBlank),
         title.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).take(2).joinToString(" · ")
     val update = title.updateText.takeIf(String::isNotBlank)
     val extra = metadata.takeIf { it.isNotBlank() && (list || update == null) }
     val caption = listOfNotNull(sourceLabel, update, extra).joinToString(" · ")
-    AnimeCompactCoverCard(title.sourceId + ":" + title.id, title.title, title.coverUrl, caption, title.sourceId,
-        badge = null, badgeDescription = null,
+    AnimeCompactCoverCard(cardKey, title.title, title.coverUrl, caption, title.sourceId,
+        badge = null,
         description = listOfNotNull(title.title, sourceLabel, update?.let { "来源标注：$it" },
             metadata.takeIf(String::isNotBlank)).joinToString("，"),
         modifier = modifier, list = list, onOpen = onOpen)
 }
 
 @Composable
+internal fun AnimeSourceGroupDiscoveryCard(group: AnimeSearchGroup, sourceLabel: String?,
+    modifier: Modifier = Modifier, list: Boolean = false, onOpen: () -> Unit) {
+    val title = group.sources.firstOrNull() ?: return
+    val sourceCount = group.sources.distinctBy { it.sourceId }.size
+    if (sourceCount == 1) {
+        AnimeSourceDiscoveryCard(title, modifier = modifier, list = list, sourceLabel = sourceLabel,
+            cardKey = group.key, onOpen = onOpen)
+    } else {
+        val artwork = group.sources.firstOrNull { it.coverUrl.isNotBlank() } ?: title
+        val caption = "$sourceCount 个来源"
+        AnimeCompactCoverCard(group.key, title.title, artwork.coverUrl, caption, artwork.sourceId,
+            badge = null, description = "${title.title}，$caption", modifier = modifier,
+            list = list, onOpen = onOpen)
+    }
+}
+
+@Composable
 private fun AnimeCompactCoverCard(key: String, title: String, cover: String, caption: String, sourceId: String,
-    badge: String?, badgeDescription: String?, description: String, modifier: Modifier,
+    badge: (@Composable () -> Unit)?, description: String, modifier: Modifier,
     list: Boolean, onOpen: () -> Unit) {
     val interaction = remember(key) { MutableInteractionSource() }
     val click = modifier.motionPress(interaction, pressedScale = .98f)
@@ -158,24 +191,22 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
     if (list) {
         Row(click.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            AnimePoster(cover, Modifier.width(52.dp).height(74.dp), sourceId = sourceId)
-            Column(Modifier.weight(1f).clearAndSetSemantics { }, verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 2,
+            AnimePoster(cover, Modifier.width(52.dp).height(74.dp).clearAndSetSemantics { }, sourceId = sourceId)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text(title, Modifier.clearAndSetSemantics { }, style = MaterialTheme.typography.titleSmall, maxLines = 2,
                     overflow = TextOverflow.Ellipsis)
-                if (caption.isNotBlank()) Text(caption, style = MaterialTheme.typography.labelSmall,
+                if (caption.isNotBlank()) Text(caption, Modifier.clearAndSetSemantics { }, style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (!badge.isNullOrBlank()) AnimeDiscoveryBadge(badge, badgeDescription)
+                badge?.invoke()
             }
             Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     } else {
         Column(click, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Box(Modifier.fillMaxWidth().aspectRatio(.7f).clearAndSetSemantics { }) {
-                AnimePoster(cover, Modifier.fillMaxSize(), sourceId = sourceId)
-                if (!badge.isNullOrBlank()) Box(Modifier.align(Alignment.TopEnd).padding(5.dp)) {
-                    AnimeDiscoveryBadge(badge, badgeDescription)
-                }
+            Box(Modifier.fillMaxWidth().aspectRatio(.7f)) {
+                AnimePoster(cover, Modifier.fillMaxSize().clearAndSetSemantics { }, sourceId = sourceId)
+                if (badge != null) Box(Modifier.align(Alignment.TopEnd).padding(4.dp)) { badge() }
             }
             Text(title, Modifier.clearAndSetSemantics { }, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Medium,
                 maxLines = 2, minLines = 2,
@@ -187,15 +218,44 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
 }
 
 @Composable
-private fun AnimeDiscoveryBadge(text: String, description: String?) {
-    Row(Modifier.clip(RoundedCornerShape(6.dp))
-        .background(MaterialTheme.colorScheme.surface.copy(alpha = .94f))
-        .padding(horizontal = 5.dp, vertical = 3.dp)
-        .semantics { contentDescription = description ?: text },
-        horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(Icons.Outlined.Star, null, Modifier.size(11.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(text, color = MaterialTheme.colorScheme.onSurface,
-            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 13.sp),
-            maxLines = 1, overflow = TextOverflow.Ellipsis)
+private fun AnimeDiscoveryScores(scores: List<AnimeSourceScore>, inline: Boolean, onOpen: (() -> Unit)?) {
+    val description = scores.joinToString("，") { score ->
+        "${animeDiscoveryProviderLabel(score.provider)} ${detailMetricScore(score.rating)} 分，满分 ${score.scale}"
+    }
+    val interaction = remember { MutableInteractionSource() }
+    val button = if (onOpen == null) Modifier else Modifier
+        .defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+        .clickable(interactionSource = interaction, indication = null, role = Role.Button,
+            onClickLabel = "查看来源评分", onClick = onOpen)
+        .motionPress(interaction, pressedScale = .98f)
+    BoxWithConstraints(button.semantics(mergeDescendants = true) { contentDescription = description },
+        contentAlignment = if (inline) Alignment.CenterStart else Alignment.TopEnd) {
+        val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+        val count = if (maxWidth >= 108.dp * fontScale) scores.size else 1
+        Row(Modifier.clip(RoundedCornerShape(6.dp))
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = .95f))
+            .padding(horizontal = 4.dp, vertical = 3.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            scores.take(count).forEach { score ->
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ReviewSourceMark(animeDiscoveryScoreSourceId(score.provider), size = 12.dp)
+                    Text(animeDiscoveryScoreText(score), Modifier.clearAndSetSemantics { },
+                        color = MaterialTheme.colorScheme.onSurface,
+                        style = mangaMetricValueStyle(12.sp, 16.sp),
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            if (count < scores.size) Text("+${scores.size - count}", Modifier.clearAndSetSemantics { },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp), maxLines = 1)
+        }
     }
 }
+
+internal fun animeDiscoveryScoreSourceId(provider: AnimeDiscoveryProvider): String = when (provider) {
+    AnimeDiscoveryProvider.BANGUMI -> "bangumi"
+    AnimeDiscoveryProvider.ANILIST -> "anilist"
+}
+
+internal fun animeDiscoveryScoreText(score: AnimeSourceScore): String =
+    "${detailMetricScore(score.rating)}/${score.scale}"

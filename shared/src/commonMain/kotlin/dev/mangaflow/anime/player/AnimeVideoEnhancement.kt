@@ -14,6 +14,19 @@ data class AnimeVideoEnhancementState(
     val inputHeight: Int? = null,
     val outputWidth: Int? = null,
     val outputHeight: Int? = null,
+    val observation: AnimeVideoEnhancementObservation? = null,
+)
+
+/** Evidence from the current enhancement pass. A submission does not prove display presentation. */
+data class AnimeVideoEnhancementObservation(
+    val submittedFrames: Long,
+    val sampleFrames: Long? = null,
+    val sampleDurationMillis: Long? = null,
+    /** CPU time for one sampled submission on the rendering thread, excluding GPU execution. */
+    val submitThreadCpuNanos: Long? = null,
+    /** Allocated intermediate texture payload estimate, excluding the output and decoder buffers. */
+    val intermediateTextureBytes: Long,
+    val recentlySubmitting: Boolean = false,
 )
 
 internal data class Anime4KShader(val name: String, val source: String)

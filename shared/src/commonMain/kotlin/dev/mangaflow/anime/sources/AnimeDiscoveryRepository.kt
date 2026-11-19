@@ -1,22 +1,35 @@
 package dev.mangaflow.anime.sources
 
+import dev.mangaflow.anime.AnimeDiscoveryFormat
 import dev.mangaflow.anime.AnimeDiscoveryItem
 import dev.mangaflow.anime.AnimeDiscoveryOrder
 import dev.mangaflow.anime.AnimeDiscoveryPage
 import dev.mangaflow.anime.AnimeDiscoveryProvider
 import dev.mangaflow.anime.AnimeDiscoveryQuery
+import dev.mangaflow.anime.AnimeSourceScore
 import dev.mangaflow.anime.AnimeSourceTitle
+import dev.mangaflow.anime.AnimeSubject
+import dev.mangaflow.anime.combineAnimeDiscoveryItems
 import dev.mangaflow.experience.ContentCacheKind
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.net.NetworkFailureKind
+import dev.mangaflow.net.NetworkTransferException
+import dev.mangaflow.net.identity
+import dev.mangaflow.net.networkFailureKind
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.wallTimeMillis
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** Public catalogue queries; playback availability and canonical identity remain separate. */
 class AnimeDiscoveryRepository(context: PlatformContext) {
@@ -24,43 +37,158 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
     private val cache = AnimeMetadataCache.get(context)
     private val calendarMutex = Mutex()
 
-    suspend fun cached(query: AnimeDiscoveryQuery, page: Int = 1): AnimeDiscoveryPage? {
-        validate(query, page)
-        return readCache(query, page, freshOnly = false)
+    internal fun route(query: AnimeDiscoveryQuery): DownloadRouteSnapshot =
+        DownloadRoutingStore.activeSourceSnapshot(providerId(query), DownloadCategory.ANIME)
+
+    internal fun isFresh(query: AnimeDiscoveryQuery, fetchedAt: Long): Boolean =
+        cache.isFresh(fetchedAt, cacheKind(query))
+
+    /** Optional public rating. Provider failure does not prevent opening a canonical detail. */
+    internal suspend fun lookupAniListScore(subject: AnimeSubject): AnimeSourceScore? {
+        if (!subject.id.startsWith("bangumi:")) return null
+        val ids = subject.externalIds
+        val aniListId = ids["anilist"]?.toIntOrNull()?.takeIf { it > 0 }
+        val malIds = listOfNotNull(ids["myanimelist"], ids["mal"]).mapNotNull { it.toIntOrNull()?.takeIf { id -> id > 0 } }
+            .distinct()
+        if (malIds.size > 1) return null
+        val malId = malIds.singleOrNull()
+        val year = subject.year?.takeIf { it in 1..9998 }
+        val title = subject.originalTitle.ifBlank { subject.title }.trim()
+        val byId = aniListId != null || malId != null
+        if (!byId && (year == null || title.length !in 1..180)) return null
+        val query = AnimeDiscoveryQuery(provider = AnimeDiscoveryProvider.ANILIST)
+        return try {
+            val route = route(query)
+            val identity = JSONObject().put("subject", subject.id).put("anilist", aniListId).put("mal", malId)
+                .put("title", subject.title).put("originalTitle", subject.originalTitle).put("year", year)
+                .put("episodes", subject.episodeCount)
+            val key = "anilist-score:v1:${identity}:${animeHash(route.identity())}"
+            val cached = cache.read(key)?.takeIf { cache.isFresh(it, ContentCacheKind.DETAILS) }
+                ?.let { runCatching { JSONObject(it.text).finiteNumber("score") }.getOrNull() }
+                ?.takeIf { it > 0.0 && it <= 100.0 }
+            if (cached != null) {
+                checkRoute(query, route)
+                return AnimeSourceScore(AnimeDiscoveryProvider.ANILIST, cached, 100)
+            }
+            val generation = cache.generation
+            val variables = JSONObject().put("id", aniListId).put("idMal", malId)
+            if (!byId && year != null) variables.put("search", title).putAniListReleaseYear(year)
+            checkRoute(query, route)
+            val score = withTimeoutOrNull(ANILIST_SCORE_TIMEOUT_MILLIS) {
+                val http = AnimeHttp(ANILIST_PROVIDER, route)
+                try {
+                    val payload = http.json(ANILIST_API, AnimeSourceStage.METADATA, "POST",
+                        JSONObject().put("query", ANILIST_SCORE_QUERY).put("variables", variables))
+                    withContext(Dispatchers.Default) {
+                        val candidates = aniListFirstPage(payload).orEmpty().filter { item ->
+                            val externalIds = item.reference?.externalIds.orEmpty()
+                            (aniListId == null || externalIds["anilist"] == aniListId.toString()) &&
+                                (malId == null || externalIds["myanimelist"] == malId.toString())
+                        }
+                        if (byId) return@withContext candidates.singleOrNull()?.rating?.takeIf { it > 0.0 }
+                            ?.let { AnimeSourceScore(AnimeDiscoveryProvider.ANILIST, it, 100) }
+                        val work = AnimeDiscoveryItem(key = subject.id, title = subject.title, year = year,
+                            episodeCount = subject.episodeCount, subject = subject)
+                        combineAnimeDiscoveryItems(listOf(work), candidates).firstOrNull { it.subject?.id == subject.id }
+                            ?.sourceScores?.firstOrNull { it.provider == AnimeDiscoveryProvider.ANILIST && it.rating > 0.0 }
+                    }
+                } finally { http.close() }
+            } ?: return null
+            checkRoute(query, route)
+            cache.write(key, JSONObject().put("score", score.rating).toString(), generation)
+            checkRoute(query, route)
+            score
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Exception) {
+            null
+        }
     }
 
-    suspend fun browse(query: AnimeDiscoveryQuery, page: Int = 1, forceRefresh: Boolean = false): AnimeDiscoveryPage {
+    private fun aniListFirstPage(payload: JSONObject): List<AnimeDiscoveryItem>? {
+        if (payload.optJSONArray("errors")?.length()?.let { it > 0 } == true) return null
+        val page = payload.getJSONObject("data").getJSONObject("Page")
+        val info = page.getJSONObject("pageInfo")
+        if (info.getInt("currentPage") != 1 || info.getBoolean("hasNextPage")) return null
+        val rows = page.getJSONArray("media")
+        if (rows.length() > ANILIST_SCORE_LIMIT) return null
+        return (0 until rows.length()).map { anilistItem(rows.getJSONObject(it)) }
+    }
+
+    suspend fun cached(
+        query: AnimeDiscoveryQuery, page: Int = 1,
+        route: DownloadRouteSnapshot? = runCatching { route(query) }.getOrNull(),
+    ): AnimeDiscoveryPage? {
+        validate(query, page)
+        // Earlier versions did not record the route. Keep their displayable snapshots,
+        // but revalidate them before treating a query as fresh on the current route.
+        return route?.let { readCache(query, page, cacheKey(query, page, it), freshOnly = false) }
+            ?: readCache(query, page, cacheKey(query, page, null), freshOnly = false)
+    }
+
+    suspend fun browse(
+        query: AnimeDiscoveryQuery, page: Int = 1, forceRefresh: Boolean = false,
+        route: DownloadRouteSnapshot = route(query),
+    ): AnimeDiscoveryPage {
         validate(query, page)
         return if (query.calendar) calendarMutex.withLock {
             // Recheck the shared weekly cache after an earlier weekday request finishes.
             // Explicit refresh still bypasses that fresh copy and performs its own request.
-            browsePage(query, page, forceRefresh)
-        } else browsePage(query, page, forceRefresh)
+            browsePage(query, page, forceRefresh, route)
+        } else browsePage(query, page, forceRefresh, route)
     }
 
-    private suspend fun browsePage(query: AnimeDiscoveryQuery, page: Int, forceRefresh: Boolean): AnimeDiscoveryPage {
-        if (!forceRefresh) readCache(query, page, freshOnly = true)?.let { return it }
+    private suspend fun browsePage(
+        query: AnimeDiscoveryQuery, page: Int, forceRefresh: Boolean, route: DownloadRouteSnapshot,
+    ): AnimeDiscoveryPage {
+        checkRoute(query, route)
+        val key = cacheKey(query, page, route)
+        if (!forceRefresh) {
+            readCache(query, page, key, freshOnly = true)?.let {
+                checkRoute(query, route)
+                return it
+            }
+        }
         val generation = cache.generation
-        val http = AnimeHttp(providerId(query))
+        val http = AnimeHttp(providerId(query), route)
         return try {
-            val response = when {
-                query.calendar -> {
-                    val response = http.request(animePublicUrl("https://api.bgm.tv/calendar"), AnimeSourceStage.METADATA)
-                    val observedAt = wallTimeMillis()
-                    withContext(Dispatchers.Default) {
-                        JSONObject().put("fetchedAt", observedAt).put("payload", JSONArray(response.text))
+            suspend fun read(): JSONObject {
+                checkRoute(query, route)
+                return withTimeoutOrNull(READ_TIMEOUT_MILLIS) {
+                    when {
+                        query.calendar -> {
+                            val response = http.request(animePublicUrl("https://api.bgm.tv/calendar"), AnimeSourceStage.METADATA)
+                            val observedAt = wallTimeMillis()
+                            withContext(Dispatchers.Default) {
+                                JSONObject().put("fetchedAt", observedAt).put("payload", JSONArray(response.text))
+                            }
+                        }
+                        query.provider == AnimeDiscoveryProvider.BANGUMI ->
+                            JSONObject().put("payload", bangumi(http, query, page)).put("fetchedAt", wallTimeMillis())
+                        else -> JSONObject().put("payload", anilist(http, query, page)).put("fetchedAt", wallTimeMillis())
                     }
-                }
-                query.provider == AnimeDiscoveryProvider.BANGUMI ->
-                    JSONObject().put("payload", bangumi(http, query, page)).put("fetchedAt", wallTimeMillis())
-                else -> JSONObject().put("payload", anilist(http, query, page)).put("fetchedAt", wallTimeMillis())
+                } ?: throw AnimeSourceException(providerId(query), AnimeSourceStage.METADATA,
+                    "等待番剧资料超时，请稍后重试。",
+                    cause = NetworkTransferException(NetworkFailureKind.RESPONSE_TIMEOUT, "等待番剧资料超时"))
+            }
+            val response = try { read() } catch (failure: AnimeSourceException) {
+                // Discovery POSTs are read-only API queries. Never replay writes, schema
+                // failures, access verification, or a server cooldown too long for this fetch.
+                if (networkFailureKind(failure) == NetworkFailureKind.NO_NETWORK) throw failure
+                val wait = discoveryRetryDelay(failure, transientDelay = 450L)
+                    ?.takeIf { it <= INLINE_RETRY_BUDGET_MILLIS } ?: throw failure
+                delay(wait)
+                read()
             }
             val result = withContext(Dispatchers.Default) { decode(response, query, page) }
             val encoded = withContext(Dispatchers.Default) { response.toString() }
-            cache.write(cacheKey(query, page), encoded, generation)
+            checkRoute(query, route)
+            cache.write(key, encoded, generation)
             result
         } catch (cancel: CancellationException) {
             throw cancel
+        } catch (failure: DownloadRouteException) {
+            throw failure
         } catch (failure: AnimeSourceException) {
             throw failure
         } catch (failure: Exception) {
@@ -69,10 +197,11 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
         } finally { http.close() }
     }
 
-    private suspend fun readCache(query: AnimeDiscoveryQuery, page: Int, freshOnly: Boolean): AnimeDiscoveryPage? {
-        val document = cache.read(cacheKey(query, page)) ?: return null
-        val kind = if (query.calendar || query.year != null) ContentCacheKind.DISCOVERY else ContentCacheKind.RANKING
-        if (freshOnly && !cache.isFresh(document, kind)) return null
+    private suspend fun readCache(
+        query: AnimeDiscoveryQuery, page: Int, key: String, freshOnly: Boolean,
+    ): AnimeDiscoveryPage? {
+        val document = cache.read(key) ?: return null
+        if (freshOnly && !cache.isFresh(document, cacheKind(query))) return null
         return try {
             withContext(Dispatchers.Default) { decode(JSONObject(document.text), query, page) }
         } catch (cancel: CancellationException) { throw cancel }
@@ -109,7 +238,9 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
             AnimeDiscoveryOrder.RANK -> throw IllegalArgumentException("AniList 暂不提供 Bangumi 综合名次排序。")
         }
         val variables = JSONObject().put("page", page).put("perPage", PAGE_SIZE)
-            .put("sort", JSONArray(listOf(sort))).put("year", query.year).put("season", query.season?.name)
+            .put("sort", JSONArray(listOf(sort)))
+        if (query.season != null) variables.put("year", query.year).put("season", query.season.name)
+        else query.year?.let { variables.putAniListReleaseYear(it) }
         query.tag.trim().takeIf { it.isNotEmpty() }?.let { variables.put("genre", it) }
         return http.json(ANILIST_API, AnimeSourceStage.METADATA, "POST",
             JSONObject().put("query", ANILIST_QUERY).put("variables", variables))
@@ -162,7 +293,13 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
             ?: throw AnimeSourceException(BANGUMI_PROVIDER, AnimeSourceStage.METADATA, "Bangumi 返回了缺少动画身份的条目。")
         return AnimeDiscoveryItem(key = subject.id, title = subject.title, coverUrl = subject.coverUrl,
             year = subject.year, episodeCount = subject.episodeCount, rating = subject.rating, ratingScale = 10,
-            rank = subject.rank, popularity = bangumiPopularity(row), airWeekday = subject.airWeekday, subject = subject)
+            rank = subject.rank, popularity = bangumiPopularity(row), airWeekday = subject.airWeekday, subject = subject,
+            format = when (row.text("platform")) {
+                "TV" -> AnimeDiscoveryFormat.SERIES
+                "剧场版" -> AnimeDiscoveryFormat.MOVIE
+                "OVA" -> AnimeDiscoveryFormat.SPECIAL
+                else -> null
+            })
     }
 
     private fun bangumiPopularity(row: JSONObject): Long? {
@@ -181,10 +318,12 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
         val id = row.positiveInt("id")
             ?: throw AnimeSourceException(ANILIST_PROVIDER, AnimeSourceStage.METADATA, "AniList 条目缺少身份。")
         require(row.text("type") == "ANIME") { "AniList 返回了非动画条目。" }
-        val title = row.requiredObject("title", ANILIST_PROVIDER, AnimeSourceStage.METADATA).text("native", "romaji", "english")
-        require(title.isNotBlank()) { "AniList 条目缺少名称。" }
+        val names = row.requiredObject("title", ANILIST_PROVIDER, AnimeSourceStage.METADATA)
+        val titles = listOf("native", "romaji", "english").map { names.text(it) }.filter(String::isNotBlank).distinct()
+        require(titles.isNotEmpty()) { "AniList 条目缺少名称。" }
+        val title = titles.first()
         val cover = sourceCover("https://anilist.co/", row.optJSONObject("coverImage")?.text("extraLarge", "large").orEmpty())
-        val year = (row.positiveInt("seasonYear") ?: row.optJSONObject("startDate")?.positiveInt("year"))?.takeIf { it <= 9999 }
+        val year = (row.optJSONObject("startDate")?.positiveInt("year") ?: row.positiveInt("seasonYear"))?.takeIf { it <= 9999 }
         val episodes = row.positiveInt("episodes")
         val ids = mutableMapOf("anilist" to id.toString())
         row.positiveInt("idMal")?.let { ids["myanimelist"] = it.toString() }
@@ -194,6 +333,14 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
             episodeCount = episodes, rating = row.finiteNumber("averageScore")?.takeIf { it in 0.0..100.0 }, ratingScale = 100,
             popularity = nonNegativeLong(row, "popularity"), trending = nonNegativeLong(row, "trending"),
             nextEpisode = airing?.positiveInt("episode"), nextAiringAt = airingAt?.times(1000),
+            aliases = titles.drop(1),
+            format = when (row.text("format")) {
+                "TV" -> AnimeDiscoveryFormat.SERIES
+                "MOVIE" -> AnimeDiscoveryFormat.MOVIE
+                "SPECIAL", "OVA" -> AnimeDiscoveryFormat.SPECIAL
+                "TV_SHORT" -> AnimeDiscoveryFormat.SHORT
+                else -> null
+            },
             reference = AnimeSourceTitle(sourceId = ANILIST_PROVIDER, id = id.toString(), title = title,
                 url = "https://anilist.co/anime/$id", coverUrl = cover, year = year, episodeCount = episodes, externalIds = ids))
     }
@@ -223,9 +370,21 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
         }
     }
 
-    private fun cacheKey(query: AnimeDiscoveryQuery, page: Int): String = if (query.calendar) "discovery:v1:bangumi:calendar" else
-        "discovery:v1:" + JSONObject().put("provider", query.provider.name).put("order", query.order.name)
-            .put("year", query.year).put("season", query.season?.name).put("tag", query.tag.trim()).put("page", page)
+    private fun cacheKind(query: AnimeDiscoveryQuery): ContentCacheKind =
+        if (query.calendar || query.year != null) ContentCacheKind.DISCOVERY else ContentCacheKind.RANKING
+
+    private fun cacheKey(query: AnimeDiscoveryQuery, page: Int, route: DownloadRouteSnapshot?): String {
+        val identity = if (query.calendar) "bangumi:calendar" else
+            JSONObject().put("provider", query.provider.name).put("order", query.order.name)
+                .put("year", query.year).put("season", query.season?.name).put("tag", query.tag.trim()).put("page", page)
+                .put("releaseYear", query.year.takeIf { query.provider == AnimeDiscoveryProvider.ANILIST && query.season == null })
+                .toString()
+        return if (route == null) "discovery:v1:$identity" else "discovery:v2:$identity:${animeHash(route.identity())}"
+    }
+
+    private fun checkRoute(query: AnimeDiscoveryQuery, requested: DownloadRouteSnapshot) {
+        if (route(query) != requested) throw DownloadRouteException("番剧资料的网络线路已更改，请按当前线路重新读取。")
+    }
 
     private fun providerId(query: AnimeDiscoveryQuery): String = when (query.provider) {
         AnimeDiscoveryProvider.BANGUMI -> BANGUMI_PROVIDER
@@ -235,22 +394,59 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
     private fun date(year: Int, month: Int): String = "${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-01"
     private fun nonNegativeLong(json: JSONObject, key: String): Long? = json.optLong(key, -1L).takeIf { it >= 0 }
 
+    private fun JSONObject.putAniListReleaseYear(year: Int): JSONObject =
+        put("from", (year - 1) * 10_000 + 1_231).put("until", (year + 1) * 10_000)
+
     private companion object {
         const val PAGE_SIZE = 24
+        const val READ_TIMEOUT_MILLIS = 8_000L
+        const val INLINE_RETRY_BUDGET_MILLIS = 4_000L
+        const val ANILIST_SCORE_LIMIT = 20
+        const val ANILIST_SCORE_TIMEOUT_MILLIS = 4_000L
         val ANILIST_GENRES = setOf("Action", "Adventure", "Comedy", "Drama", "Ecchi", "Fantasy", "Hentai", "Horror",
             "Mahou Shoujo", "Mecha", "Music", "Mystery", "Psychological", "Romance", "Sci-Fi", "Slice of Life",
             "Sports", "Supernatural", "Thriller")
         val ANILIST_QUERY = """
-            query Discovery(${'$'}page: Int!, ${'$'}perPage: Int!, ${'$'}sort: [MediaSort], ${'$'}year: Int, ${'$'}season: MediaSeason, ${'$'}genre: String) {
+            query Discovery(${'$'}page: Int!, ${'$'}perPage: Int!, ${'$'}sort: [MediaSort], ${'$'}year: Int,
+              ${'$'}season: MediaSeason, ${'$'}genre: String, ${'$'}from: FuzzyDateInt, ${'$'}until: FuzzyDateInt) {
               Page(page: ${'$'}page, perPage: ${'$'}perPage) {
                 pageInfo { currentPage hasNextPage }
-                media(type: ANIME, isAdult: false, sort: ${'$'}sort, seasonYear: ${'$'}year, season: ${'$'}season, genre: ${'$'}genre) {
-                  id idMal type title { native romaji english } coverImage { extraLarge large }
+                media(type: ANIME, isAdult: false, sort: ${'$'}sort, seasonYear: ${'$'}year, season: ${'$'}season,
+                  genre: ${'$'}genre, startDate_greater: ${'$'}from, startDate_lesser: ${'$'}until) {
+                  id idMal type format title { native romaji english } coverImage { extraLarge large }
                   seasonYear startDate { year } episodes averageScore popularity trending
                   nextAiringEpisode { episode airingAt }
                 }
               }
             }
         """.trimIndent()
+        val ANILIST_SCORE_QUERY = """
+            query AnimeScore(${'$'}id: Int, ${'$'}idMal: Int, ${'$'}search: String, ${'$'}from: FuzzyDateInt, ${'$'}until: FuzzyDateInt) {
+              Page(page: 1, perPage: $ANILIST_SCORE_LIMIT) {
+                pageInfo { currentPage hasNextPage }
+                media(type: ANIME, isAdult: false, id: ${'$'}id, idMal: ${'$'}idMal, search: ${'$'}search,
+                  startDate_greater: ${'$'}from, startDate_lesser: ${'$'}until) {
+                  id idMal type format title { native romaji english }
+                  seasonYear startDate { year } episodes averageScore
+                }
+              }
+            }
+        """.trimIndent()
+    }
+}
+
+/** Backoff for the original read, never authorization, route setup, or invalid response data. */
+internal fun discoveryRetryDelay(failure: Exception, transientDelay: Long = 30_000L): Long? {
+    val error = failure as? AnimeSourceException ?: return null
+    if (error.retryAfterSeconds > 0) return error.retryAfterSeconds.coerceAtMost(86_400L) * 1_000L
+    when (error.httpStatus) {
+        408, 429, 500, 502, 503, 504 -> return transientDelay
+        null -> Unit
+        else -> return null
+    }
+    return when (networkFailureKind(error)) {
+        NetworkFailureKind.NO_NETWORK, NetworkFailureKind.DNS, NetworkFailureKind.CONNECTION, NetworkFailureKind.CONNECT_TIMEOUT,
+        NetworkFailureKind.RESPONSE_TIMEOUT, NetworkFailureKind.TRANSFER_TIMEOUT, NetworkFailureKind.REQUEST_TIMEOUT -> transientDelay
+        else -> null
     }
 }

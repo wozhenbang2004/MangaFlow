@@ -78,6 +78,10 @@ import dev.mangaflow.data.SourceDiscoveryStatus
 import dev.mangaflow.data.FederatedSearchSource
 import dev.mangaflow.data.FederatedSearchGroup
 import dev.mangaflow.data.FederatedSearchGrouper
+import dev.mangaflow.data.MangaGenreDirectory
+import dev.mangaflow.data.MangaTagKind
+import dev.mangaflow.data.combineOrdinarySearchTags
+import dev.mangaflow.data.federatedMangaIdentity
 import dev.mangaflow.data.sources.KomiicBodySource
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
@@ -155,6 +159,8 @@ data class BrowseState(
     val searchSources: Map<String, FederatedSearchSource> = emptyMap(),
     val sourceNextPages: Map<String, Int> = emptyMap(),
     val sourceScope: String = "",
+    /** Already confirmed readable versions of TAG hits. Only sourceMatches contains actual search hits. */
+    val alignedTagSources: Map<String, List<Manga>> = emptyMap(),
 ) {
     val isSearch: Boolean get() = searchTarget != SearchTarget.TITLE || query.isNotBlank() || selectedTags.isNotEmpty()
     val isFederatedSearch: Boolean get() = searchTarget != SearchTarget.TRANSLATION_GROUP &&
@@ -163,15 +169,32 @@ data class BrowseState(
         isSearch -> {
             val keyword = if (searchTarget == SearchTarget.TAG) "" else query.trim()
             val prefix = when {
-                isFederatedSearch -> "search-v10-fields:$sourceScope"
+                isFederatedSearch -> "search-v11-fields:$sourceScope"
                 searchTarget == SearchTarget.TRANSLATION_GROUP -> "copy-translation-v1:$sourceScope"
                 else -> "search-v3-heat"
             }
-            "${prefix}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
+            val tags = selectedTags.sortedBy(MangaTag::path).joinToString("|") { tag ->
+                val native = tag.additionalSearchPaths().entries.sortedBy { it.key }
+                    .joinToString(",") { (source, path) -> "$source:${path.length}:$path" }
+                "${tag.path.length}:${tag.path}:${native.length}:$native"
+            }
+            "$prefix:${searchTarget.name}:${keyword.length}:$keyword:$tags"
         }
         mode == DiscoveryMode.RANKING -> "ranking:${period.name}:${audience.name}"
         else -> "discover:${mode.name}"
     }
+}
+
+private data class TagSearchIdentities(val sourceScope: String, val cacheKey: String, val groups: Map<String, List<Manga>>)
+
+private fun MangaTag.additionalSearchPaths(): Map<String, String> =
+    providerPaths.filter { (source, native) -> source != "copy" || native != path }
+
+private fun BrowseState.tagSearchIdentities(): TagSearchIdentities? {
+    if (searchTarget != SearchTarget.TAG || !isFederatedSearch || items.isEmpty()) return null
+    return TagSearchIdentities(sourceScope, cacheKey, items.associate { manga ->
+        manga.id to sourceMatches[manga.id].orEmpty().ifEmpty { listOf(manga) }
+    })
 }
 
 data class DetailState(
@@ -320,6 +343,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     val browse = _browse.asStateFlow()
     private var retainedBrowse: BrowseState? = null
     private var knownSearchTags = CopySearchTags
+    private var genreDirectory = MangaGenreDirectory(emptyList())
+    private var genreDirectoryScope = ""
+    private var genreDirectoryUpdatedAt = 0L
+    private var genreDirectoryJob: Job? = null
+    private var genreDirectoryRequest = 0L
+    private var genreDirectoryLoading = false
+    private var genreDirectoryError: String? = null
     private var tagLookupJob: Job? = null
     private var tagLookupRequest = 0L
     private var pendingTagLookup: Pair<Manga, String>? = null
@@ -428,6 +458,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 // Native labels/counts replace older values without losing detail-returned identifiers.
                 knownSearchTags = (knownSearchTags + directory.themes).associateBy(MangaTag::path).values.toList()
                 _browse.update { current -> current.withSearchTagDirectory() }
+                if (directory.updatedAt > 0) launch { refreshNewTagBindings(repository.ordinaryGenreScope()) }
             }
         }
         viewModelScope.launch {
@@ -498,6 +529,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 .drop(1).collectLatest { refreshUnifiedProjection() }
         }
         viewModelScope.launch { repository.sourceDiscovery.collect { refreshSourceOverview() } }
+        viewModelScope.launch { observeAlignedTagSources() }
         viewModelScope.launch { unifiedChapters.persistenceError.collect { error ->
             if (error != null) messages.send(error)
         } }
@@ -529,16 +561,12 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     fun setSearchTarget(target: SearchTarget) {
         val previous = _browse.value
         if (previous.searchTarget == target) {
-            if (target == SearchTarget.TAG) {
-                copyExplore.ensureDirectory()
-                _browse.update { it.withSearchTagDirectory() }
-            }
+            if (target == SearchTarget.TAG) loadSearchTagDirectories()
             return
         }
         cancelTagLookup()
         showBrowse(BrowseState(query = previous.query, searchTarget = target, selectedTags = previous.selectedTags,
             mode = previous.mode, period = previous.period, audience = previous.audience))
-        if (target == SearchTarget.TAG) copyExplore.ensureDirectory()
     }
 
     fun submitSearch() {
@@ -550,8 +578,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         // Unknown labels are still useful to native TAG endpoints such as JM.
         // Only Copy's known paths are ever passed to its path-based tag API.
         val label = previous.query.trim()
-        val tag = dev.mangaflow.data.copyTagForName(label, knownSearchTags)
-            ?: MangaTag(label, "label:" + dev.mangaflow.data.normalizedBodySourceTitle(label))
+        val tag = searchTagForName(label) ?: MangaTag(label, "label:" + normalizedBodySourceTitle(label))
         if (tag.name.isBlank() || tag.name.length > 120) return
         cancelTagLookup()
         showBrowse(previous.copy(query = "", selectedTags = (previous.selectedTags + tag).distinctBy(MangaTag::path),
@@ -564,7 +591,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val previous = _browse.value
         val selected = if (previous.selectedTags.any { it.path == tag.path })
             previous.selectedTags.filterNot { it.path == tag.path } else previous.selectedTags + tag
-        knownSearchTags = (knownSearchTags + tag).distinctBy(MangaTag::path)
+        if (!tag.path.startsWith("label:"))
+            knownSearchTags = (knownSearchTags + tag).distinctBy(MangaTag::path)
         showBrowse(BrowseState(query = previous.query, searchTarget = previous.searchTarget, selectedTags = selected,
             mode = previous.mode, period = previous.period, audience = previous.audience))
     }
@@ -587,7 +615,6 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val selection = retainedSearchSelection ?: return
         retainedSearchSelection = null
         showBrowse(selection)
-        if (selection.searchTarget == SearchTarget.TAG) copyExplore.ensureDirectory()
     }
 
     fun clearSearch() {
@@ -602,19 +629,25 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val previous = _browse.value
         if (manga.sourceId == "copy") knownSearchTags =
             (knownSearchTags + manga.tagPaths.map { MangaTag(it.key, it.value) }).distinctBy(MangaTag::path)
-        val tag = if (manga.sourceId == "copy") {
-            manga.tagPaths[name]?.let { MangaTag(name, it) }
-                ?: dev.mangaflow.data.copyTagForName(name, knownSearchTags)
-        } else MangaTag(name, "label:" + dev.mangaflow.data.normalizedBodySourceTitle(name))
+        val known = searchTagForName(name)
+        val own = manga.tagPaths[name]?.takeIf(String::isNotBlank)
+        val tag = when (manga.sourceId) {
+            "copy" -> own?.let { path -> known?.takeIf { it.path == path } ?: MangaTag(name, path) }
+                ?: known?.takeUnless { it.path.startsWith("label:") }
+            "mangadex", "komiic" -> {
+                val label = known ?: MangaTag(name, "label:" + normalizedBodySourceTitle(name))
+                if (own == null) label else label.copy(kind = MangaTagKind.GENRE,
+                    providerPaths = label.providerPaths + (manga.sourceId to own))
+            }
+            else -> known ?: MangaTag(name, "label:" + normalizedBodySourceTitle(name))
+        }
         val selection = BrowseState(query = if (tag == null) name else "",
             searchTarget = SearchTarget.TAG, selectedTags = listOfNotNull(tag),
             tagsLoading = tag == null,
             mode = previous.mode, period = previous.period, audience = previous.audience)
         if (tag == null) pendingTagLookup = manga to name
         showBrowse(selection)
-        copyExplore.ensureDirectory()
         if (tag != null) {
-            knownSearchTags = (knownSearchTags + tag).distinctBy(MangaTag::path)
             return
         }
         _browse.update { it.copy(tagsLoading = true) }
@@ -638,16 +671,123 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     fun retrySearchTags() {
         pendingTagLookup?.let { (manga, tag) -> openTagSearch(manga, tag); return }
-        copyExplore.refreshDirectory()
-        _browse.update { it.withSearchTagDirectory() }
+        loadSearchTagDirectories(forceRefresh = true)
+    }
+
+    private fun searchTagForName(name: String): MangaTag? {
+        val choices = _browse.value.withSearchTagDirectory().availableTags
+        val key = normalizedBodySourceTitle(name)
+        val copy = choices.filter { "copy" in it.providerPaths }
+        return dev.mangaflow.data.copyTagForName(name, copy) ?: choices.singleOrNull { tag ->
+            normalizedBodySourceTitle(tag.name) == key ||
+                tag.aliases.any { normalizedBodySourceTitle(it) == key }
+        }
     }
 
     private fun BrowseState.withSearchTagDirectory(): BrowseState {
         val directory = copyExplore.state.value
         val ownsStatus = searchTarget == SearchTarget.TAG && pendingTagLookup == null
-        return copy(availableTags = knownSearchTags,
-            tagsLoading = if (ownsStatus) directory.directoryLoading else tagsLoading,
-            tagsError = if (ownsStatus) directory.themeError else tagsError)
+        val copyEnabled = "copy" in repository.enabledSources()
+        val ownsGenres = genreDirectoryScope.isNotBlank() && genreDirectoryScope == repository.ordinaryGenreScope()
+        val genres = genreDirectory.tags.takeIf { ownsGenres }.orEmpty()
+        val directoryErrors = listOfNotNull(directory.themeError.takeIf { copyEnabled }, genreDirectoryError.takeIf { ownsGenres })
+        return copy(availableTags = combineOrdinarySearchTags(knownSearchTags, genres, copyEnabled),
+            tagsLoading = if (ownsStatus) (ownsGenres && genreDirectoryLoading) ||
+                (copyEnabled && directory.directoryLoading) else tagsLoading,
+            tagsError = if (ownsStatus) directoryErrors.takeIf { it.isNotEmpty() }?.joinToString(" · ") else tagsError)
+    }
+
+    private fun loadSearchTagDirectories(forceRefresh: Boolean = false) {
+        if ("copy" in repository.enabledSources()) {
+            if (forceRefresh) copyExplore.refreshDirectory()
+            else copyExplore.ensureDirectory()
+        }
+        val scope = repository.ordinaryGenreScope()
+        if (genreDirectoryScope != scope) {
+            resetGenreDirectory()
+            genreDirectoryScope = scope
+        }
+        if (!forceRefresh && (genreDirectoryJob?.isActive == true || wallTimeMillis() - genreDirectoryUpdatedAt in
+                0 until contentCachePreferences(application).freshMillis(ContentCacheKind.DISCOVERY))) {
+            _browse.update { it.withSearchTagDirectory() }
+            return
+        }
+        genreDirectoryJob?.cancel()
+        val request = ++genreDirectoryRequest
+        genreDirectoryLoading = true
+        genreDirectoryError = null
+        _browse.update { it.withSearchTagDirectory() }
+        genreDirectoryJob = viewModelScope.launch {
+            fun ownsRequest() = request == genreDirectoryRequest && repository.ordinaryGenreScope() == scope
+            try {
+                val result = repository.ordinarySearchGenres(forceRefresh)
+                if (!ownsRequest()) return@launch
+                genreDirectory = result
+                genreDirectoryUpdatedAt = wallTimeMillis()
+                genreDirectoryError = result.errors.takeIf { it.isNotEmpty() }?.entries
+                    ?.joinToString(" · ") { (source, message) -> "${sourceDisplayName(source)}：$message" }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (failure: Exception) {
+                if (ownsRequest()) {
+                    genreDirectoryError = failure.message ?: "多来源题材暂时无法读取。"
+                }
+            } finally {
+                if (ownsRequest()) {
+                    genreDirectoryLoading = false
+                    _browse.update { it.withSearchTagDirectory() }
+                }
+            }
+            if (ownsRequest()) refreshNewTagBindings(scope)
+        }
+    }
+
+    private fun BrowseState.withCurrentTagBindings(): BrowseState {
+        if (searchTarget != SearchTarget.TAG || selectedTags.isEmpty()) return this
+        val choices = availableTags.associateBy(MangaTag::path)
+        return copy(selectedTags = selectedTags.map { selected ->
+            val observed = choices[selected.path] ?: availableTags.singleOrNull { tag ->
+                selected.providerPaths.any { (source, native) -> tag.providerPaths[source] == native }
+            } ?: return@map selected
+            observed.copy(path = selected.path, providerPaths = observed.providerPaths + selected.providerPaths)
+        })
+    }
+
+    /** Add newly known native filters to the still-current selection, rechecking only changed lanes. */
+    private suspend fun refreshNewTagBindings(scope: String) {
+        val original = _browse.value
+        if (original.withCurrentTagBindings().cacheKey == original.cacheKey) return
+        while (original.cacheKey == _browse.value.cacheKey) {
+            val active = browseJob?.takeIf { it.isActive } ?: break
+            active.join()
+        }
+        val current = _browse.value
+        if (current.cacheKey != original.cacheKey || scope != repository.ordinaryGenreScope()) return
+        val refreshed = current.withCurrentTagBindings()
+        if (refreshed.cacheKey == current.cacheKey) return
+        val affected = current.selectedTags.zip(refreshed.selectedTags).flatMap { (old, new) ->
+            val before = old.additionalSearchPaths()
+            val after = new.additionalSearchPaths()
+            (before.keys + after.keys).filter { before[it] != after[it] }
+        }.toSet()
+        if (affected.isEmpty()) return
+        val request = ++browseRequestId
+        val generation = browseCache.generation
+        _browse.value = refreshed.copy(loading = current.items.isEmpty(), refreshing = current.items.isNotEmpty(),
+            error = null, failedPage = null)
+        browseJob = viewModelScope.launch {
+            refreshFederatedRange(refreshed, request, generation, forceRefresh = false, onlySources = affected)
+        }
+    }
+
+    private fun resetGenreDirectory() {
+        ++genreDirectoryRequest
+        genreDirectoryJob?.cancel()
+        genreDirectory = MangaGenreDirectory(emptyList())
+        genreDirectoryScope = ""
+        genreDirectoryUpdatedAt = 0L
+        genreDirectoryLoading = false
+        genreDirectoryError = null
     }
 
     /** Invalidation retires old work and errors; only a visible user action starts a new request. */
@@ -655,6 +795,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         cancelTagLookup()
         knownSearchTags = CopySearchTags
         copyExplore.clearCache()
+        resetGenreDirectory()
         _browse.update { it.withSearchTagDirectory() }
     }
 
@@ -692,9 +833,11 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         browseJob?.cancel()
         val requestId = ++browseRequestId
         val generation = browseCache.generation
-        val configured = selection.copy(sourceScope = repository.sourceConfigurationKey()).withSearchTagDirectory()
+        val configured = selection.copy(sourceScope = repository.sourceConfigurationKey(),
+            alignedTagSources = emptyMap()).withSearchTagDirectory().withCurrentTagBindings()
         val memory = browseCache.cached(configured.cacheKey)
         _browse.value = memory?.restore(configured) ?: configured
+        if (configured.searchTarget == SearchTarget.TAG) loadSearchTagDirectories()
         browseJob = viewModelScope.launch {
             val snapshot = memory ?: browseCache.read(configured.cacheKey, generation)
             if (requestId != browseRequestId) return@launch
@@ -719,6 +862,51 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             if (requestId != browseRequestId) return@launch
             _browse.update { it.copy(loading = snapshot == null, refreshing = snapshot != null) }
             loadBrowse(_browse.value, 0, requestId, generation)
+        }
+    }
+
+    /** Direct tag membership, pagination and BrowseCache keep their upstream results.
+     * Supplement those visible cards with exact links already proven by the existing work owner. */
+    private suspend fun observeAlignedTagSources() {
+        val identities = _browse.map { it.tagSearchIdentities() }.distinctUntilChanged()
+        combine(identities, unifiedChapters.revision, repository.sourceDiscovery,
+            repository.sourceErrors, services.sourceConfiguration) { selection, _, discovery, failures, configuration ->
+            val aligned = if (selection == null || selection.sourceScope != configuration) emptyMap()
+            else withContext(Dispatchers.IO) {
+                val eligible = repository.sources.filterNot { it.adult }.map { it.id }.toSet()
+                    .intersect(repository.enabledSources())
+                val direct = selection.groups.values.flatten()
+                val alreadyShown = direct.mapTo(mutableSetOf(), ::federatedMangaIdentity)
+                val saved = try {
+                    unifiedChapters.alignedSearchLinks(direct.mapTo(mutableSetOf(), Manga::id))
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (_: Exception) {
+                    emptyMap()
+                }
+                buildMap {
+                    for ((id, group) in selection.groups) {
+                        val versions = group.flatMap { work ->
+                            val states = discovery[work.id].orEmpty()
+                            val errors = failures[work.id].orEmpty()
+                            saved[work.id].orEmpty().filter { version ->
+                                val source = version.sourceId
+                                source in eligible && version.id !in errors &&
+                                    states[source]?.status.let { it == null || it == SourceDiscoveryStatus.LINKED } &&
+                                    federatedMangaIdentity(version) !in alreadyShown
+                            }
+                        }.distinctBy(::federatedMangaIdentity)
+                        if (versions.isNotEmpty()) put(id, versions)
+                    }
+                }
+            }
+            Triple(selection, configuration, aligned)
+        }.collect { (selection, configuration, aligned) ->
+            _browse.update { current ->
+                if (configuration == services.sourceConfiguration.value && current.tagSearchIdentities() == selection)
+                    current.copy(alignedTagSources = aligned)
+                else current
+            }
         }
     }
 

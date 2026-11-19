@@ -17,9 +17,10 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.EmojiEvents
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ButtonDefaults
@@ -37,6 +38,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -72,6 +74,7 @@ internal fun MangaAwardsScreen(
     active: Boolean,
     onBack: () -> Unit,
     onOpen: (SiteRankedWork) -> Unit,
+    sectionTabs: (@Composable () -> Unit)? = null,
 ) {
     var awardId by rememberSaveable { mutableStateOf<String?>(null) }
     var year by rememberSaveable { mutableStateOf<Int?>(MangaAwardsCatalog.years().firstOrNull()) }
@@ -81,9 +84,11 @@ internal fun MangaAwardsScreen(
     val positions = rememberSaveableStateHolder()
     val focus = LocalFocusManager.current
     val colors = MaterialTheme.colorScheme
-    val controlColors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)
-    var yearMenu by remember { mutableStateOf(false) }
+    val pageTitle = if (sectionTabs != null) "漫画榜单" else "年度获奖"
+    var filterMenu by remember { mutableStateOf<AwardFilterMenu?>(null) }
+    var awardPresent by remember { mutableStateOf(false) }
     var yearPresent by remember { mutableStateOf(false) }
+    var menuAwardId by remember { mutableStateOf(awardId) }
     var menuYear by remember { mutableStateOf(year) }
     var infoVisible by remember { mutableStateOf(false) }
     var infoPresent by remember { mutableStateOf(false) }
@@ -92,13 +97,13 @@ internal fun MangaAwardsScreen(
     var lookupPresent by remember { mutableStateOf(false) }
     var requestedWork by remember { mutableStateOf<SiteRankedWork?>(null) }
     val modalPresent = infoVisible || infoPresent || lookupVisible || lookupPresent
-    val contentReady = active && !modalPresent && !yearMenu && !yearPresent
+    val contentReady = active && !modalPresent && filterMenu == null && !awardPresent && !yearPresent
 
     LaunchedEffect(active) {
         if (!active) {
             focus.clearFocus(force = true)
             requestedWork = null
-            yearMenu = false
+            filterMenu = null
             infoVisible = false
             lookupVisible = false
         }
@@ -106,30 +111,29 @@ internal fun MangaAwardsScreen(
     BackHandler(active && !modalPresent) {
         focus.clearFocus(force = true)
         when {
-            yearMenu -> yearMenu = false
-            yearPresent -> Unit
+            filterMenu != null -> filterMenu = null
+            awardPresent || yearPresent -> Unit
             else -> onBack()
         }
     }
 
     RankingPageFrame(Modifier.fillMaxSize().background(colors.background.copy(alpha = .97f))
-        .semantics { paneTitle = "年度获奖" }, header = {
+        .semantics { paneTitle = pageTitle }, header = {
         Column {
-            PageTitleHeader("年度获奖", backdrop,
+            PageTitleHeader(pageTitle, backdrop,
                 navigation = { Box(Modifier.motionInputGate(contentReady)) { navigation() } },
                 modifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
                     .padding(horizontal = 8.dp, vertical = 2.dp),
                 summary = {
-                    Text("年度获奖", Modifier.padding(start = 4.dp),
+                    Text(pageTitle, Modifier.padding(start = 4.dp),
                         style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }, actions = {
-                    MotionTextButton(onClick = {
+                    if (sectionTabs == null) MotionIconButton(onClick = {
                         focus.clearFocus(force = true)
                         onBack()
-                    }, enabled = contentReady, contentPadding = PaddingValues(horizontal = 8.dp),
-                        colors = controlColors) {
-                        Text("各站榜单", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    }, enabled = contentReady, modifier = Modifier.size(44.dp), tooltip = "返回榜单") {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, null, Modifier.size(19.dp))
                     }
                     MotionIconButton(onClick = {
                         focus.clearFocus(force = true)
@@ -139,52 +143,51 @@ internal fun MangaAwardsScreen(
                         Icon(Icons.Outlined.Info, "获奖目录说明", Modifier.size(19.dp))
                     }
                 })
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                BoxWithConstraints(Modifier.weight(1f)) {
-                    val width = maxWidth.coerceAtLeast(272.dp * LocalDensity.current.fontScale.coerceAtLeast(1f))
-                    Box(Modifier.horizontalScroll(rememberScrollState())) {
-                        MotionTabs(selected = (award?.ordinal ?: -1) + 1,
-                            labels = listOf("全部", "漫画大赏", "小学馆", "讲谈社"),
-                            onSelect = { index ->
-                                if (contentReady) {
-                                    val next = MangaAward.entries.getOrNull(index - 1)
-                                    awardId = next?.id
-                                    val available = MangaAwardsCatalog.years(next)
-                                    val selectedYear = year
-                                    if (selectedYear != null && selectedYear !in available) year = available.firstOrNull()
-                                }
-                            }, modifier = Modifier.width(width).motionInputGate(contentReady),
-                            treatment = MotionTabTreatment.Capsule, fontSize = 12.sp, controlHeight = 44.dp)
-                    }
-                }
-                Box {
-                    MotionTextButton(onClick = {
+            if (sectionTabs != null) Box(Modifier.motionInputGate(contentReady)) { sectionTabs() }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                val awardMenu = filterMenu == AwardFilterMenu.AWARD && active && !modalPresent
+                val yearMenu = filterMenu == AwardFilterMenu.YEAR && active && !modalPresent
+                AwardFilterControl("奖项", award?.title ?: "全部奖项", backdrop, awardMenu,
+                    modifier = Modifier.weight(1f, fill = false),
+                    enabled = contentReady || awardMenu, onPresence = { awardPresent = it },
+                    onDismiss = { if (awardMenu) filterMenu = null },
+                    onToggle = {
                         focus.clearFocus(force = true)
-                        if (!yearMenu) menuYear = year
-                        yearMenu = !yearMenu
-                    }, enabled = active && !modalPresent,
-                        colors = controlColors, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                        modifier = Modifier.heightIn(min = 44.dp)) {
-                        Column {
-                            Text("年份", style = MaterialTheme.typography.labelMedium)
-                            Text(year?.toString() ?: "历年", style = MaterialTheme.typography.labelSmall,
-                                color = colors.onSurfaceVariant)
+                        if (!awardMenu) menuAwardId = awardId
+                        filterMenu = if (awardMenu) null else AwardFilterMenu.AWARD
+                    }) {
+                    RankingMenuChoice("全部奖项", menuAwardId == null, awardMenu) {
+                        awardId = null
+                        filterMenu = null
+                    }
+                    MangaAward.entries.forEach { next ->
+                        RankingMenuChoice(next.title, menuAwardId == next.id, awardMenu) {
+                            awardId = next.id
+                            val available = MangaAwardsCatalog.years(next)
+                            val selectedYear = year
+                            if (selectedYear != null && selectedYear !in available) year = available.firstOrNull()
+                            filterMenu = null
                         }
                     }
-                    CompactGlassPopover(yearMenu && active && !modalPresent, backdrop,
-                        onDismiss = { yearMenu = false }, maximumWidth = 180.dp,
-                        onPresenceChange = { yearPresent = it }) {
-                        Column(Modifier.selectableGroup()) {
-                            RankingMenuChoice("全部年份", menuYear == null, active && yearMenu) {
-                                year = null
-                                yearMenu = false
-                            }
-                            years.forEach { value ->
-                                RankingMenuChoice(value.toString(), menuYear == value, active && yearMenu) {
-                                    year = value
-                                    yearMenu = false
-                                }
-                            }
+                }
+                AwardFilterControl("公布年份", year?.let { "${it} 年公布" } ?: "全部年份", backdrop, yearMenu,
+                    modifier = Modifier.weight(1f, fill = false),
+                    enabled = contentReady || yearMenu, onPresence = { yearPresent = it },
+                    onDismiss = { if (yearMenu) filterMenu = null },
+                    onToggle = {
+                        focus.clearFocus(force = true)
+                        if (!yearMenu) menuYear = year
+                        filterMenu = if (yearMenu) null else AwardFilterMenu.YEAR
+                    }) {
+                    RankingMenuChoice("全部年份", menuYear == null, yearMenu) {
+                        year = null
+                        filterMenu = null
+                    }
+                    years.forEach { value ->
+                        RankingMenuChoice(value.toString(), menuYear == value, yearMenu) {
+                            year = value
+                            filterMenu = null
                         }
                     }
                 }
@@ -204,13 +207,27 @@ internal fun MangaAwardsScreen(
                         .motionInputGate(contentReady && pane == selection),
                     contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp,
                         bottom = 24.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding()),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    items(rows, key = { it.key }, contentType = { "award-work" }) { entry ->
-                        MangaAwardRow(entry, contentReady && pane == selection) {
-                            lookupEntry = entry
-                            requestedWork = null
-                            lookupPresent = true
-                            lookupVisible = true
+                    verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    rows.groupBy { it.year }.forEach { (announcementYear, yearRows) ->
+                        if (pane.year == null) item(key = "award-year:$announcementYear", contentType = "award-year") {
+                            Text("${announcementYear} 年公布", Modifier.padding(top = 10.dp, bottom = 4.dp)
+                                .semantics { heading() }, style = MaterialTheme.typography.titleLarge)
+                        }
+                        yearRows.groupBy { it.award to it.edition }.forEach { (group, works) ->
+                            val (source, edition) = group
+                            if (pane.award == null || edition != null) item(
+                                key = "award-group:$announcementYear:${source.id}:$edition", contentType = "award-group",
+                            ) {
+                                MangaAwardGroupHeading(source.takeIf { pane.award == null }, edition)
+                            }
+                            items(works, key = { it.key }, contentType = { "award-work" }) { entry ->
+                                MangaAwardRow(entry, contentReady && pane == selection) {
+                                    lookupEntry = entry
+                                    requestedWork = null
+                                    lookupPresent = true
+                                    lookupVisible = true
+                                }
+                            }
                         }
                     }
                     if (rows.isEmpty()) item("empty-awards") {
@@ -269,26 +286,59 @@ private data class AwardCatalogueSelection(val award: MangaAward?, val year: Int
     val key: String get() = (award?.id ?: "all") + ":" + (year?.toString() ?: "all")
 }
 
+private enum class AwardFilterMenu { AWARD, YEAR }
+
+@Composable
+private fun AwardFilterControl(label: String, value: String, backdrop: HazeState, visible: Boolean,
+    enabled: Boolean, onToggle: () -> Unit, onDismiss: () -> Unit, onPresence: (Boolean) -> Unit,
+    modifier: Modifier = Modifier, choices: @Composable ColumnScope.() -> Unit) {
+    Box(modifier) {
+        MotionTextButton(onClick = onToggle, enabled = enabled,
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+            contentPadding = PaddingValues(horizontal = 8.dp),
+            modifier = Modifier.heightIn(min = 44.dp).semantics { contentDescription = "$label，$value" }) {
+            Text(value, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.labelLarge,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.width(3.dp))
+            Icon(Icons.Outlined.ExpandMore, null, Modifier.size(17.dp))
+        }
+        CompactGlassPopover(visible, backdrop, onDismiss, onPresenceChange = onPresence,
+            alignToStart = true, maximumWidth = 232.dp) {
+            Column(Modifier.selectableGroup(), content = choices)
+        }
+    }
+}
+
+@Composable
+private fun MangaAwardGroupHeading(award: MangaAward?, edition: Int?) {
+    val editionLabel = edition?.let { "第${it}届" }
+    Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(award?.title ?: editionLabel.orEmpty(), Modifier.weight(1f).semantics { heading() },
+            style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        if (award != null && editionLabel != null) Text(editionLabel,
+            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
 @Composable
 private fun MangaAwardRow(entry: MangaAwardEntry, enabled: Boolean, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
+    val category = entry.category.takeUnless { it == "获奖作品" || entry.award == MangaAward.MANGA_TAISHO && it == "大赏" }
+    val summary = listOfNotNull(category, entry.authors.joinToString(" / ").takeIf { it.isNotBlank() })
+        .joinToString(" · ")
     Row(Modifier.fillMaxWidth().clickable(enabled = enabled, role = Role.Button, interactionSource = interaction,
-        indication = null, onClick = onClick).motionPress(interaction, enabled, pressedScale = .985f)
-        .padding(vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(Icons.Outlined.EmojiEvents, null, Modifier.padding(end = 12.dp).size(21.dp),
-            tint = colors.onSurfaceVariant.copy(alpha = .65f))
+        indication = null, onClickLabel = "查找作品", onClick = onClick).motionPress(interaction, enabled, pressedScale = .985f)
+        .heightIn(min = 48.dp).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(entry.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                 style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text(entry.authors.joinToString(" / "), style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("${entry.year} · ${entry.award.title} · ${entry.category}",
-                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                maxLines = 3, overflow = TextOverflow.Ellipsis)
+            if (summary.isNotBlank()) Text(summary, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
-        Icon(Icons.Outlined.ChevronRight, "查找作品", Modifier.padding(start = 8.dp).size(18.dp),
+        Icon(Icons.Outlined.ChevronRight, null, Modifier.padding(start = 8.dp).size(18.dp),
             tint = colors.onSurfaceVariant.copy(alpha = .6f))
     }
 }
@@ -372,8 +422,7 @@ private fun MangaAwardLookupDialog(
                 Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp)
                     .semantics { paneTitle = "查找获奖作品" }) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Outlined.EmojiEvents, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
-                        Text("查找作品", Modifier.weight(1f).padding(start = 8.dp),
+                        Text("查找作品", Modifier.weight(1f),
                             style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
                         MotionIconButton(onClick = { provenance = !provenance }, enabled = open,
                             modifier = Modifier.size(44.dp), tooltip = "查看获奖出处") {

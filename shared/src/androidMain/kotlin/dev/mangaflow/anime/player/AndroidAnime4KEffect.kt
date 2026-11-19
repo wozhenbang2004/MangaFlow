@@ -4,6 +4,8 @@ package dev.mangaflow.anime.player
 
 import android.content.Context
 import android.opengl.GLES20
+import android.os.Debug
+import android.os.SystemClock
 import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.util.GlProgram
 import androidx.media3.common.util.GlUtil
@@ -32,13 +34,15 @@ internal class AndroidAnime4KEffect(
 
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram {
         val revision = programRevision.incrementAndGet()
-        val currentReport: (AnimeVideoEnhancementState) -> Unit = { observation ->
+        val currentReport: (AnimeVideoEnhancementState, () -> Boolean) -> Unit = { observation, sampleIsCurrent ->
             // A format/HDR transition may instantiate this same effect again. Retired GL
             // programs cannot replace observations from its new input stream.
-            if (programRevision.get() == revision) report(observation) { programRevision.get() == revision }
+            if (programRevision.get() == revision && sampleIsCurrent()) report(observation) {
+                programRevision.get() == revision && sampleIsCurrent()
+            }
         }
         fun unavailable(detail: String): GlShaderProgram {
-            currentReport(AnimeVideoEnhancementState(mode, AnimeVideoEnhancementPhase.UNAVAILABLE, detail))
+            currentReport(AnimeVideoEnhancementState(mode, AnimeVideoEnhancementPhase.UNAVAILABLE, detail)) { true }
             return PassthroughShaderProgram()
         }
         if (useHdr) return unavailable("HDR 保持原画；当前 Anime4K 组合仅处理 SDR")
@@ -76,7 +80,7 @@ internal class AndroidAnime4KEffect(
                 // handles. Retire this context through the native-only recovery, instead of
                 // keeping it alive behind a passthrough and leaking failed compiler objects.
                 currentReport(AnimeVideoEnhancementState(mode, AnimeVideoEnhancementPhase.FAILED,
-                    "GPU 未能编译 Anime4K，正在恢复原生画面"))
+                    "GPU 未能编译 Anime4K，正在恢复原生画面")) { true }
                 throw VideoFrameProcessingException.from(failure)
             }
             return unavailable("当前 GPU 未能建立 Anime4K 处理，已保留原画")
@@ -89,7 +93,7 @@ private class Anime4KGlProgram(
     private val plan: Anime4KGlPlan,
     private val programs: List<GlProgram>,
     private val copy: GlProgram,
-    private val report: (AnimeVideoEnhancementState) -> Unit,
+    private val report: (AnimeVideoEnhancementState, () -> Boolean) -> Unit,
 ) : BaseGlShaderProgram(false, 1) {
     private data class Scratch(val texture: Int, val framebuffer: Int)
 
@@ -97,19 +101,25 @@ private class Anime4KGlProgram(
     private var inputWidth = 0
     private var inputHeight = 0
     private var enhancing = false
-    private var reportedActive = false
+    private var failed = false
+    private val observationGeneration = AtomicLong(0L)
+    private var submittedFrames = 0L
+    private var lastSubmissionAt: Long? = null
+    private var sampleStartedAt: Long? = null
+    private var sampleStartFrames = 0L
     private val dimensions = FloatArray(2)
     private val savedFramebuffer = IntArray(1)
     private val savedViewport = IntArray(4)
 
     override fun configure(inputWidth: Int, inputHeight: Int): Size {
+        resetObservations()
         releaseScratch()
         this.inputWidth = inputWidth
         this.inputHeight = inputHeight
         dimensions[0] = inputWidth.toFloat()
         dimensions[1] = inputHeight.toFloat()
         enhancing = false
-        reportedActive = false
+        failed = false
         try {
             val maximum = IntArray(1)
             val viewport = IntArray(2)
@@ -141,26 +151,32 @@ private class Anime4KGlProgram(
                 }
             }
             enhancing = true
-            report(observation(AnimeVideoEnhancementPhase.CONFIGURED, "Anime4K 已配置，等待视频帧"))
+            publishObservation(AnimeVideoEnhancementPhase.CONFIGURED, "Anime4K 已配置，等待视频帧")
             return Size(inputWidth * 2, inputHeight * 2)
         } catch (failure: Exception) {
             // configure runs before BaseGlShaderProgram allocates/binds its output. A same-size
             // copy is safe for a known capability limit with fully owned/released resources.
             releaseScratch()
             if (failure is Anime4KUnavailable) {
-                report(observation(AnimeVideoEnhancementPhase.UNAVAILABLE, failure.message))
+                publishObservation(AnimeVideoEnhancementPhase.UNAVAILABLE, failure.message)
                 return Size(inputWidth, inputHeight)
             }
             // GlUtil allocation helpers, like GlProgram, can fail before returning a newly
             // allocated handle. A GL/OOM failure retires the complete context, rather than
             // leaving unknown allocations behind or assuming that the driver is still healthy.
-            report(observation(AnimeVideoEnhancementPhase.FAILED,
-                "GPU 无法建立浮点处理资源，正在恢复原生画面"))
+            failed = true
+            publishObservation(AnimeVideoEnhancementPhase.FAILED, "GPU 无法建立浮点处理资源，正在恢复原生画面")
             throw VideoFrameProcessingException.from(failure)
         }
     }
 
     override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
+        val startedAt = if (enhancing) SystemClock.elapsedRealtime() else 0L
+        val sampleStart = sampleStartedAt?.takeUnless {
+            lastSubmissionAt?.let { last -> startedAt - last >= ANIME4K_ACTIVITY_TIMEOUT_MS } == true
+        }
+        val sampleSubmission = enhancing && (sampleStart == null || startedAt - sampleStart >= ANIME4K_SAMPLE_MS)
+        val cpuStartedAt = if (sampleSubmission) Debug.threadCpuTimeNanos() else -1L
         GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, savedFramebuffer, 0)
         GLES20.glGetIntegerv(GLES20.GL_VIEWPORT, savedViewport, 0)
         val blend = GLES20.glIsEnabled(GLES20.GL_BLEND)
@@ -193,29 +209,45 @@ private class Anime4KGlProgram(
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
                 GlUtil.checkGlError()
             }
-            // Only a completed, error-free frame submission can advance past CONFIGURED.
-            // This is pipeline activity, not a claim of display quality, FPS or presentation.
-            if (!reportedActive) {
-                reportedActive = true
-                report(observation(AnimeVideoEnhancementPhase.ACTIVE, "Anime4K 正在处理视频帧"))
-            }
         } catch (failure: Exception) {
-            report(observation(AnimeVideoEnhancementPhase.FAILED, "Anime4K 处理失败，正在恢复原画"))
+            failed = true
+            resetObservations()
+            publishObservation(AnimeVideoEnhancementPhase.FAILED, "Anime4K 处理失败，正在恢复原画")
             throw VideoFrameProcessingException.from(failure)
         } finally {
             restoreOutput()
             if (blend) GLES20.glEnable(GLES20.GL_BLEND) else GLES20.glDisable(GLES20.GL_BLEND)
             if (scissor) GLES20.glEnable(GLES20.GL_SCISSOR_TEST) else GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
         }
+        // Count successful submissions of the complete CNN chain. This does not
+        // wait for the GPU or read back pixels, and it is not a display signal.
+        submittedFrames++
+        lastSubmissionAt = startedAt
+        if (sampleSubmission) {
+            val cpuNanos = if (cpuStartedAt >= 0L)
+                Debug.threadCpuTimeNanos().takeIf { it >= cpuStartedAt }?.minus(cpuStartedAt) else null
+            publishObservation(AnimeVideoEnhancementPhase.ACTIVE, null,
+                sampleFrames = sampleStart?.let { submittedFrames - sampleStartFrames },
+                sampleDurationMillis = sampleStart?.let { startedAt - it },
+                submitThreadCpuNanos = cpuNanos)
+            sampleStartedAt = startedAt
+            sampleStartFrames = submittedFrames
+        }
     }
 
     override fun flush() {
-        reportedActive = false
+        resetObservations()
         super.flush()
+        if (enhancing && !failed) {
+            publishObservation(AnimeVideoEnhancementPhase.CONFIGURED, "Anime4K 已配置，等待视频帧")
+        }
     }
 
     override fun release() {
         // Every GL allocation belongs to this program/context, never the UI or a later session.
+        resetObservations()
+        val wasEnhancing = enhancing
+        enhancing = false
         var failure: Exception? = null
         fun releasePart(action: () -> Unit) {
             try { action() } catch (error: Exception) { if (failure == null) failure = error }
@@ -225,6 +257,7 @@ private class Anime4KGlProgram(
         releasePart { copy.delete() }
         releasePart { super.release() }
         failure?.let { throw VideoFrameProcessingException.from(it) }
+        if (wasEnhancing && !failed) publishObservation(AnimeVideoEnhancementPhase.WAITING, null)
     }
 
     private fun releaseScratch() {
@@ -242,13 +275,40 @@ private class Anime4KGlProgram(
         GLES20.glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3])
     }
 
-    private fun observation(phase: AnimeVideoEnhancementPhase, detail: String?) = AnimeVideoEnhancementState(
-        mode = mode, phase = phase, detail = detail,
-        inputWidth = inputWidth, inputHeight = inputHeight,
-        outputWidth = if (enhancing) inputWidth * 2 else inputWidth,
-        outputHeight = if (enhancing) inputHeight * 2 else inputHeight,
-    )
+    private fun resetObservations() {
+        observationGeneration.incrementAndGet()
+        submittedFrames = 0L
+        lastSubmissionAt = null
+        sampleStartedAt = null
+        sampleStartFrames = 0L
+    }
+
+    private fun publishObservation(
+        phase: AnimeVideoEnhancementPhase,
+        detail: String?,
+        sampleFrames: Long? = null,
+        sampleDurationMillis: Long? = null,
+        submitThreadCpuNanos: Long? = null,
+    ) {
+        val generation = observationGeneration.get()
+        val hasResources = enhancing && !failed
+        report(AnimeVideoEnhancementState(
+            mode = mode, phase = phase, detail = detail,
+            inputWidth = inputWidth.takeIf { it > 0 }, inputHeight = inputHeight.takeIf { it > 0 },
+            outputWidth = if (hasResources) inputWidth * 2 else null,
+            outputHeight = if (hasResources) inputHeight * 2 else null,
+            observation = if (hasResources) AnimeVideoEnhancementObservation(
+                submittedFrames, sampleFrames, sampleDurationMillis, submitThreadCpuNanos,
+                inputWidth.toLong() * inputHeight * RGBA16F_BYTES_PER_PIXEL * scratch.size,
+                recentlySubmitting = phase == AnimeVideoEnhancementPhase.ACTIVE,
+            ) else null,
+        )) { observationGeneration.get() == generation }
+    }
 }
+
+internal const val ANIME4K_ACTIVITY_TIMEOUT_MS = 1_500L
+private const val ANIME4K_SAMPLE_MS = 750L
+private const val RGBA16F_BYTES_PER_PIXEL = 8L
 
 private class Anime4KUnavailable(message: String) : Exception(message)
 

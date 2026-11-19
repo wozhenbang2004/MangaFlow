@@ -184,7 +184,7 @@ import kotlinx.coroutines.withContext
 
 private enum class Section(val title: String, val icon: ImageVector) {
     DISCOVER("漫画", Icons.Outlined.Explore), ANIME("动漫", Icons.Outlined.Tv),
-    BOARDS("各站榜单", Icons.Outlined.Leaderboard), LIBRARY("书架", Icons.Outlined.Bookmarks),
+    BOARDS("漫画榜单", Icons.Outlined.Leaderboard), LIBRARY("书架", Icons.Outlined.Bookmarks),
     DOWNLOADS("下载", Icons.Outlined.FileDownload), ACCOUNT("账号", Icons.Outlined.AccountCircle),
     SETTINGS("设置", Icons.Outlined.Settings),
 }
@@ -1460,7 +1460,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             Box(Modifier.fillMaxSize().padding(top = chromePadding)) {
                                                 EmptyMessage("当前范围暂无站点榜单", "已接入的站点尚不提供此内容范围的榜单。")
                                             }
-                                            PageTitleHeader("各站榜单", searchBackdrop, navigation,
+                                            PageTitleHeader("漫画榜单", searchBackdrop, navigation,
                                                 modifier = Modifier.align(Alignment.TopCenter)
                                                     .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
                                                     .padding(horizontal = 8.dp, vertical = 2.dp))

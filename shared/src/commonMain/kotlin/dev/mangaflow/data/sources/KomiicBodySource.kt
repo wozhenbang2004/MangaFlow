@@ -16,6 +16,7 @@ import dev.mangaflow.net.MediaType.Companion.toMediaType
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrl
 import dev.mangaflow.net.Request
 import dev.mangaflow.net.RequestBody.Companion.toRequestBody
+import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.data.DecimalNumber as BigDecimal
 import dev.mangaflow.data.toPortableDecimalOrNull
@@ -29,14 +30,38 @@ class KomiicBodySource(private val selectedBaseUrl: () -> String = { BASE_URLS.f
     private val home: String get() = selectedBaseUrl().takeIf { it in BASE_URLS } ?: BASE_URLS.first()
     override val info get() = BodySourceInfo("komiic", "Komiic", "繁中", home, "$home/favicon.ico")
     private val http = SourceHttp(sourceId = info.id)
+    override val supportsNativeGenres = true
+
+    override suspend fun genreDirectory(): List<SourceChoice> = withContext(Dispatchers.IO) {
+        // The pinned Keiyoushi Queries.kt reads this same field in its public listing queries.
+        graphQl("genreCatalogue", "query genreCatalogue { allCategory { id name } }", JSONObject())
+            .getJSONArray("allCategory").bodyObjects().mapNotNull { row ->
+                val id = categoryId(row.bodyId("id"))
+                row.bodyText("name").takeIf(String::isNotBlank)?.let { SourceChoice(id, it) }
+            }.distinctBy(SourceChoice::id)
+    }
+
+    override suspend fun searchGenres(ids: List<String>, page: Int): MangaPage = withContext(Dispatchers.IO) {
+        require(ids.size in 1..12 && page in 0..333) { "Komiic 类型筛选或分页超出范围。" }
+        val data = graphQl("comicByCategories",
+            "query comicByCategories(\$categoryId: [ID!]!, \$pagination: Pagination!) { comics: comicByCategories(categoryId: \$categoryId, pagination: \$pagination) $COMIC }",
+            JSONObject().put("categoryId", JSONArray(ids.map(::categoryId).distinct())).put("pagination", pagination(page)))
+        listing(data, page)
+    }
 
     override suspend fun discover(page: Int): MangaPage = withContext(Dispatchers.IO) {
         require(page in 0..333)
-        val variables = JSONObject().put("pagination", JSONObject().put("limit", 30).put("offset", page * 30)
-            .put("orderBy", "DATE_UPDATED").put("status", "").put("asc", false))
+        val variables = JSONObject().put("pagination", pagination(page))
         val data = graphQl("commonQuery", "query commonQuery(\$pagination: Pagination!) { comics: recentUpdate(pagination: \$pagination) $COMIC }", variables)
+        listing(data, page)
+    }
+
+    private fun pagination(page: Int) = JSONObject().put("limit", 30).put("offset", page * 30)
+        .put("orderBy", "DATE_UPDATED").put("status", "").put("asc", false)
+
+    private fun listing(data: JSONObject, page: Int): MangaPage {
         val rows = data.getJSONArray("comics").bodyObjects().map(::manga)
-        MangaPage(rows, rows.size == 30, if (rows.size == 30) page + 1 else null)
+        return MangaPage(rows, rows.size == 30, if (rows.size == 30) page + 1 else null)
     }
 
     override suspend fun search(query: String, page: Int): MangaPage = withContext(Dispatchers.IO) {
@@ -99,13 +124,17 @@ class KomiicBodySource(private val selectedBaseUrl: () -> String = { BASE_URLS.f
 
     private fun manga(row: JSONObject): Manga {
         val id = id(row.bodyId("id"))
+        val tags = row.optJSONArray("categories")?.bodyObjects()?.mapNotNull { category ->
+            category.bodyText("name").takeIf(String::isNotBlank)?.let { it to category.bodyText("id") }
+        }.orEmpty()
         return Manga(
             id = SourceKeys.manga(info.id, id), title = row.bodyText("title"),
             coverUrl = row.bodyText("imageUrl").takeIf(String::isNotBlank)?.let { imageUrl(it) }.orEmpty(),
             authors = row.optJSONArray("authors")?.bodyObjects()?.map { it.bodyText("name") }?.filter(String::isNotBlank).orEmpty(),
             description = row.bodyText("description"),
             status = when (row.bodyText("status")) { "ONGOING" -> "连载"; "END" -> "完结"; else -> "" },
-            tags = row.optJSONArray("categories")?.bodyObjects()?.map { it.bodyText("name") }?.filter(String::isNotBlank).orEmpty(),
+            tags = tags.map { it.first }.distinct(),
+            tagPaths = tags.filter { it.second.isNotBlank() }.toMap(),
             sourceUrl = "$home/comic/$id", sourceId = info.id, sourceMangaId = id,
         )
     }
@@ -135,6 +164,9 @@ class KomiicBodySource(private val selectedBaseUrl: () -> String = { BASE_URLS.f
 
     private fun nativeId(value: String): String = id(SourceKeys.decodeManga(value).mangaId)
     private fun id(value: String): String = value.also { require(it.matches(Regex("[0-9]{1,30}"))) { "Komiic 标识无效。" } }
+    private fun categoryId(value: String): String = value.also {
+        require(it.length in 1..128 && it.none { character -> character <= ' ' || character == '\u007f' }) { "Komiic 类型标识无效。" }
+    }
 
     companion object {
         val BASE_URLS = listOf("https://komiic.com", "https://komiic.cc")

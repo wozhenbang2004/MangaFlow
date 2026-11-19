@@ -4,8 +4,10 @@ import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.NetworkClient
+import dev.mangaflow.net.NetworkTransferObservation
 import dev.mangaflow.net.Request
 import dev.mangaflow.net.retryAfterMillis
 import dev.mangaflow.platform.ConcurrentMap
@@ -45,23 +47,28 @@ internal class SourceHttp(
         val until = wallTimeMillis() + seconds.coerceAtMost(86_400) * 1_000
         pauses.merge(url.origin(), until) { current, incoming -> maxOf(current, incoming) }
     }
-    suspend fun request(request: Request, operation: String, publicUrl: String = "", readAccountErrors: Boolean = false): SourceResponse {
+    suspend fun request(request: Request, operation: String, publicUrl: String = "", readAccountErrors: Boolean = false,
+        pinnedRoute: DownloadRouteSnapshot? = null, maximumBytes: Long = MAX_TEXT_BYTES,
+        onTransfer: ((NetworkTransferObservation) -> Unit)? = null,
+    ): SourceResponse {
         val remaining = pauses[request.url.origin()]?.minus(wallTimeMillis()) ?: 0
         if (remaining > 0) {
             val seconds = ceil(remaining / 1000.0).toLong()
             throw SourceException("$operation 暂时受限，请在 ${seconds} 秒后重试。", publicUrl, seconds)
         }
-        val frozen = currentCoroutineContext()[ChapterDownloadTransport]
-        val route = if (frozen == null) {
+        val frozen = if (pinnedRoute == null) currentCoroutineContext()[ChapterDownloadTransport] else null
+        val route = pinnedRoute ?: if (frozen == null) {
             (sourceId ?: ReviewProviders.routingOwner(request.url.host))?.let { DownloadRoutingStore.activeSourceSnapshot(it) }
                 ?: DownloadRoutingStore.activeDefaultSnapshot()
         } else null
-        val owned = route?.takeIf { it.mode != DownloadRouteMode.SYSTEM }?.let { NetworkClient(http1Only = http1Only, route = it) }
+        val owned = route?.takeIf { pinnedRoute != null || it.mode != DownloadRouteMode.SYSTEM }?.let {
+            NetworkClient(http1Only = http1Only, route = it, onTransfer = onTransfer)
+        }
         if (owned != null) synchronized(transportLock) { routedClients.add(owned) }
         val transport = frozen?.client ?: owned ?: ordinaryClient
         val response = try {
-            if (frozen?.connectionCheck == true) ConnectionProbeBudget.requests.withPermit { transport.execute(request, MAX_TEXT_BYTES) }
-            else transport.execute(request, MAX_TEXT_BYTES)
+            if (frozen?.connectionCheck == true) ConnectionProbeBudget.requests.withPermit { transport.execute(request, maximumBytes) }
+            else transport.execute(request, maximumBytes)
         }
         catch (cancel: CancellationException) { throw cancel }
         catch (failure: DownloadRouteException) { throw failure }

@@ -47,6 +47,7 @@ import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 
 /**
@@ -86,6 +87,11 @@ class UnifiedMangaRepository(
     private data class CachedSearch(val storedAt: Long, val generation: Long, val page: MangaPage)
     private val sourceSearchCache = LinkedHashMap<SearchKey, CachedSearch>()
     private val searchLocks = Array(16) { Mutex() }
+    private data class GenreSource(val adapter: BodySource, val info: BodySourceInfo, val route: String) {
+        val key: String get() = "${info.id}:${info.revision}:${info.homeUrl}:$route"
+    }
+    private data class CachedGenres(val observedAt: Long, val tags: List<MangaTag>)
+    private val genreCache = LinkedHashMap<String, CachedGenres>()
     private data class CachedChapterPages(val storedAtNanos: Long, val pages: List<Page>)
     private val pageCache = LinkedHashMap<String, CachedChapterPages>()
     private class ChapterPageRequest(val generation: Long, val result: Deferred<List<Page>>, var readers: Int = 0)
@@ -275,6 +281,59 @@ class UnifiedMangaRepository(
     suspend fun sourceFeedFilters(id: String, feedId: String): List<SourceFilter> = if (id == "copy") emptyList() else adapter(id).feedFilters(feedId)
     suspend fun sourceSearchFilters(id: String): List<SourceFilter> = if (id == "copy") emptyList() else adapter(id).searchFilters()
     suspend fun sourceHotTags(id: String): List<String> = if (id == "copy") emptyList() else adapter(id).hotTags()
+
+    private fun genreSources(eligibility: SourceEligibility): List<GenreSource> = adapters.values.mapNotNull { source ->
+        if (!source.supportsNativeGenres) return@mapNotNull null
+        val info = source.info
+        if (info.adult || info.id !in eligibility.ids) null
+        else GenreSource(source, info, DownloadRoutingStore.sourceRevision(info.id))
+    }.sortedBy { it.info.id }
+
+    fun ordinaryGenreScope(): String {
+        val current = sourceEligibility
+        return genreSources(current).joinToString("|", prefix = "ordinary-genres:v1:copy=${"copy" in current.ids}|") { it.key }
+    }
+
+    /** Read only declared genre directories, once per active provider and route, without browsing works. */
+    suspend fun ordinarySearchGenres(forceRefresh: Boolean = false): MangaGenreDirectory = supervisorScope {
+        val eligibility = sourceEligibility
+        val scope = ordinaryGenreScope()
+        fun ensureCurrent(sourceId: String? = null) {
+            ensureEligibility(eligibility, sourceId)
+            if (scope != ordinaryGenreScope()) throw CancellationException("漫画类型目录的来源或线路已更改。")
+        }
+        val results = genreSources(eligibility).map { source -> async {
+            val sourceId = source.info.id
+            ensureCurrent(sourceId)
+            val key = source.key
+            val cached = if (copy.contentCachePolicy().enabled)
+                synchronized(unifiedMangaRepositoryStateLock) { genreCache[key] } else null
+            if (!forceRefresh && cached != null &&
+                repositoryNanoTime() - cached.observedAt in 0 until freshNanos(ContentCacheKind.DISCOVERY)) {
+                return@async Triple(sourceId, cached.tags, null)
+            }
+            try {
+                val choices = withTimeoutOrNull(8_000L) {
+                    diagnostics.track(sourceId, SourceStage.CATALOGUE) { source.adapter.genreDirectory() }
+                } ?: throw SourceException("读取类型目录超时，请重试。")
+                val tags = choices.asSequence().filter { it.id.isNotBlank() && it.title.isNotBlank() }
+                    .distinctBy(SourceChoice::id).take(1_000).map { mangaGenreTag(sourceId, it.id, it.title) }.toList()
+                ensureCurrent(sourceId)
+                if (copy.contentCachePolicy().enabled) synchronized(unifiedMangaRepositoryStateLock) {
+                    genreCache.remove(key)
+                    genreCache[key] = CachedGenres(repositoryNanoTime(), tags)
+                    while (genreCache.size > 12) genreCache.remove(genreCache.keys.first())
+                }
+                Triple(sourceId, tags, null)
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) {
+                Triple(sourceId, cached?.tags.orEmpty(), failure.message ?: "类型目录暂时无法读取。")
+            }
+        } }.map { it.await() }
+        ensureCurrent()
+        MangaGenreDirectory(results.flatMap { it.second }, results.mapNotNull { (id, _, error) -> error?.let { id to it } }.toMap())
+    }
+
     suspend fun sourceTargetSearch(id: String, query: String, target: SearchTarget, page: Int): MangaPage =
         if (target == SearchTarget.TRANSLATION_GROUP) throw SourceException("汉化组仅支持拷贝专用检索。")
         else diagnostics.track(id, SourceStage.SEARCH) {
@@ -368,7 +427,7 @@ class UnifiedMangaRepository(
         if (target == SearchTarget.TRANSLATION_GROUP)
             throw SourceException("汉化组仅支持拷贝专用检索。")
         val text = query.trim()
-        val tags = selectedTags.distinctBy { it.name.trim().lowercase() }.take(12)
+        val tags = selectedTags.distinctBy(MangaTag::path).take(12)
         require(text.length in 1..120 || text.isEmpty() && tags.isNotEmpty()) {
             "请输入 1–120 个字的搜索内容或选择标签。"
         }
@@ -433,10 +492,16 @@ class UnifiedMangaRepository(
         if (target != SearchTarget.TITLE || selectedTags.isNotEmpty()) {
             if (sourceId == "copy") {
                 // Tags from another source carry only a display name, never its foreign path.
-                val copyTags = selectedTags.mapNotNull { tag ->
-                    if (tag.path.startsWith("label:")) copyTagForName(tag.name)
+                val mapped = selectedTags.map { tag ->
+                    val boundPath = tag.providerPaths["copy"]
+                    if (boundPath != null) tag.copy(path = boundPath)
+                    else if (tag.path.startsWith("label:")) copyTagForName(tag.name)
                     else tag.takeIf { it.path.isNotBlank() }
-                }.distinctBy(MangaTag::path)
+                }
+                if (target == SearchTarget.TAG && mapped.any { it == null }) {
+                    throw SourceException("拷贝目录缺少部分所选标签的编号；其他来源仍会搜索。")
+                }
+                val copyTags = mapped.filterNotNull().distinctBy(MangaTag::path)
                 if (target == SearchTarget.TAG && copyTags.isEmpty()) {
                     val mapped = copyTagForName(query)
                     if (mapped != null) return copy.search("", SearchTarget.TAG, listOf(mapped), page)
@@ -447,13 +512,22 @@ class UnifiedMangaRepository(
             val term = if (target == SearchTarget.TAG)
                 selectedTags.firstOrNull()?.name?.trim().orEmpty().ifBlank { query }
             else query
-            val result = adapter(sourceId).searchTarget(term, target, page)
+            val adapter = adapter(sourceId)
+            val paths = selectedTags.mapNotNull { it.providerPaths[sourceId] }
+            if (target == SearchTarget.TAG && adapter.supportsNativeGenres &&
+                paths.isNotEmpty() && paths.size == selectedTags.size) {
+                val result = adapter.searchGenres(paths, page)
+                return result.copy(items = result.items.filter { manga -> paths.all { it in manga.tagPaths.values } })
+            }
+            val result = adapter.searchTarget(term, target, page)
             if (selectedTags.isEmpty()) return result
-            val required = selectedTags.map { normalizedBodySourceTitle(it.name) }.filter(String::isNotBlank)
+            val required = selectedTags.map { tag ->
+                (tag.aliases + tag.name).map(::normalizedBodySourceTitle).filter(String::isNotBlank).toSet()
+            }.filter { it.isNotEmpty() }
             return result.copy(items = result.items.filter { manga ->
                 val actual = (manga.tags + manga.tagPaths.keys)
                     .map(::normalizedBodySourceTitle).toSet()
-                required.all { it in actual }
+                required.all { group -> group.any(actual::contains) }
             })
         }
         val retained = if (page > 0) synchronized(unifiedMangaRepositoryStateLock) {

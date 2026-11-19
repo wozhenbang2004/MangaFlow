@@ -27,6 +27,7 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Info
@@ -50,8 +51,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -118,69 +121,76 @@ internal fun SiteRankingsScreen(
     val positions = rememberSaveableStateHolder()
     val ready = active && !state.restoringSelection
     val menuWidth = 208.dp * LocalDensity.current.fontScale.coerceIn(1f, 1.4f)
+    val sectionTabs: @Composable () -> Unit = {
+        val tabsActive = active && !siteMenu && !filterMenu && !sitePresent && !filterPresent &&
+            !infoPresent && !filtersPresent
+        MotionTabs(if (awards) 1 else 0, listOf("各站榜单", "年度获奖"), onSelect = {
+            if (tabsActive) awards = it == 1
+        }, treatment = MotionTabTreatment.Underline, controlHeight = 44.dp,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).motionInputGate(tabsActive))
+    }
     if (awards) {
         positions.SaveableStateProvider("award-catalogue") {
             MangaAwardsScreen(controller.repository, backdrop, navigation, active,
-                onBack = { awards = false }, onOpen = onOpen)
+                onBack = { awards = false }, onOpen = onOpen, sectionTabs = sectionTabs)
         }
         return
     }
     RankingPageFrame(Modifier.fillMaxSize().background(colors.background.copy(alpha = .97f))
-        .semantics { paneTitle = "各站榜单" }, header = {
+        .semantics { paneTitle = "漫画榜单" }, header = {
         Column {
-            PageTitleHeader("各站榜单", backdrop, navigation,
+            PageTitleHeader("漫画榜单", backdrop, navigation,
                 modifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
                     .padding(horizontal = 8.dp, vertical = 2.dp),
                 summary = {
-                    Box {
-                        MotionTextButton(onClick = {
-                            if (!siteMenu) menuSite = state.selection.site
-                            siteMenu = !siteMenu; filterMenu = false
-                        }, enabled = ready && !filterPresent && !filtersPresent && !infoPresent,
-                            modifier = Modifier.semantics { stateDescription = "当前站点：${state.selection.site.title}" },
-                            contentPadding = PaddingValues(horizontal = 4.dp), colors = controlColors) {
-                            if (!state.restoringSelection) ReviewSourceMark(state.selection.site.id, size = 17.dp)
-                            Column(Modifier.weight(1f, fill = false).padding(start = 6.dp)) {
-                                Text("榜单站点", style = MaterialTheme.typography.labelMedium)
-                                if (!state.restoringSelection) Text(state.selection.site.title,
-                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
-                        CompactGlassPopover(siteMenu && ready, backdrop, onDismiss = { siteMenu = false },
-                            onPresenceChange = { sitePresent = it }, alignToStart = true, maximumWidth = menuWidth) {
-                            Column(Modifier.selectableGroup()) {
-                                RankingSite.entries.forEach { site ->
-                                    RankingMenuChoice(site.title, site == menuSite, ready && siteMenu,
-                                        sourceId = site.id) {
-                                        siteMenu = false; controller.selectSite(site)
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    Text("漫画榜单", Modifier.padding(start = 4.dp),
+                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }, actions = {
-                    MotionTextButton(onClick = { awards = true },
-                        enabled = ready && !siteMenu && !filterMenu && !sitePresent && !filterPresent &&
-                            !infoPresent && !filtersPresent,
-                        contentPadding = PaddingValues(horizontal = 8.dp), colors = controlColors) {
-                        Text("年度获奖", style = MaterialTheme.typography.labelMedium, maxLines = 1)
-                    }
                     Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
                         if (state.refreshing) MotionBusyIndicator(Modifier.size(17.dp))
                         else MotionIconButton(onClick = controller::refresh,
-                            enabled = ready && !state.loading && !state.loadingMore,
+                            enabled = ready && !state.loading && !state.loadingMore && !sitePresent && !filterPresent &&
+                                !filtersPresent && !infoPresent,
                             modifier = Modifier.size(44.dp), tooltip = "刷新当前榜单") {
                             Icon(Icons.Outlined.Refresh, "刷新当前榜单", Modifier.size(19.dp))
                         }
                     }
                 })
+            sectionTabs()
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box {
+                    MotionTextButton(onClick = {
+                        if (!siteMenu) menuSite = state.selection.site
+                        siteMenu = !siteMenu; filterMenu = false
+                    }, enabled = ready && !filterPresent && !filtersPresent && !infoPresent,
+                        modifier = Modifier.heightIn(min = 44.dp).semantics {
+                            contentDescription = "选择榜单站点"
+                            stateDescription = "当前站点 ${state.selection.site.title}"
+                        }, contentPadding = PaddingValues(horizontal = 7.dp), colors = controlColors) {
+                        if (!state.restoringSelection) ReviewSourceMark(state.selection.site.id, size = 16.dp)
+                        Text(if (state.restoringSelection) "站点" else state.selection.site.title,
+                            Modifier.padding(horizontal = 5.dp).widthIn(max = 84.dp),
+                            style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Icon(Icons.Outlined.ExpandMore, null, Modifier.size(14.dp))
+                    }
+                    CompactGlassPopover(siteMenu && ready, backdrop, onDismiss = { siteMenu = false },
+                        onPresenceChange = { sitePresent = it }, alignToStart = true, maximumWidth = menuWidth) {
+                        Column(Modifier.selectableGroup()) {
+                            RankingSite.entries.forEach { site ->
+                                RankingMenuChoice(site.title, site == menuSite, ready && siteMenu,
+                                    sourceId = site.id) {
+                                    siteMenu = false; controller.selectSite(site)
+                                }
+                            }
+                        }
+                    }
+                }
                 val kinds = state.selection.availableKinds
                 val keywordMatch = state.selection.site == RankingSite.BANGUMI &&
                     state.selection.filters.query.isNotBlank()
-                if (keywordMatch) Text("搜索匹配", Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 12.dp),
-                    style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                if (keywordMatch) Text("搜索匹配", Modifier.weight(1f).padding(horizontal = 6.dp),
+                    style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 else if (kinds.size > 1) BoxWithConstraints(Modifier.weight(1f)) {
                     val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                     val minimum = 48.dp * scale * kinds.size
@@ -191,8 +201,7 @@ internal fun SiteRankingsScreen(
                             treatment = MotionTabTreatment.Underline, fontSize = 12.sp, controlHeight = 44.dp,
                             modifier = Modifier.width(tabsWidth).motionInputGate(ready))
                     }
-                } else Text("评分", Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 12.dp),
-                    style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                } else Spacer(Modifier.weight(1f))
                 Box {
                     MotionTextButton(onClick = {
                         if (!filterMenu) {
@@ -205,10 +214,11 @@ internal fun SiteRankingsScreen(
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                         colors = controlColors, modifier = Modifier.heightIn(min = 44.dp)) {
                         Icon(Icons.Outlined.FilterList, null, Modifier.size(16.dp))
-                        Column(Modifier.padding(start = 5.dp)) {
-                            Text("范围与筛选", style = MaterialTheme.typography.labelMedium)
+                        Column(Modifier.padding(start = 5.dp).widthIn(max = 88.dp)) {
+                            Text("筛选", style = MaterialTheme.typography.labelMedium)
                             if (!state.restoringSelection) Text(state.selection.scopeLabel,
-                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant, maxLines = 1)
+                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                     CompactGlassPopover(filterMenu && ready, backdrop, onDismiss = { filterMenu = false },
@@ -366,12 +376,11 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
     top: androidx.compose.ui.unit.Dp, active: Boolean, onRetry: () -> Unit, onMore: () -> Unit,
     onOpen: (SiteRankedWork) -> Unit, onInspect: (SiteRankedWork) -> Unit,
 ) {
-    if (state.loading && state.entries.isEmpty()) {
-        Box(Modifier.fillMaxSize().padding(top = top).mangaHazeSource(backdrop)) { QuietLoading("正在读取榜单…") }
-        return
-    }
     val grid = rememberLazyGridState()
     val desktop = platformKind == PlatformKind.DESKTOP
+    val empty = state.entries.isEmpty()
+    val firstError = state.error?.takeIf { empty || (state.failedPage ?: 0) == 0 }
+    val fetching = empty && (state.loading || state.restoringSelection)
     val nearEnd by remember(grid) { derivedStateOf {
         val info = grid.layoutInfo
         info.totalItemsCount > 0 && (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 4
@@ -386,23 +395,48 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
             contentPadding = PaddingValues(start = 16.dp, end = if (desktop) 24.dp else 16.dp,
                 top = top + 6.dp, bottom = 24.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding()),
             horizontalArrangement = Arrangement.spacedBy(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (empty || state.refreshing || firstError != null) item(key = "rank-status", span = { GridItemSpan(maxLineSpan) }) {
+                val site = state.selection.site.title
+                val observed = state.fetchedAt.takeIf { it > 0 }?.let { formatInstantMillis(it, "MM-dd HH:mm") }
+                Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 9.dp)
+                    .semantics { liveRegion = LiveRegionMode.Polite }, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (fetching) MotionBusyIndicator(Modifier.size(16.dp))
+                        Text(when {
+                            state.restoringSelection -> "正在恢复榜单选择"
+                            fetching -> "正在读取$site 榜单"
+                            firstError != null && empty -> "$site 榜单暂未载入"
+                            firstError != null -> observed?.let { "更新未完成 · 显示 $it 的结果" } ?: "更新未完成 · 显示上次结果"
+                            state.refreshing -> "正在更新 · 显示已载入结果"
+                            state.loadingMore -> "正在读取下一页"
+                            else -> "当前条件没有匹配作品"
+                        }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (firstError != null) {
+                        Text(firstError, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        MotionTextButton(onClick = onRetry, enabled = active) { Text("重试") }
+                    } else if (empty && !fetching && !state.loadingMore) {
+                        if (state.hasMore) MotionTextButton(onClick = onMore, enabled = active) { Text("继续读取") }
+                        else Text("可调整筛选或切换站点。", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
             items(state.entries, key = { it.work.key }, contentType = { "native-ranking" }) { entry ->
                 SiteRankingRow(entry, state.selection.kind, entry.work.key in state.linkedIds,
                     state.selection.key, onOpen, onInspect)
             }
-            item(key = "rank-footer", span = { GridItemSpan(maxLineSpan) }) {
+            if (!empty && (state.loadingMore || state.error != null && firstError == null)) item(
+                key = "rank-footer", span = { GridItemSpan(maxLineSpan) }
+            ) {
                 Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                    when {
-                        state.error != null -> {
-                            Text(state.error, Modifier.padding(vertical = 10.dp),
-                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            MotionTextButton(onClick = onRetry, enabled = active) { Text("重试") }
-                        }
-                        state.loadingMore -> MotionBusyIndicator(Modifier.padding(16.dp).size(20.dp))
-                        state.entries.isEmpty() -> EmptyMessage("当前条件没有条目", "可以放宽年份、题材等筛选条件，或更换站点。")
+                    if (state.loadingMore) MotionBusyIndicator(Modifier.padding(16.dp).size(20.dp))
+                    else if (state.error != null) {
+                        Text(state.error, Modifier.padding(vertical = 10.dp),
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        MotionTextButton(onClick = onRetry, enabled = active) { Text("重试") }
                     }
-                    if (state.entries.isEmpty() && state.hasMore && !state.loadingMore && state.error == null)
-                        MotionTextButton(onClick = onMore, enabled = active) { Text("继续读取") }
                 }
             }
         }
@@ -500,17 +534,27 @@ internal fun RankedWorkDetailScreen(
     var info by remember(work.key) { mutableStateOf(false) }
     var failures by remember(work.key) { mutableStateOf(false) }
     var otherResults by rememberSaveable(work.key) { mutableStateOf(false) }
+    var expandedGroup by rememberSaveable(work.key) { mutableStateOf<String?>(null) }
     LaunchedEffect(active) { if (!active) { info = false; failures = false } }
     val candidates = remember(state.rankedSources, state.rankedLinkedSource) {
-        state.rankedSources.filterNot { it.manga.id == state.rankedLinkedSource?.id }
+        val linked = state.rankedLinkedSource?.let(::federatedMangaIdentity)
+        state.rankedSources.filterNot { federatedMangaIdentity(it.manga) == linked }
     }
     val primary = remember(candidates) { candidates.filter { it.relevant } }
     val secondary = remember(candidates, primary) { candidates.filterNot { it in primary } }
     val rows = if (otherResults || !state.rankedSourcesLoading && primary.isEmpty()) candidates else primary
+    val groups = remember(state.rankedLinkedSource, rows) {
+        val matches = listOfNotNull(state.rankedLinkedSource) + rows.map { it.manga }
+        val order = matches.mapIndexed { index, manga -> federatedMangaIdentity(manga) to index }.toMap()
+        groupFederatedSearch(matches).sortedBy { group -> group.matches.minOf { order.getValue(federatedMangaIdentity(it)) } }
+    }
+    val verified = remember(state.rankedSources) {
+        state.rankedSources.filter { it.verified }.mapTo(hashSetOf()) { federatedMangaIdentity(it.manga) }
+    }
     val sourceReady = active && state.rankedOpeningSourceId == null
     val submit = {
         if (active && query.isNotBlank()) {
-            focus.clearFocus(); otherResults = false; failures = false
+            focus.clearFocus(); otherResults = false; failures = false; expandedGroup = null
             onSearch(work.key, query)
         }
     }
@@ -557,12 +601,12 @@ internal fun RankedWorkDetailScreen(
                     .padding(horizontal = 8.dp, vertical = 2.dp))
             }) {
             val scroll = rememberLazyListState()
-            val previewId = state.rankedSourcePreview?.selected?.id
-            LaunchedEffect(previewId, active) {
-                if (active && previewId != null && !scroll.isScrollInProgress &&
-                    scroll.layoutInfo.visibleItemsInfo.any { it.key == previewId }) {
-                    val index = rows.indexOfFirst { it.manga.id == previewId }
-                    if (index >= 0) scroll.animateScrollToItem(2 + (if (state.rankedLinkedSource != null) 1 else 0) + index)
+            val previewIdentity = state.rankedSourcePreview?.selected?.let(::federatedMangaIdentity)
+            LaunchedEffect(previewIdentity, active) {
+                if (active && previewIdentity != null && !scroll.isScrollInProgress) {
+                    val group = groups.firstOrNull { group -> group.matches.any { federatedMangaIdentity(it) == previewIdentity } }
+                    val visible = scroll.layoutInfo.visibleItemsInfo.firstOrNull { it.key == group?.let(::rankedSourceGroupKey) }
+                    if (visible != null) scroll.animateScrollToItem(visible.index)
                 }
             }
             val bottom = screenFitContentInsets().asPaddingValues().calculateBottomPadding()
@@ -632,28 +676,42 @@ internal fun RankedWorkDetailScreen(
                             }
                         }
                     }
-                    state.rankedLinkedSource?.let { linked ->
-                        item(key = "linked-source") {
-                            RankedSourceRow(linked, repository, matched = false, linked = true,
-                                opening = state.rankedOpeningSourceId == linked.id, enabled = sourceReady,
-                                onClick = { onUseSource(work.key, linked) })
-                        }
-                    }
-                    items(rows, key = { it.manga.id }, contentType = { "reading-source" }) { candidate ->
-                        val selectedPreview = state.rankedSourcePreview?.takeIf { it.selected.id == candidate.manga.id }
+                    items(groups, key = ::rankedSourceGroupKey, contentType = { "reading-source" }) { group ->
+                        val groupKey = rankedSourceGroupKey(group)
+                        val identities = remember(group.matches) { group.matches.mapTo(hashSetOf(), ::federatedMangaIdentity) }
+                        val linked = state.rankedLinkedSource?.let(::federatedMangaIdentity)?.takeIf(identities::contains)
+                        val preview = state.rankedSourcePreview?.takeIf { federatedMangaIdentity(it.selected) in identities }
+                        val opening = group.matches.any { it.id == state.rankedOpeningSourceId }
+                        val showChoices = group.matches.size > 1
+                        val expanded = showChoices && (expandedGroup == groupKey || preview != null || opening)
                         Column {
-                            RankedSourceRow(selectedPreview?.canonical ?: candidate.manga, repository,
-                                matched = selectedPreview == null && candidate.verified, linked = false,
-                                opening = state.rankedOpeningSourceId == candidate.manga.id,
-                                enabled = sourceReady && selectedPreview == null,
-                                showAction = selectedPreview == null,
-                                onClick = { onUseSource(work.key, candidate.manga) })
-                            MotionTabContent(selected = selectedPreview,
-                                contentKey = { it?.canonical?.id ?: "closed" }, order = { if (it == null) 0 else 1 },
-                                fillContent = false, modifier = Modifier.fillMaxWidth()) { preview ->
-                                if (preview == null) Spacer(Modifier.height(0.dp))
-                                else RankedSourceConfirmation(work, preview, backdrop,
-                                    enabled = sourceReady && selectedPreview?.request == preview.request,
+                            RankedSourceRow(if (showChoices) group.manga else preview?.canonical ?: group.manga, repository,
+                                matched = preview == null && !showChoices && identities.any(verified::contains),
+                                linked = linked != null, opening = opening, enabled = sourceReady && preview == null,
+                                showAction = showChoices || preview == null, choices = group.matches.takeIf { showChoices }.orEmpty(),
+                                expanded = expanded, onClick = {
+                                    if (showChoices) expandedGroup = groupKey.takeUnless { expanded }
+                                    else onUseSource(work.key, group.manga)
+                                })
+                            if (expanded) {
+                                val counts = remember(group.matches) { group.matches.groupingBy { it.sourceId }.eachCount() }
+                                group.matches.forEach { manga ->
+                                    val identity = federatedMangaIdentity(manga)
+                                    key(identity) {
+                                        val selected = preview?.takeIf { federatedMangaIdentity(it.selected) == identity }
+                                        RankedSourceChoice(manga, linked = identity == linked, matched = identity in verified,
+                                            selected = selected != null, repeated = (counts[manga.sourceId] ?: 0) > 1,
+                                            opening = manga.id == state.rankedOpeningSourceId,
+                                            enabled = sourceReady && selected == null,
+                                            onClick = { onUseSource(work.key, manga) })
+                                        if (selected != null) RankedSourceConfirmation(work, selected, backdrop,
+                                            enabled = sourceReady, onConfirm = {
+                                                onConfirmSource(work.key, selected.canonical.id, selected.request)
+                                            }, onCancel = { onCancelPreview(work.key, selected.request) })
+                                    }
+                                }
+                            } else if (!showChoices && preview != null) {
+                                RankedSourceConfirmation(work, preview, backdrop, enabled = sourceReady,
                                     onConfirm = { onConfirmSource(work.key, preview.canonical.id, preview.request) },
                                     onCancel = { onCancelPreview(work.key, preview.request) })
                             }
@@ -662,7 +720,7 @@ internal fun RankedWorkDetailScreen(
                     if (secondary.isNotEmpty() && (primary.isNotEmpty() || state.rankedSourcesLoading)) item(key = "other-results") {
                         MotionTextButton(onClick = { otherResults = !otherResults }, enabled = active,
                             contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
-                            Text(if (otherResults) "收起其他结果" else "其他搜索结果 · " + secondary.size,
+                            Text(if (otherResults) "收起其他结果" else "其他搜索结果",
                                 style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                             Icon(Icons.Outlined.ExpandMore, null, Modifier.padding(start = 5.dp).size(16.dp))
                         }
@@ -752,14 +810,24 @@ private fun RankedConfirmationEvidence(source: String, manga: Manga) {
     }
 }
 
+private fun rankedSourceGroupKey(group: FederatedSearchGroup): String =
+    normalizedBodySourceTitle(group.manga.title).takeIf(String::isNotBlank)?.let { "work:$it" }
+        ?: federatedMangaIdentity(group.manga).let { (source, id) -> "native:${source.length}:$source:$id" }
+
 @Composable
 private fun RankedSourceRow(manga: Manga, repository: MangaRepository, matched: Boolean,
-    linked: Boolean, opening: Boolean, enabled: Boolean, showAction: Boolean = true, onClick: () -> Unit) {
+    linked: Boolean, opening: Boolean, enabled: Boolean, showAction: Boolean = true,
+    choices: List<Manga> = emptyList(), expanded: Boolean = false, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
+    val hasChoices = choices.isNotEmpty()
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
         .clickable(enabled = enabled, role = Role.Button, interactionSource = interaction,
-            indication = null, onClickLabel = "核对来源资料并打开", onClick = onClick)
+            indication = null, onClickLabel = when {
+                !hasChoices -> "核对来源资料并打开"
+                expanded -> "收起阅读来源"
+                else -> "展开阅读来源"
+            }, onClick = onClick)
         .motionPress(interaction, enabled, pressedScale = .988f).heightIn(min = 76.dp).padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically) {
         MangaCover(manga, repository, Modifier.width(42.dp).height(60.dp).mangaCoverCard(8.dp))
@@ -767,18 +835,65 @@ private fun RankedSourceRow(manga: Manga, repository: MangaRepository, matched: 
             Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                 style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
-            val source = manga.sourceName.ifBlank { sourceDisplayName(manga.sourceId) }
-            Text(listOf(source, manga.authors.take(2).joinToString(" / ")).filter(String::isNotBlank).joinToString(" · "),
-                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 2,
-                overflow = TextOverflow.Ellipsis)
+            if (hasChoices) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                val count = choices.distinctBy { federatedMangaIdentity(it).first }.size
+                SearchSourceMarks(choices, Modifier.width((count * 18).coerceAtMost(82).dp))
+                if (linked) Icon(Icons.Outlined.Link, "组内有已关联来源", Modifier.size(14.dp), tint = colors.onSurfaceVariant)
+                Text(if (count == 1) "${choices.size} 个条目" else "$count 个来源",
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant, maxLines = 1)
+            } else {
+                val source = manga.sourceName.ifBlank { sourceDisplayName(manga.sourceId) }
+                Text(listOf(source, manga.authors.take(2).joinToString(" / ")).filter(String::isNotBlank).joinToString(" · "),
+                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 2,
+                    overflow = TextOverflow.Ellipsis)
+            }
         }
         if (showAction) Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
             if (opening) MotionBusyIndicator(Modifier.size(17.dp), strokeWidth = 1.6.dp)
-            else Icon(if (linked) Icons.Outlined.Link else if (matched) Icons.Outlined.Check else Icons.Outlined.ChevronRight,
-                if (linked) "已关联的来源" else if (matched) "作品信息匹配" else null,
-                Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+            else if (hasChoices) Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+            else RankedSourceStatus(linked, matched)
         }
     }
+}
+
+@Composable
+private fun RankedSourceChoice(manga: Manga, linked: Boolean, matched: Boolean, selected: Boolean,
+    repeated: Boolean, opening: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val name = manga.sourceName.ifBlank { sourceDisplayName(manga.sourceId) }
+    val interaction = remember { MutableInteractionSource() }
+    Row(Modifier.fillMaxWidth().padding(start = 54.dp).clip(RoundedCornerShape(10.dp))
+        .background(if (selected) colors.surfaceContainerHigh else androidx.compose.ui.graphics.Color.Transparent)
+        .semantics {
+            if (selected) stateDescription = "等待确认"
+        }
+        .clickable(enabled = enabled, role = Role.Button, interactionSource = interaction, indication = null,
+            onClickLabel = "核对${name}的${manga.title}", onClick = onClick)
+        .motionPress(interaction, enabled, pressedScale = .99f)
+        .heightIn(min = 44.dp).padding(horizontal = 6.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        ChapterSourceLogo(manga.sourceId, name, Modifier.size(16.dp))
+        Column(Modifier.weight(1f)) {
+            Text(name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (repeated) {
+                val (_, id) = federatedMangaIdentity(manga)
+                val details = listOf(manga.authors.take(2).joinToString(" / "), manga.latestChapter, id)
+                    .filter(String::isNotBlank).joinToString(" · ")
+                Text(details, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        if (opening) MotionBusyIndicator(Modifier.size(16.dp))
+        else if (!selected) RankedSourceStatus(linked, matched)
+    }
+}
+
+@Composable
+private fun RankedSourceStatus(linked: Boolean, matched: Boolean) {
+    Icon(if (linked) Icons.Outlined.Link else if (matched) Icons.Outlined.Check else Icons.Outlined.ChevronRight,
+        if (linked) "已关联的来源" else if (matched) "作品信息匹配" else null,
+        Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 private fun rankingCount(value: Long): String = when {

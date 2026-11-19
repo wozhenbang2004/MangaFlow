@@ -59,7 +59,10 @@ internal class AnimeMetadataCache private constructor(private val context: Platf
     }
 
     fun isFresh(document: AnimeCachedDocument, kind: ContentCacheKind): Boolean =
-        wallTimeMillis() - document.savedAt in 0 until policy.freshMillis(kind)
+        isFresh(document.savedAt, kind)
+
+    fun isFresh(savedAt: Long, kind: ContentCacheKind): Boolean =
+        savedAt > 0L && wallTimeMillis() - savedAt in 0 until policy.freshMillis(kind)
 
     suspend fun read(key: String): AnimeCachedDocument? = withContext(Dispatchers.IO) {
         lock.withLock {

@@ -19,9 +19,22 @@ internal fun autoPlaySubjectMatches(subject: AnimeSubject, title: AnimeSourceTit
 internal fun autoPlaySubjectCandidate(subject: AnimeSubject, title: AnimeSourceTitle): Boolean =
     autoPlaySubjectEvidence(subject, title, requireEvidence = false)
 
-private fun autoPlaySubjectEvidence(subject: AnimeSubject, title: AnimeSourceTitle, requireEvidence: Boolean): Boolean {
-    val subjectIds = subject.externalIds + if (subject.id.startsWith("bangumi:"))
+internal fun autoPlaySubjectHasSharedId(subject: AnimeSubject, title: AnimeSourceTitle): Boolean =
+    autoPlaySubjectMatches(subject, title) && sharesAuthoritativeAnimeId(subject, title)
+
+private val authoritativeAnimeIdTypes = setOf("bangumi", "anilist", "mal", "douban")
+
+private fun animeSubjectIds(subject: AnimeSubject): Map<String, String> =
+    subject.externalIds + if (subject.id.startsWith("bangumi:"))
         mapOf("bangumi" to subject.id.removePrefix("bangumi:")) else emptyMap()
+
+private fun sharesAuthoritativeAnimeId(subject: AnimeSubject, title: AnimeSourceTitle): Boolean =
+    animeSubjectIds(subject).any { (key, id) ->
+        key in authoritativeAnimeIdTypes && id.isNotBlank() && id == title.externalIds[key]
+    }
+
+private fun autoPlaySubjectEvidence(subject: AnimeSubject, title: AnimeSourceTitle, requireEvidence: Boolean): Boolean {
+    val subjectIds = animeSubjectIds(subject)
     val sharedKeys = subjectIds.keys.intersect(title.externalIds.keys)
     if (sharedKeys.any { key -> subjectIds[key]?.isNotBlank() == true &&
         title.externalIds[key]?.isNotBlank() == true && subjectIds[key] != title.externalIds[key] }) return false
@@ -29,8 +42,7 @@ private fun autoPlaySubjectEvidence(subject: AnimeSubject, title: AnimeSourceTit
     val exactName = listOf(subject.title, subject.originalTitle).any {
         it.isNotBlank() && autoTitleKey(it) == autoTitleKey(title.title)
     }
-    val sharedId = sharedKeys.any { key -> key in setOf("bangumi", "anilist", "mal", "douban") &&
-        subjectIds[key]?.isNotBlank() == true && subjectIds[key] == title.externalIds[key] }
+    val sharedId = sharesAuthoritativeAnimeId(subject, title)
     // A matching authoritative ID permits aliases, while conflicting IDs/years above still veto.
     return sharedId || (exactName && (!requireEvidence || (subject.year != null && title.year == subject.year)))
 }

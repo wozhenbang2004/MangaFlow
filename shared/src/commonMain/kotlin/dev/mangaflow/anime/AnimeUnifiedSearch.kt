@@ -7,6 +7,7 @@ import dev.mangaflow.anime.sources.lanerc.LanercProvider
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.platform.normalizeNfkc
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -250,10 +251,39 @@ internal class AnimeUnifiedSearch(
 
 internal fun groupAnimeSearch(
     subjects: List<AnimeSubject>, results: List<AnimeSourceResult>, previous: List<AnimeSearchGroup> = emptyList(),
+): List<AnimeSearchGroup> = groupAnimeWorks(subjects, results.flatMap { it.items }, previous, keepPreviousOrder = true)
+
+internal fun groupAnimeTitles(
+    titles: List<AnimeSourceTitle>, previous: List<AnimeSearchGroup> = emptyList(),
+): List<AnimeSearchGroup> = groupAnimeWorks(emptyList(), titles, previous, keepPreviousOrder = false)
+
+private fun groupAnimeWorks(
+    subjects: List<AnimeSubject>, titles: List<AnimeSourceTitle>, previous: List<AnimeSearchGroup>,
+    keepPreviousOrder: Boolean,
 ): List<AnimeSearchGroup> {
+    fun AnimeSourceTitle.identity() = Triple(sourceId, id, url)
+    val names = mutableMapOf<String, String>()
+    fun normalized(title: String) = names.getOrPut(title) {
+        val text = normalizeNfkc(title).lowercase()
+        buildString {
+            text.forEachIndexed { index, char ->
+                val numericSeparator = char in ".-" && text.getOrNull(index - 1)?.isDigit() == true &&
+                    text.getOrNull(index + 1)?.isDigit() == true
+                if (char.isLetterOrDigit() || char in "≡∞×+!?★☆♪" || numericSeparator) append(char)
+            }
+        }
+    }
+    val distinctTitles = titles.distinctBy { it.identity() }
+    // MangaFlow's ordinary manga search groups complete display titles. A missing
+    // year can allow the same display grouping here, while conflicting records
+    // and two native objects from the same provider need stronger evidence.
+    val unambiguousNames = distinctTitles.groupBy { normalized(it.title) }.filter { (name, rows) ->
+        name.isNotBlank() && rows.map { it.sourceId }.distinct().size == rows.size &&
+            rows.mapNotNull { it.year }.distinct().size <= 1 &&
+            rows.flatMap { it.externalIds.entries }.filter { it.value.isNotBlank() }
+                .groupBy({ it.key }, { it.value }).values.none { it.distinct().size > 1 }
+    }.keys
     val groups = subjects.distinctBy { it.id }.map { AnimeSearchGroup("subject:${it.id}", it) }.toMutableList()
-    // Only whitespace/case are cosmetic. Keep numbers, punctuation, season/film/special suffixes.
-    fun normalized(title: String) = title.trim().lowercase().filterNot { it.isWhitespace() }
     val groupsByName = mutableMapOf<String, MutableList<Int>>()
     groups.forEachIndexed { index, group ->
         val subject = requireNotNull(group.subject)
@@ -261,29 +291,30 @@ internal fun groupAnimeSearch(
             groupsByName.getOrPut(name) { mutableListOf() }.add(index)
         }
     }
-    fun matchesIdentity(title: AnimeSourceTitle, group: AnimeSearchGroup): Boolean {
+    fun canShareCard(title: AnimeSourceTitle, name: String, group: AnimeSearchGroup): Boolean {
         // A source must not collapse two distinct native records into one result card.
         if (group.sources.any { it.sourceId == title.sourceId }) return false
         val subject = group.subject
-        val reference = group.sources.firstOrNull()
-        val identities = listOfNotNull(subject?.externalIds) + group.sources.map { it.externalIds }
+        val subjectIds = subject?.let {
+            it.externalIds + if (it.id.startsWith("bangumi:")) mapOf("bangumi" to it.id.removePrefix("bangumi:")) else emptyMap()
+        }
+        val identities = listOfNotNull(subjectIds) + group.sources.map { it.externalIds }
         if (identities.any { ids -> title.externalIds.any { (key, value) ->
             value.isNotBlank() && ids[key]?.takeIf { it.isNotBlank() }?.let { it != value } == true
         } }) return false
         val years = listOfNotNull(subject?.year) + group.sources.mapNotNull { it.year }
         if (title.year != null && years.any { it != title.year }) return false
-        val year = subject?.year ?: reference?.year
         val sharedId = identities.any { ids -> title.externalIds.any { (key, value) ->
-            value.isNotBlank() && ids[key] == value
+            key in setOf("bangumi", "anilist", "mal", "douban") && value.isNotBlank() && ids[key] == value
         } }
-        // Unknown year/title-only similarity is not sufficient evidence, especially for remakes.
-        return sharedId || (year != null && title.year == year)
+        return sharedId || if (subject != null) subject.year != null && title.year == subject.year
+            else name in unambiguousNames
     }
-    fun AnimeSourceTitle.identity() = Triple(sourceId, id, url)
-    results.flatMap { it.items }.distinctBy { it.identity() }.forEach { title ->
+    distinctTitles.forEach { title ->
         val name = normalized(title.title)
-        val candidates = groupsByName[name].orEmpty().filter { matchesIdentity(title, groups[it]) }
-        val index = candidates.singleOrNull()
+        val candidates = groupsByName[name].orEmpty().filter { canShareCard(title, name, groups[it]) }
+        val canonical = candidates.filter { groups[it].subject != null }
+        val index = if (canonical.isEmpty()) candidates.singleOrNull() else canonical.singleOrNull()
         if (index == null) {
             if (name.isNotBlank()) groupsByName.getOrPut(name) { mutableListOf() }.add(groups.size)
             groups += AnimeSearchGroup("source:${title.sourceId}:${title.id.length}:${title.id}:${title.url}", sources = listOf(title))
@@ -300,11 +331,12 @@ internal fun groupAnimeSearch(
         ?.takeIf { it == group.key || it !in baselineKeys }
     val canonicalKeys = groups.mapNotNull(::existingCanonicalKey).toSet()
     val claimed = mutableSetOf<String>()
-    return groups.map { group ->
+    val retained = groups.map { group ->
         val inherited = existingCanonicalKey(group) ?: group.sources.mapNotNull { oldBySource[it.identity()] }
             .filter { it !in canonicalKeys && (it == group.key || it !in baselineKeys) && it !in claimed }
             .minByOrNull { order.getValue(it) }
         val key = inherited?.takeIf(claimed::add) ?: group.key
         group.copy(key = key, sources = group.sources.sortedBy { oldSourceOrder[it.identity()] ?: Int.MAX_VALUE })
-    }.sortedBy { order[it.key] ?: Int.MAX_VALUE }
+    }
+    return if (keepPreviousOrder) retained.sortedBy { order[it.key] ?: Int.MAX_VALUE } else retained
 }

@@ -2,7 +2,77 @@ package dev.mangaflow.data
 
 enum class SearchTarget { TITLE, AUTHOR, TAG, TRANSLATION_GROUP }
 
-data class MangaTag(val name: String, val path: String, val count: Int? = null)
+enum class MangaTagKind { TAG, GENRE, CONVENTION }
+
+data class MangaTag(
+    val name: String,
+    val path: String,
+    val count: Int? = null,
+    val kind: MangaTagKind = MangaTagKind.TAG,
+    /** Real query identifiers; they are meaningful only to the provider that supplied them. */
+    val providerPaths: Map<String, String> = emptyMap(),
+    val aliases: List<String> = emptyList(),
+)
+
+data class MangaGenreDirectory(val tags: List<MangaTag>, val errors: Map<String, String> = emptyMap())
+
+private val copyGenrePaths = setOf(
+    "aiqing", "maoxian", "qihuan", "baihe", "xiaoyuan", "kehuan", "danmei", "shenghuo", "gedou", "xuanyi",
+    "shengui", "zhichang", "jingji", "gaoxiao", "rexue", "hougong", "meishi", "zhentan", "mohuan",
+    "zhanzheng", "lishi", "yishijie", "jingsong", "jizhan", "dushi", "chuanyue", "kongbu", "chongsheng",
+    "shengcun", "wuxia", "zhuansheng", "xianxia",
+)
+private val conventionPath = Regex("(?:comiket|c)[1-9][0-9]{1,2}", RegexOption.IGNORE_CASE)
+
+fun isCopyConventionTag(path: String): Boolean = conventionPath.matches(path)
+
+/** Use the existing multilingual genre vocabulary and Copy aliases for display grouping only. */
+private val localizedGenres by lazy {
+    SiteRankingGenre.entries.associate { normalizedBodySourceTitle(it.id) to it.label }
+}
+private val equivalentGenreLabels = mapOf("恋爱" to "爱情", "日常" to "生活")
+
+private fun catalogueTagName(name: String): String {
+    val label = normalizedBodySourceTitle(name)
+    val localized = localizedGenres[label] ?: label
+    return equivalentGenreLabels[localized] ?: localized
+}
+
+/** Copy's path remains the stable selection key when a native genre shares the same label. */
+fun combineOrdinarySearchTags(copyTags: List<MangaTag>, genres: List<MangaTag>, copyEnabled: Boolean = true): List<MangaTag> {
+    val copy = if (!copyEnabled) emptyList() else copyTags.filter {
+        it.name.isNotBlank() && it.path.isNotBlank() && !it.path.startsWith("label:")
+    }.distinctBy(MangaTag::path).map { tag ->
+        val kind = when {
+            isCopyConventionTag(tag.path) -> MangaTagKind.CONVENTION
+            tag.path in copyGenrePaths -> MangaTagKind.GENRE
+            else -> MangaTagKind.TAG
+        }
+        tag.copy(kind = kind, providerPaths = mapOf("copy" to tag.path))
+    }
+    return (copy + genres).distinctBy(MangaTag::path).groupBy { tag ->
+        if (tag.kind == MangaTagKind.CONVENTION) "copy-convention:${tag.path}"
+        else catalogueTagName(tag.name).ifBlank { tag.path }
+    }.values.flatMap { matching ->
+        val bindings = matching.flatMap { it.providerPaths.entries }.groupBy({ it.key }, { it.value })
+        // Two real IDs with the same label on one provider need to remain individually selectable.
+        if (bindings.any { (_, paths) -> paths.distinct().size != 1 }) matching
+        else {
+            val first = matching.first()
+            listOf(first.copy(
+                kind = if (matching.any { it.kind == MangaTagKind.GENRE }) MangaTagKind.GENRE else first.kind,
+                providerPaths = bindings.mapValues { (_, paths) -> paths.first() },
+                aliases = matching.flatMap { it.aliases + it.name }.distinct().filterNot { it == first.name },
+            ))
+        }
+    }
+}
+
+internal fun mangaGenreTag(sourceId: String, id: String, name: String): MangaTag {
+    val label = localizedGenres[normalizedBodySourceTitle(name)] ?: name
+    return MangaTag(label, "label:genre:$sourceId:$id", kind = MangaTagKind.GENRE,
+        providerPaths = mapOf(sourceId to id), aliases = listOf(name).filterNot { it == label })
+}
 
 /** Map display names to real Copy identifiers; another source's native path is never reused. */
 fun copyTagForName(name: String, tags: List<MangaTag> = CopySearchTags): MangaTag? {

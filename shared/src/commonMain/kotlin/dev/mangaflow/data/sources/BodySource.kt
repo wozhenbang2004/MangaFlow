@@ -30,6 +30,9 @@ interface BodySourceProbeIdentity { fun connectionProbeIdentity(): String }
 
 interface BodySource : MangaRepository {
     val info: BodySourceInfo
+    val supportsNativeGenres: Boolean get() = false
+    suspend fun genreDirectory(): List<SourceChoice> = emptyList()
+    suspend fun searchGenres(ids: List<String>, page: Int): MangaPage = unsupportedSourceFeature()
     suspend fun capabilities(): SourceCapabilities = SourceCapabilities()
     suspend fun feeds(): List<SourceFeed> = listOf(SourceFeed("latest", "最近更新", SourceFeedKind.LATEST))
     suspend fun feedFilters(feedId: String): List<SourceFilter> = feeds().firstOrNull { it.id == feedId }?.filters.orEmpty()

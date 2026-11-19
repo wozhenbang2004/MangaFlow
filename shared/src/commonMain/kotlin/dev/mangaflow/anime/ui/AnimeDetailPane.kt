@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -30,25 +31,32 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.anime.AnimeDetail
+import dev.mangaflow.anime.AnimeDiscoveryProvider
 import dev.mangaflow.anime.AnimeEpisode
 import dev.mangaflow.anime.AnimeEpisodeKind
 import dev.mangaflow.anime.AnimeLibraryEntry
 import dev.mangaflow.anime.AnimeScreenState
+import dev.mangaflow.anime.AnimeSourceScore
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeWatchProgress
 import dev.mangaflow.anime.AnimeWatchStatus
 import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.CompactMenuAction
+import dev.mangaflow.ui.CommunityComment
 import dev.mangaflow.ui.FeaturedCoverColors
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
+import dev.mangaflow.ui.ReviewSourceMark
+import dev.mangaflow.ui.detailMetricScore
 import dev.mangaflow.ui.motion.*
 
 @Composable
@@ -68,6 +76,16 @@ internal fun AnimeDetailPane(
     val subject = detail.subject
     val nativeSource = subject.externalIds["native-source"]
     val native = nativeSource != null
+    val currentDiscussion by controller.discussion.state.collectAsStateWithLifecycle()
+    val discussion = currentDiscussion.takeIf { it.subjectId == subject.id && it.available }
+    val uriHandler = LocalUriHandler.current
+    var selectedDetailTab by rememberSaveable(subject.id) { mutableIntStateOf(0) }
+    var discussionLinkError by remember(subject.id) { mutableStateOf(false) }
+    val commentsVisible = active && discussion != null && selectedDetailTab == 1
+    DisposableEffect(controller, subject.id, commentsVisible) {
+        if (commentsVisible) controller.discussion.setVisible(subject.id, true)
+        onDispose { if (commentsVisible) controller.discussion.setVisible(subject.id, false) }
+    }
     val bindings = remember(state.sourceBindings, subject.id) {
         state.sourceBindings.filter { it.subjectId == subject.id }
     }
@@ -89,6 +107,7 @@ internal fun AnimeDetailPane(
     var episodeQuery by rememberSaveable(subject.id) { mutableStateOf("") }
     var episodeSearch by rememberSaveable(subject.id) { mutableStateOf(false) }
     var statusPresent by remember(subject.id) { mutableStateOf(false) }
+    var ratingPresent by remember(subject.id) { mutableStateOf(false) }
     var episodeMenuOwner by remember(subject.id) { mutableStateOf<String?>(null) }
 
     // Native catalogue order and IDs are authoritative for the selected line.
@@ -112,6 +131,21 @@ internal fun AnimeDetailPane(
     val sourceNames = bindings.sortedBy { it.catalog.sourceId != state.preferredSourceId }.map { binding ->
         binding.catalog.sourceId to animeSourceName(binding.catalog.sourceId, state)
     }
+    val groupedSourceCount = remember(state.groupSourceCandidates) {
+        state.groupSourceCandidates.map { it.sourceId }.distinct().size
+    }
+    val pendingSourceCount = state.associationChoices.count { it.value.isNotEmpty() }
+    val detailScores = remember(state.detailScores, subject) {
+        buildList {
+            if (!native && subject.id.startsWith("bangumi:")) {
+                subject.rating?.takeIf { it > 0 && it <= 10.0 }?.let {
+                    add(AnimeSourceScore(AnimeDiscoveryProvider.BANGUMI, it, 10))
+                }
+            }
+            addAll(state.detailScores.filter { it.scale > 0 && it.rating.isFinite() &&
+                it.rating > 0 && it.rating <= it.scale.toDouble() })
+        }.distinctBy { it.provider }
+    }
 
     BoxWithConstraints(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
@@ -124,7 +158,7 @@ internal fun AnimeDetailPane(
         val motion = LocalMotionEnabled.current
         LazyColumn(
             Modifier.widthIn(max = 1080.dp).fillMaxSize()
-                .motionInputGate(active && !statusPresent && episodeMenuOwner == null),
+                .motionInputGate(active && !statusPresent && !ratingPresent && episodeMenuOwner == null),
             state = scroll,
             contentPadding = PaddingValues(start = horizontal, end = horizontal, top = 10.dp, bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -132,6 +166,7 @@ internal fun AnimeDetailPane(
             item(key = "identity") {
                 AnimeDetailHero(
                     subject = subject,
+                    scores = detailScores,
                     episode = first,
                     progress = savedProgress.takeIf { resume != null },
                     entry = entry,
@@ -146,6 +181,7 @@ internal fun AnimeDetailPane(
                     onStatus = { controller.setWatchStatus(subject.id, it) },
                     onTracking = onTracking,
                     onStatusPresence = { statusPresent = it },
+                    onRatingPresence = { ratingPresent = it },
                 )
             }
             if (state.libraryReadUnavailable) item(key = "library-read-warning") {
@@ -153,6 +189,57 @@ internal fun AnimeDetailPane(
                     "临时浏览 · 不保存进度", Icons.Outlined.Info,
                     detail = "本地追番记录未能读取。可以继续播放，旧收藏与观看记录已保留。",
                 )
+            }
+            if (discussion != null) item(key = "detail-tabs") {
+                MotionTabs(selectedDetailTab, listOf("剧集", "评论"), onSelect = { selectedDetailTab = it },
+                    modifier = Modifier.widthIn(max = 232.dp).fillMaxWidth().motionInputGate(active),
+                    controlHeight = 44.dp, treatment = MotionTabTreatment.Underline)
+            }
+            if (discussion != null && selectedDetailTab == 1) {
+                item(key = "comments-heading") {
+                    AnimeSectionTitle("Bangumi 讨论", discussion.total?.let { "$it 条评论" }) {
+                        Row {
+                            if (discussion.error == null) MotionIconButton(
+                                onClick = { controller.discussion.retry(subject.id) },
+                                enabled = active && !discussion.loading && !discussion.loadingMore,
+                                modifier = Modifier.size(44.dp), tooltip = "刷新评论",
+                            ) { Icon(Icons.Outlined.Refresh, null, Modifier.size(18.dp)) }
+                            discussion.sourceUrl?.takeIf(String::isNotBlank)?.let { url ->
+                                MotionIconButton(onClick = {
+                                    discussionLinkError = runCatching { uriHandler.openUri(url) }.isFailure
+                                }, enabled = active,
+                                    modifier = Modifier.size(44.dp), tooltip = "在 Bangumi 查看") {
+                                    Icon(Icons.Outlined.OpenInNew, null, Modifier.size(18.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+                items(discussion.items, key = { "comment:${it.id}" }) { review ->
+                    Column {
+                        CommunityComment(review, Modifier.padding(vertical = 6.dp), sourceId = "bangumi")
+                        HorizontalDivider(Modifier.padding(start = 36.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .6f))
+                    }
+                }
+                item(key = "comments-status") {
+                    if (discussionLinkError) AnimeQuietLabel("暂时无法打开 Bangumi 页面")
+                    when {
+                        discussion.error != null -> AnimeDiscoveryInlineStatus(discussion.error,
+                            retry = { controller.discussion.retry(subject.id) }.takeIf { active })
+                        discussion.loading || discussion.loadingMore || !discussion.loaded -> AnimeDetailStatus(
+                            if (discussion.items.isEmpty()) "正在读取评论" else "正在更新评论",
+                            Icons.Outlined.Info, loading = true,
+                        )
+                        discussion.items.isEmpty() -> AnimeQuietLabel("暂无评论")
+                    }
+                    if (discussion.hasMore && discussion.error == null) MotionTextButton(
+                        onClick = { controller.discussion.loadMore(subject.id) },
+                        enabled = active && !discussion.loading && !discussion.loadingMore,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                    ) { Text("加载更多评论") }
+                }
+                return@LazyColumn
             }
             item(key = "episodes-heading") {
                 Column(Modifier.fillMaxWidth().padding(top = 5.dp)) {
@@ -188,7 +275,16 @@ internal fun AnimeDetailPane(
                                         Icon(Icons.Outlined.SwapVert, sortLabel, Modifier.size(18.dp))
                                     }
                                 }
-                                AnimeSourceStack(sourceNames, onClick = { onSources(null) })
+                                if (groupedSourceCount > 1 || pendingSourceCount > 0) {
+                                    MotionTextButton(onClick = { onSources(null) }, enabled = active,
+                                        modifier = Modifier.heightIn(min = 44.dp),
+                                        contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                        Icon(Icons.Outlined.Link, null, Modifier.size(18.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(if (groupedSourceCount > 1) "$groupedSourceCount 个来源"
+                                            else "待确认 $pendingSourceCount", maxLines = 1)
+                                    }
+                                } else AnimeSourceStack(sourceNames, onClick = { onSources(null) })
                             }
                         },
                     )
@@ -228,7 +324,7 @@ internal fun AnimeDetailPane(
                         if (detail.episodes.isEmpty()) "集数暂不可用" else "集数更新未完成",
                         Icons.Outlined.CloudOff, detail = state.detailError,
                         actionLabel = "重试加载集数", actionIcon = Icons.Outlined.Refresh,
-                        onAction = { controller.open(subject) },
+                        onAction = controller::retryCurrentDetail,
                     )
                     pendingNativeCatalog != null -> AnimeDetailStatus(
                         if (missingSelectedGroup) "原线路暂不可用" else "原线路尚未加载完整",
@@ -305,6 +401,7 @@ internal fun AnimeDetailPane(
 @Composable
 private fun AnimeDetailHero(
     subject: AnimeSubject,
+    scores: List<AnimeSourceScore>,
     episode: AnimeEpisode?,
     progress: AnimeWatchProgress?,
     entry: AnimeLibraryEntry?,
@@ -319,13 +416,13 @@ private fun AnimeDetailHero(
     onStatus: (AnimeWatchStatus) -> Unit,
     onTracking: () -> Unit,
     onStatusPresence: (Boolean) -> Unit,
+    onRatingPresence: (Boolean) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val atmosphere = FeaturedCoverColors.get(subject.coverUrl) ?: colors.primary
     val metadata = listOfNotNull(
         subject.year?.toString(),
         subject.episodeCount?.takeIf { it > 0 }?.let { "$it 集" },
-        subject.rating?.takeIf { it > 0 && !native }?.let { "Bangumi $it 分" },
     ).joinToString(" · ")
     val actions: @Composable () -> Unit = {
         AnimeDetailActions(
@@ -358,6 +455,7 @@ private fun AnimeDetailHero(
                 if (metadata.isNotBlank()) {
                     Text(metadata, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
                 }
+                if (scores.isNotEmpty()) AnimeDetailRatingStrip(scores, backdrop, active, onRatingPresence)
                 if (wide) {
                     Spacer(Modifier.height(4.dp))
                     actions()
@@ -365,6 +463,45 @@ private fun AnimeDetailHero(
             }
         }
         if (!wide) actions()
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AnimeDetailRatingStrip(scores: List<AnimeSourceScore>, backdrop: HazeState, active: Boolean,
+    onPresence: (Boolean) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    LaunchedEffect(active) { if (!active) open = false }
+    fun AnimeSourceScore.displayScore() = "${detailMetricScore(rating)} / $scale"
+    Box {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            scores.forEach { score ->
+                val provider = animeDiscoveryProviderLabel(score.provider)
+                MotionTextButton(onClick = { open = true }, enabled = active,
+                    modifier = Modifier.heightIn(min = 44.dp).semantics {
+                        contentDescription = "$provider 评分 ${score.displayScore()}，查看各站评分"
+                    },
+                    contentPadding = PaddingValues(horizontal = 5.dp)) {
+                    ReviewSourceMark(score.provider.name.lowercase(), size = 14.dp)
+                    Spacer(Modifier.width(5.dp))
+                    Text(score.displayScore(), style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1, softWrap = false)
+                }
+            }
+        }
+        CompactGlassPopover(open, backdrop, onDismiss = { open = false }, onPresenceChange = onPresence,
+            alignToStart = true) {
+            AnimeSectionTitle("各站评分")
+            scores.forEach { score ->
+                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ReviewSourceMark(score.provider.name.lowercase(), size = 18.dp)
+                    Text(animeDiscoveryProviderLabel(score.provider), Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium)
+                    Text(score.displayScore(), style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        }
     }
 }
 

@@ -629,33 +629,8 @@ class ReviewRepository(context: Context) {
     }
 
     private suspend fun bangumiComments(id: Int, page: Int): ReviewPage {
-        val publicUrl = "https://bgm.tv/subject/$id/comments"
-        val offset = page * PAGE_SIZE
-        // p1 serves Bangumi's public next-generation frontend; anonymous GET only.
-        // It is not a stable v0 API, so a failure must leave the independent score intact.
-        val result = jsonRequest("https://next.bgm.tv/p1/subjects/$id/comments?limit=$PAGE_SIZE&offset=$offset",
-            "Bangumi 短评", publicUrl)
-        val rows = result.optJSONArray("data") ?: throw SourceException("Bangumi 短评暂时没有返回有效数据。", publicUrl)
-        val total = result.nonNegativeInt("total")
-        if (rows.length() == 0 && total != null && offset < total) {
-            throw SourceException("Bangumi 短评这一页暂时未能载入，请重试。", publicUrl)
-        }
-        val reviews = rows.objects().mapNotNull { row ->
-            val reviewId = row.optLong("id", 0)
-            val user = row.optJSONObject("user")
-            val username = user?.text("username").orEmpty()
-            val author = user?.text("nickname").orEmpty().ifBlank { username }
-            val raw = row.text("comment")
-            val content = plainText(raw)
-            if (reviewId <= 0 || author.isBlank() || content.isBlank()) return@mapNotNull null
-            MangaReview(id = reviewId.toString(), author = author, summary = content.take(360), url = publicUrl,
-                score = row.nullableScore("rate", 10), scoreScale = 10, body = content,
-                date = date(row.optLong("updatedAt", 0)), spoiler = hasSpoilerMarkup(raw), kind = ReviewKind.COMMENT,
-                authorUrl = username.takeIf(String::isNotBlank)?.let { profileUrl("https://bgm.tv", it) }.orEmpty(),
-                avatarUrl = avatar(user?.optJSONObject("avatar"), setOf("lain.bgm.tv")))
-        }
-        val more = if (total != null) offset.toLong() + rows.length() < total else rows.length() == PAGE_SIZE
-        return ReviewPage(reviews, total, if (more && rows.length() > 0) page + 1 else null)
+        val result = jsonRequest(bangumiCommentsRequestUrl(id, page), "Bangumi 短评", bangumiCommentsPublicUrl(id))
+        return decodeBangumiComments(result, id, page)
     }
 
     private suspend fun aniList(
@@ -868,47 +843,12 @@ class ReviewRepository(context: Context) {
         while (confirmedNames.size > 96) confirmedNames.remove(confirmedNames.keys.first())
     }
 
-    private fun avatar(value: JSONObject?, domains: Set<String>): String = sequenceOf("medium", "large", "small")
-        .mapNotNull { size -> value?.text(size)?.toHttpUrlOrNull() }
-        .firstOrNull { url -> url.isHttps && url.port == 443 && url.username.isEmpty() && url.password.isEmpty() &&
-            domains.any { url.host == it || url.host.endsWith(".$it") } }?.toString().orEmpty()
-
-    private fun plainText(raw: String, markdown: Boolean = false): String {
-        var text = raw.replace(Regex("(?is)\\[img(?:=[^]]*)?].*?\\[/img]"), "")
-            .replace(Regex("(?i)\\[/?(?:b|i|u|s|quote|spoiler|url|size|color|align)(?:=[^]]*)?]"), "")
-        if (markdown) {
-            text = text.replace(Regex("!\\[[^]]*]\\([^)]*\\)"), "")
-                .replace(Regex("\\[([^]]+)]\\([^)]*\\)"), "$1")
-                .replace(Regex("(?m)^#{1,6}\\s+"), "")
-                .replace("~!", "").replace("!~", "").replace("**", "").replace("__", "")
-        }
-        val document = Jsoup.parse(text)
-        document.select("script, style").remove()
-        document.select("br").forEach { it.appendText("\n") }
-        document.select("p, div, li, blockquote, h1, h2, h3").forEach { it.appendText("\n") }
-        return document.wholeText().replace("\r\n", "\n").replace(Regex("[\\t ]+"), " ")
-            .replace(Regex("\\n[\\t ]+"), "\n").replace(Regex("\\n{3,}"), "\n\n").trim()
-    }
-
-    private fun hasSpoilerMarkup(text: String): Boolean = Regex("(?i)\\[spoiler(?:=[^]]*)?]|~!|剧透|劇透|spoiler").containsMatchIn(text)
-    private fun profileUrl(origin: String, name: String): String = origin.toHttpUrl().newBuilder().addPathSegment("user")
-        .addPathSegment(name).build().toString()
-    private fun date(seconds: Long): String = if (seconds > 0) try {
-        formatInstantMillis(seconds * 1000, "yyyy-MM-dd HH:mm:ss")
-    } catch (_: Exception) { "" } else ""
-
     private fun normalize(text: String): String {
         var normalized = normalizeNfkc(text).lowercase()
         normalized = transliterate(normalized, "Traditional-Simplified")
         return normalized.filter(Char::isLetterOrDigit)
     }
 
-    private fun JSONArray.objects(): List<JSONObject> = (0 until length()).mapNotNull(::optJSONObject)
-    private fun JSONObject.text(key: String) = (opt(key) as? String).orEmpty().trim()
-    private fun JSONObject.nonNegativeInt(key: String): Int? = (opt(key) as? Number)?.toLong()
-        ?.takeIf { it in 0..Int.MAX_VALUE.toLong() }?.toInt()
-    private fun JSONObject.nullableScore(key: String, scale: Int, allowZero: Boolean = false): Double? =
-        (opt(key) as? Number)?.toDouble()?.takeIf { it.isFinite() && (it > 0 || (allowZero && it == 0.0)) && it <= scale }
     private fun Exception.userMessage(fallback: String) = if (this is SourceException) message.orEmpty().ifBlank { fallback } else fallback
     private data class BangumiMatch(val source: ReviewSource, val names: List<String> = emptyList())
     private data class MetricLookupIdentity(val aliases: List<String>, val externalIds: Map<String, String>)
@@ -919,5 +859,77 @@ class ReviewRepository(context: Context) {
 
     private companion object { const val PAGE_SIZE = 20 }
 }
+
+private const val BANGUMI_COMMENT_PAGE_SIZE = 20
+
+internal fun bangumiCommentsPublicUrl(id: Int): String = "https://bgm.tv/subject/$id/comments"
+
+/** Both callers supply a confirmed Bangumi subject. p1 is the public anonymous frontend API. */
+internal fun bangumiCommentsRequestUrl(id: Int, page: Int): String {
+    require(id > 0 && page >= 0)
+    return "https://next.bgm.tv/p1/subjects/$id/comments?limit=$BANGUMI_COMMENT_PAGE_SIZE&offset=${page.toLong() * BANGUMI_COMMENT_PAGE_SIZE}"
+}
+
+internal fun decodeBangumiComments(result: JSONObject, id: Int, page: Int): ReviewPage {
+    val publicUrl = bangumiCommentsPublicUrl(id)
+    val offset = page.toLong() * BANGUMI_COMMENT_PAGE_SIZE
+    val rows = result.optJSONArray("data") ?: throw SourceException("Bangumi 短评暂时没有返回有效数据。", publicUrl)
+    val total = result.nonNegativeInt("total")
+    if (rows.length() == 0 && total != null && offset < total) {
+        throw SourceException("Bangumi 短评这一页暂时未能载入，请重试。", publicUrl)
+    }
+    val reviews = rows.objects().mapNotNull { row ->
+        val reviewId = row.optLong("id", 0)
+        val user = row.optJSONObject("user")
+        val username = user?.text("username").orEmpty()
+        val author = user?.text("nickname").orEmpty().ifBlank { username }
+        val raw = row.text("comment")
+        val content = plainText(raw)
+        if (reviewId <= 0 || author.isBlank() || content.isBlank()) return@mapNotNull null
+        MangaReview(id = reviewId.toString(), author = author, summary = content.take(360), url = publicUrl,
+            score = row.nullableScore("rate", 10), scoreScale = 10, body = content,
+            date = date(row.optLong("updatedAt", 0)), spoiler = hasSpoilerMarkup(raw), kind = ReviewKind.COMMENT,
+            authorUrl = username.takeIf(String::isNotBlank)?.let { profileUrl("https://bgm.tv", it) }.orEmpty(),
+            avatarUrl = avatar(user?.optJSONObject("avatar"), setOf("lain.bgm.tv")))
+    }
+    val more = if (total != null) offset + rows.length() < total else rows.length() == BANGUMI_COMMENT_PAGE_SIZE
+    return ReviewPage(reviews, total, if (more && rows.length() > 0 && page < Int.MAX_VALUE) page + 1 else null)
+}
+
+private fun avatar(value: JSONObject?, domains: Set<String>): String = sequenceOf("medium", "large", "small")
+    .mapNotNull { size -> value?.text(size)?.toHttpUrlOrNull() }
+    .firstOrNull { url -> url.isHttps && url.port == 443 && url.username.isEmpty() && url.password.isEmpty() &&
+        domains.any { url.host == it || url.host.endsWith(".$it") } }?.toString().orEmpty()
+
+private fun plainText(raw: String, markdown: Boolean = false): String {
+    var text = raw.replace(Regex("(?is)\\[img(?:=[^]]*)?].*?\\[/img]"), "")
+        .replace(Regex("(?i)\\[/?(?:b|i|u|s|quote|spoiler|url|size|color|align)(?:=[^]]*)?]"), "")
+    if (markdown) {
+        text = text.replace(Regex("!\\[[^]]*]\\([^)]*\\)"), "")
+            .replace(Regex("\\[([^]]+)]\\([^)]*\\)"), "$1")
+            .replace(Regex("(?m)^#{1,6}\\s+"), "")
+            .replace("~!", "").replace("!~", "").replace("**", "").replace("__", "")
+    }
+    val document = Jsoup.parse(text)
+    document.select("script, style").remove()
+    document.select("br").forEach { it.appendText("\n") }
+    document.select("p, div, li, blockquote, h1, h2, h3").forEach { it.appendText("\n") }
+    return document.wholeText().replace("\r\n", "\n").replace(Regex("[\\t ]+"), " ")
+        .replace(Regex("\\n[\\t ]+"), "\n").replace(Regex("\\n{3,}"), "\n\n").trim()
+}
+
+private fun hasSpoilerMarkup(text: String): Boolean = Regex("(?i)\\[spoiler(?:=[^]]*)?]|~!|剧透|劇透|spoiler").containsMatchIn(text)
+private fun profileUrl(origin: String, name: String): String = origin.toHttpUrl().newBuilder().addPathSegment("user")
+    .addPathSegment(name).build().toString()
+private fun date(seconds: Long): String = if (seconds > 0) try {
+    formatInstantMillis(seconds * 1000, "yyyy-MM-dd HH:mm:ss")
+} catch (_: Exception) { "" } else ""
+
+private fun JSONArray.objects(): List<JSONObject> = (0 until length()).mapNotNull(::optJSONObject)
+private fun JSONObject.text(key: String) = (opt(key) as? String).orEmpty().trim()
+private fun JSONObject.nonNegativeInt(key: String): Int? = (opt(key) as? Number)?.toLong()
+    ?.takeIf { it in 0..Int.MAX_VALUE.toLong() }?.toInt()
+private fun JSONObject.nullableScore(key: String, scale: Int, allowZero: Boolean = false): Double? =
+    (opt(key) as? Number)?.toDouble()?.takeIf { it.isFinite() && (it > 0 || (allowZero && it == 0.0)) && it <= scale }
 
 private val reviewRepositoryStateLock = SynchronizedObject()

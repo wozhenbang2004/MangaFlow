@@ -71,7 +71,7 @@ import dev.chrisbanes.haze.blur.HazeBlurStyle
 import dev.chrisbanes.haze.blur.hazeBlur
 import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.anime.AnimeDiscoveryItem
-import dev.mangaflow.anime.AnimeSourceTitle
+import dev.mangaflow.anime.AnimeSearchGroup
 import dev.mangaflow.experience.sourceNetwork
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.platform.*
@@ -93,7 +93,7 @@ import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.floor
 
-/** The native/discovery object remains the only authority for opening a gallery item. */
+/** Each gallery card retains the current source candidates or its metadata item. */
 internal data class AnimeFeaturedEntry(
     val key: String,
     val title: String,
@@ -101,7 +101,7 @@ internal data class AnimeFeaturedEntry(
     val sourceId: String,
     val sourceLabel: String,
     val caption: String,
-    val sourceTitle: AnimeSourceTitle? = null,
+    val sourceGroup: AnimeSearchGroup? = null,
     val discoveryItem: AnimeDiscoveryItem? = null,
 )
 

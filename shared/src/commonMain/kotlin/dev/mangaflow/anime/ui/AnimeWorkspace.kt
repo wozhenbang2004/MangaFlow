@@ -39,7 +39,10 @@ private data class AnimeRoute(
     val detailState: AnimeScreenState? = null,
     val relatedDepth: Int = 0,
 )
-private data class AnimeDetailVisit(val detail: AnimeDetail, val related: List<AnimeSubject>)
+private data class AnimeDetailVisit(
+    val detail: AnimeDetail, val related: List<AnimeSubject>,
+    val candidates: List<AnimeSourceTitle>, val scores: List<AnimeSourceScore>,
+)
 private data class AnimeSourceAssociation(val title: AnimeSourceTitle, val subjectId: String)
 private enum class AnimeWorkspacePage(val label: String, val discovery: AnimeDiscoveryTab? = null) {
     HOME("发现", AnimeDiscoveryTab.HOME), SEASON("新番", AnimeDiscoveryTab.SEASON),
@@ -127,8 +130,10 @@ internal fun AnimeWorkspace(
     DisposableEffect(controller) {
         onDispose { currentPlaybackVisibility(false) }
     }
-    LaunchedEffect(controller) {
-        controller.ensureDiscovery()
+    val discoveryVisible = rootActive && pane == AnimeWorkspacePane.DISCOVERY
+    DisposableEffect(controller, discoveryVisible) {
+        if (discoveryVisible) controller.setDiscoveryVisible(true)
+        onDispose { if (discoveryVisible) controller.setDiscoveryVisible(false) }
     }
     LaunchedEffect(controller, directoryOpen) {
         if (directoryOpen) controller.sourceBrowse.activate()
@@ -209,7 +214,7 @@ internal fun AnimeWorkspace(
         val latest = controller.state.value
         val current = latest.detail ?: return
         if (current.subject.id == subject.id) return
-        detailHistory += AnimeDetailVisit(current, latest.relatedSubjects)
+        detailHistory += AnimeDetailVisit(current, latest.relatedSubjects, latest.groupSourceCandidates, latest.detailScores)
         open(subject)
     }
     fun returnFromDetail() {
@@ -217,7 +222,7 @@ internal fun AnimeWorkspace(
         if (detailHistory.isNotEmpty()) {
             val previous = detailHistory.removeAt(detailHistory.lastIndex)
             openingSubject = previous.detail.subject
-            controller.returnToVisitedDetail(previous.detail, previous.related)
+            controller.returnToVisitedDetail(previous.detail, previous.related, previous.candidates, previous.scores)
             val candidates = controller.searchState.value.groups
                 .firstOrNull { returnToSearch && it.subject?.id == previous.detail.subject.id }?.sources.orEmpty()
             if (candidates.isNotEmpty()) controller.stageSearchCandidates(previous.detail.subject.id, candidates)
@@ -269,13 +274,42 @@ internal fun AnimeWorkspace(
         focusSearchInput = true
         searchExpanded = true
     }
-    fun openSearchResult(subject: AnimeSubject) {
-        val candidates = if (browseCandidate == null)
-            controller.searchState.value.groups.firstOrNull { it.subject?.id == subject.id }?.sources.orEmpty()
-        else emptyList()
+    fun openVideoGroup(group: AnimeSearchGroup) {
+        val candidates = controller.currentVideoCandidates(group.sources)
+        if (candidates.size < 2) {
+            (candidates.firstOrNull() ?: group.sources.firstOrNull())?.let { chooseReference(it, true) }
+            return
+        }
+        val reference = candidates.first()
+        val known = candidates.mapNotNull(controller::knownDiscoverySubject).distinctBy { it.id }.singleOrNull()
+        val native = controller.sourceSubject(reference)
+        val subject = known ?: native
         pendingAssociation = null
-        open(subject)
-        if (candidates.isNotEmpty()) controller.stageSearchCandidates(subject.id, candidates)
+        browseCandidate = null
+        beginDetailNavigation()
+        openingSubject = subject
+        controller.openVideoGroup(subject, reference.takeIf { subject.id == native.id }, candidates)
+    }
+    fun openDiscoveryItem(item: AnimeDiscoveryItem) {
+        val subject = item.subject
+        if (subject != null) {
+            pendingAssociation = null
+            browseCandidate = null
+            beginDetailNavigation()
+            openingSubject = subject
+            controller.openDiscoveryItem(item)
+        } else item.reference?.let { chooseReference(it, false) }
+    }
+    fun openSearchResult(subject: AnimeSubject) {
+        val group = if (browseCandidate == null)
+            controller.searchState.value.groups.firstOrNull { it.subject?.id == subject.id } else null
+        pendingAssociation = null
+        if (group == null) open(subject)
+        else {
+            beginDetailNavigation()
+            openingSubject = subject
+            controller.openSearchGroup(group)
+        }
     }
     fun dismissSources() {
         sourcesVisible = false
@@ -446,7 +480,8 @@ internal fun AnimeWorkspace(
                                 val paneActive = rootActive && shownPane == pane
                                 when (shownPane) {
                                     AnimeWorkspacePane.DISCOVERY -> AnimeDiscovery(state, controller, backdrop, discoveryScrolls,
-                                        onOpen = ::open, onChooseReference = ::chooseReference, onBrowseSource = ::openDirectory,
+                                        onOpenItem = ::openDiscoveryItem, onChooseReference = ::chooseReference,
+                                        onOpenSourceGroup = ::openVideoGroup, onBrowseSource = ::openDirectory,
                                         onResume = ::resume, active = paneActive)
                                     AnimeWorkspacePane.DIRECTORY -> AnimeSourceBrowsePane(controller, backdrop, discoveryScrolls,
                                         columns = state.discoveryColumns, active = paneActive,
@@ -533,7 +568,8 @@ internal fun AnimeWorkspace(
                         else -> animeSearchResults(search, indexOnly, controller, showSearchIssues,
                             onToggleIssues = { showSearchIssues = !showSearchIssues }, expandedGroup = expandedSearchGroup,
                             onToggleSources = { key -> expandedSearchGroup = key.takeUnless { it == expandedSearchGroup } },
-                            onOpenSubject = ::openSearchResult, onOpenSource = { chooseReference(it, true) })
+                            onOpenSubject = ::openSearchResult, onOpenSource = { chooseReference(it, true) },
+                            onOpenSourceGroup = ::openVideoGroup)
                     }
                 }
             }

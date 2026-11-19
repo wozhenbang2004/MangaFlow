@@ -13,6 +13,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.anime.AnimeController
+import dev.mangaflow.anime.AnimeSearchGroup
 import dev.mangaflow.anime.AnimeSourceTitle
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeUnifiedSearchState
@@ -29,6 +30,7 @@ internal fun LazyListScope.animeSearchResults(
     onToggleSources: (String) -> Unit,
     onOpenSubject: (AnimeSubject) -> Unit,
     onOpenSource: (AnimeSourceTitle) -> Unit,
+    onOpenSourceGroup: (AnimeSearchGroup) -> Unit,
 ) {
     // When matching a foreign catalogue entry, show only canonical index candidates.
     val groups = if (indexOnly) search.groups.filter { it.subject != null } else search.groups
@@ -91,7 +93,7 @@ internal fun LazyListScope.animeSearchResults(
             Column {
                 AnimeSubjectRow(remember(first) { controller.sourceSubject(first) },
                     listOfNotNull(sourceNames[first.sourceId], first.updateText.takeIf(String::isNotBlank)).joinToString(" · "),
-                    onOpen = { onOpenSource(first) }, trailing = {
+                    onOpen = { onOpenSourceGroup(group) }, trailing = {
                         if (group.sources.size > 1) MotionTextButton(onClick = { onToggleSources(group.key) },
                             modifier = Modifier.heightIn(min = 44.dp)) {
                             Text(if (expandedGroup == group.key) "收起" else "${group.sources.size} 源")

@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -53,10 +54,13 @@ internal fun SearchSourceMarks(
     matches: List<Manga>,
     modifier: Modifier = Modifier,
     onSource: ((List<Manga>) -> Unit)? = null,
+    alignedSources: List<Manga> = emptyList(),
+    tagSearch: Boolean = false,
 ) {
-    val grouped = remember(matches) {
-        matches.distinctBy(::federatedMangaIdentity).groupBy { it.sourceId }.values.toList()
+    val grouped = remember(matches, alignedSources) {
+        (matches + alignedSources).distinctBy(::federatedMangaIdentity).groupBy { it.sourceId }.values.toList()
     }
+    val directSources = remember(matches) { matches.mapTo(mutableSetOf()) { it.sourceId } }
     val sources = grouped.map { it.first() }
     if (sources.isEmpty()) return
     if (onSource != null) {
@@ -73,7 +77,10 @@ internal fun SearchSourceMarks(
                     val source = sourceMatches.first()
                     val name = source.sourceName.ifBlank { sourceDisplayName(source.sourceId) }
                     val interaction = remember(source.sourceId) { MutableInteractionSource() }
-                    val description = if (sourceMatches.size == 1) "打开${name}的搜索结果"
+                    val linkedOnly = source.sourceId !in directSources
+                    val description = if (linkedOnly) "$name，已核对同一作品，点击查看正文来源"
+                        else if (tagSearch && sourceMatches.size == 1) "打开${name}的标签命中结果"
+                        else if (sourceMatches.size == 1) "打开${name}的搜索结果"
                         else "$name，${sourceMatches.size}条搜索结果，选择条目"
                     Box(Modifier.size(24.dp).clip(RoundedCornerShape(5.dp))
                         .clickable(interactionSource = interaction, indication = null, role = Role.Button,
@@ -82,6 +89,9 @@ internal fun SearchSourceMarks(
                         .semantics { contentDescription = description },
                         contentAlignment = Alignment.Center) {
                         ChapterSourceLogo(source.sourceId, name, Modifier.size(14.dp), muted = true)
+                        if (linkedOnly) Icon(Icons.Outlined.Link, null,
+                            Modifier.align(Alignment.BottomEnd).size(10.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         if (sourceMatches.size > 1) Text(sourceMatches.size.toString(),
                             modifier = Modifier.align(Alignment.TopEnd).padding(end = 1.dp),
                             fontSize = 7.sp, lineHeight = 8.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)

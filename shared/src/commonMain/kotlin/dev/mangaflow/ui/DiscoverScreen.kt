@@ -517,7 +517,10 @@ internal fun DiscoverySearchResults(
                                 SearchResultRow(manga, repository, "search-$searchKey",
                                     horizontalInset = if (tagsOnly) 0.dp else 6.dp,
                                     adultProfile = adultProfile,
-                                    bodySources = if (federated) search.sourceMatches[manga.id].orEmpty() else emptyList(),
+                                    bodySources = if (federated) search.sourceMatches[manga.id].orEmpty().ifEmpty { listOf(manga) }
+                                        else emptyList(),
+                                    alignedSources = if (!adultProfile) search.alignedTagSources[manga.id].orEmpty() else emptyList(),
+                                    tagSearch = search.searchTarget == SearchTarget.TAG,
                                     onSource = if (federated) openSource else null) { openResult(manga) }
                             }
                         }
@@ -1025,6 +1028,7 @@ internal fun DesktopBrowseActions(
 @Composable
 private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement: String,
     horizontalInset: Dp = 6.dp, bodySources: List<Manga> = emptyList(),
+    alignedSources: List<Manga> = emptyList(), tagSearch: Boolean = false,
     adultProfile: Boolean = false, onSource: ((List<Manga>) -> Unit)? = null, onOpen: () -> Unit) {
     val transition = LocalMangaCoverTransition.current
     val interaction = remember { MutableInteractionSource() }
@@ -1050,7 +1054,7 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (adultProfile && bodySources.size <= 1) MangaBrowseSource(manga)
-            else SearchSourceMarks(bodySources, Modifier.fillMaxWidth(), onSource)
+            else SearchSourceMarks(bodySources, Modifier.fillMaxWidth(), onSource, alignedSources, tagSearch)
             if (!adultProfile) MangaMetricBadges(manga, showMore = false)
         }
     }

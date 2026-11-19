@@ -105,6 +105,21 @@ class UnifiedChapterStore(context: Context) {
 
     fun linkedSources(workId: String): List<LinkedMangaSource> = settings(workId).links
 
+    /** Search only needs saved, aligned links for the exact works already found. */
+    internal fun alignedSearchLinks(workIds: Set<String>): Map<String, List<Manga>> = synchronized(lock) {
+        if (workIds.isEmpty()) return@synchronized emptyMap()
+        val root = readRoot()
+        buildMap {
+            for (id in workIds) {
+                val saved = root.optJSONObject(id)?.let(::readSettings) ?: continue
+                val aligned = saved.links.filter {
+                    it.confirmedAt > 0L && it.sameChapterSystem && it.manga.sourceId !in saved.excludedSources
+                }.map { it.manga }
+                if (aligned.isNotEmpty()) put(id, aligned)
+            }
+        }
+    }
+
     /** Invoke only after the user confirms this is the same work and the indicated edition. */
     fun attach(workId: String, manga: Manga, language: String = "简中", edition: String = "连载版",
         sameChapterSystem: Boolean = true) = mutate(workId) { old ->

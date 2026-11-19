@@ -9,6 +9,7 @@ import dev.mangaflow.anime.player.AnimeLocalMedia
 import dev.mangaflow.anime.player.createAnimePlayer
 import dev.mangaflow.anime.sources.AnimeMetadataRepository
 import dev.mangaflow.anime.sources.AnimeDiscoveryRepository
+import dev.mangaflow.anime.sources.AnimeDiscussionController
 import dev.mangaflow.anime.sources.AnimeSourceBrowseController
 import dev.mangaflow.anime.sources.AnimeSourceRepository
 import dev.mangaflow.anime.sources.AnimeTrackingRepository
@@ -59,11 +60,21 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     internal val searchState = unifiedSearch.state
     private val discovery = AnimeDiscoveryRepository(context)
     val sourceBrowse = AnimeSourceBrowseController(context, scope, sources)
+    internal val discussion by lazy { AnimeDiscussionController(context, scope) }
     private val tracking = AnimeTrackingRepository(context)
     private val library = AnimeLibraryStore.get(context)
     private val routing = DownloadRoutingStore.get(context)
     private val mutableState = MutableStateFlow(AnimeScreenState())
     val state = mutableState.asStateFlow()
+    private val discoveryLoads = AnimeDiscoveryLoads(scope, discovery,
+        currentFeed = { mutableState.value.discoveryFeeds[it] },
+        publishFeed = { key, feed -> mutableState.update { state ->
+            val subjectId = state.detail?.subject?.id
+            val scores = if (subjectId == null) emptyList() else
+                feed.items.firstOrNull { it.subject?.id == subjectId }?.sourceScores.orEmpty()
+            state.copy(discoveryFeeds = state.discoveryFeeds + (key to feed),
+                detailScores = (scores + state.detailScores).distinctBy { it.provider })
+        } })
     val extensions get() = sources.extensions
     internal val builtInVideoSources get() = sources.builtInVideoSources
     val danmaku by lazy { dev.mangaflow.anime.danmaku.AnimeDanmakuController(context, scope, sources.extensions) }
@@ -89,10 +100,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             observePlayer(it)
         }
 
-    private var discoverySequence = 0L
     private var discoveryDate: String? = null
-    private val discoveryRequests = mutableMapOf<String, Long>()
-    private val discoveryJobs = mutableMapOf<String, Job>()
+    private var discoveryVisible = false
     private val discoveryOptions = mutableMapOf<Pair<AnimeDiscoveryTab, AnimeDiscoveryProvider>, AnimeDiscoveryQuery>()
     private var detailGeneration = 0L
     private var retryNativeReference: AnimeSourceTitle? = null
@@ -102,6 +111,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private var catalogGeneration = 0L
     private val catalogRequests = mutableMapOf<String, Long>()
     private var detailJob: Job? = null
+    private var detailScoreJob: Job? = null
     private var sourceJob: Job? = null
     private var previewJob: Job? = null
     private var previewSourceId: String? = null
@@ -214,7 +224,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         ++detailGeneration
                         cancelSourceAggregation()
                         detailJob?.cancel()
+                        detailScoreJob?.cancel()
                         boundCatalogJob?.cancel()
+                        discussion.open(null)
                         retryNativeReference = null
                         stopPlayback(discardCheckpoint = true)
                         recentPlaybackSources.clear()
@@ -257,6 +269,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 } == true }.map { it.id }.toSet()
                 previous = listings.associateBy { it.id }
                 mutableState.update { it.copy(sourceExtensions = listings,
+                    groupSourceCandidates = it.groupSourceCandidates.filterNot { title -> title.sourceId in changed },
+                    associationChoices = it.associationChoices - changed,
                     sourceCatalogs = it.sourceCatalogs.filterNot { catalog -> catalog.title.sourceId in changed },
                     sourceResults = it.sourceResults.map { result -> if (result.providerId in changed)
                         result.copy(items = emptyList(), loading = false, loadingMore = false, hasMore = false, page = 0,
@@ -285,6 +299,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 projectRoutes()
                 unifiedSearch.reconcile()
                 invalidatePreparation()
+                if (discoveryVisible && foreground) ensureDiscovery()
             }
         }
         scope.launch {
@@ -320,15 +335,17 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val season = AnimeSeason.entries[(today.monthNumber - 1) / 3]
         val nextSeason = AnimeSeason.entries[(season.ordinal + 1) % AnimeSeason.entries.size]
         val nextYear = today.year + if (nextSeason == AnimeSeason.WINTER) 1 else 0
-        val seasonal = AnimeDiscoveryQuery(year = today.year, season = season)
+        val seasonal = AnimeDiscoveryQuery(year = today.year, season = season, combined = true)
         val calendar = AnimeDiscoveryQuery(calendar = true, weekday = today.dayOfWeek.isoDayNumber)
         val sections = listOf(
             AnimeDiscoverySection("home:today", "今日放送", calendar, AnimeDiscoveryTab.CALENDAR),
             AnimeDiscoverySection("home:season", "本季人气", seasonal, AnimeDiscoveryTab.SEASON),
             AnimeDiscoverySection("home:trending", "近期趋势", AnimeDiscoveryQuery(
                 provider = AnimeDiscoveryProvider.ANILIST, order = AnimeDiscoveryOrder.TRENDING), AnimeDiscoveryTab.RANKING),
-            AnimeDiscoverySection("home:rank", "高分佳作", AnimeDiscoveryQuery(order = AnimeDiscoveryOrder.RANK), AnimeDiscoveryTab.RANKING),
-            AnimeDiscoverySection("home:upcoming", "下季期待", AnimeDiscoveryQuery(year = nextYear, season = nextSeason), AnimeDiscoveryTab.SEASON),
+            AnimeDiscoverySection("home:rank", "高分佳作", AnimeDiscoveryQuery(
+                order = AnimeDiscoveryOrder.SCORE, combined = true), AnimeDiscoveryTab.RANKING),
+            AnimeDiscoverySection("home:upcoming", "下季期待", AnimeDiscoveryQuery(
+                year = nextYear, season = nextSeason, combined = true), AnimeDiscoveryTab.SEASON),
         )
         if (discoveryDate != today.toString() || mutableState.value.discoverySections.isEmpty()) {
             discoveryDate = today.toString()
@@ -336,38 +353,40 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             val feeds = before.discoveryFeeds.toMutableMap()
             sections.forEach { section ->
                 if (feeds[section.key]?.query != section.query) {
-                    discoveryRequests[section.key] = ++discoverySequence
-                    discoveryJobs.remove(section.key)?.cancel()
+                    discoveryLoads.reset(section.key)
                     feeds[section.key] = AnimeDiscoveryFeed(section.query)
                 }
             }
-            mapOf(AnimeDiscoveryTab.RANKING to AnimeDiscoveryQuery(), AnimeDiscoveryTab.SEASON to seasonal,
-                AnimeDiscoveryTab.CALENDAR to calendar, AnimeDiscoveryTab.GENRES to AnimeDiscoveryQuery()).forEach { (tab, query) ->
+            mapOf(AnimeDiscoveryTab.RANKING to AnimeDiscoveryQuery(combined = true), AnimeDiscoveryTab.SEASON to seasonal,
+                AnimeDiscoveryTab.CALENDAR to calendar, AnimeDiscoveryTab.GENRES to AnimeDiscoveryQuery(combined = true)).forEach { (tab, query) ->
                 val key = animeDiscoveryFeedKey(tab)
                 if (key !in feeds) feeds[key] = AnimeDiscoveryFeed(query)
             }
             mutableState.update { it.copy(discoverySections = sections, discoveryFeeds = feeds) }
         }
-        if (loadHome && mutableState.value.discoveryTab == AnimeDiscoveryTab.HOME) {
-            sections.forEach { section ->
-                val feed = mutableState.value.discoveryFeeds[section.key] ?: return@forEach
-                if (feed.page == 0 && !feed.loading && feed.error == null) loadDiscovery(section.key)
-            }
-            sourceBrowse.refreshLatest()
+        if (!loadHome) return
+        val tab = mutableState.value.discoveryTab
+        val keys = when (tab) {
+            AnimeDiscoveryTab.HOME -> sections.mapTo(linkedSetOf()) { it.key }
+            AnimeDiscoveryTab.SOURCES -> emptySet()
+            else -> setOf(animeDiscoveryFeedKey(tab))
         }
+        discoveryLoads.visible(keys.takeIf { discoveryVisible && foreground }.orEmpty())
+        keys.forEach(discoveryLoads::ensure)
+        if (tab == AnimeDiscoveryTab.HOME) sourceBrowse.refreshLatest()
+    }
+
+    internal fun setDiscoveryVisible(visible: Boolean) {
+        discoveryVisible = visible
+        if (visible && foreground) ensureDiscovery() else discoveryLoads.visible(emptySet())
     }
 
     fun selectDiscoveryTab(tab: AnimeDiscoveryTab) {
         ensureDiscovery(loadHome = false)
         mutableState.update { it.copy(discoveryTab = tab) }
         when (tab) {
-            AnimeDiscoveryTab.HOME -> ensureDiscovery()
             AnimeDiscoveryTab.SOURCES -> sourceBrowse.activate()
-            else -> {
-                val key = animeDiscoveryFeedKey(tab)
-                val feed = mutableState.value.discoveryFeeds[key] ?: return
-                if (feed.page == 0 && !feed.loading && feed.error == null) loadDiscovery(key)
-            }
+            else -> ensureDiscovery()
         }
     }
 
@@ -378,7 +397,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (tab == AnimeDiscoveryTab.HOME || tab == AnimeDiscoveryTab.SOURCES) return
         ensureDiscovery(loadHome = false)
         val key = animeDiscoveryFeedKey(tab)
-        val normalized = query.copy(tag = query.tag.trim())
+        val tag = query.tag.trim()
+        val normalized = when {
+            !query.combined -> query.copy(tag = tag)
+            query.order == AnimeDiscoveryOrder.TRENDING -> query.copy(provider = AnimeDiscoveryProvider.ANILIST,
+                tag = animeDiscoveryGenreLabels.entries.firstOrNull { it.value == tag }?.key ?: tag)
+            else -> query.copy(provider = AnimeDiscoveryProvider.BANGUMI, tag = animeDiscoveryGenreLabels[tag] ?: tag)
+        }
         val current = mutableState.value.discoveryFeeds[key]
         if (tab != AnimeDiscoveryTab.CALENDAR) {
             current?.query?.let { discoveryOptions[tab to it.provider] = it }
@@ -386,21 +411,21 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         mutableState.update { it.copy(discoveryTab = tab, discoveryFeeds = it.discoveryFeeds +
             (key to if (current != null && current.query == normalized) current else AnimeDiscoveryFeed(normalized))) }
-        if (current == null || current.query != normalized || current.page == 0 && !current.loading) loadDiscovery(key)
+        ensureDiscovery()
     }
 
     fun openDiscoverySection(sectionKey: String) {
         val current = mutableState.value
         val section = current.discoverySections.firstOrNull { it.key == sectionKey } ?: return
         val key = animeDiscoveryFeedKey(section.destination)
-        discoveryRequests[key] = ++discoverySequence
-        discoveryJobs.remove(key)?.cancel()
+        discoveryLoads.reset(key)
         val preview = current.discoveryFeeds[sectionKey]
         val feed = if (preview != null && preview.query == section.query && preview.page > 0)
             preview.copy(loading = false, loadingMore = false, moreError = null)
         else AnimeDiscoveryFeed(section.query)
         mutableState.update { it.copy(discoveryTab = section.destination, discoveryFeeds = it.discoveryFeeds + (key to feed)) }
-        if (feed.page == 0) loadDiscovery(key)
+        discoveryLoads.restorePreview(sectionKey, key)
+        ensureDiscovery()
     }
 
     fun refreshDiscovery() {
@@ -408,73 +433,17 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val current = mutableState.value
         when (current.discoveryTab) {
             AnimeDiscoveryTab.HOME -> {
-                current.discoverySections.forEach { loadDiscovery(it.key, forceRefresh = true) }
+                current.discoverySections.forEach { discoveryLoads.refresh(it.key) }
                 sourceBrowse.refreshLatest(force = true)
             }
             AnimeDiscoveryTab.SOURCES -> sourceBrowse.refresh()
-            else -> loadDiscovery(animeDiscoveryFeedKey(current.discoveryTab), forceRefresh = true)
+            else -> discoveryLoads.refresh(animeDiscoveryFeedKey(current.discoveryTab))
         }
     }
 
-    fun retryDiscovery(key: String) {
-        val feed = mutableState.value.discoveryFeeds[key] ?: return
-        if (feed.loading || feed.loadingMore) return
-        loadDiscovery(key, forceRefresh = true)
-    }
+    fun retryDiscovery(key: String) = discoveryLoads.retry(key)
 
-    fun loadMoreDiscovery(key: String) {
-        val feed = mutableState.value.discoveryFeeds[key] ?: return
-        if (feed.loading || feed.loadingMore || !feed.hasMore) return
-        loadDiscovery(key, append = true, forceRefresh = feed.moreError != null)
-    }
-
-    private fun loadDiscovery(key: String, append: Boolean = false, forceRefresh: Boolean = false) {
-        val before = mutableState.value.discoveryFeeds[key] ?: return
-        val query = before.query
-        val page = if (append) before.page.toLong() + 1 else 1L
-        val generation = ++discoverySequence
-        discoveryRequests[key] = generation
-        discoveryJobs.remove(key)?.cancel()
-        mutableState.update { it.copy(discoveryFeeds = it.discoveryFeeds + (key to before.copy(
-            loading = !append, loadingMore = append, error = if (append) before.error else null, moreError = null))) }
-        discoveryJobs[key] = scope.launch {
-            fun current() = discoveryRequests[key] == generation && mutableState.value.discoveryFeeds[key]?.query == query
-            fun publish(transform: (AnimeDiscoveryFeed) -> AnimeDiscoveryFeed) {
-                if (!current()) return
-                mutableState.update { state ->
-                    val feed = state.discoveryFeeds[key]
-                    if (feed == null || feed.query != query || discoveryRequests[key] != generation) state
-                    else state.copy(discoveryFeeds = state.discoveryFeeds + (key to transform(feed)))
-                }
-            }
-            try {
-                require(page in 1..Int.MAX_VALUE.toLong()) { "分页位置已超出来源支持范围。" }
-                if (!append && before.items.isEmpty()) discovery.cached(query, 1)?.let { cached ->
-                    publish { it.copy(items = cached.items, page = cached.page, hasMore = cached.hasMore,
-                        fetchedAt = cached.fetchedAt) }
-                }
-                val result = discovery.browse(query, page.toInt(), forceRefresh)
-                check(result.page == page.toInt()) { "来源返回的页码与请求不一致。" }
-                publish { feed ->
-                    val oldKeys = feed.items.mapTo(mutableSetOf()) { it.key }
-                    val added = if (append) result.items.filterNot { it.key in oldKeys } else result.items
-                    feed.copy(items = (if (append) feed.items + added else result.items).distinctBy { it.key },
-                        page = result.page, hasMore = result.hasMore,
-                        loading = false, loadingMore = false, error = if (append) feed.error else null,
-                        moreError = null, fetchedAt = if (append) feed.fetchedAt else result.fetchedAt)
-                }
-            } catch (cancel: CancellationException) {
-                publish { it.copy(loading = false, loadingMore = false) }
-                throw cancel
-            } catch (failure: Exception) {
-                publish { it.copy(loading = false, loadingMore = false,
-                    error = if (append) it.error else failure.message ?: "这一栏暂未取得，可单独重试。",
-                    moreError = if (append) failure.message ?: "这一页未能加载，请重试。" else null) }
-            } finally {
-                if (current()) discoveryJobs.remove(key)
-            }
-        }
-    }
+    fun loadMoreDiscovery(key: String) = discoveryLoads.more(key)
 
     /** Only an already saved exact association can bypass the explicit counterpart picker. */
     fun knownDiscoverySubject(reference: AnimeSourceTitle): AnimeSubject? {
@@ -491,21 +460,38 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     fun open(subject: AnimeSubject) = openDetail(subject, resumeEpisodeId = null)
 
-    internal fun returnToVisitedDetail(detail: AnimeDetail, related: List<AnimeSubject>) {
-        openDetail(detail.subject, resumeEpisodeId = null, visitedDetail = detail, visitedRelated = related)
+    internal fun returnToVisitedDetail(detail: AnimeDetail, related: List<AnimeSubject>,
+        candidates: List<AnimeSourceTitle> = emptyList(), scores: List<AnimeSourceScore> = emptyList()) {
+        openDetail(detail.subject, resumeEpisodeId = null, visitedDetail = detail, visitedRelated = related,
+            sourceCandidates = candidates, observedScores = scores)
+    }
+
+    internal fun openDiscoveryItem(item: AnimeDiscoveryItem) {
+        val subject = item.subject ?: return
+        openDetail(subject, resumeEpisodeId = null, observedScores = item.sourceScores)
+    }
+
+    internal fun retryCurrentDetail() {
+        val current = mutableState.value
+        val subject = current.detail?.subject ?: return
+        openDetail(subject, resumeRequest?.takeIf { it.first == subject.id }?.second,
+            sourceCandidates = current.groupSourceCandidates, observedScores = current.detailScores)
     }
 
     /** Search grouping supplies candidates, never a persisted work/episode association. */
     fun openSearchGroup(group: AnimeSearchGroup) {
         val subject = group.subject ?: return
-        open(subject)
-        stageSearchCandidates(subject.id, group.sources)
+        openDetail(subject, resumeEpisodeId = null, sourceCandidates = group.sources)
     }
+
+    internal fun currentVideoCandidates(candidates: List<AnimeSourceTitle>): List<AnimeSourceTitle> =
+        candidates.filter { title -> sources.provider(title.sourceId) != null &&
+            (title.sourceRevision == null || title.sourceRevision == discoverySourceRevision(title.sourceId))
+        }.distinctBy { Triple(it.sourceId, it.id, it.url) }
 
     fun stageSearchCandidates(subjectId: String, candidates: List<AnimeSourceTitle>) {
         if (mutableState.value.detail?.subject?.id != subjectId) return
-        val current = candidates.filter { title -> sources.provider(title.sourceId) != null &&
-            (title.sourceRevision == null || title.sourceRevision == discoverySourceRevision(title.sourceId)) }
+        val current = currentVideoCandidates(candidates)
         sourceQuery = mutableState.value.detail?.subject?.title.orEmpty()
         mutableState.update { state -> state.copy(sourceResults = current.groupBy { it.sourceId }.map { (id, items) ->
             AnimeSourceResult(id, sources.provider(id)?.name ?: id, items.distinctBy { it.id to it.url })
@@ -527,6 +513,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     fun openSourceTitle(title: AnimeSourceTitle) = openDetail(sourceSubject(title), null, title)
 
+    internal fun openVideoGroup(subject: AnimeSubject, nativeReference: AnimeSourceTitle?,
+        candidates: List<AnimeSourceTitle>) =
+        openDetail(subject, resumeEpisodeId = null, nativeReference = nativeReference, sourceCandidates = candidates)
+
     private fun nativeEpisodeId(subject: AnimeSubject, episode: AnimeSourceEpisode): String =
         "${subject.id}:episode:${dev.mangaflow.anime.sources.animeHash(episode.group + "\n" + episode.id)}"
 
@@ -539,7 +529,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         })
 
     private fun openDetail(subject: AnimeSubject, resumeEpisodeId: String?, nativeReference: AnimeSourceTitle? = null,
-        visitedDetail: AnimeDetail? = null, visitedRelated: List<AnimeSubject> = emptyList()) {
+        visitedDetail: AnimeDetail? = null, visitedRelated: List<AnimeSubject> = emptyList(),
+        sourceCandidates: List<AnimeSourceTitle> = emptyList(), observedScores: List<AnimeSourceScore> = emptyList()) {
         // A related-title back action can reuse the exact catalogue the user saw. Media
         // bindings and source options still resolve against the current registry and library.
         val initialDetail = visitedDetail ?: AnimeDetail(subject, emptyList())
@@ -550,6 +541,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         cancelSourceAggregation()
         val openingRestoreEpoch = library.state.value.restoreEpoch
         detailJob?.cancel()
+        detailScoreJob?.cancel()
         boundCatalogJob?.cancel()
         relatedJob?.cancel()
         sourceJob?.cancel()
@@ -561,8 +553,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         ++searchGeneration
         ++previewGeneration
         resumeRequest = resumeEpisodeId?.let { subject.id to it }
+        val candidates = currentVideoCandidates(sourceCandidates)
+        val scores = (observedScores + mutableState.value.discoveryFeeds.values.asSequence()
+            .flatMap { it.items.asSequence() }.filter { it.subject?.id == subject.id }
+            .flatMap { it.sourceScores.asSequence() }.toList()).distinctBy { it.provider }
         mutableState.update { it.copy(
             detail = initialDetail, detailLoading = true, detailError = null,
+            detailScores = scores, groupSourceCandidates = candidates, associationChoices = emptyMap(),
             detailFromCache = visitedDetail != null, relatedSubjects = visitedRelated,
             sourceCatalogs = emptyList(), sourceResults = emptyList(), episodeOptions = emptyMap(),
             sourceBindings = library.state.value.bindings.filter { binding -> binding.subjectId == subject.id },
@@ -572,6 +569,15 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             sourceAggregation = emptyMap(), sourceAggregationRunning = false,
             sourceAggregationCompleted = 0, sourceAggregationTotal = 0,
         ) }
+        discussion.open(subject)
+        if (candidates.isNotEmpty()) {
+            stageSearchCandidates(subject.id, candidates)
+            // Group membership supplies candidates for detail lookup. The source's
+            // catalogue still has to pass the existing work and episode checks.
+            candidates.groupBy { it.sourceId }.forEach { (id, titles) ->
+                associationCandidates[id] = discoverySourceRevision(id) to titles
+            }
+        }
         if (subject.externalIds["native-source"] != null) {
             detailJob = scope.launch {
                 try {
@@ -665,6 +671,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 (if (visitedDetail == null) metadata.cachedDetail(subject) else null)?.let { cached ->
                     if (!currentDetail(generation, subject.id)) return@launch
                     mutableState.update { it.copy(detail = cached, detailFromCache = true) }
+                    discussion.open(cached.subject)
                     rebuildOptions()
                     startSourceAggregation(cached)
                 }
@@ -677,6 +684,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     result.episodeError?.let { "集数目录：$it" }).joinToString("\n").ifBlank { null }
                 mutableState.update { it.copy(detail = detail, detailLoading = false, detailError = failure,
                     detailFromCache = it.detailFromCache && (result.subject == null || result.episodes == null)) }
+                discussion.open(detail.subject)
+                loadDetailScore(detail.subject, generation)
                 rebuildOptions()
                 if (result.episodes != null && resumeRequest?.first == subject.id) {
                     notice("当前剧集目录里暂时找不到上次观看的剧集，原进度已保留。")
@@ -691,15 +700,28 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
     }
 
+    private fun loadDetailScore(subject: AnimeSubject, generation: Long) {
+        if (!subject.id.startsWith("bangumi:") || detailScoreJob?.isActive == true ||
+            mutableState.value.detailScores.any { it.provider == AnimeDiscoveryProvider.ANILIST }) return
+        detailScoreJob = scope.launch {
+            val score = discovery.lookupAniListScore(subject) ?: return@launch
+            if (currentDetail(generation, subject.id)) mutableState.update { state ->
+                state.copy(detailScores = state.detailScores.filterNot { it.provider == score.provider } + score)
+            }
+        }
+    }
+
     fun closeDetail() {
         retryNativeReference = null
         closePlayback()
+        discussion.open(null)
         resumeRequest = null
         ++detailGeneration
         cancelSourceAggregation()
         ++searchGeneration
         ++previewGeneration
         detailJob?.cancel()
+        detailScoreJob?.cancel()
         boundCatalogJob?.cancel()
         relatedJob?.cancel()
         sourceJob?.cancel()
@@ -707,6 +729,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         sourceSearchJobs.clear()
         previewJob?.cancel()
         mutableState.update { it.copy(detail = null, detailLoading = false, detailError = null,
+            detailScores = emptyList(), groupSourceCandidates = emptyList(), associationChoices = emptyMap(),
             sourceResults = emptyList(), sourceCatalogs = emptyList(), episodeOptions = emptyMap(),
             previewCatalog = null, previewLoading = false, sourceError = null, preferredSourceId = null,
             sourceGroups = emptyMap(), sourceBindings = emptyList(), sourceCatalogErrors = emptyMap(),
@@ -1076,6 +1099,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         associationAttempts.clear()
         associationCandidates.clear()
         mutableState.update { it.copy(sourceAggregation = emptyMap(), sourceAggregationRunning = false,
+            associationChoices = emptyMap(),
             sourceAggregationCompleted = 0, sourceAggregationTotal = 0) }
     }
 
@@ -1129,8 +1153,17 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 associationAttempts[sourceId] == attempt &&
                 catalogRequests[sourceId] == catalogRequest &&
                 sources.provider(sourceId) != null && discoverySourceRevision(sourceId) == revision
-            fun report(phase: AnimeAssociationPhase, message: String? = null) {
-                if (current()) publishAssociation(sourceId, AnimeAssociationProgress(phase, message))
+            fun report(phase: AnimeAssociationPhase, message: String? = null,
+                choices: List<AnimeSourceTitle> = emptyList()) {
+                if (!current()) return
+                if (phase == AnimeAssociationPhase.NEEDS_SELECTION) {
+                    val candidates = choices.distinctBy { it.id to it.url }.take(12)
+                    mutableState.update { it.copy(associationChoices = it.associationChoices + (sourceId to candidates)) }
+                } else if (phase in setOf(AnimeAssociationPhase.LINKED, AnimeAssociationPhase.NO_MATCH,
+                    AnimeAssociationPhase.EXCLUDED)) {
+                    mutableState.update { it.copy(associationChoices = it.associationChoices - sourceId) }
+                }
+                publishAssociation(sourceId, AnimeAssociationProgress(phase, message))
             }
             report(AnimeAssociationPhase.QUEUED)
             associationJobs[sourceId] = scope.launch {
@@ -1223,11 +1256,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 else report(AnimeAssociationPhase.NO_MATCH, "本次有界搜索未找到可靠的同作品候选，可手动继续搜索。")
                                 return@aggregation true
                             }
-                            if (titles.size > 2) {
-                                report(AnimeAssociationPhase.NEEDS_SELECTION, "同名版本不唯一，可在来源详情中核对。")
+                            val identified = titles.filter { autoPlaySubjectHasSharedId(detail.subject, it) }
+                            val possible = identified.ifEmpty { titles }
+                            if (possible.size > 2) {
+                                report(AnimeAssociationPhase.NEEDS_SELECTION, "同名版本不唯一，可在来源详情中核对。", possible)
                                 return@aggregation true
                             }
-                            val verified = titles.mapNotNull { title ->
+                            val verified = possible.mapNotNull { title ->
                                 val catalog = withTimeoutOrNull(5_000) { provider.catalog(title) }
                                     ?: return@aggregation false
                                 check(catalog.title.sourceId == sourceId && catalog.title.id == title.id &&
@@ -1236,7 +1271,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             }
                             val catalog = verified.singleOrNull()
                             if (catalog == null) {
-                                report(AnimeAssociationPhase.NEEDS_SELECTION, "作品年份、身份或版本仍需核对。")
+                                report(AnimeAssociationPhase.NEEDS_SELECTION, "作品年份、身份或版本仍需核对。", possible)
                                 return@aggregation true
                             }
                             if (!current()) return@aggregation false
@@ -1806,7 +1841,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         playerInstance?.setForeground(value)
         if (downloadsOwner.isInitialized()) downloads.setForeground(value)
         if (!value && (!mutableState.value.settings.backgroundAudio || prepared == null)) clearPreparation()
-        if (value && discoveryDate != null) ensureDiscovery()
+        if (value && discoveryVisible) ensureDiscovery()
+        else if (!value) discoveryLoads.visible(emptySet())
     }
 
     fun flushPlayback() {
@@ -2133,7 +2169,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 ++detailGeneration
                 ++searchGeneration
                 ++previewGeneration
-                detailJob?.cancel(); boundCatalogJob?.cancel(); relatedJob?.cancel(); previewJob?.cancel()
+                detailJob?.cancel(); detailScoreJob?.cancel(); boundCatalogJob?.cancel(); relatedJob?.cancel(); previewJob?.cancel()
                 sourceSearchJobs.values.forEach { it.cancel() }
                 sourceSearchJobs.clear()
                 resumeRequest = null
@@ -2148,7 +2184,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 val option = AnimeEpisodeOption(offline.asset.sourceId, "离线", catalog, native, confirmed = true)
                 val previous = library.progressFor(offline.subject.id, offline.episode.id)
                 val position = previous?.takeIf { !it.completed && it.assetId == offline.asset.id }?.positionMs ?: 0L
+                discussion.open(null)
                 mutableState.update { it.copy(detail = detail, detailLoading = false, detailError = null,
+                    detailScores = emptyList(), groupSourceCandidates = emptyList(), associationChoices = emptyMap(),
                     detailFromCache = cached != null, relatedSubjects = emptyList(), sourceResults = emptyList(),
                     sourceCatalogs = emptyList(), sourceBindings = emptyList(), sourceCatalogErrors = emptyMap(),
                     episodeOptions = emptyMap(), previewCatalog = null, previewLoading = false,

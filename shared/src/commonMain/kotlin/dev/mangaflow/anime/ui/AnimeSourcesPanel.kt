@@ -24,6 +24,8 @@ import dev.mangaflow.ui.motion.*
 
 private data class EpisodeMappingDraft(val sourceId: String, val episode: AnimeSourceEpisode)
 
+private fun AnimeSourceTitle.referenceKey(): String = "$sourceId:${id.length}:$id:$url"
+
 @Composable
 internal fun AnimeSourcesPanel(
     visible: Boolean,
@@ -54,15 +56,27 @@ internal fun AnimeSourcesPanel(
     var aggregationExpanded by remember(subject?.id) { mutableStateOf(false) }
     var episodeQuery by remember(focusEpisode?.id) { mutableStateOf("") }
     var mappingLimit by remember(expandedSource, episodeQuery) { mutableIntStateOf(40) }
-    var allPreviewEpisodes by remember(state.previewCatalog?.title?.id) { mutableStateOf(false) }
-    val sourceScroll = rememberLazyListState()
-    val previewScroll = key(state.previewCatalog?.title?.id) { rememberLazyListState() }
     val preview = state.previewCatalog
+    val subjectId = subject?.id
+    val previewKey = preview?.title?.referenceKey()
+    var allPreviewEpisodes by remember(previewKey) { mutableStateOf(false) }
+    val sourceScroll = key(subjectId, focusEpisode?.id) { rememberLazyListState() }
+    val previewScroll = key(previewKey) { rememberLazyListState() }
+    val candidates = remember(state.groupSourceCandidates, state.associationChoices) {
+        val grouped = state.groupSourceCandidates.takeIf { rows -> rows.distinctBy { it.sourceId }.size > 1 }.orEmpty()
+        (grouped + state.associationChoices.values.flatten()).distinctBy { it.referenceKey() }
+    }
+    val candidateKeys = remember(candidates) { candidates.map { it.referenceKey() }.toSet() }
+    val linkedKeys = remember(state.sourceBindings, subjectId) {
+        state.sourceBindings.filter { it.subjectId == subjectId }.map { it.catalog.referenceKey() }.toSet()
+    }
+    val excludedSourceIds = state.library.firstOrNull { it.subject.id == subjectId }?.excludedSourceIds.orEmpty()
+    val previewLinked = previewKey != null && previewKey in candidateKeys && previewKey in linkedKeys
     val previousBinding = preview?.let { candidate -> state.sourceBindings.firstOrNull {
-        it.catalog.sourceId == candidate.title.sourceId && it.catalog.id != candidate.title.id
+        it.subjectId == subjectId && it.catalog.sourceId == candidate.title.sourceId &&
+            it.catalog.referenceKey() != candidate.title.referenceKey()
     } }
     val previewing = preview != null || state.previewLoading
-    val subjectId = subject?.id
     LaunchedEffect(visible, subjectId, manageExpanded) {
         if (visible && manageExpanded && subjectId != null && state.sourceResults.isEmpty()) controller.searchSources()
     }
@@ -87,7 +101,11 @@ internal fun AnimeSourcesPanel(
                     }
                     Column(Modifier.weight(1f).padding(start = if (previewing) 2.dp else 8.dp),
                         verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text(if (previewing) "确认作品关联" else "播放来源", style = MaterialTheme.typography.titleMedium)
+                        Text(when {
+                            previewLinked || state.previewLoading -> "来源目录"
+                            previewing -> "确认作品关联"
+                            else -> "播放来源"
+                        }, style = MaterialTheme.typography.titleMedium)
                         AnimeQuietLabel(focusEpisode?.let(::animeEpisodeLabel) ?: subject?.title.orEmpty())
                     }
                     if (state.canUndo) MotionIconButton(onClick = controller::undo, modifier = Modifier.size(44.dp),
@@ -100,13 +118,18 @@ internal fun AnimeSourcesPanel(
                     LazyColumn(Modifier.weight(1f, fill = false), state = previewScroll, contentPadding = PaddingValues(20.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         if (state.previewLoading && preview == null) item {
-                            AnimeMessage("正在读取来源目录", "取得真实集数后再确认关联。")
+                            AnimeMessage("正在读取来源目录")
                         }
                         if (preview != null) {
                             item {
                                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                                        AnimeQuietLabel("作品资料 · Bangumi")
+                                        val nativeSource = subject?.externalIds?.get("native-source")
+                                        AnimeQuietLabel(when {
+                                            nativeSource != null -> "当前作品 · ${animeSourceName(nativeSource, state)}"
+                                            subject?.id?.startsWith("bangumi:") == true -> "作品资料 · Bangumi"
+                                            else -> "当前作品"
+                                        })
                                         Text(subject?.title.orEmpty(), style = MaterialTheme.typography.titleSmall)
                                         AnimeQuietLabel(subject?.let(::animeSubjectSummary).orEmpty())
                                     }
@@ -130,7 +153,7 @@ internal fun AnimeSourcesPanel(
                                 Text("替换后重新核对线路与集数映射；观看记录会保留，关联改动可以撤销。",
                                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            item {
+                            if (!previewLinked) item {
                                 Text("请核对季度、正片/特别篇与版本。关联作品后还需选择线路组；同名或集数相同不代表同一版本。",
                                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
@@ -151,11 +174,11 @@ internal fun AnimeSourcesPanel(
                         }
                         if (state.sourceError != null) item {
                             if (preview == null) AnimeMessage("来源目录未取得", state.sourceError, icon = Icons.Outlined.ErrorOutline)
-                            else AnimeDiscoveryInlineStatus("目录更新未完成，仍可选择已加载集数",
+                            else AnimeDiscoveryInlineStatus("目录更新未完成，仍显示上次目录",
                                 retry = { controller.previewSource(preview.title) })
                         }
                     }
-                    if (preview != null) MotionButton(onClick = controller::bindPreviewSource,
+                    if (preview != null && !previewLinked) MotionButton(onClick = controller::bindPreviewSource,
                         enabled = !state.previewLoading, modifier = Modifier.fillMaxWidth().padding(16.dp).heightIn(min = 48.dp)) {
                         Text(if (previousBinding != null) "确认替换来源关联" else "确认关联此作品")
                     }
@@ -207,12 +230,26 @@ internal fun AnimeSourcesPanel(
                             AnimeSectionTitle("自动汇总", "已匹配 $matchedSources 个来源 · $matchedEpisodes 集有对应线路")
                             AnimeQuietLabel("剧集统一显示，点击剧集自动选择线路；不确定的结果不会混入。")
                         }
+                        if (candidates.isNotEmpty()) {
+                            item(key = "group-source-heading") { AnimeSectionTitle("来源候选") }
+                            items(candidates, key = { "group-source:${it.referenceKey()}" }) { title ->
+                                val linked = title.referenceKey() in linkedKeys
+                                val status = when {
+                                    linked -> "作品已关联 · 查看目录"
+                                    title.sourceId in excludedSourceIds -> "已排除 · 查看目录"
+                                    else -> "待确认 · 查看目录"
+                                }
+                                AnimeSelection(animeSourceName(title.sourceId, state),
+                                    listOfNotNull(title.title, title.year?.toString(), status).joinToString(" · "),
+                                    selected = linked, onClick = { controller.previewSource(title) })
+                            }
+                        }
                         if (state.sourceAggregationTotal > 0) item(key = "aggregation-progress") {
                             val counts = state.sourceAggregation.values.groupingBy { it.phase }.eachCount()
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 AnimeQuietLabel(if (state.sourceAggregationRunning)
-                                    "后台处理来源 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal} · 无需等待全部完成"
-                                    else "本轮来源处理已结束 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal}")
+                                    "正在核对 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal} 个来源"
+                                    else "已核对 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal} 个来源")
                                 val summary = listOfNotNull(
                                     counts[AnimeAssociationPhase.LINKED]?.let { "作品已关联 $it" },
                                     counts[AnimeAssociationPhase.NO_MATCH]?.let { "未找到可靠候选 $it" },
@@ -232,28 +269,15 @@ internal fun AnimeSourcesPanel(
                         }
                         if (aggregationExpanded) items(state.sourceAggregation.entries.toList(),
                             key = { "aggregation-result:" + it.key }) { (sourceId, progress) ->
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                AnimeSectionTitle(animeSourceName(sourceId, state), when (progress.phase) {
-                                    AnimeAssociationPhase.QUEUED -> "等待处理"
-                                    AnimeAssociationPhase.SEARCHING -> "正在读取"
-                                    AnimeAssociationPhase.LINKED -> "作品已关联"
-                                    AnimeAssociationPhase.NO_MATCH -> "未找到可靠候选"
-                                    AnimeAssociationPhase.NEEDS_SELECTION -> "需要确认作品或版本"
-                                    AnimeAssociationPhase.UNAVAILABLE -> "本轮未完成"
-                                    AnimeAssociationPhase.EXCLUDED -> "已按你的选择排除"
-                                })
-                                // Aggregation messages may originate from provider exceptions or notices.
-                                // Keep this summary typed and fixed rather than exposing their raw text.
-                                AnimeQuietLabel(when (progress.phase) {
-                                    AnimeAssociationPhase.QUEUED -> "等待本轮来源处理。"
-                                    AnimeAssociationPhase.SEARCHING -> "正在搜索并核对作品与集数。"
-                                    AnimeAssociationPhase.LINKED -> "作品关联已确认，具体集数与播放地址仍需核对。"
-                                    AnimeAssociationPhase.NO_MATCH -> "本轮未找到可可靠关联的作品。"
-                                    AnimeAssociationPhase.NEEDS_SELECTION -> "请确认同一作品及季度，避免混入其他版本。"
-                                    AnimeAssociationPhase.UNAVAILABLE -> "搜索或目录读取未完成，可重试。"
-                                    AnimeAssociationPhase.EXCLUDED -> "不会自动重新关联这个来源。"
-                                })
-                            }
+                            AnimeSectionTitle(animeSourceName(sourceId, state), when (progress.phase) {
+                                AnimeAssociationPhase.QUEUED -> "等待核对"
+                                AnimeAssociationPhase.SEARCHING -> "正在搜索并核对"
+                                AnimeAssociationPhase.LINKED -> "作品已关联"
+                                AnimeAssociationPhase.NO_MATCH -> "未找到可靠候选"
+                                AnimeAssociationPhase.NEEDS_SELECTION -> "待确认作品或版本"
+                                AnimeAssociationPhase.UNAVAILABLE -> "搜索或目录读取未完成"
+                                AnimeAssociationPhase.EXCLUDED -> "已按你的选择排除"
+                            })
                         }
                         if (state.sourceError != null) item(key = "source-error") {
                             Text("来源操作未完成，请重试或检查来源设置。", style = MaterialTheme.typography.bodySmall,
@@ -405,10 +429,14 @@ internal fun AnimeSourcesPanel(
                             }
                         }
                         items(state.sourceResults, key = { it.providerId }) { result ->
+                            val otherItems = result.items.filterNot { it.referenceKey() in candidateKeys }
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                AnimeSectionTitle(result.name,
-                                    when { result.loading -> "正在搜索"; result.error != null -> "暂未取得"
-                                        else -> result.items.size.toString() + " 个候选" })
+                                AnimeSectionTitle(result.name, when {
+                                    result.loading -> "正在搜索"
+                                    result.error != null -> "暂未取得"
+                                    otherItems.isEmpty() && result.items.isNotEmpty() -> "候选已在上方"
+                                    else -> "${otherItems.size} 个候选"
+                                })
                                 if (result.error != null) {
                                     Text(result.error, style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -421,10 +449,8 @@ internal fun AnimeSourcesPanel(
                                         MotionTextButton(onClick = { openWebsite(result.providerId) },
                                             modifier = Modifier.heightIn(min = 44.dp)) { Text("打开来源网站") }
                                 } else if (!result.loading && result.items.isEmpty()) AnimeQuietLabel("没有找到候选，试试别名。")
-                                result.items.forEach { title ->
-                                    val linked = state.sourceBindings.any {
-                                        it.catalog.sourceId == title.sourceId && it.catalog.id == title.id
-                                    }
+                                otherItems.forEach { title ->
+                                    val linked = title.referenceKey() in linkedKeys
                                     AnimeSelection(title.title,
                                         listOfNotNull(title.year?.toString(), title.episodeCount?.let { it.toString() + " 集" },
                                             if (linked) "已关联" else "查看目录后确认").joinToString(" · "),

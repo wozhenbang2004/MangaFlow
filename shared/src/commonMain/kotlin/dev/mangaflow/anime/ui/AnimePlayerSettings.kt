@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.player.*
+import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
@@ -54,6 +55,7 @@ internal fun AnimePlayerSettings(
     var startDraft by remember { mutableStateOf("") }
     var rebufferDraft by remember { mutableStateOf("") }
     var retryDraft by remember { mutableStateOf("") }
+    var enhancementDetails by remember(visible, playback.sessionGeneration) { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(visible, initialSection) {
         if (visible) {
@@ -175,29 +177,11 @@ internal fun AnimePlayerSettings(
                             }
                             if (AnimePlayerCapability.VIDEO_ENHANCEMENT in capabilities ||
                                 state.settings.videoEnhancement != AnimeVideoEnhancementMode.OFF) {
-                                item {
-                                    AnimeSectionTitle("Anime4K", animeEnhancementLabel(playback.videoEnhancement.phase))
-                                    MotionTabs(state.settings.videoEnhancement.ordinal, listOf("原画", "轻量", "精细"),
-                                        onSelect = { controller.updatePlaybackSettings(state.settings.copy(
-                                            videoEnhancement = AnimeVideoEnhancementMode.entries[it])) },
-                                        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Anime4K 画质增强" },
-                                        controlHeight = 44.dp, treatment = MotionTabTreatment.Soft)
-                                }
-                                item {
-                                    AnimeQuietLabel(when (state.settings.videoEnhancement) {
-                                        AnimeVideoEnhancementMode.OFF -> "本机 GPU 实时增强动漫画面，不改原视频。"
-                                        AnimeVideoEnhancementMode.FAST -> "轻量处理线条与放大；优先减轻 GPU 负担。"
-                                        AnimeVideoEnhancementMode.QUALITY -> "更细致地处理线条与放大；GPU 负担更高。"
-                                    })
-                                }
-                                val enhancement = playback.videoEnhancement
-                                enhancement.detail?.takeIf(String::isNotBlank)?.let { detail ->
-                                    item { AnimeQuietLabel(detail) }
-                                }
-                                if (enhancement.inputWidth != null && enhancement.inputHeight != null &&
-                                    enhancement.outputWidth != null && enhancement.outputHeight != null) item {
-                                    AnimeQuietLabel("处理 " + enhancement.inputWidth + " × " + enhancement.inputHeight +
-                                        " → " + enhancement.outputWidth + " × " + enhancement.outputHeight)
+                                item(key = "anime4k") {
+                                    Anime4KSettings(playback, state.settings.videoEnhancement,
+                                        detailsExpanded = enhancementDetails,
+                                        onToggleDetails = { enhancementDetails = !enhancementDetails },
+                                        onSelect = { controller.updatePlaybackSettings(state.settings.copy(videoEnhancement = it)) })
                                 }
                             }
                             if (state.playbackResolutions.isNotEmpty()) {
@@ -357,13 +341,91 @@ internal fun animeScaleLabel(scale: AnimeVideoScale): String = when (scale) {
     AnimeVideoScale.ZOOM -> "填满"
 }
 
-private fun animeEnhancementLabel(phase: AnimeVideoEnhancementPhase): String = when (phase) {
-    AnimeVideoEnhancementPhase.OFF -> "原画"
-    AnimeVideoEnhancementPhase.WAITING -> "等待画面"
-    AnimeVideoEnhancementPhase.CONFIGURED -> "已配置"
-    AnimeVideoEnhancementPhase.ACTIVE -> "已在处理画面"
-    AnimeVideoEnhancementPhase.UNAVAILABLE -> "当前保持原画"
-    AnimeVideoEnhancementPhase.FAILED -> "增强失败"
+@Composable
+private fun Anime4KSettings(
+    playback: AnimePlayerState,
+    selectedMode: AnimeVideoEnhancementMode,
+    detailsExpanded: Boolean,
+    onToggleDetails: () -> Unit,
+    onSelect: (AnimeVideoEnhancementMode) -> Unit,
+) {
+    // A mode change can reach saved settings and the renderer on different frames.
+    val enhancement = playback.videoEnhancement.takeIf { it.mode == selectedMode }
+    val phase = enhancement?.phase ?: if (selectedMode == AnimeVideoEnhancementMode.OFF)
+        AnimeVideoEnhancementPhase.OFF else AnimeVideoEnhancementPhase.WAITING
+    val observation = enhancement?.observation
+    val processing = phase == AnimeVideoEnhancementPhase.ACTIVE && playback.isPlaying &&
+        !playback.playbackSuppressed && observation?.recentlySubmitting == true
+    val status = when (phase) {
+        AnimeVideoEnhancementPhase.OFF -> "原画"
+        AnimeVideoEnhancementPhase.UNAVAILABLE -> "当前无法增强"
+        AnimeVideoEnhancementPhase.FAILED -> "增强失败"
+        AnimeVideoEnhancementPhase.WAITING, AnimeVideoEnhancementPhase.CONFIGURED,
+        AnimeVideoEnhancementPhase.ACTIVE -> when {
+            playback.ended -> "播放已结束"
+            playback.phase == AnimePlayerPhase.ERROR -> "播放已中断"
+            playback.hasVideoTracks == false -> "当前媒体只有音频"
+            playback.isBuffering -> "缓冲中 · 等待视频帧"
+            playback.playbackSuppressed -> "播放暂时挂起"
+            playback.phase == AnimePlayerPhase.READY && !playback.playWhenReady -> "播放已暂停"
+            processing -> "正在提交增强帧"
+            phase == AnimeVideoEnhancementPhase.WAITING -> "等待视频画面"
+            phase == AnimeVideoEnhancementPhase.CONFIGURED -> if (observation == null)
+                "已配置 · 暂无处理观测" else "已配置 · 等待首个增强帧"
+            observation == null -> "已观测到增强帧"
+            else -> "等待后续增强帧"
+        }
+    }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        AnimeSectionTitle("Anime4K", status, action = {
+            if (selectedMode != AnimeVideoEnhancementMode.OFF) {
+                MotionTextButton(
+                    onClick = onToggleDetails,
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
+                    Text(if (detailsExpanded) "收起详情" else "处理详情")
+                    Icon(if (detailsExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        null, Modifier.size(16.dp))
+                }
+            }
+        })
+        MotionTabs(selectedMode.ordinal, listOf("原画", "轻量", "精细"),
+            onSelect = { onSelect(AnimeVideoEnhancementMode.entries[it]) },
+            modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Anime4K 画质增强" },
+            controlHeight = 44.dp, treatment = MotionTabTreatment.Soft)
+        enhancement?.let { state ->
+            if (phase == AnimeVideoEnhancementPhase.UNAVAILABLE || phase == AnimeVideoEnhancementPhase.FAILED) {
+                state.detail?.takeIf(String::isNotBlank)?.let { AnimeQuietLabel(it) }
+            }
+            if ((phase == AnimeVideoEnhancementPhase.CONFIGURED || phase == AnimeVideoEnhancementPhase.ACTIVE) &&
+                state.inputWidth != null && state.inputHeight != null &&
+                state.outputWidth != null && state.outputHeight != null) {
+                AnimeQuietLabel("处理尺寸 ${state.inputWidth} × ${state.inputHeight} → ${state.outputWidth} × ${state.outputHeight}")
+            }
+        }
+        observation?.let { sample ->
+            val duration = sample.sampleDurationMillis
+            val frames = sample.sampleFrames
+            val rate = if (processing && duration != null && duration > 0 && frames != null)
+                " · ${formatDecimal(frames * 1000.0 / duration, 1)} 帧/秒" else ""
+            if (sample.submittedFrames > 0) AnimeQuietLabel("已提交 ${sample.submittedFrames} 帧$rate")
+            if (sample.intermediateTextureBytes > 0) {
+                val size = formatDecimal(sample.intermediateTextureBytes / (1024.0 * 1024.0), 1)
+                AnimeQuietLabel("中间纹理约 $size MiB")
+            }
+        }
+        if (selectedMode != AnimeVideoEnhancementMode.OFF && detailsExpanded) {
+            if (observation == null) {
+                AnimeQuietLabel("当前暂无帧计数和纹理采样。")
+            } else {
+                if (processing) observation.submitThreadCpuNanos?.let { nanos ->
+                    AnimeQuietLabel("最近一帧提交线程 CPU 用时 ${formatDecimal(nanos / 1_000_000.0, 2)} 毫秒")
+                }
+                AnimeQuietLabel("帧数从当前一轮处理开始累计。纹理估算仅含 Anime4K 的中间纹理。")
+            }
+            AnimeQuietLabel("视频逐帧处理。GPU 总利用率与实际显示帧率暂无测量。")
+        }
+    }
 }
 
 internal fun animeSpeedLabel(speed: Float): String =

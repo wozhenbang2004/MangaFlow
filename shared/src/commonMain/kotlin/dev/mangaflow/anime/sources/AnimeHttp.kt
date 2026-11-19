@@ -3,14 +3,17 @@ package dev.mangaflow.anime.sources
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.net.MediaType.Companion.toMediaType
 import dev.mangaflow.net.NetworkClient
+import dev.mangaflow.net.NetworkFailureKind
 import dev.mangaflow.net.Request
 import dev.mangaflow.net.RequestBody.Companion.toRequestBody
+import dev.mangaflow.net.networkFailureKind
 import dev.mangaflow.net.retryAfterMillis
 import dev.mangaflow.platform.ConcurrentMap
 import dev.mangaflow.platform.sha256
@@ -84,8 +87,16 @@ internal class AnimeHttp(
                 client.execute(request.build(), maximumBytes = 8L * 1024 * 1024)
             } catch (cancel: CancellationException) {
                 throw cancel
+            } catch (failure: DownloadRouteException) {
+                throw failure
             } catch (failure: Exception) {
-                throw AnimeSourceException(sourceId, stage, "来源连接或数据读取未完成，请稍后重试。", cause = failure)
+                val kind = networkFailureKind(failure)
+                val detail = when (kind) {
+                    NetworkFailureKind.TRANSFER_TIMEOUT, NetworkFailureKind.REQUEST_TIMEOUT -> "读取来源数据超时，请稍后重试"
+                    null -> "来源连接或数据读取未完成，请稍后重试"
+                    else -> kind.message
+                }
+                throw AnimeSourceException(sourceId, stage, "$detail。", cause = failure)
             }
             if (response.code in setOf(301, 302, 303, 307, 308)) {
                 if (method != "GET" || remainingRedirects-- <= 0)
@@ -98,11 +109,12 @@ internal class AnimeHttp(
                 continue
             }
             if (response.code == 429 || response.code == 503) {
-                val retry = retryAfterMillis(response.header("Retry-After")) ?: 60_000L
-                pauses[pauseKey] = wallTimeMillis() + retry.coerceIn(1_000L, 86_400_000L)
+                val retry = (retryAfterMillis(response.header("Retry-After")) ?: 60_000L).coerceIn(1_000L, 86_400_000L)
+                val now = wallTimeMillis()
+                val until = pauses.merge(pauseKey, now + retry) { currentUntil, incoming -> maxOf(currentUntil, incoming) }
                 throw AnimeSourceException(sourceId, stage,
                     if (response.code == 429) "来源请求过于频繁，请稍后重试。" else "来源暂时繁忙，请稍后重试。",
-                    response.code, ceil(retry / 1000.0).toLong())
+                    response.code, ceil((until - now) / 1000.0).toLong())
             }
             if (response.code == 404 && allowNotFound)
                 return AnimeHttpResponse(current, response.code, response.text(), response.bytes)

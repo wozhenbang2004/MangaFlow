@@ -29,6 +29,24 @@ class MangaDexBodySource : BodySource {
     private val http = SourceHttp(sourceId = info.id)
     // Feed language codes differ from free-form metadata/alternative-title locale keys.
     private val languages = listOf("zh", "zh-hk", "zh-ro", "en")
+    override val supportsNativeGenres = true
+
+    override suspend fun genreDirectory(): List<SourceChoice> = withContext(Dispatchers.IO) {
+        // https://api.mangadex.org/docs/static/api.yaml — get-manga-tag, TagAttributes.
+        get("$API/manga/tag".toHttpUrl()).getJSONArray("data").bodyObjects().mapNotNull { row ->
+            val attributes = row.getJSONObject("attributes")
+            if (attributes.bodyText("group") != "genre") null
+            else {
+                val id = uuid(row.bodyId("id"))
+                tagName(attributes.optJSONObject("name"))?.let { SourceChoice(id, it) }
+            }
+        }.distinctBy(SourceChoice::id)
+    }
+
+    override suspend fun searchGenres(ids: List<String>, page: Int): MangaPage {
+        require(ids.size in 1..12) { "MangaDex 类型筛选超出范围。" }
+        return searchPage("", page, ids.map(::uuid).distinct())
+    }
 
     override suspend fun discover(page: Int): MangaPage = searchPage("", page)
     override suspend fun search(query: String, page: Int): MangaPage {
@@ -36,7 +54,7 @@ class MangaDexBodySource : BodySource {
         return searchPage(query.trim(), page)
     }
 
-    private suspend fun searchPage(query: String, page: Int): MangaPage = withContext(Dispatchers.IO) {
+    private suspend fun searchPage(query: String, page: Int, genres: List<String> = emptyList()): MangaPage = withContext(Dispatchers.IO) {
         require(page in 0..499) { "MangaDex 分页超出范围。" }
         val url = "$API/manga".toHttpUrl().newBuilder().addQueryParameter("limit", "20")
             .addQueryParameter("offset", (page * 20).toString())
@@ -46,6 +64,10 @@ class MangaDexBodySource : BodySource {
         if (query.isNotBlank()) url.addQueryParameter("title", query)
             .addQueryParameter("order[relevance]", "desc")
         else url.addQueryParameter("order[followedCount]", "desc")
+        if (genres.isNotEmpty()) {
+            genres.forEach { url.addQueryParameter("includedTags[]", it) }
+            url.addQueryParameter("includedTagsMode", "AND")
+        }
         val data = get(url.build())
         val items = data.getJSONArray("data").bodyObjects().map(::manga)
         val total = data.optInt("total", -1)
@@ -164,6 +186,9 @@ class MangaDexBodySource : BodySource {
         val relationships = row.optJSONArray("relationships")?.bodyObjects().orEmpty()
         val cover = relationships.firstOrNull { it.bodyText("type") == "cover_art" }?.optJSONObject("attributes")?.bodyText("fileName").orEmpty()
         val description = attributes.optJSONObject("description")
+        val tags = attributes.optJSONArray("tags")?.bodyObjects()?.mapNotNull { tag ->
+            tagName(tag.optJSONObject("attributes")?.optJSONObject("name"))?.let { name -> name to tag.bodyText("id") }
+        }.orEmpty()
         return Manga(
             SourceKeys.manga(info.id, id), title,
             if (cover.isBlank()) "" else "https://uploads.mangadex.org/covers/$id/".toHttpUrl().newBuilder().addPathSegment("$cover.256.jpg").build().toString(),
@@ -172,14 +197,16 @@ class MangaDexBodySource : BodySource {
             description = description?.bodyText("zh")?.takeIf(String::isNotBlank)
                 ?: description?.bodyText("en").orEmpty(),
             status = attributes.bodyText("status"),
-            tags = attributes.optJSONArray("tags")?.bodyObjects()?.mapNotNull {
-                it.optJSONObject("attributes")?.optJSONObject("name")?.let { name -> name.bodyText("zh").ifBlank { name.bodyText("en") } }?.takeIf(String::isNotBlank)
-            }.orEmpty(),
+            tags = tags.map { it.first }.distinct(),
+            tagPaths = tags.filter { it.second.isNotBlank() }.toMap(),
             sourceUrl = "$HOME/title/$id", sourceId = info.id, sourceMangaId = id,
             alternativeTitles = titles.values.flatten().distinct(),
             externalIds = externalIds,
         )
     }
+
+    private fun tagName(values: JSONObject?): String? = listOf("zh", "zh-hk", "zh-tw", "en")
+        .firstNotNullOfOrNull { locale -> values?.bodyText(locale)?.takeIf(String::isNotBlank) }
 
     private suspend fun get(url: HttpUrl): JSONObject {
         val request = Request.Builder().url(url).header("User-Agent", BODY_USER_AGENT).header("Accept", "application/json")

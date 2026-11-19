@@ -30,11 +30,18 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import dev.mangaflow.net.DownloadProxyType
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.FormBody
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrl
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
+import dev.mangaflow.net.NetworkFailureKind
 import dev.mangaflow.net.Request
+import dev.mangaflow.net.networkFailureKind
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.platform.ConcurrentMap as ConcurrentHashMap
 
@@ -58,7 +65,7 @@ class CopyAccountRepository(context: Context) {
     private val accountClient = sourceClient(http1Only = true)
     // Owner profile/member requests never inherit public-reader cooldowns.
     private val accountPauses = ConcurrentHashMap<String, Long>()
-    private val accountHttp = SourceHttp(accountClient, accountPauses, sourceId = "copy", http1Only = true)
+    private val accountHttp = SourceHttp(accountClient, accountPauses, sourceId = COPY_SOURCE_ID, http1Only = true)
     private val appContext = context.applicationContext
     private val restorationControl by lazy { preferences(appContext, "mangaflow_account_restoration") }
     private var logoutRequested = false
@@ -150,7 +157,7 @@ class CopyAccountRepository(context: Context) {
         }
     }
 
-    /** One explicit password submission, followed by private token/profile verification. */
+    /** Save a password login only after the fixed endpoint confirms a valid token. */
     suspend fun loginWithPassword(username: String, password: String): AccountProfile {
         val expected = beginAttempt()
         return withContext(Dispatchers.IO) {
@@ -163,15 +170,25 @@ class CopyAccountRepository(context: Context) {
                 ensureVersion(expected)
                 val submission = CopyRelayAccountProtocol.loginRequest(name, password)
                 val operation = "账号密码提交"
+                val route = try {
+                    DownloadRoutingStore.activeSourceSnapshot(COPY_SOURCE_ID)
+                } catch (failure: DownloadRouteException) {
+                    throw SourceException("${operation}未开始。${failure.message.orEmpty()}\n登录站点 · ${submission.request.url.host}")
+                }
+                ensureVersion(expected)
+                var observedStatus: Int? = null
                 val response = try {
-                    accountHttp.request(submission.request, operation, readAccountErrors = true)
+                    accountHttp.request(submission.request, operation, readAccountErrors = true,
+                        pinnedRoute = route, maximumBytes = MAX_LOGIN_RESPONSE_BYTES) { observedStatus = it.code }
+                } catch (cancel: CancellationException) {
+                    throw cancel
                 } catch (error: Exception) {
                     ensureVersion(expected)
-                    throw error
+                    throw loginTransportFailure(error, submission.request.url, route, observedStatus)
                 }
                 ensureVersion(expected)
                 val data = envelope(response, submission.request.url, accountHttp, operation,
-                    256 * 1024, listOf(password, submission.passwordField)) as? JSONObject
+                    MAX_LOGIN_RESPONSE_BYTES.toInt(), listOf(name, password, submission.passwordField)) as? JSONObject
                     ?: throw SourceException("账号密码提交没有返回有效登录凭据。")
                 if (response.statusCode != 200) {
                     throw SourceException("账号密码提交未确认成功（HTTP ${response.statusCode}）。",
@@ -200,6 +217,42 @@ class CopyAccountRepository(context: Context) {
                 commit(lease, AccountProfile(accountName, nickname), persist = true)
             }
         }
+    }
+
+    private fun loginTransportFailure(failure: Exception, url: HttpUrl, route: DownloadRouteSnapshot,
+        status: Int?): SourceException {
+        val sourceError = failure as? SourceException
+        val detail = when {
+            failure is DownloadRouteException -> "账号密码提交的线路不可用。${failure.message.orEmpty()}"
+            sourceError != null && sourceError.cause == null -> sourceError.message.orEmpty()
+            else -> {
+                val reason = when (val kind = networkFailureKind(failure)) {
+                    NetworkFailureKind.TRANSFER_TIMEOUT, NetworkFailureKind.REQUEST_TIMEOUT ->
+                        if (status == null) "等待登录响应超时。" else "读取登录响应超时。"
+                    null -> "连接中断或登录响应无法读取。"
+                    else -> kind.message + "。"
+                }
+                if (status == null) "账号密码提交未收到完整响应。$reason"
+                else "账号密码提交已收到 HTTP $status，但响应未完整读取。$reason"
+            }
+        }
+        val routeLabel = when (route.mode) {
+            DownloadRouteMode.SYSTEM -> "跟随系统"
+            DownloadRouteMode.DIRECT -> if (route.relayBinding == null) "应用直连" else "Relay 直连"
+            DownloadRouteMode.PROXY -> when {
+                route.relayBinding != null -> "Relay 代理"
+                route.proxy?.type == DownloadProxyType.SOCKS -> "自定义 SOCKS 代理"
+                else -> "自定义 HTTP 代理"
+            }
+        }
+        val changed = runCatching { DownloadRoutingStore.activeSourceSnapshot(COPY_SOURCE_ID) }.getOrNull() != route
+        val retryAfter = sourceError?.retryAfterSeconds ?: 0L
+        val routeHint = if (changed && retryAfter <= 0L) "\n线路设置已改变，再次手动提交会使用当前线路。"
+            else if (status == null && retryAfter <= 0L)
+                "\n可在网络设置检查拷贝线路，再手动提交。"
+            else ""
+        return SourceException("$detail\n登录站点 · ${url.host}\n请求线路 · $routeLabel$routeHint",
+            retryAfterSeconds = retryAfter, httpStatus = sourceError?.httpStatus ?: status)
     }
 
     /** The actual official form owns password entry, encoding and submission. */
@@ -852,6 +905,8 @@ class CopyAccountRepository(context: Context) {
     private data class FavoriteRow(val manga: Manga, val metadata: CopyShelfMetadata)
 
     private companion object {
+        const val COPY_SOURCE_ID = "copy"
+        const val MAX_LOGIN_RESPONSE_BYTES = 256L * 1024L
         val SEGMENT_PATTERN = Regex("[A-Za-z0-9_-]{1,160}")
         val UUID_PATTERN = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
         val QUERY_PATH = Regex("/api/v3/comic2/[A-Za-z0-9_-]{1,160}/query")

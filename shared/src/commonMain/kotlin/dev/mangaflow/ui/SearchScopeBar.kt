@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
@@ -66,11 +67,15 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.MangaTag
+import dev.mangaflow.data.MangaTagKind
 import dev.mangaflow.data.SearchTarget
+import dev.mangaflow.data.isCopyConventionTag
+import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionPress
 
 /** Existing Ovio scope tabs and compact source-choice patterns, using actual source tags only. */
@@ -104,9 +109,16 @@ internal fun SearchScopeBar(
         if (translationGroupAvailable) listOf(Icons.Outlined.Translate) else emptyList()
     val selectedPaths = remember(selectedTags) { selectedTags.mapTo(mutableSetOf()) { it.path } }
     val tagChoices = remember(availableTags) {
-        availableTags.distinctBy { it.path }.map { tag -> tag to simplifiedTagQuery(tag.name) }
+        availableTags.distinctBy { it.path }.map { tag ->
+            tag to (listOf(tag.name) + tag.aliases).map(::simplifiedTagQuery)
+        }
     }
     var tagsExpanded by rememberSaveable(target, tagsOnly) { mutableStateOf(false) }
+    var eventTab by rememberSaveable(target, tagsOnly) { mutableStateOf(false) }
+    var showTagSources by rememberSaveable(target, tagsOnly) { mutableStateOf(false) }
+    var choseTabForQuery by remember(target, tagsOnly, query) { mutableStateOf(false) }
+    val themeScroll = rememberScrollState()
+    val eventScroll = rememberScrollState()
     val showChoices = target == SearchTarget.TAG && (tagsExpanded || selectedTags.isEmpty())
     val releaseInput = { keyboard?.hide(); focus.clearFocus(force = true) }
     val chooseTag: (MangaTag) -> Unit = { tag ->
@@ -172,8 +184,8 @@ internal fun SearchScopeBar(
         }
         MotionTabContent(showChoices, Modifier.fillMaxWidth(), contentKey = { it },
             order = { if (it) 1 else 0 }, fillContent = false, soft = true) { visible ->
-            if (visible) Column(Modifier.fillMaxWidth().heightIn(max = maxChoicesHeight.coerceAtLeast(0.dp))
-                .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (visible) Column(Modifier.fillMaxWidth().heightIn(max = maxChoicesHeight.coerceAtLeast(0.dp)),
+                verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (tagsOnly && onTagQuery != null) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 40.dp).clip(RoundedCornerShape(12.dp))
                         .background(colors.onSurface.copy(alpha = .045f)).padding(horizontal = 12.dp, vertical = 8.dp),
@@ -191,49 +203,78 @@ internal fun SearchScopeBar(
                             } })
                     }
                 }
-                val matches = remember(tagChoices, query) {
+                val (themes, events) = remember(tagChoices, query) {
                     val term = simplifiedTagQuery(query.trim())
                     val resolvedPath = dev.mangaflow.data.copyTagForName(query, availableTags)?.path
-                    tagChoices.filter { (tag, normalizedName) ->
-                        term.isEmpty() || normalizedName.contains(term, ignoreCase = true) ||
+                    val matches = tagChoices.filter { (tag, names) ->
+                        term.isEmpty() || names.any { it.contains(term, ignoreCase = true) } ||
                             tag.path.contains(term, ignoreCase = true) || tag.path == resolvedPath
                     }.map { it.first }
+                    val (conventions, genres) = matches.partition(::searchConventionTag)
+                    genres to conventions.sortedWith(compareByDescending<MangaTag> { copyEventNumber(it) }
+                        .thenBy { it.path })
                 }
-                if (tagsError != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(tagsError, color = colors.onSurfaceVariant, fontSize = 11.sp, maxLines = 2,
-                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                    MotionIconButton(onClick = onRetryTags, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Outlined.Refresh, "重试加载标签", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+                val hasEvents = remember(tagChoices) { tagChoices.any { searchConventionTag(it.first) } }
+                val autoEvent = when {
+                    query.isBlank() || choseTabForQuery -> eventTab
+                    themes.isEmpty() && events.isNotEmpty() -> true
+                    events.isEmpty() && themes.isNotEmpty() -> false
+                    else -> eventTab
+                }
+                val showEvents = hasEvents && autoEvent
+                val choices = if (showEvents) events else themes
+                val origins = remember(choices, translationGroupAvailable) {
+                    if (translationGroupAvailable) choices.flatMap { it.providerPaths.keys }.distinct() else emptyList()
+                }
+                if (hasEvents || origins.isNotEmpty()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    if (hasEvents) MotionTabs(if (showEvents) 1 else 0, listOf("题材", "展会"),
+                        onSelect = {
+                            choseTabForQuery = true
+                            eventTab = it == 1
+                        }, modifier = Modifier.width(154.dp), controlHeight = 36.dp, indicatorHeight = 28.dp,
+                        treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, fontSize = 12.sp)
+                    Spacer(Modifier.weight(1f))
+                    if (origins.isNotEmpty()) MotionTextButton(onClick = { showTagSources = !showTagSources }) {
+                        Text(if (showTagSources) "收起来源" else "标签来源", fontSize = 11.sp)
                     }
                 }
-                when {
-                    tagsLoading && matches.isEmpty() -> Row(Modifier.heightIn(min = 44.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        MotionBusyIndicator(Modifier.size(16.dp).semantics { contentDescription = "正在读取标签" },
-                            color = colors.onSurfaceVariant, strokeWidth = 1.5.dp)
+                val lookupScroll = remember(query, showEvents) { ScrollState(0) }
+                val scroll = if (query.isNotBlank()) lookupScroll else if (showEvents) eventScroll else themeScroll
+                Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(scroll),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (showTagSources && origins.isNotEmpty()) {
+                        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            origins.forEach { source ->
+                                Row(verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    ReviewSourceMark(source, size = 12.dp)
+                                    Text(sourceDisplayName(source), style = MaterialTheme.typography.labelSmall,
+                                        color = colors.onSurfaceVariant)
+                                }
+                            }
+                        }
                     }
-                    matches.isEmpty() -> if (tagsError == null) Text(if (query.isBlank()) "暂无可选标签" else "没有匹配的标签",
-                        color = colors.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.padding(vertical = 8.dp))
-                    else -> {
-                        val events = remember(matches) {
-                            matches.mapNotNull { tag -> copyEventNumber(tag)?.let { it to tag } }
-                                .sortedWith(compareByDescending<Pair<Int, MangaTag>> { it.first }
-                                    .thenBy { it.second.path }).map { it.second }
+                    when {
+                        tagsLoading && choices.isEmpty() -> Row(Modifier.heightIn(min = 44.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            MotionBusyIndicator(Modifier.size(16.dp).semantics { contentDescription = "正在读取标签" },
+                                color = colors.onSurfaceVariant, strokeWidth = 1.5.dp)
                         }
-                        val themes = remember(matches) { matches.filter { copyEventNumber(it) == null } }
-                        if (events.isNotEmpty()) {
-                            Text("展会", color = colors.onSurfaceVariant, fontSize = 10.sp,
-                                modifier = Modifier.padding(top = 2.dp))
-                            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                events.forEach { tag -> SearchTagChoice(tag, tag.path in selectedPaths) { chooseTag(tag) } }
+                        choices.isEmpty() -> if (tagsError == null) Text(
+                            if (query.isBlank()) "暂无可选标签" else if (showEvents) "没有匹配的展会" else "没有匹配的题材",
+                            color = colors.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.padding(vertical = 8.dp))
+                        else -> FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            choices.forEach { tag ->
+                                SearchTagChoice(tag, tag.path in selectedPaths,
+                                    includeProvenance = translationGroupAvailable, showOrigins = showTagSources) { chooseTag(tag) }
                             }
                         }
-                        if (themes.isNotEmpty()) {
-                            if (events.isNotEmpty()) Text("题材", color = colors.onSurfaceVariant, fontSize = 10.sp,
-                                modifier = Modifier.padding(top = 2.dp))
-                            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                themes.forEach { tag -> SearchTagChoice(tag, tag.path in selectedPaths) { chooseTag(tag) } }
-                            }
+                    }
+                    if (tagsError != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(tagsError, color = colors.onSurfaceVariant, fontSize = 11.sp, maxLines = 2,
+                            overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        MotionIconButton(onClick = onRetryTags, modifier = Modifier.size(44.dp)) {
+                            Icon(Icons.Outlined.Refresh, "重试加载标签", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
                         }
                     }
                 }
@@ -246,6 +287,10 @@ private val CopyEventName = Regex("C\\s*(\\d{1,4})", RegexOption.IGNORE_CASE)
 private fun copyEventNumber(tag: MangaTag): Int? =
     CopyEventName.matchEntire(tag.name.trim())?.groupValues?.get(1)?.toIntOrNull()
 
+private fun searchConventionTag(tag: MangaTag): Boolean =
+    tag.kind == MangaTagKind.CONVENTION ||
+        tag.kind == MangaTagKind.TAG && tag.providerPaths.isEmpty() && isCopyConventionTag(tag.path)
+
 // Search aliases for the traditional characters in the source's archived theme names.
 // Only display-name matching changes; selected values always retain the original path.
 private fun simplifiedTagQuery(value: String): String = value.map { character ->
@@ -257,9 +302,12 @@ private fun simplifiedTagQuery(value: String): String = value.map { character ->
 }.joinToString("")
 
 @Composable
-private fun SearchTagChoice(tag: MangaTag, selected: Boolean, remove: Boolean = false, onClick: () -> Unit) {
+private fun SearchTagChoice(tag: MangaTag, selected: Boolean, remove: Boolean = false,
+    includeProvenance: Boolean = false, showOrigins: Boolean = false, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember(tag.path) { MutableInteractionSource() }
+    val origins = if (includeProvenance && !remove) tag.providerPaths.keys else emptySet()
+    val copyCount = tag.count?.takeIf { it >= 0 && "copy" in origins }
     val light = colors.surface.luminance() > .5f
     val accent = when ((tag.path.hashCode() and Int.MAX_VALUE) % 4) {
         0 -> if (light) Color(0xFF805C43) else Color(0xFFD9B49E)
@@ -272,8 +320,9 @@ private fun SearchTagChoice(tag: MangaTag, selected: Boolean, remove: Boolean = 
             onValueChange = { onClick() })
         .motionPress(interaction, pressedScale = .97f)
         .semantics(mergeDescendants = true) {
-            contentDescription = tag.name + if (!remove && tag.count != null && tag.count >= 0)
-                "，${tag.count} 部" else ""
+            contentDescription = listOfNotNull(tag.name,
+                origins.takeIf { it.isNotEmpty() }?.joinToString("、", prefix = "支持来源 ") { sourceDisplayName(it) },
+                copyCount?.let { "拷贝统计 $it 部" }).joinToString("，")
         },
         contentAlignment = Alignment.Center) {
         Row(Modifier.clip(RoundedCornerShape(7.dp))
@@ -285,7 +334,11 @@ private fun SearchTagChoice(tag: MangaTag, selected: Boolean, remove: Boolean = 
             Text(tag.name, fontSize = if (remove) 11.sp else 10.sp, lineHeight = 15.sp,
                 color = accent,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (!remove) tag.count?.takeIf { it >= 0 }?.let { count ->
+            if (showOrigins) origins.filterNot { it == "copy" && copyCount != null }.forEach { origin ->
+                ReviewSourceMark(origin, size = 10.dp)
+            }
+            copyCount?.let { count ->
+                ReviewSourceMark("copy", size = 10.dp)
                 Text(count.toString(), fontSize = 9.sp, lineHeight = 15.sp,
                     color = accent.copy(alpha = .72f), maxLines = 1)
             }
