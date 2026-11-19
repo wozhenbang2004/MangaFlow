@@ -15,6 +15,7 @@ internal fun bodySourceSearchTerms(query: String, aliases: List<String> = emptyL
             add(convertBodyTitle(primary, "Simplified-Traditional"))
         }
         aliases.filter(String::isNotBlank).forEach { add(it.trim()) }
+        if (primary.isNotEmpty()) add(normalizeNfkc(primary))
     }.filter { it.length in 1..120 }.distinct().take(4)
 
 /** Keep sequel symbols: stripping ≡ would conflate Jujutsu Kaisen with its independent sequel. */

@@ -20,8 +20,10 @@ import dev.mangaflow.enhancement.ui.EnhancementReadout
 import dev.mangaflow.enhancement.ui.EnhancementReadouts
 import dev.mangaflow.enhancement.ui.enhancementResourceReadouts
 import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.platform.monotonicTimeMillis
+import dev.mangaflow.platform.platformKind
 
 /** Non-interactive readings stay visible when controls hide; configuration has a separate button. */
 @Composable
@@ -77,8 +79,11 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
                     else -> "原画 · 增强未运行"
                 }
                 AnimeVideoEnhancementPhase.WAITING, AnimeVideoEnhancementPhase.CONFIGURED -> "增强待运行"
-                AnimeVideoEnhancementPhase.ACTIVE -> if (flowing && observation?.recentlySubmitting == true)
-                    "增强处理中" else "增强已配置"
+                AnimeVideoEnhancementPhase.ACTIVE -> when {
+                    flowing && observation?.recentlySubmitting == true -> "增强处理中"
+                    flowing && platformKind == PlatformKind.DESKTOP -> "增强运行中"
+                    else -> "增强已配置"
+                }
                 AnimeVideoEnhancementPhase.UNAVAILABLE -> "增强不可用"
                 AnimeVideoEnhancementPhase.FAILED -> "增强异常"
                 null -> "画质 —"
@@ -150,6 +155,8 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
             !policy.realtimeInterpolationEnabled -> "补帧已关闭"
             motion?.phase == AnimeVideoEnhancementPhase.FAILED || motion?.phase == AnimeVideoEnhancementPhase.UNAVAILABLE ->
                 motionProblemLabel(motion?.detail)
+            motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && flowing && platformKind == PlatformKind.DESKTOP ->
+                motion.graphFps?.let { "补帧 · 滤镜估计 ${formatDecimal(it, 1)} fps" } ?: "补帧 · 等待输出"
             motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && flowing && (motion.graphFps ?: 0.0) > 0.0 &&
                 (motion.synthesizedFrames == 0L || motion.generationFps == 0.0) -> "补帧 · 保留原帧"
             motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && flowing && motion.synthesizedFrames > 0L &&

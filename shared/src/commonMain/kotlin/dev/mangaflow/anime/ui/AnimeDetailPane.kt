@@ -63,6 +63,8 @@ import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
 import dev.mangaflow.experience.sourceNetwork
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.CompactGlassPopover
@@ -168,10 +170,12 @@ internal fun AnimeDetailPane(
     }
 
     BoxWithConstraints(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        val desktop = platformKind == PlatformKind.DESKTOP
         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
         val horizontal = if (maxWidth >= 720.dp) 28.dp else 16.dp
         val contentWidth = minOf(maxWidth, 1080.dp)
-        val columns = ((contentWidth - horizontal * 2).value / (78f * fontScale)).toInt().coerceIn(1, 8)
+        val columns = ((contentWidth - horizontal * 2).value / ((if (desktop) 100f else 78f) * fontScale))
+            .toInt().coerceIn(1, 8)
         val episodeRows = remember(episodes, columns) { episodes.chunked(columns) }
         val wideHero = contentWidth >= 620.dp && fontScale <= 1.3f
         val stackHeroActions = contentWidth < 340.dp || fontScale > 1.3f
@@ -417,6 +421,7 @@ internal fun AnimeDetailPane(
                                 matched = controller.confirmedPlaybackLines(episode.id, state).size,
                                 backdrop = backdrop,
                                 active = active,
+                                compact = desktop,
                                 libraryAvailable = !state.libraryReadUnavailable,
                                 onMenuPresenceChange = { present ->
                                     if (present) episodeMenuOwner = episode.id
@@ -900,6 +905,7 @@ private fun AnimeEpisodeCell(
     matched: Int,
     backdrop: HazeState,
     active: Boolean,
+    compact: Boolean,
     libraryAvailable: Boolean,
     onPlay: () -> Unit,
     onSources: () -> Unit,
@@ -920,6 +926,9 @@ private fun AnimeEpisodeCell(
         AnimeEpisodeAvailability.RECENTLY_FAILED -> "线路暂不可用"
         AnimeEpisodeAvailability.UPCOMING -> upcomingEpisodeLabel(episode)
     }
+    val visibleSourceState = sourceState.takeUnless {
+        compact && (availability == AnimeEpisodeAvailability.CHECKING || availability == AnimeEpisodeAvailability.UNMATCHED)
+    }
     val interaction = remember(episode.id) { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
     var menuVisible by remember(episode.id) { mutableStateOf(false) }
@@ -932,7 +941,8 @@ private fun AnimeEpisodeCell(
     }
     Box(modifier) {
         Column(
-            Modifier.fillMaxWidth().heightIn(min = 64.dp).clip(RoundedCornerShape(13.dp))
+            Modifier.fillMaxWidth().heightIn(min = if (compact) 54.dp else 64.dp)
+                .clip(RoundedCornerShape(if (compact) 9.dp else 13.dp))
                 .background(if (resume) colors.primaryContainer else colors.surfaceContainerLow)
                 .motionPress(interaction, enabled = active, pressedScale = .97f)
                 .combinedClickable(
@@ -953,18 +963,18 @@ private fun AnimeEpisodeCell(
                         upcomingEpisodeLabel(episode, fullDate = true) else sourceState
                     stateDescription = listOfNotNull(progressState, availabilityState).joinToString("，")
                     if (active) customActions = listOf(CustomAccessibilityAction("本集操作") { menuVisible = true; true })
-                }.padding(horizontal = 7.dp, vertical = 9.dp),
+                }.padding(horizontal = 7.dp, vertical = if (compact) 6.dp else 9.dp),
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
         ) {
             Text(label, minLines = if (native) 2 else 1, maxLines = if (native) 2 else 1,
                 textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.labelLarge,
                 color = if (resume) colors.onPrimaryContainer else colors.onSurface)
-            if (!native && (subtitle != null || sourceState == null)) Text(subtitle.orEmpty(), minLines = 1, maxLines = 1,
+            if (!native && (subtitle != null || !compact && sourceState == null)) Text(subtitle.orEmpty(), minLines = 1, maxLines = 1,
                 textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.labelSmall,
                 color = if (resume) colors.onPrimaryContainer else colors.onSurfaceVariant)
-            if (sourceState != null) Text(sourceState, maxLines = 1,
+            if (visibleSourceState != null) Text(visibleSourceState, maxLines = 1,
                 textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.labelSmall,
                 color = if (resume) colors.onPrimaryContainer else colors.onSurfaceVariant)

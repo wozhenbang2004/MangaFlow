@@ -66,6 +66,14 @@ internal class DesktopAnimeVideoEnhancement(
         monitoring = scope.launch(Dispatchers.Main.immediate) {
             try {
                 val paths = withContext(Dispatchers.IO) { DesktopAnime4KShaderStore.prepare(context, mode, scale, model) }
+                check(paths.isNotEmpty()) { "No enhancement shader was prepared" }
+                val anime4kSize = when {
+                    model != null && Anime4KOptionalModels.supports(model.engineId) ->
+                        model.title.substringAfter(' ').substringBefore('/')
+                    mode == AnimeVideoEnhancementMode.FAST -> "S"
+                    mode == AnimeVideoEnhancementMode.QUALITY -> "M"
+                    else -> null
+                }
                 // append accepts a single literal path, even with ':' / ';' / '\\'.
                 // mpv's string getter prints this list with the platform separator.
                 val expectedList = paths.joinToString(File.pathSeparator)
@@ -75,7 +83,7 @@ internal class DesktopAnimeVideoEnhancement(
                 while (isCurrentSession(handle, generation, mode)) {
                     // get_property synchronizes with mpv's engine and may wait behind GPU work.
                     // In particular vo-passes can require hundreds of native calls per observation.
-                    val observed = withContext(Dispatchers.IO) { readObservation(handle, model, scale) }
+                    val observed = withContext(Dispatchers.IO) { readObservation(handle, anime4kSize, model, scale) }
                     if (!isCurrentSession(handle, generation, mode) || this@DesktopAnimeVideoEnhancement.handle !== handle)
                         return@launch
                     val width = observed.width
@@ -119,7 +127,6 @@ internal class DesktopAnimeVideoEnhancement(
                         check(shaderList == expectedList) {
                             "The renderer did not confirm the complete shader list"
                         }
-                        val optional = model?.takeIf { Anime4KOptionalModels.supports(it.engineId) }
                         val sample = observed.shaderPassNanos
                         if (sample == null) {
                             update(generation, state(mode, AnimeVideoEnhancementPhase.CONFIGURED,
@@ -139,7 +146,7 @@ internal class DesktopAnimeVideoEnhancement(
                                 return@launch
                             }
                             update(generation, state(mode, AnimeVideoEnhancementPhase.ACTIVE,
-                                (if (optional == null) "2× 亮度超分 · 8 个 GPU pass" else "${scale}× Anime4K · GPU pass") +
+                                (if (anime4kSize == null) "2× 亮度超分 · 8 个 GPU pass" else "${scale}× Anime4K · GPU pass") +
                                     " ${(sample / 10_000L) / 100.0}ms", width, height)
                                 .copy(modelName = model?.title))
                         }
@@ -199,16 +206,16 @@ internal class DesktopAnimeVideoEnhancement(
         val shaderList: String?, val shaderPassNanos: Long?, val videoPts: Double?, val sourceFps: Double?,
     )
 
-    private fun readObservation(handle: MPVHandle, model: EngineModel?, scale: Int): Observation {
+    private fun readObservation(handle: MPVHandle, anime4kSize: String?, model: EngineModel?, scale: Int): Observation {
         val width = positiveDimension(handle, "video-params/w")
         val height = positiveDimension(handle, "video-params/h")
         val gamma = handle.getPropertyString("video-params/gamma")?.lowercase()
         val output = handle.getPropertyString("current-vo")
         val shaderList = handle.getPropertyString("glsl-shaders")
-        val passes = if (model != null && width != null && height != null &&
+        val passes = if (width != null && height != null &&
             gamma in SDR_TRANSFERS && output == "libmpv" && !shaderList.isNullOrBlank()) {
-            if (Anime4KOptionalModels.supports(model.engineId)) readAnime4KPasses(handle, model.title, scale)
-            else readArtCnnPasses(handle, model.title)
+            if (anime4kSize != null) readAnime4KPasses(handle, anime4kSize, scale)
+            else model?.let { readArtCnnPasses(handle, it.title) }
         } else null
         return Observation(width, height, gamma, output, shaderList, passes,
             if (passes != null) handle.getPropertyDoubleOrNull("video-pts")?.takeIf(Double::isFinite) else null,
@@ -231,8 +238,7 @@ internal class DesktopAnimeVideoEnhancement(
         return timings.values.sum().takeIf { timings.size == 8 && "Depth-To-Space" in timings }
     }
 
-    private fun readAnime4KPasses(handle: MPVHandle, title: String, scale: Int): Long? {
-        val size = title.substringAfter(' ').substringBefore('/')
+    private fun readAnime4KPasses(handle: MPVHandle, size: String, scale: Int): Long? {
         val prefix = "vo-passes/fresh"
         val count = handle.getPropertyLongOrNull("$prefix/count")?.takeIf { it in 1..128 }?.toInt() ?: return null
         var elapsed = 0L

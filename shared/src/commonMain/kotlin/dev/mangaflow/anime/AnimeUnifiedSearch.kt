@@ -4,6 +4,8 @@ import dev.mangaflow.anime.sources.AnimeMetadataRepository
 import dev.mangaflow.anime.sources.AnimeProvider
 import dev.mangaflow.anime.sources.AnimeSourceRepository
 import dev.mangaflow.anime.sources.lanerc.LanercProvider
+import dev.mangaflow.data.bodySourceSearchTerms
+import dev.mangaflow.data.normalizedBodySourceTitle
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
@@ -11,12 +13,14 @@ import dev.mangaflow.platform.normalizeNfkc
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** Presentation grouping only: never grants a canonical binding or an episode mapping. */
@@ -61,9 +65,10 @@ internal class AnimeUnifiedSearch(
     private val mutableState = MutableStateFlow(AnimeUnifiedSearchState())
     val state = mutableState.asStateFlow()
     private val permits = Semaphore(6)
-    // The script engine can run two requests. Its queue should not consume native search permits.
+    // Keep queued script searches from consuming the native search permits.
     private val scriptPermits = Semaphore(2)
     private val sourceJobs = mutableMapOf<String, Job>()
+    private val sourceTerms = mutableMapOf<String, String>()
     private val overlappingPages = mutableSetOf<String>()
     private var sourceKeys = emptyMap<String, Source>()
     private var indexRoute: Route? = null
@@ -77,6 +82,7 @@ internal class AnimeUnifiedSearch(
             indexJob?.cancel()
             sourceJobs.values.forEach { it.cancel() }
             sourceJobs.clear()
+            sourceTerms.clear()
             overlappingPages.clear()
             sourceKeys = emptyMap()
             indexRoute = null
@@ -103,7 +109,10 @@ internal class AnimeUnifiedSearch(
         val refreshed = nextKeys.filter { (id, key) -> sourceKeys[id] != key }.keys
         val removed = sourceKeys.keys - nextKeys.keys
         if (!refreshIndex && refreshed.isEmpty() && removed.isEmpty()) return
-        (refreshed + removed).forEach { sourceJobs.remove(it)?.cancel() }
+        (refreshed + removed).forEach {
+            sourceJobs.remove(it)?.cancel()
+            sourceTerms.remove(it)
+        }
         overlappingPages.removeAll(refreshed + removed)
         sourceKeys = nextKeys
         val current = mutableState.value
@@ -182,6 +191,7 @@ internal class AnimeUnifiedSearch(
         if (state.query.isBlank() || previous.loading || previous.loadingMore) return
         val owner = generation
         val page = nextPage(previous.page) ?: return
+        val term = sourceTerms[provider.id] ?: state.query
         publishSource(previous.copy(loading = page == 1, loadingMore = page > 1, error = null))
         // Register the exact job before it can start on the immediate main dispatcher.
         val job = scope.launch(start = CoroutineStart.LAZY) {
@@ -195,15 +205,16 @@ internal class AnimeUnifiedSearch(
                 key.route.requireAvailable()
                 suspend fun find() = permits.withPermit {
                     if (!current()) return@withPermit null
-                    withTimeoutOrNull(SEARCH_TIMEOUT_MILLIS) { provider.search(state.query, page) }
+                    withTimeoutOrNull(SEARCH_TIMEOUT_MILLIS) { searchPage(provider, term, page) }
                         ?: error("搜索超时，请重试。")
                 }
-                val found = (if (provider is LanercProvider) scriptPermits.withPermit { find() } else find())
+                val (matchedTerm, found) = (if (provider is LanercProvider) scriptPermits.withPermit { find() } else find())
                     ?: return@launch
                 if (!current()) return@launch
                 check(found.all { it.sourceId == provider.id && (it.sourceRevision == null || it.sourceRevision == key.revision) }) {
                     "来源返回的条目身份已变化，请重试。"
                 }
+                if (page == 1 && found.isNotEmpty()) sourceTerms[provider.id] = matchedTerm
                 val known = previous.items.map { it.id to it.url }.toHashSet()
                 val added = found.filter { known.add(it.id to it.url) }.map { it.copy(sourceRevision = key.revision) }
                 if (added.isNotEmpty()) overlappingPages.remove(provider.id)
@@ -220,6 +231,26 @@ internal class AnimeUnifiedSearch(
         }
         sourceJobs[provider.id] = job
         job.start()
+    }
+
+    private suspend fun searchPage(provider: AnimeProvider, term: String, page: Int): Pair<String, List<AnimeSourceTitle>> {
+        val primary = provider.search(term, page)
+        if (page != 1 || primary.isNotEmpty()) return term to primary
+        val index = mutableState.value.index.items
+        val alternatives = withContext(Dispatchers.Default) {
+            val key = normalizedBodySourceTitle(term)
+            val subject = index.singleOrNull {
+                key.isNotBlank() && (normalizedBodySourceTitle(it.title) == key ||
+                    normalizedBodySourceTitle(it.originalTitle) == key)
+            }
+            val aliases = subject?.let { listOf(it.title, it.originalTitle) }.orEmpty()
+            bodySourceSearchTerms(term, aliases).filter { it != term }
+        }
+        for (alternative in alternatives) {
+            val matches = provider.search(alternative, page)
+            if (matches.isNotEmpty()) return alternative to matches
+        }
+        return term to primary
     }
 
     private fun publishSource(row: AnimeSourceResult, regroup: Boolean = false) {

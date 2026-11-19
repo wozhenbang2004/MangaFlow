@@ -135,6 +135,7 @@ import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.DontMemoize
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -3365,6 +3366,19 @@ private fun ReaderPage(
     }
 }
 
+// Keep this cache group out of the viewport's large Compose lambda. In the Windows
+// package its inlined branch emitted an invalid JVM stack frame before any page I/O.
+@Composable
+private fun rememberReaderPageRequest(
+    resource: Page?,
+    headers: Map<String, String>,
+    attempt: ReaderLoadAttempt,
+    previewSize: IntSize,
+    build: (Page) -> ImageRequest,
+): ImageRequest? = remember(resource, headers, attempt, previewSize) {
+    resource?.let(build)
+}
+
 @Composable
 private fun ReaderPageImage(
     page: Page,
@@ -3667,12 +3681,10 @@ private fun ReaderPageImage(
         val viewportWidthPx = with(density) { maxWidth.roundToPx() }
         val previewSize = readerPreviewSize(viewportWidthPx, with(density) { screenHeight.roundToPx() },
             maxWidthPx = imageRuntime.previewWidthPx, maxHeightPx = imageRuntime.previewHeightPx)
-        val previewWidth = previewSize.width
-        val previewHeight = previewSize.height
         val currentPreviewSize by rememberUpdatedState(previewSize)
         val resource = resolvedPage
-        val request = remember(resource, headers, attempt, previewWidth, previewHeight) {
-            resource?.let { requested -> readerImageRequest(context, requested, headers, sourceId)
+        val request = rememberReaderPageRequest(resource, headers, attempt, previewSize,
+            build = @DontMemoize { requested -> readerImageRequest(context, requested, headers, sourceId)
                 .readerTransferProgress(transferObserver)
                 .readerPreparationWork(preparationWork)
                 .apply {
@@ -3685,7 +3697,7 @@ private fun ReaderPageImage(
                 }
                 // The preview need only fit this viewport. Telephoto keeps the original
                 // disk file for full-quality visible tiles and pinch zoom.
-                .size(previewWidth, previewHeight)
+                .size(previewSize.width, previewSize.height)
                 .scale(Scale.FIT)
                 .crossfade(false)
                 .listener(
@@ -3735,8 +3747,9 @@ private fun ReaderPageImage(
                         }
                     } },
                 )
-                .build() }
-        }
+                .build()
+            },
+        )
         LaunchedEffect(resource, loadedImage, pageVisible, imageRangeOwner) {
             val image = loadedImage ?: return@LaunchedEffect
             if (resource != null) {

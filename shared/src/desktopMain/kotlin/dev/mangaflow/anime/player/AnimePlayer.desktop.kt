@@ -7,6 +7,7 @@ import dev.mangaflow.enhancement.engine.EnhancementEngineIds
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.monotonicTimeMillis
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -52,8 +53,8 @@ private class DesktopAnimePlayer(
         scope = playerScope,
         renderingActive = videoRenderingActive,
         refreshHz = { context.playbackDisplayRefreshHz?.invoke() },
-    ) { generation, value ->
-        publish(generation) { it.copy(videoEnhancement = value) }
+    ) { generation, quality, motion ->
+        publish(generation) { it.copy(videoEnhancement = quality ?: it.videoEnhancement, realtimeMotion = motion) }
     }
     private val wantsNativeModel: Boolean
         get() = options.enhancementModel?.engineId == EnhancementEngineIds.DESKTOP_REALTIME
@@ -65,7 +66,7 @@ private class DesktopAnimePlayer(
             isCurrent(generation) && engine.value?.impl === handle && options.videoEnhancement == mode
         },
         update = { generation, value ->
-            if (!wantsNativeModel && (options.realtimeFrames == null || !animeJaNai.usesNativeRuntime())) {
+            if (!wantsNativeModel) {
                 publish(generation) { it.copy(videoEnhancement = value) }
             }
         },
@@ -121,7 +122,15 @@ private class DesktopAnimePlayer(
         return super.setSpeedNative(speed)
     }
 
-    override suspend fun createBackend(): MediampPlayer = createMpv()
+    override suspend fun createBackend(): MediampPlayer = try {
+        createMpv()
+    } catch (cancel: CancellationException) {
+        throw cancel
+    } catch (failure: LinkageError) {
+        throw AnimePlayerInitializationException("本机视频内核无法加载，请重新打开漫流。", failure)
+    } catch (failure: Exception) {
+        throw AnimePlayerInitializationException("本机视频播放器启动失败，请重试或重新打开漫流。", failure)
+    }
 
     override suspend fun createDecoderStartup(byteLimit: Long): MediampPlayer = createMpv(byteLimit)
 
@@ -138,7 +147,7 @@ private class DesktopAnimePlayer(
                     if (animeJaNai.usesNativeRuntime()) handle.option("hwdec", "d3d11va")
                     if (configuration.preparedVideoModel != null && configuration.realtimeFrames == null &&
                         configuration.enhancementModel?.engineId != EnhancementEngineIds.DESKTOP_REALTIME)
-                        check(handle.option("hwdec", "auto-copy")) { "播放器无法准备可复用的解码画面" }
+                        handle.option("hwdec", "auto-copy")
                     handle.option("cache", "yes")
                     check(handle.option("rebase-start-time", "yes")) { "播放器无法统一视频时间轴" }
                     // Start with a short current-media window; expand only after actual
@@ -161,7 +170,7 @@ private class DesktopAnimePlayer(
                 }.also { pending = it }
             }
         } catch (failure: Throwable) {
-            pending?.close()
+            runCatching { pending?.close() }
             throw failure
         }
     }
@@ -325,6 +334,10 @@ private class DesktopAnimePlayer(
 
     private fun applyVideoEnhancement() {
         val handle = engine.value?.impl as? MPVHandle
+        val nativeHandle = handle.takeUnless { windowOwnsVideo }
+        val nativeReady = enhancementMediaReady && !windowOwnsVideo
+        if ((nativeHandle == null || !nativeReady || options.realtimeFrames == null) && state.value.realtimeMotion != null)
+            publish(nativeGeneration) { it.copy(realtimeMotion = null) }
         enhancement.configure(
             handle = handle.takeUnless { wantsNativeModel || windowOwnsVideo },
             generation = nativeGeneration,
@@ -334,7 +347,7 @@ private class DesktopAnimePlayer(
             mediaReady = enhancementMediaReady && !windowOwnsVideo,
         )
         nativeEnhancement.configure(
-            handle.takeUnless { windowOwnsVideo }, nativeGeneration, options.videoEnhancement, enhancementMediaReady && !windowOwnsVideo,
+            nativeHandle, nativeGeneration, options.videoEnhancement, nativeReady,
             options.enhancementModel.takeIf { wantsNativeModel }, options.realtimeFrames,
         )
     }

@@ -274,8 +274,15 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
             checkNotNull(warm.transport).also { bridge = it }
         } else if (request.localMedia == null) {
             validateAsset(request.asset)
+            // Storage failure must not block the routed online stream. A recovery
+            // request that bypasses disk must not initialize the cache at all.
+            val onlineCache = if (request.bypassMediaCache) null else withContext(Dispatchers.IO) {
+                try { streamCache }
+                catch (cancel: CancellationException) { throw cancel }
+                catch (_: Exception) { null }
+            }
             AnimeStreamBridge.create(request.asset, playerScope, prepared,
-                cache = streamCache.takeUnless { request.bypassMediaCache }).also {
+                cache = onlineCache).also {
                 if (!isCurrent(generation)) { it.close(); return }
                 bridge = it
             }

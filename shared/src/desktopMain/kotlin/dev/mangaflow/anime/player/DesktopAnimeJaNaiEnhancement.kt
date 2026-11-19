@@ -23,7 +23,7 @@ internal class DesktopAnimeJaNaiEnhancement(
     private val scope: CoroutineScope,
     private val renderingActive: StateFlow<Boolean>,
     private val refreshHz: () -> Double?,
-    private val update: (Long, AnimeVideoEnhancementState) -> Unit,
+    private val update: (Long, AnimeVideoEnhancementState?, AnimeRealtimeMotionState?) -> Unit,
 ) {
     private data class Target(
         val handle: MPVHandle,
@@ -40,7 +40,7 @@ internal class DesktopAnimeJaNaiEnhancement(
     fun configure(handle: MPVHandle?, generation: Long, mode: AnimeVideoEnhancementMode,
         mediaReady: Boolean, model: EngineModel?, frames: AnimeRealtimeFrameRequest?) {
         val next = handle?.takeIf { mediaReady && (model != null || frames != null) }
-            ?.let { Target(it, generation, mode, model, frames) }
+            ?.let { Target(it, generation, if (model == null) AnimeVideoEnhancementMode.OFF else mode, model, frames) }
         if (target == next) return
         release()
         target = next
@@ -49,14 +49,29 @@ internal class DesktopAnimeJaNaiEnhancement(
         job = scope.launch(Dispatchers.Main.immediate) {
             var inputWidth: Int? = null
             var inputHeight: Int? = null
+            var targetFps: Double? = null
             fun state(phase: AnimeVideoEnhancementPhase, detail: String, width: Int? = null, height: Int? = null,
                 outputFps: Double? = null) {
                 if (target != next) return
-                val name = listOfNotNull(next.model?.title, next.frames?.model?.title).joinToString(" + ").takeIf(String::isNotEmpty)
-                update(generation, AnimeVideoEnhancementState(mode, phase, detail, inputWidth, inputHeight, width, height,
-                    modelName = name.takeIf { phase == AnimeVideoEnhancementPhase.ACTIVE }, filteredFps = outputFps))
+                val quality = next.model?.let { model ->
+                    AnimeVideoEnhancementState(next.mode, phase, detail, inputWidth, inputHeight, width, height,
+                        modelName = model.title.takeIf { phase == AnimeVideoEnhancementPhase.ACTIVE })
+                }
+                val motion = next.frames?.let { frames ->
+                    val noTarget = targetFps == null && phase == AnimeVideoEnhancementPhase.ACTIVE
+                    AnimeRealtimeMotionState(frames.model.title,
+                        if (noTarget) AnimeVideoEnhancementPhase.UNAVAILABLE else phase,
+                        if (noTarget) "目标帧率未落在当前源帧率的可补帧范围" else detail,
+                        graphFps = outputFps, inputWidth = inputWidth, inputHeight = inputHeight,
+                        targetFps = targetFps)
+                }
+                update(generation, quality, motion)
             }
             try {
+                if (!runtime.usesNativeRuntime()) {
+                    state(AnimeVideoEnhancementPhase.UNAVAILABLE, runtime.unavailableReason())
+                    return@launch
+                }
                 var initialPts: Double? = null
                 var outputDeadlineNanos = Long.MAX_VALUE
                 var lastDropCount: Long? = null
@@ -92,18 +107,21 @@ internal class DesktopAnimeJaNaiEnhancement(
                         }
                     }
                     val frames = next.frames
-                    val ratio = frames?.let { request ->
-                        when {
-                            request.automatic -> refreshHz()?.let { rationalFactor(minOf(sourceFps * 2, it, 240.0), sourceFps) }
-                            request.targetFps == null -> 2 to 1
-                            else -> rationalFactor(request.targetFps, sourceFps)
-                        }
-                    }
-                    if (frames != null && ratio == null && next.model == null) {
-                        state(AnimeVideoEnhancementPhase.UNAVAILABLE, "目标帧率未落在当前源帧率的可补帧范围")
-                        return@launch
-                    }
                     if (filter == null) {
+                        val ratio = frames?.let { request ->
+                            when {
+                                request.automatic -> {
+                                    val ceiling = refreshHz()?.takeIf { it.isFinite() && it > 0 } ?: 240.0
+                                    rationalFactor(minOf(sourceFps * 2, ceiling, 240.0), sourceFps)
+                                }
+                                request.targetFps == null -> 2 to 1
+                                else -> rationalFactor(request.targetFps, sourceFps)
+                            }
+                        }
+                        if (frames != null && ratio == null && next.model == null) {
+                            state(AnimeVideoEnhancementPhase.UNAVAILABLE, "目标帧率未落在当前源帧率的可补帧范围")
+                            return@launch
+                        }
                         withContext(Dispatchers.IO) {
                             val prepared = runtime.session(next.model, frames?.model?.takeIf { ratio != null }, ratio)
                             // Returning a resource through a canceled dispatcher hop can lose its owner.
@@ -123,6 +141,7 @@ internal class DesktopAnimeJaNaiEnhancement(
                         }
                         val startPts = observation.position
                         check(backend.command("vf", "add", native.filter)) { "原生滤镜无法加载" }
+                        targetFps = ratio?.let { (numerator, denominator) -> sourceFps * numerator / denominator }
                         initialPts = startPts
                         outputDeadlineNanos = System.nanoTime() + 12_000_000_000L
                         state(AnimeVideoEnhancementPhase.CONFIGURED, "DirectML 已配置，等待实际输出")
@@ -163,7 +182,8 @@ internal class DesktopAnimeJaNaiEnhancement(
                         val detail = listOfNotNull(executedBackend,
                             if (native.weightName != null) "${outWidth}×$outHeight" else null,
                             if (native.interpolate && filteredFps != null) "滤镜输出估计 ${(filteredFps * 10).roundToInt() / 10.0} FPS" else null)
-                        state(AnimeVideoEnhancementPhase.ACTIVE, detail.joinToString(" · "), outWidth, outHeight, filteredFps)
+                        state(AnimeVideoEnhancementPhase.ACTIVE, detail.joinToString(" · "), outWidth, outHeight,
+                            filteredFps.takeIf { native.interpolate })
                         outputDeadlineNanos = System.nanoTime() + 12_000_000_000L
                     } else if (paused) {
                         outputDeadlineNanos = System.nanoTime() + 12_000_000_000L

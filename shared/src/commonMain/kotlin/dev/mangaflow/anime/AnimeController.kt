@@ -2438,21 +2438,31 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             check(admissionStillCurrent?.invoke() == true) { "播放请求、画质或来源已变化。" }
                             return ResolvedPlaybackOption(confirmed, asset, revision, mediaVerified = true)
                         }
-                        val media = inspectAnimeMediaBeforePlayback(asset)
+                        // Desktop opens a deliberately chosen line through the routed player
+                        // immediately. Automatic selection can still prefer a quick sample.
+                        val media = if (platformKind == PlatformKind.DESKTOP) {
+                            if (manualOption != null && samePlaybackLine(candidate, manualOption)) null
+                            else withTimeoutOrNull(750L) { inspectAnimeMediaBeforePlayback(asset) }
+                        } else inspectAnimeMediaBeforePlayback(asset)
                         check(admissionStillCurrent?.invoke() == true) { "播放请求、画质或来源已变化。" }
-                        if (!refreshing || refreshResolutionId == null) {
+                        // A CDN can reject the sample's Range request and still serve the
+                        // same media to the player. Let the ordinary playback path decide.
+                        val rangeRejected = platformKind == PlatformKind.DESKTOP && media?.httpStatus == 403
+                        val mediaVerified = if (rangeRejected) null else media?.verified
+                        if (media != null && (!refreshing || refreshResolutionId == null)) {
                             storePlaybackMeasurements(historyKey, confirmed) { it.copy(
                                 mediaObservedAt = media.observedAt, mediaPreferredHeight = preferredHeight,
-                                mediaHttpStatus = media.httpStatus, mediaVerified = media.verified,
-                                mediaFailure = media.failure, mediaQuality = media.quality,
+                                mediaHttpStatus = media.httpStatus, mediaVerified = mediaVerified,
+                                mediaFailure = if (rangeRejected) "限量读取被拒绝，等待实际播放确认" else media.failure,
+                                mediaQuality = media.quality,
                                 mediaSampleBytesPerSecond = media.sampleBytesPerSecond, mediaSampleMs = media.elapsedMs) }
                         }
-                        if (media.verified == false) {
+                        if (media != null && mediaVerified == false) {
                             val incident = AnimePlaybackFailure(candidate.sourceId, candidate.sourceName,
                                 "检查媒体", media.failure ?: "当前地址未提供可读取的视频。")
                             throw PlaybackResolutionException(incident, IllegalStateException(incident.reason))
                         }
-                        return ResolvedPlaybackOption(confirmed, asset, revision, media.verified)
+                        return ResolvedPlaybackOption(confirmed, asset, revision, mediaVerified)
                     }
                     suspend fun resolveOnCurrentRoute(): ResolvedPlaybackOption {
                         try { return resolveOption() }
