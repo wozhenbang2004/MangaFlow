@@ -120,47 +120,59 @@ internal actual suspend fun downloadNativeIncrementalUpdate(
     val cancellation = currentCoroutineContext()
     val payload = File(state.work, "payload")
     check(payload.isDirectory || payload.mkdirs()) { "无法创建增量暂存目录" }
-    val xml = buildString {
-        append("<configuration><base path=\"").append(escapeXml(payload.canonicalPath)).append("\"/><files>")
-        state.changed.forEach { entry ->
-            append("<file path=\"").append(escapeXml(entry.path)).append("\" uri=\"")
-                .append(escapeXml(entry.url)).append("\" size=\"").append(entry.bytes)
-                .append("\" checksum=\"").append(entry.checksum).append("\"/>")
-        }
-        append("</files></configuration>")
+    // A previously verified whole file can be reused after a canceled download.
+    // Partial bytes are never trusted, and the plan is keyed by the immutable manifest digest.
+    val missing = state.changed.filter { entry ->
+        cancellation.ensureActive()
+        val staged = safeInstallFile(payload, entry.path)
+        !staged.isFile || staged.length() != entry.bytes || hash(staged) != entry.sha256
     }
-    val config = Configuration.read(StringReader(xml))
+    val remainingBytes = missing.sumOf { it.bytes }
+    val retainedBytes = plan.bytes - remainingBytes
+    onProgress(retainedBytes, plan.bytes)
     val archive = File(state.work, "download.zip")
-    val byPath = state.changed.associateBy { safeInstallFile(payload, it.path).toPath().toAbsolutePath().normalize() }
-    val result = config.update(UpdateOptions.archive(archive.toPath()).updateHandler(object : UpdateHandler {
-        override fun openDownloadStream(file: FileMetadata): InputStream {
-            cancellation.ensureActive()
-            val connection = officialConnection(file.uri.toString(), proxy)
-            val input = try { connection.inputStream }
-                catch (failure: Exception) { connection.disconnect(); throw failure }
-            return object : FilterInputStream(input) {
-                override fun close() {
-                    try { super.close() } finally { connection.disconnect() }
+    if (missing.isNotEmpty()) {
+        val xml = buildString {
+            append("<configuration><base path=\"").append(escapeXml(payload.canonicalPath)).append("\"/><files>")
+            missing.forEach { entry ->
+                append("<file path=\"").append(escapeXml(entry.path)).append("\" uri=\"")
+                    .append(escapeXml(entry.url)).append("\" size=\"").append(entry.bytes)
+                    .append("\" checksum=\"").append(entry.checksum).append("\"/>")
+            }
+            append("</files></configuration>")
+        }
+        val config = Configuration.read(StringReader(xml))
+        val byPath = missing.associateBy { safeInstallFile(payload, it.path).toPath().toAbsolutePath().normalize() }
+        val result = config.update(UpdateOptions.archive(archive.toPath()).updateHandler(object : UpdateHandler {
+            override fun openDownloadStream(file: FileMetadata): InputStream {
+                cancellation.ensureActive()
+                val connection = officialConnection(file.uri.toString(), proxy)
+                val input = try { connection.inputStream }
+                    catch (failure: Exception) { connection.disconnect(); throw failure }
+                return object : FilterInputStream(input) {
+                    override fun close() {
+                        try { super.close() } finally { connection.disconnect() }
+                    }
                 }
             }
-        }
-        override fun updateDownloadProgress(frac: Float) {
-            cancellation.ensureActive()
-            onProgress((plan.bytes * frac.coerceIn(0f, 1f)).toLong(), plan.bytes)
-        }
-        override fun validatingFile(file: FileMetadata, path: Path) {
-            cancellation.ensureActive()
-            val entry = byPath[file.path.toAbsolutePath().normalize()] ?: error("未知增量文件")
-            require(Files.size(path) == entry.bytes && hash(path) == entry.sha256) { "增量文件 SHA-256 校验失败" }
-        }
-        override fun doneDownloadFile(file: FileMetadata, path: Path) {
-            cancellation.ensureActive()
-            val destination = file.path
-            Files.createDirectories(destination.parent)
-            Files.copy(path, destination, StandardCopyOption.REPLACE_EXISTING)
-        }
-    }))
-    result.exception?.let { throw it }
+            override fun updateDownloadProgress(frac: Float) {
+                cancellation.ensureActive()
+                onProgress(retainedBytes + (remainingBytes * frac.coerceIn(0f, 1f)).toLong(), plan.bytes)
+            }
+            override fun validatingFile(file: FileMetadata, path: Path) {
+                cancellation.ensureActive()
+                val entry = byPath[file.path.toAbsolutePath().normalize()] ?: error("未知增量文件")
+                require(Files.size(path) == entry.bytes && hash(path) == entry.sha256) { "增量文件 SHA-256 校验失败" }
+            }
+            override fun doneDownloadFile(file: FileMetadata, path: Path) {
+                cancellation.ensureActive()
+                val destination = file.path
+                Files.createDirectories(destination.parent)
+                Files.copy(path, destination, StandardCopyOption.REPLACE_EXISTING)
+            }
+        }))
+        result.exception?.let { throw it }
+    }
     state.changed.forEach { entry ->
         cancellation.ensureActive()
         val file = safeInstallFile(payload, entry.path)
