@@ -89,7 +89,7 @@ jobs:
           set +o pipefail
           yes | "$SDKMANAGER" --licenses > /dev/null
           set -o pipefail
-          "$SDKMANAGER" 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;27.2.12479018' 'cmake;3.22.1'
+          "$SDKMANAGER" 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;27.2.12479018' 'ndk;30.0.16248370' 'cmake;3.22.1'
 
       - name: Check out pinned Steam protocol source
         if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'

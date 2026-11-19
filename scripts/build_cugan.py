@@ -9,7 +9,8 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from package_runtimes import ABIS, require_elf
 
 ROOT = Path(__file__).resolve().parents[1]
-NDK_VERSION = "27.2.12479018"
+# The pinned upstream ncnn/glslang archive uses the r30 libc++ ABI.
+NDK_VERSION = "30.0.16248370"
 CMAKE_VERSION = "3.22.1"
 LIBRARY = "libmangaflow_cugan.so"
 
