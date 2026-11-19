@@ -11,6 +11,7 @@ import dev.mangaflow.anime.sources.AnimeMetadataRepository
 import dev.mangaflow.anime.sources.AnimeDiscoveryRepository
 import dev.mangaflow.anime.sources.AnimeDiscussionController
 import dev.mangaflow.anime.sources.AnimeSourceBrowseController
+import dev.mangaflow.anime.sources.AnimeSourceException
 import dev.mangaflow.anime.sources.AnimeSourceRepository
 import dev.mangaflow.anime.sources.AnimeTrackingRepository
 import dev.mangaflow.anime.sources.animeContentIdentity
@@ -151,6 +152,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private var playbackAttemptSequence = 0L
     private val recentPlaybackSources = mutableMapOf<String, PlaybackSourceReceipt>()
     private var sourceRecoveryWindowStarted = false
+    private var playbackDiscoveryRetried = false
     private val playbackEpochs = mutableMapOf<String, Long>()
     private var active: ActivePlayback? = null
     private var pending: PendingPlayback? = null
@@ -1077,6 +1079,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         autoPlaybackDeadline = monotonicTimeMillis() + 45_000L
         recoveryOptions.clear()
         sourceRecoveryWindowStarted = false
+        playbackDiscoveryRetried = false
         mutableState.update { it.copy(playbackRecoveryStopReason = null) }
     }
 
@@ -1086,7 +1089,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         resetPlaybackRecoveryWindow()
         autoPlayJob?.cancel()
         mutableState.update { it.copy(playbackTarget = AnimePlaybackTarget(episode, option), autoMatching = false) }
-        if (option == null && mutableState.value.episodeOptions[episodeId].orEmpty().none { it.confirmed }) {
+        if (option == null && confirmedPlaybackLines(episodeId).isEmpty()) {
             autoAssociateAndPlay(episodeId)
         } else resolveAndPlay(episodeId, option)
     }
@@ -1156,7 +1159,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             fun report(phase: AnimeAssociationPhase, message: String? = null,
                 choices: List<AnimeSourceTitle> = emptyList()) {
                 if (!current()) return
-                if (phase == AnimeAssociationPhase.NEEDS_SELECTION) {
+                if (phase == AnimeAssociationPhase.NEEDS_SELECTION || choices.isNotEmpty()) {
                     val candidates = choices.distinctBy { it.id to it.url }.take(12)
                     mutableState.update { it.copy(associationChoices = it.associationChoices + (sourceId to candidates)) }
                 } else if (phase in setOf(AnimeAssociationPhase.LINKED, AnimeAssociationPhase.NO_MATCH,
@@ -1214,41 +1217,49 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             val seenByKeyword = keywords.associateWith { mutableSetOf<Pair<String, String>>() }
                             val finishedKeywords = mutableSetOf<String>()
                             // Recall only. Round-robin keywords so extra title pages cannot
-                            // starve the original-title first page. Keep the shared 15s budget.
+                            // starve the original-title first page. Leave time to read catalogues.
                             val lastPage = if (provider.supportsSearchPagination) 3 else 1
-                            searchPages@ for (pageNumber in 1..lastPage) {
-                                for (keyword in keywords) {
-                                    if (!force && rows.any { autoPlaySubjectCandidate(detail.subject, it) }) break@searchPages
-                                    if (keyword in finishedKeywords) continue
-                                    if (!current()) return@aggregation false
-                                    val page = try {
-                                        withTimeoutOrNull(4_000) { provider.search(keyword, pageNumber) }
-                                            ?.also { searchSucceeded = true } ?: run {
-                                            searchFailure = "来源搜索超时，本次搜索尚未完成。"
+                            val recalled = withTimeoutOrNull(6_500) recall@ {
+                                for (pageNumber in 1..lastPage) {
+                                    for (keyword in keywords) {
+                                        // A grouped search row without ID/year is only a hint.
+                                        if (rows.any { autoPlaySubjectHasSharedId(detail.subject, it) } ||
+                                            (pageNumber > 1 && rows.any { autoPlaySubjectMatches(detail.subject, it) }))
+                                            return@recall true
+                                        if (keyword in finishedKeywords) continue
+                                        if (!current()) return@recall false
+                                        val page = try {
+                                            withTimeoutOrNull(3_000) { provider.search(keyword, pageNumber) }
+                                                ?.also { searchSucceeded = true } ?: run {
+                                                searchFailure = "来源搜索超时，本次搜索尚未完成。"
+                                                null
+                                            }
+                                        } catch (cancel: CancellationException) { throw cancel }
+                                        catch (failure: Exception) {
+                                            searchFailure = failure.message ?: "来源搜索失败，本次搜索尚未完成。"
                                             null
                                         }
-                                    } catch (cancel: CancellationException) { throw cancel }
-                                    catch (failure: Exception) {
-                                        searchFailure = failure.message ?: "来源搜索失败，本次搜索尚未完成。"
-                                        null
+                                        if (page == null) {
+                                            finishedKeywords += keyword
+                                            continue
+                                        }
+                                        check(page.all { it.sourceId == sourceId }) { "来源搜索身份不一致。" }
+                                        val seen = seenByKeyword.getValue(keyword)
+                                        val fresh = page.distinctBy { it.id to it.url }.filter { seen.add(it.id to it.url) }
+                                        if (fresh.isEmpty()) finishedKeywords += keyword
+                                        fresh.forEach { found ->
+                                            // The fresh row may carry evidence missing from the staged row.
+                                            val index = rows.indexOfFirst { it.id == found.id && it.url == found.url }
+                                            if (index < 0) rows += found
+                                            else if (autoPlaySubjectMatches(detail.subject, found)) rows[index] = found
+                                        }
                                     }
-                                    if (page == null) {
-                                        finishedKeywords += keyword
-                                        continue
-                                    }
-                                    check(page.all { it.sourceId == sourceId }) { "来源搜索身份不一致。" }
-                                    val seen = seenByKeyword.getValue(keyword)
-                                    val fresh = page.distinctBy { it.id to it.url }.filter { seen.add(it.id to it.url) }
-                                    if (fresh.isEmpty()) {
-                                        finishedKeywords += keyword // Empty or repeated page, never loop on ignored pagination.
-                                        continue
-                                    }
-                                    rows += fresh.filter { found -> rows.none { it.id == found.id && it.url == found.url } }
-                                    if (rows.any { autoPlaySubjectCandidate(detail.subject, it) }) break@searchPages
+                                    if (finishedKeywords.size == keywords.size) break
                                 }
-                                if (finishedKeywords.size == keywords.size) break
+                                true
                             }
                             if (!current()) return@aggregation false
+                            if (recalled == null) searchFailure = "来源搜索超时，本次搜索尚未完成。"
                             if (searchSucceeded) associationCandidates[sourceId] = revision to rows.toList()
                             val titles = rows.filter { autoPlaySubjectCandidate(detail.subject, it) }
                             if (titles.isEmpty()) {
@@ -1263,7 +1274,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 return@aggregation true
                             }
                             val verified = possible.mapNotNull { title ->
-                                val catalog = withTimeoutOrNull(5_000) { provider.catalog(title) }
+                                val catalog = withTimeoutOrNull(4_000) { provider.catalog(title) }
                                     ?: return@aggregation false
                                 check(catalog.title.sourceId == sourceId && catalog.title.id == title.id &&
                                     catalog.title.url == title.url) { "来源目录身份不一致。" }
@@ -1271,7 +1282,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             }
                             val catalog = verified.singleOrNull()
                             if (catalog == null) {
-                                report(AnimeAssociationPhase.NEEDS_SELECTION, "作品年份、身份或版本仍需核对。", possible)
+                                if (verified.isEmpty() && searchFailure != null)
+                                    report(AnimeAssociationPhase.UNAVAILABLE, searchFailure, possible)
+                                else report(AnimeAssociationPhase.NEEDS_SELECTION, "作品年份、身份或版本仍需核对。", possible)
                                 return@aggregation true
                             }
                             if (!current()) return@aggregation false
@@ -1451,20 +1464,34 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             try {
                 library.awaitLoaded(); sources.extensions.ready.await()
                 if (generation != autoPlayGeneration || !currentDetail(owner, detail.subject.id)) return@launch
-                startSourceAggregation(detail, retryFailed = true)
-                val remaining = autoPlaybackDeadline - monotonicTimeMillis()
-                val ready = if (remaining <= 0L) null else withTimeoutOrNull(remaining) {
-                    state.first { state ->
-                        confirmedPlaybackLines(episodeId, state).any { optionKey(it) !in attempted } ||
-                            !state.sourceAggregationRunning
+                fun nextLineAvailable(snapshot: AnimeScreenState) =
+                    confirmedPlaybackLines(episodeId, snapshot).any { optionKey(it) !in attempted }
+                suspend fun awaitLines(): AnimeScreenState? {
+                    val remaining = autoPlaybackDeadline - monotonicTimeMillis()
+                    if (remaining <= 0L) return null
+                    return withTimeoutOrNull(remaining) {
+                        state.first { nextLineAvailable(it) || !it.sourceAggregationRunning }
                     }
                 }
+                startSourceAggregation(detail)
+                var ready = awaitLines()
                 if (generation != autoPlayGeneration || !currentDetail(owner, detail.subject.id)) return@launch
-                if (ready != null && confirmedPlaybackLines(episodeId, ready).any { optionKey(it) !in attempted }) {
+                if (ready != null && !nextLineAvailable(ready) && canRetryPlaybackDiscovery(ready)) {
+                    playbackDiscoveryRetried = true
+                    startSourceAggregation(detail, retryFailed = true)
+                    ready = awaitLines()
+                }
+                if (generation != autoPlayGeneration || !currentDetail(owner, detail.subject.id)) return@launch
+                if (ready != null && nextLineAvailable(ready)) {
                     resolveAndPlay(episodeId, attempted = attempted)
                 } else {
-                    failPlaybackTarget(lastFailure ?: if (attempted.isNotEmpty()) "已确认的本集线路暂未解析成功。"
-                        else "暂未找到能确认对应本集的片源。")
+                    val reason = when {
+                        ready == null -> "本轮查找已到时限，可重试本集或查看线路。"
+                        ready.sourceAggregation.values.any { it.phase == AnimeAssociationPhase.UNAVAILABLE } ->
+                            "有来源尚未查完，暂未找到其他可确认的本集线路。"
+                        else -> "暂未找到其他可确认的本集线路。"
+                    }
+                    failPlaybackTarget(lastFailure ?: reason, recoveryStopReason = reason.takeIf { lastFailure != null })
                 }
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
@@ -1581,7 +1608,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         // cancelled playback request still cancels the whole race.
                         currentCoroutineContext().ensureActive()
                         if (current()) rejected += key
-                        Result.failure(IllegalStateException("本集来源已变化，请重试。", cancel))
+                        Result.failure(IllegalStateException("${candidate.sourceName} · 本集来源已变化，请重试。", cancel))
                     } catch (failure: Exception) {
                         if (current()) {
                             val admitted = admissionKey
@@ -1591,7 +1618,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 rememberPlaybackFailure(admitted)
                             } else rejected += key
                         }
-                        Result.failure(failure)
+                        val diagnostic = when ((failure as? AnimeSourceException)?.httpStatus) {
+                            403 -> "请求被拒绝（HTTP 403）。"
+                            else -> failure.message ?: "未能取得本集播放地址。"
+                        }
+                        Result.failure(IllegalStateException("${candidate.sourceName} · 取播放地址\n$diagnostic", failure))
                     }
                 }
                 val choices = (if (canFallback) options else listOf(selected)).toMutableList()
@@ -1693,9 +1724,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (target != null) mutableState.update { it.copy(playbackTarget = target.copy(error = reason)) }
     }
 
-    private fun failPlaybackTarget(error: String) {
+    private fun failPlaybackTarget(error: String, recoveryStopReason: String? = null) {
         mutableState.update { it.copy(resolving = false, autoMatching = false,
-            playbackTarget = it.playbackTarget?.copy(error = error)) }
+            playbackTarget = it.playbackTarget?.copy(error = error), playbackRecoveryStopReason = recoveryStopReason) }
     }
 
     fun cancelPlaybackResolution() {
@@ -1924,9 +1955,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 if (!owner.sourceReceiptSaved && owner.localMedia == null && stableFor >= 2_000L) {
                     rememberWorkingSource(owner, now)
                 }
-                if (!owner.stableRecoveryReset && stableFor >= 30_000L) {
+                if (!owner.stableRecoveryReset && stableFor >= 30_000L && mutableState.value.playbackTarget == null) {
                     owner.stableRecoveryReset = true
                     sourceRecoveryWindowStarted = false
+                    playbackDiscoveryRetried = false
                     recoveryOptions.clear()
                 }
                 if ((snapshot.isBuffering || !snapshot.playWhenReady) && preparationTarget != null && prepared == null) {
@@ -2070,6 +2102,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         job.cancel()
     }
 
+    private fun canRetryPlaybackDiscovery(snapshot: AnimeScreenState) = !playbackDiscoveryRetried &&
+        snapshot.sourceAggregation.values.any { it.phase == AnimeAssociationPhase.UNAVAILABLE }
+
     private fun recoverPlayback(owner: ActivePlayback) {
         val playback = playerInstance?.state?.value
         if (playback != null && belongsTo(owner, playback) && !playback.sourceRecoveryAllowed) return
@@ -2090,14 +2125,19 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         recoveryOptions += optionKey(owner.option)
         val hasAlternative = confirmedPlaybackLines(owner.episode.id).any { optionKey(it) !in recoveryOptions }
-        if (!hasAlternative && !mutableState.value.sourceAggregationRunning) {
-            mutableState.update { it.copy(playbackRecoveryStopReason = "当前已确认的本集线路均已尝试，暂无其他已确认线路。") }
+        val discovery = mutableState.value
+        if (!hasAlternative && !discovery.sourceAggregationRunning && !canRetryPlaybackDiscovery(discovery)) {
+            val reason = if (discovery.sourceAggregation.values.any { it.phase == AnimeAssociationPhase.UNAVAILABLE })
+                "有来源尚未查完，暂未找到其他可确认的本集线路。"
+            else "当前已确认的本集线路均已尝试。"
+            mutableState.update { it.copy(playbackRecoveryStopReason = reason) }
             return
         }
         ++autoPlayGeneration
         autoPlayJob?.cancel()
         if (hasAlternative) resolveAndPlay(owner.episode.id, attempted = recoveryOptions.toSet())
-        else autoAssociateAndPlay(owner.episode.id, attempted = recoveryOptions.toSet())
+        else autoAssociateAndPlay(owner.episode.id, attempted = recoveryOptions.toSet(),
+            lastFailure = playback?.error?.let { "${owner.option.sourceName} · 播放视频\n$it" })
     }
 
     fun updatePlaybackSettings(settings: AnimePlaybackSettings) = mutate {

@@ -274,17 +274,19 @@ internal fun AnimeWorkspace(
         focusSearchInput = true
         searchExpanded = true
     }
-    fun openVideoGroup(group: AnimeSearchGroup) {
+    fun openVideoGroup(group: AnimeSearchGroup, preview: AnimeSourceTitle? = null) {
         val candidates = controller.currentVideoCandidates(group.sources)
         if (candidates.size < 2) {
-            (candidates.firstOrNull() ?: group.sources.firstOrNull())?.let { chooseReference(it, true) }
+            val reference = if (preview == null) candidates.firstOrNull() ?: group.sources.firstOrNull()
+                else candidates.firstOrNull { it == preview }
+            reference?.let { chooseReference(it, true) }
             return
         }
         val reference = candidates.first()
         val known = candidates.mapNotNull(controller::knownDiscoverySubject).distinctBy { it.id }.singleOrNull()
         val native = controller.sourceSubject(reference)
         val subject = known ?: native
-        pendingAssociation = null
+        pendingAssociation = preview?.takeIf { it in candidates }?.let { AnimeSourceAssociation(it, subject.id) }
         browseCandidate = null
         beginDetailNavigation()
         openingSubject = subject
@@ -300,10 +302,11 @@ internal fun AnimeWorkspace(
             controller.openDiscoveryItem(item)
         } else item.reference?.let { chooseReference(it, false) }
     }
-    fun openSearchResult(subject: AnimeSubject) {
+    fun openSearchResult(subject: AnimeSubject, preview: AnimeSourceTitle? = null) {
         val group = if (browseCandidate == null)
             controller.searchState.value.groups.firstOrNull { it.subject?.id == subject.id } else null
-        pendingAssociation = null
+        pendingAssociation = if (preview != null && group != null && preview in controller.currentVideoCandidates(group.sources))
+            AnimeSourceAssociation(preview, subject.id) else null
         if (group == null) open(subject)
         else {
             beginDetailNavigation()
@@ -481,7 +484,7 @@ internal fun AnimeWorkspace(
                                 when (shownPane) {
                                     AnimeWorkspacePane.DISCOVERY -> AnimeDiscovery(state, controller, backdrop, discoveryScrolls,
                                         onOpenItem = ::openDiscoveryItem, onChooseReference = ::chooseReference,
-                                        onOpenSourceGroup = ::openVideoGroup, onBrowseSource = ::openDirectory,
+                                        onOpenSourceGroup = { openVideoGroup(it) }, onBrowseSource = ::openDirectory,
                                         onResume = ::resume, active = paneActive)
                                     AnimeWorkspacePane.DIRECTORY -> AnimeSourceBrowsePane(controller, backdrop, discoveryScrolls,
                                         columns = state.discoveryColumns, active = paneActive,
@@ -568,8 +571,12 @@ internal fun AnimeWorkspace(
                         else -> animeSearchResults(search, indexOnly, controller, showSearchIssues,
                             onToggleIssues = { showSearchIssues = !showSearchIssues }, expandedGroup = expandedSearchGroup,
                             onToggleSources = { key -> expandedSearchGroup = key.takeUnless { it == expandedSearchGroup } },
-                            onOpenSubject = ::openSearchResult, onOpenSource = { chooseReference(it, true) },
-                            onOpenSourceGroup = ::openVideoGroup)
+                            onOpenSubject = { openSearchResult(it) },
+                            onOpenSource = { group, candidate ->
+                                val subject = group.subject
+                                if (subject != null) openSearchResult(subject, candidate) else openVideoGroup(group, candidate)
+                            },
+                            onOpenSourceGroup = { openVideoGroup(it) })
                     }
                 }
             }

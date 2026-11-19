@@ -99,7 +99,7 @@ internal data class AnimeFeaturedEntry(
     val title: String,
     val coverUrl: String,
     val sourceId: String,
-    val sourceLabel: String,
+    val sources: List<Pair<String, String>>,
     val caption: String,
     val sourceGroup: AnimeSearchGroup? = null,
     val discoveryItem: AnimeDiscoveryItem? = null,
@@ -118,6 +118,7 @@ internal fun AnimeFeaturedCarousel(
     visible: Boolean,
     selectedKey: String?,
     onSelected: (String) -> Unit,
+    onOpenSources: (AnimeFeaturedEntry) -> Unit,
     onOpen: (AnimeFeaturedEntry) -> Unit,
 ) {
     if (entries.isEmpty()) return
@@ -138,7 +139,8 @@ internal fun AnimeFeaturedCarousel(
         val inlineInformation = preferredWidth >= 224.dp && fontScale <= 1.3f
         val titleLines = if (window.shortHeight || fontScale > 1.3f) 1 else 2
         val captionHeight = if (inlineInformation) 0.dp else
-            (8f + (20f * titleLines + 15f) * fontScale).dp.coerceAtMost(itemHeight - 36.dp)
+            ((10f + 20f * titleLines * fontScale).dp + maxOf(30.dp, (15f * fontScale).dp))
+                .coerceAtMost(itemHeight - 36.dp)
         val artworkHeight = (itemHeight - captionHeight).coerceAtLeast(1.dp)
         val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
         val state = rememberPagerState(
@@ -226,7 +228,8 @@ internal fun AnimeFeaturedCarousel(
                     emphasis = emphasis,
                     offset = { if (motion) (index - position.value).coerceIn(-1f, 1f) *
                         (if (rtl) -1f else 1f) else 0f },
-                    enabled = active, onOpen = onOpen)
+                    enabled = active, sourcesEnabled = active && index == state.settledPage && !state.isScrollInProgress,
+                    onOpenSources = onOpenSources, onOpen = onOpen)
             }
             Row(Modifier.fillMaxWidth().height(footerHeight), verticalAlignment = Alignment.CenterVertically) {
                 if (desktop) MotionIconButton(onClick = { selectPage(state.currentPage - 1) },
@@ -274,6 +277,8 @@ private fun AnimeFeaturedCard(
     emphasis: () -> Float,
     offset: () -> Float,
     enabled: Boolean,
+    sourcesEnabled: Boolean,
+    onOpenSources: (AnimeFeaturedEntry) -> Unit,
     onOpen: (AnimeFeaturedEntry) -> Unit,
 ) {
     val context = LocalMangaContext.current
@@ -319,7 +324,7 @@ private fun AnimeFeaturedCard(
     Box(modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button,
         enabled = enabled, onClickLabel = "查看" + entry.title, onClick = { onOpen(entry) })
         .semantics(mergeDescendants = true) {
-            contentDescription = listOf(entry.title, entry.sourceLabel, entry.caption)
+            contentDescription = listOf(entry.title, entry.caption)
                 .filter(String::isNotBlank).joinToString("，")
         }.motionPress(interaction, enabled = enabled, pressedScale = .985f)) {
         BoxWithConstraints(Modifier.matchParentSize()) {
@@ -396,20 +401,21 @@ private fun AnimeFeaturedCard(
                     .padding(vertical = if (inlineInformation) 6.dp else 4.dp),
                     verticalArrangement = Arrangement.spacedBy(if (inlineInformation) 8.dp else 2.dp,
                         if (inlineInformation) Alignment.CenterVertically else Alignment.Bottom)) {
-                    if (inlineInformation) Text(entry.sourceLabel, Modifier.clearAndSetSemantics { },
-                        color = ink.copy(alpha = .68f),
-                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 13.sp),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (inlineInformation) AnimeSourceBadge(entry.sources, ink = ink, compact = true,
+                        enabled = sourcesEnabled, onClick = { onOpenSources(entry) })
                     Text(entry.title, Modifier.clearAndSetSemantics { }, color = ink,
                         style = MaterialTheme.typography.titleSmall.copy(fontSize = 14.sp, lineHeight = 20.sp),
                         fontWeight = FontWeight.Medium, minLines = if (inlineInformation) 1 else titleLines,
                         maxLines = if (inlineInformation) titleLines + 1 else titleLines, overflow = TextOverflow.Ellipsis)
-                    val caption = if (inlineInformation) entry.caption
-                        else listOf(entry.sourceLabel, entry.caption).filter(String::isNotBlank).joinToString(" · ")
-                    if (caption.isNotBlank()) Text(caption, Modifier.clearAndSetSemantics { },
-                        color = ink.copy(alpha = .76f),
-                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, lineHeight = 15.sp),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (!inlineInformation || entry.caption.isNotBlank()) Row(verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (!inlineInformation) AnimeSourceBadge(entry.sources, ink = ink, compact = true,
+                            enabled = sourcesEnabled, onClick = { onOpenSources(entry) })
+                        if (entry.caption.isNotBlank()) Text(entry.caption,
+                            Modifier.weight(1f, fill = false).clearAndSetSemantics { }, color = ink.copy(alpha = .76f),
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, lineHeight = 15.sp),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             }
         }

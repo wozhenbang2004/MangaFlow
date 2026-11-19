@@ -86,19 +86,25 @@ internal fun AnimePlayerPane(
     val target = state.playbackTarget
     val episode = target?.episode ?: activeEpisode
     val resolutionError = target?.error
-    val optionCount = remember(episode?.id, state.detail, state.episodeOptions, state.sourceCatalogs) {
-        episode?.let { controller.confirmedPlaybackLines(it.id, state).size } ?: 0
+    val confirmedOptions = remember(episode?.id, state.detail, state.episodeOptions, state.sourceCatalogs) {
+        episode?.let { controller.confirmedPlaybackLines(it.id, state) }.orEmpty()
     }
+    val optionCount = confirmedOptions.size
+    val currentOption = target?.manualOption ?: state.selectedPlaybackOption.takeIf {
+        target == null && episode != null && state.selectedEpisodeId == episode.id
+    }
+    val sourceNames = (listOfNotNull(currentOption) + confirmedOptions).map { it.sourceId to it.sourceName }
     val ordered = remember(detail?.episodes, episode?.kind) { detail?.episodes.orEmpty().filter { it.kind == episode?.kind } }
     val index = ordered.indexOfFirst { it.id == episode?.id }
     val previous = ordered.getOrNull(index - 1).takeIf { index > 0 }
     val next = ordered.getOrNull(index + 1).takeIf { index >= 0 }
     val playerFailure = playback.error ?: if (playback.phase == AnimePlayerPhase.ERROR)
         "播放器未能准备视频，请重试或选择其他来源。" else null
-    val failure = resolutionError ?: playerFailure?.let { error ->
-        if (playback.phase == AnimePlayerPhase.ERROR) listOfNotNull(error, state.playbackRecoveryStopReason).joinToString("\n")
-        else error
+    val playbackSource = state.selectedPlaybackOption?.sourceName
+    val error = resolutionError ?: playerFailure?.let { message ->
+        playbackSource?.let { "$it · 播放视频\n$message" } ?: message
     }
+    val failure = error?.let { listOfNotNull(it, state.playbackRecoveryStopReason).joinToString("\n") }
     val focus = remember { FocusRequester() }
     val chromeFocus = remember { FocusRequester() }
     val touchExploration = LocalTouchExplorationEnabled.current
@@ -295,7 +301,8 @@ internal fun AnimePlayerPane(
                     MaterialTheme(colorScheme = videoColors) {
                         AnimeVideoStatus(
                             resolving = state.resolving, autoMatching = state.autoMatching,
-                            sourceName = target?.sourceName, failure = failure, playback = playback,
+                            sourceName = if (target == null) playbackSource else target.sourceName,
+                            failure = failure, playback = playback,
                             optionsAvailable = optionCount, canChooseSource = episode != null,
                             compact = videoHeight < 196.dp,
                             next = next, onRetry = onRetry, onSources = onSources, onEpisode = onEpisode,
@@ -333,10 +340,16 @@ internal fun AnimePlayerPane(
                     }
                     if (fullscreen && canControl && !touchExploration) MotionIconButton(onClick = { locked = true }, modifier = Modifier.size(44.dp),
                         tooltip = "锁定触控") { Icon(Icons.Outlined.LockOpen, "锁定触控", Modifier.size(20.dp)) }
-                    if (optionCount > 1 && failure == null && !state.resolving) MotionIconButton(
-                        onClick = { interact(); onSources() }, modifier = Modifier.size(44.dp),
-                        tooltip = "切换来源与线路") {
-                        Icon(Icons.Outlined.SwapHoriz, "切换线路", Modifier.size(21.dp))
+                    if (episode != null && !state.resolving) {
+                        if (sourceNames.isNotEmpty()) {
+                            AnimeSourceBadge(sourceNames, modifier = Modifier.widthIn(max = 90.dp), enabled = active,
+                                selectedId = currentOption?.sourceId, onClick = { interact(); onSources() })
+                        } else if (failure == null) {
+                            MotionIconButton(onClick = { interact(); onSources() }, modifier = Modifier.size(44.dp),
+                                tooltip = "查看来源与线路") {
+                                Icon(Icons.Outlined.SwapHoriz, "查看来源与线路", Modifier.size(21.dp))
+                            }
+                        }
                     }
                     if (canControl || fullscreen) MotionIconButton(onClick = ::toggleFullscreen, modifier = Modifier.size(44.dp),
                         tooltip = if (fullscreen) "退出全屏 · F" else "全屏 · F") {
@@ -424,7 +437,7 @@ private fun AnimeVideoStatus(
         failure != null -> Column(Modifier.widthIn(max = 500.dp).verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            PlayerStageMessage("本集暂时无法播放", failure, maxLines = if (compact) 2 else 4)
+            PlayerStageMessage("本集暂时无法播放", failure, maxLines = if (compact) 3 else 5)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                 verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 if (optionsAvailable > 1) {

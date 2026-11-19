@@ -109,12 +109,16 @@ internal class AniChAnimeProvider(override val revision: String) : AnimeProvider
         val http = AnimeHttp(id)
         return try {
             val available = lines(http, work, sort, AnimeSourceStage.RESOLVE)
-            // Automatic is explicit in the catalogue; legacy user-selected stations stay exact.
-            val line = if (automatic) available.firstOrNull() else available.singleOrNull { it.slug == slug }
-            if (line == null) throw AnimeSourceException(id, AnimeSourceStage.RESOLVE,
+            // Automatic can try any resource from this exact episode. A saved explicit station
+            // still selects its own slug and cannot silently choose between competing resources.
+            val candidates = if (automatic) available.distinctBy { it.url }
+                else available.filter { it.slug == slug }
+            if (candidates.isEmpty()) throw AnimeSourceException(id, AnimeSourceStage.RESOLVE,
                 "所选 AniCh 剧集暂未提供可用线路，请重试或选择其他来源。")
-            val stream = if (!automatic) AnimeStreamResolver(http).resolve(line.url, homeUrl)
-                else resolveAutomatic(http, available)
+            if (!automatic && candidates.size > 1) throw AnimeSourceException(id, AnimeSourceStage.RESOLVE,
+                "这条 AniCh 线路对应多个不同资源，请选择自动线路或更换来源。")
+            val stream = if (automatic) resolveAutomatic(http, candidates)
+                else AnimeStreamResolver(http).resolve(candidates.single().url, homeUrl)
             checkRoute(http, AnimeSourceStage.RESOLVE)
             AnimePlaybackAsset(id = "$id:${animeHash(episode.id + "\n" + animeContentIdentity(stream.url))}",
                 sourceId = id, sourceEpisodeId = episode.id, url = stream.url, route = http.route,
@@ -154,7 +158,9 @@ internal class AniChAnimeProvider(override val revision: String) : AnimeProvider
                 require(number in 0..255)
                 number.toByte()
             }
-            val rows = AniChWire(bytes).messages(1).map { row ->
+            // Only coalesce identical station/URL pairs. Paths and query values can identify
+            // different resources even when the station slug is the same.
+            AniChWire(bytes).messages(1).map { row ->
                 val slug = row.string(5).also { require(it.isNotBlank() && it.length <= 256) }
                 val encoded = row.string(1).also { require(it.length in 5..32768) }
                 // Public wire encoding, not a secret: URL-safe Base64 with one inserted character.
@@ -162,9 +168,7 @@ internal class AniChAnimeProvider(override val revision: String) : AnimeProvider
                 val normalized = unpadded + "=".repeat((4 - unpadded.length % 4) % 4)
                 val url = Base64.decode(normalized).decodeToString(throwOnInvalidSequence = true)
                 Line(slug, animePublicUrl(url).toString())
-            }
-            require(rows.map { it.slug }.distinct().size == rows.size) { "AniCh 返回重复线路标识，无法确定所选资源。" }
-            rows
+            }.distinct()
         }
     }
 

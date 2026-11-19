@@ -1,16 +1,21 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Text
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.anime.AnimeSearchGroup
@@ -29,7 +34,7 @@ internal fun LazyListScope.animeSearchResults(
     expandedGroup: String?,
     onToggleSources: (String) -> Unit,
     onOpenSubject: (AnimeSubject) -> Unit,
-    onOpenSource: (AnimeSourceTitle) -> Unit,
+    onOpenSource: (AnimeSearchGroup, AnimeSourceTitle) -> Unit,
     onOpenSourceGroup: (AnimeSearchGroup) -> Unit,
 ) {
     // When matching a foreign catalogue entry, show only canonical index candidates.
@@ -80,28 +85,33 @@ internal fun LazyListScope.animeSearchResults(
     items(groups, key = { it.key }) { group ->
         val subject = group.subject
         val first = group.sources.firstOrNull()
-        if (subject != null) {
-            AnimeSubjectRow(subject, animeSubjectSummary(subject), onOpen = { onOpenSubject(subject) }, trailing = {
-                if (!indexOnly && group.sources.isNotEmpty()) {
-                    val count = group.sources.size
-                    AnimeQuietLabel("$count 源", Modifier.semantics {
-                        contentDescription = "搜索命中 $count 个来源，播放尚未确认"
-                    })
-                }
-            })
-        } else if (first != null) {
+        val display = subject ?: first?.let { remember(it) { controller.sourceSubject(it) } }
+        if (display != null) {
+            val candidates = if (indexOnly) emptyList() else group.sources
+            val marks = candidates.map { it.sourceId to (sourceNames[it.sourceId] ?: animeSourceName(it.sourceId)) }
+            val expanded = candidates.isNotEmpty() && expandedGroup == group.key
+            val subtitle = if (subject != null) animeSubjectSummary(subject) else listOfNotNull(
+                first?.let { sourceNames[it.sourceId] ?: animeSourceName(it.sourceId) },
+                first?.updateText?.takeIf(String::isNotBlank),
+            ).joinToString(" · ")
             Column {
-                AnimeSubjectRow(remember(first) { controller.sourceSubject(first) },
-                    listOfNotNull(sourceNames[first.sourceId], first.updateText.takeIf(String::isNotBlank)).joinToString(" · "),
-                    onOpen = { onOpenSourceGroup(group) }, trailing = {
-                        if (group.sources.size > 1) MotionTextButton(onClick = { onToggleSources(group.key) },
-                            modifier = Modifier.heightIn(min = 44.dp)) {
-                            Text(if (expandedGroup == group.key) "收起" else "${group.sources.size} 源")
+                AnimeSubjectRow(display, subtitle, onOpen = {
+                    if (subject != null) onOpenSubject(subject) else onOpenSourceGroup(group)
+                }, trailing = {
+                    if (marks.isNotEmpty()) AnimeSourceBadge(marks, compact = true,
+                        modifier = Modifier.widthIn(max = 88.dp).semantics {
+                            stateDescription = if (expanded) "已展开来源候选" else "搜索命中的播放候选"
+                        }, onClick = { onToggleSources(group.key) })
+                })
+                if (expanded) candidates.forEach { candidate ->
+                    val name = sourceNames[candidate.sourceId] ?: animeSourceName(candidate.sourceId)
+                    MotionTextButton(onClick = { onOpenSource(group, candidate) },
+                        Modifier.padding(start = 64.dp).heightIn(min = 44.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                            AnimeSourceMark(candidate.sourceId, name, size = 17.dp)
+                            Text(listOfNotNull(name, candidate.title.takeIf { it != display.title })
+                                .joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                    })
-                if (expandedGroup == group.key) group.sources.drop(1).forEach { title ->
-                    MotionTextButton(onClick = { onOpenSource(title) }, Modifier.padding(start = 64.dp).heightIn(min = 44.dp)) {
-                        Text(sourceNames[title.sourceId] ?: title.sourceId)
                     }
                 }
             }

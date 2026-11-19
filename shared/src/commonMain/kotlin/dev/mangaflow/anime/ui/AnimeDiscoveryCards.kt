@@ -134,47 +134,68 @@ internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQ
     modifier: Modifier = Modifier, list: Boolean = false, onScores: ((AnimeDiscoveryItem) -> Unit)? = null,
     onOpen: () -> Unit) {
     val provider = item.discoveryProvider ?: query.provider
-    val scores = item.sourceScores.ifEmpty {
-        item.rating?.let { listOf(AnimeSourceScore(provider, it, item.ratingScale)) }.orEmpty()
-    }.filter { it.rating.isFinite() && it.rating > 0 && it.rating <= it.scale }.distinctBy { it.provider }
+    val scores = animeDiscoverySourceScores(item, provider)
     val caption = listOfNotNull(animeDiscoveryMetric(item, query), item.year?.toString(),
         item.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).take(2).joinToString(" · ")
-    val showScores = onScores?.let { open -> { open(item.copy(sourceScores = scores)) } }
+    val rated = item.copy(sourceScores = scores)
+    val showScores = onScores?.let { open -> { open(rated) } }
+    val sourceBadge: (@Composable () -> Unit)? = if (scores.isEmpty() && showScores != null) {
+        {
+            val sources = animeDiscoverySourceProviders(rated, provider).map {
+                animeDiscoverySourceId(it) to animeDiscoveryProviderLabel(it)
+            }
+            AnimeSourceBadge(sources, compact = true, onClick = showScores)
+        }
+    } else null
     AnimeCompactCoverCard(item.key, item.title, item.coverUrl, caption, animeDiscoverySourceId(item.coverProvider ?: provider),
         badge = if (scores.isEmpty()) null else ({ AnimeDiscoveryScores(scores, list, showScores) }),
+        captionBadge = sourceBadge,
         description = listOfNotNull(item.title, caption.takeIf(String::isNotBlank)).joinToString("，"),
         modifier = modifier, list = list, onOpen = onOpen)
 }
 
+internal fun animeDiscoverySourceScores(item: AnimeDiscoveryItem, provider: AnimeDiscoveryProvider): List<AnimeSourceScore> =
+    item.sourceScores.ifEmpty {
+        item.rating?.let { listOf(AnimeSourceScore(provider, it, item.ratingScale)) }.orEmpty()
+    }.filter { it.rating.isFinite() && it.rating > 0 && it.rating <= it.scale }.distinctBy { it.provider }
+
+internal fun animeDiscoverySourceProviders(item: AnimeDiscoveryItem, fallback: AnimeDiscoveryProvider? = null): List<AnimeDiscoveryProvider> =
+    (listOfNotNull(item.discoveryProvider ?: fallback, item.coverProvider,
+        AnimeDiscoveryProvider.ANILIST.takeIf { item.reference?.sourceId == ANILIST_PROVIDER }) +
+        item.sourceScores.map { it.provider }).distinct()
+
 @Composable
 internal fun AnimeSourceDiscoveryCard(title: AnimeSourceTitle, modifier: Modifier = Modifier,
     list: Boolean = false, sourceLabel: String? = null,
-    cardKey: String = title.sourceId + ":" + title.id, onOpen: () -> Unit) {
+    cardKey: String = title.sourceId + ":" + title.id, onSources: (() -> Unit)? = null, onOpen: () -> Unit) {
     val metadata = listOfNotNull(title.year?.toString(), title.ratingText.takeIf(String::isNotBlank),
         title.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).take(2).joinToString(" · ")
     val update = title.updateText.takeIf(String::isNotBlank)
     val extra = metadata.takeIf { it.isNotBlank() && (list || update == null) }
-    val caption = listOfNotNull(sourceLabel, update, extra).joinToString(" · ")
+    val caption = listOfNotNull(sourceLabel?.takeIf { onSources == null }, update, extra).joinToString(" · ")
+    val sourceBadge: (@Composable () -> Unit)? = onSources?.let { open ->
+        { AnimeSourceBadge(listOf(title.sourceId to (sourceLabel ?: animeSourceName(title.sourceId))),
+            compact = true, onClick = open) }
+    }
     AnimeCompactCoverCard(cardKey, title.title, title.coverUrl, caption, title.sourceId,
-        badge = null,
+        badge = null, captionBadge = sourceBadge,
         description = listOfNotNull(title.title, sourceLabel, update?.let { "来源标注：$it" },
             metadata.takeIf(String::isNotBlank)).joinToString("，"),
         modifier = modifier, list = list, onOpen = onOpen)
 }
 
 @Composable
-internal fun AnimeSourceGroupDiscoveryCard(group: AnimeSearchGroup, sourceLabel: String?,
-    modifier: Modifier = Modifier, list: Boolean = false, onOpen: () -> Unit) {
+internal fun AnimeSourceGroupDiscoveryCard(group: AnimeSearchGroup, sources: List<Pair<String, String>>,
+    modifier: Modifier = Modifier, list: Boolean = false, onSources: () -> Unit, onOpen: () -> Unit) {
     val title = group.sources.firstOrNull() ?: return
-    val sourceCount = group.sources.distinctBy { it.sourceId }.size
-    if (sourceCount == 1) {
-        AnimeSourceDiscoveryCard(title, modifier = modifier, list = list, sourceLabel = sourceLabel,
-            cardKey = group.key, onOpen = onOpen)
+    if (group.sources.all { it.sourceId == title.sourceId }) {
+        AnimeSourceDiscoveryCard(title, modifier = modifier, list = list, sourceLabel = sources.firstOrNull()?.second,
+            cardKey = group.key, onSources = onSources, onOpen = onOpen)
     } else {
         val artwork = group.sources.firstOrNull { it.coverUrl.isNotBlank() } ?: title
-        val caption = "$sourceCount 个来源"
-        AnimeCompactCoverCard(group.key, title.title, artwork.coverUrl, caption, artwork.sourceId,
-            badge = null, description = "${title.title}，$caption", modifier = modifier,
+        AnimeCompactCoverCard(group.key, title.title, artwork.coverUrl, "", artwork.sourceId,
+            badge = null, captionBadge = { AnimeSourceBadge(sources, compact = true, onClick = onSources) },
+            description = title.title, modifier = modifier,
             list = list, onOpen = onOpen)
     }
 }
@@ -182,7 +203,7 @@ internal fun AnimeSourceGroupDiscoveryCard(group: AnimeSearchGroup, sourceLabel:
 @Composable
 private fun AnimeCompactCoverCard(key: String, title: String, cover: String, caption: String, sourceId: String,
     badge: (@Composable () -> Unit)?, description: String, modifier: Modifier,
-    list: Boolean, onOpen: () -> Unit) {
+    list: Boolean, captionBadge: (@Composable () -> Unit)? = null, onOpen: () -> Unit) {
     val interaction = remember(key) { MutableInteractionSource() }
     val click = modifier.motionPress(interaction, pressedScale = .98f)
         .clickable(interactionSource = interaction, indication = null, role = Role.Button,
@@ -195,8 +216,7 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text(title, Modifier.clearAndSetSemantics { }, style = MaterialTheme.typography.titleSmall, maxLines = 2,
                     overflow = TextOverflow.Ellipsis)
-                if (caption.isNotBlank()) Text(caption, Modifier.clearAndSetSemantics { }, style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                AnimeCompactCardCaption(caption, captionBadge)
                 badge?.invoke()
             }
             Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp),
@@ -211,9 +231,19 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
             Text(title, Modifier.clearAndSetSemantics { }, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Medium,
                 maxLines = 2, minLines = 2,
                 overflow = TextOverflow.Ellipsis)
-            Text(caption, Modifier.clearAndSetSemantics { }, style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            AnimeCompactCardCaption(caption, captionBadge)
         }
+    }
+}
+
+@Composable
+private fun AnimeCompactCardCaption(caption: String, badge: (@Composable () -> Unit)?) {
+    if (caption.isBlank() && badge == null) return
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        badge?.invoke()
+        if (caption.isNotBlank()) Text(caption, Modifier.weight(1f, fill = false).clearAndSetSemantics { },
+            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

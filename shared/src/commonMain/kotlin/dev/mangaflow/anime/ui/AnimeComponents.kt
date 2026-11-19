@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -19,7 +18,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.*
@@ -38,7 +36,6 @@ import dev.mangaflow.experience.sourceNetwork
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
-import dev.mangaflow.ui.TextSourceWordmark
 import dev.mangaflow.ui.mangaCoverCard
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionPress
@@ -184,36 +181,6 @@ internal fun AnimeSectionTitle(title: String, subtitle: String? = null, modifier
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (action != null) action()
-    }
-}
-
-/** Uses the same neutral, occluded marks as the existing reader. Count means bindings, not playback health. */
-@Composable
-internal fun AnimeSourceStack(names: List<Pair<String, String>>, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    val sources = names.distinctBy { it.first }.take(3)
-    val interaction = remember { MutableInteractionSource() }
-    val colors = MaterialTheme.colorScheme
-    Row(modifier.heightIn(min = 44.dp).widthIn(min = 44.dp).clip(RoundedCornerShape(22.dp))
-        .motionPress(interaction, pressedScale = .97f)
-        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-        .semantics(mergeDescendants = true) {
-            contentDescription = if (names.isEmpty()) "关联播放来源" else
-                "已关联 " + names.distinctBy { it.first }.size + " 个来源，打开来源管理"
-        }.padding(horizontal = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (sources.isEmpty()) Icon(Icons.Outlined.Link, null, Modifier.size(19.dp))
-        else Box(Modifier.width(22.dp + 10.dp * (sources.size - 1)).height(22.dp)) {
-            sources.indices.reversed().forEach { index ->
-                Box(Modifier.offset(x = 10.dp * index).size(22.dp).clip(CircleShape)
-                    .background(lerp(colors.surface, colors.onSurface, .055f + .025f * index)),
-                    contentAlignment = Alignment.Center) {
-                    TextSourceWordmark(sources[index].second.take(1), Modifier.size(14.dp),
-                        colors.onSurface.copy(alpha = if (index == 0) .85f else .6f))
-                }
-            }
-        }
-        Text(if (names.isEmpty()) "来源" else names.distinctBy { it.first }.size.toString(),
-            style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
     }
 }
 

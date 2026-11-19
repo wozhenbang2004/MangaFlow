@@ -128,13 +128,10 @@ internal fun AnimeDetailPane(
     val resume = detail.episodes.firstOrNull { it.id == savedProgress?.episodeId }
     val first = resume ?: main.firstOrNull { it.id !in completed }
         ?: main.firstOrNull() ?: extra.firstOrNull { it.id !in completed } ?: extra.firstOrNull()
-    val sourceNames = bindings.sortedBy { it.catalog.sourceId != state.preferredSourceId }.map { binding ->
-        binding.catalog.sourceId to animeSourceName(binding.catalog.sourceId, state)
-    }
-    val groupedSourceCount = remember(state.groupSourceCandidates) {
-        state.groupSourceCandidates.map { it.sourceId }.distinct().size
-    }
-    val pendingSourceCount = state.associationChoices.count { it.value.isNotEmpty() }
+    val awaitingSources = state.associationChoices.filterValues { it.isNotEmpty() }.keys
+    val sourceNames = (bindings.sortedBy { it.catalog.sourceId != state.preferredSourceId }.map { it.catalog.sourceId } +
+        state.groupSourceCandidates.map { it.sourceId } + awaitingSources).distinct()
+        .map { it to animeSourceName(it, state) }
     val detailScores = remember(state.detailScores, subject) {
         buildList {
             if (!native && subject.id.startsWith("bangumi:")) {
@@ -275,16 +272,21 @@ internal fun AnimeDetailPane(
                                         Icon(Icons.Outlined.SwapVert, sortLabel, Modifier.size(18.dp))
                                     }
                                 }
-                                if (groupedSourceCount > 1 || pendingSourceCount > 0) {
+                                if (sourceNames.isNotEmpty()) {
+                                    AnimeSourceBadge(sourceNames, enabled = active,
+                                        modifier = Modifier.widthIn(max = 90.dp).semantics {
+                                            if (awaitingSources.isNotEmpty()) stateDescription = "有播放来源待确认"
+                                        },
+                                        onClick = { onSources(null) })
+                                } else {
                                     MotionTextButton(onClick = { onSources(null) }, enabled = active,
                                         modifier = Modifier.heightIn(min = 44.dp),
                                         contentPadding = PaddingValues(horizontal = 8.dp)) {
                                         Icon(Icons.Outlined.Link, null, Modifier.size(18.dp))
                                         Spacer(Modifier.width(4.dp))
-                                        Text(if (groupedSourceCount > 1) "$groupedSourceCount 个来源"
-                                            else "待确认 $pendingSourceCount", maxLines = 1)
+                                        Text("来源", maxLines = 1)
                                     }
-                                } else AnimeSourceStack(sourceNames, onClick = { onSources(null) })
+                                }
                             }
                         },
                     )
