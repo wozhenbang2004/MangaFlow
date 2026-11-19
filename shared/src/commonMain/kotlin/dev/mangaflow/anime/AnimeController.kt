@@ -1328,8 +1328,16 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             if (searchSucceeded) associationCandidates[sourceId] = revision to rows.toList()
                             val titles = rows.filter { autoPlaySubjectCandidate(detail.subject, it) }
                             if (titles.isEmpty()) {
-                                if (searchFailure != null) report(AnimeAssociationPhase.UNAVAILABLE, searchFailure)
-                                else report(AnimeAssociationPhase.NO_MATCH, "本次有界搜索未找到可靠的同作品候选，可手动继续搜索。")
+                                // A source may list the same season with contradictory metadata.
+                                // Never bind it automatically, but provide a clear review candidate.
+                                val review = rows.filter { autoPlayTitleCandidate(detail.subject, it) }
+                                when {
+                                    review.isNotEmpty() -> report(AnimeAssociationPhase.NEEDS_SELECTION,
+                                        "找到同名作品，但年份或身份不一致，请核对后关联。", review)
+                                    searchFailure != null -> report(AnimeAssociationPhase.UNAVAILABLE, searchFailure)
+                                    else -> report(AnimeAssociationPhase.NO_MATCH,
+                                        "本次有界搜索未找到可靠同作品候选，可手动继续搜索。")
+                                }
                                 return@aggregation true
                             }
                             val identified = titles.filter { autoPlaySubjectHasSharedId(detail.subject, it) }

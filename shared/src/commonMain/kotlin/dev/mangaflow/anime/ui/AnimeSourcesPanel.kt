@@ -80,6 +80,7 @@ internal fun AnimeSourcesPanel(
     val aggregationExpanded = tools == AnimeSourceTools.DIAGNOSTICS
     fun toggleTool(tool: AnimeSourceTools) { tools = if (tools == tool) null else tool }
     var searchDiagnosticsExpanded by remember(subject?.id) { mutableStateOf(false) }
+    var showOtherSearchResults by remember(subject?.id) { mutableStateOf(false) }
     var episodeQuery by remember(focusEpisode?.id) { mutableStateOf("") }
     var mappingLimit by remember(expandedSource, episodeQuery) { mutableIntStateOf(40) }
     val preview = state.previewCatalog
@@ -631,15 +632,18 @@ internal fun AnimeSourcesPanel(
                                 result to result.items.distinctBy { it.referenceKey() }.filterNot { title ->
                                     val key = title.referenceKey()
                                     key in candidateKeys || key in linkedKeys
-                                }.sortedByDescending { title -> subject?.let { autoPlaySubjectCandidate(it, title) } == true }
+                                }.sortedByDescending { title -> subject?.let { autoPlayTitleCandidate(it, title) } == true }
                             }
                             val results = searchRows.filter { (result, rows) -> rows.isNotEmpty() || result.hasMore || result.loadingMore }
                             items(results, key = { "search:" + it.first.providerId }) { (result, rows) ->
                                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                                    val relevant = rows.count { title -> subject?.let { autoPlaySubjectCandidate(it, title) } == true }
+                                    val related = rows.filter { title -> subject?.let { autoPlayTitleCandidate(it, title) } == true }
+                                    val otherCount = rows.size - related.size
                                     AnimeSectionTitle(result.name,
-                                        if (relevant > 0) "$relevant 个相关 · ${rows.size} 个候选" else "${rows.size} 个候选")
-                                    rows.forEach { title ->
+                                        if (related.isNotEmpty()) "${related.size} 个同名候选"
+                                        else "没有可靠的同名候选")
+                                    val displayed = if (showOtherSearchResults) rows else related
+                                    displayed.forEach { title ->
                                         val detail = listOfNotNull(title.year?.toString(),
                                             title.episodeCount?.let { "$it 集" },
                                             "已排除自动关联".takeIf { title.sourceId in excludedSourceIds }).joinToString(" · ")
@@ -647,6 +651,11 @@ internal fun AnimeSourcesPanel(
                                             onClickLabel = "核对${result.name}的目录", onClick = { openPreview(title) },
                                             trailing = { Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp),
                                                 tint = MaterialTheme.colorScheme.onSurfaceVariant) })
+                                    }
+                                    if (otherCount > 0) MotionTextButton(onClick = {
+                                        showOtherSearchResults = !showOtherSearchResults
+                                    }, modifier = Modifier.heightIn(min = 44.dp)) {
+                                        Text(if (showOtherSearchResults) "收起其他结果" else "其他搜索结果 · $otherCount")
                                     }
                                     if (result.error != null) {
                                         AnimeQuietLabel(result.error)

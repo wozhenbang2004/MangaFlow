@@ -15,6 +15,13 @@ private fun autoSeasonSignature(value: String): Pair<String, Int>? {
     return autoTitleKey(base).takeIf { it.length >= 6 }?.let { it to number }
 }
 
+/** Presentation-only title hint. A conflicting year is a review candidate, not an automatic identity. */
+internal fun autoPlayTitleCandidate(subject: AnimeSubject, title: AnimeSourceTitle): Boolean {
+    val names = listOf(subject.title, subject.originalTitle).filter(String::isNotBlank)
+    return names.any { autoTitleKey(it) == autoTitleKey(title.title) ||
+        (autoSeasonSignature(it) != null && autoSeasonSignature(it) == autoSeasonSignature(title.title)) }
+}
+
 /** Search recall is wider than automatic binding. Search variants still must pass full identity checks. */
 internal fun autoPlaySearchKeywords(subject: AnimeSubject): List<String> {
     val ordinal = listOf("", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
