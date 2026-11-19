@@ -12,7 +12,10 @@ import okio.use
 import kotlin.coroutines.CoroutineContext
 import kotlin.io.encoding.Base64
 
-internal class LanercCapabilityException(message: String) : IllegalStateException(message)
+internal open class LanercCapabilityException(message: String) : IllegalStateException(message)
+
+/** Emitted only when a concrete source action requests a capability this host lacks. */
+internal class LanercMediaSniffingUnsupported : LanercCapabilityException("当前版本不支持此线路所需的网页媒体嗅探。")
 
 /** Blocking adapters execute only inside this operation's background QuickJS callback. */
 internal expect fun <T> lanercBlocking(context: CoroutineContext, block: suspend () -> T): T

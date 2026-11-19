@@ -33,6 +33,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -66,6 +68,7 @@ import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -99,6 +102,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -133,7 +137,7 @@ import kotlinx.coroutines.sync.withPermit
  * Group panes share one fixed toolbar. Changing download mode never inserts a row
  * or shifts chapters, and each pane owns its grid while a group change animates.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 internal fun DetailCatalog(
     mangaId: String,
@@ -167,6 +171,8 @@ internal fun DetailCatalog(
     onLocateSources: (() -> Unit)? = null,
 ) {
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
+    val emptyCatalog = chapters.isEmpty()
+    val catalogFailure = error?.let(::detailCatalogFailureLabel)
     var chosenGroup by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
     var groupVisit by rememberSaveable(mangaId) { mutableIntStateOf(0) }
     var appliedLocate by rememberSaveable(mangaId) { mutableIntStateOf(0) }
@@ -231,17 +237,21 @@ internal fun DetailCatalog(
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("当前目录没有上次阅读的章节", Modifier.weight(1f), color = DetailMuted, fontSize = 12.sp,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
-                if (onLocateSources != null) DetailAction(Icons.Outlined.Public, "查看可用来源",
-                    enabled = active, onClick = onLocateSources)
-                DetailAction(Icons.Outlined.Refresh, "重查上次阅读章节", enabled = active, onClick = onRetry)
+                if (!emptyCatalog) {
+                    if (onLocateSources != null) DetailAction(Icons.Outlined.Public, "查看可用来源",
+                        enabled = active, onClick = onLocateSources)
+                    DetailAction(Icons.Outlined.Refresh, "重查上次阅读章节", enabled = active, onClick = onRetry)
+                }
                 DetailAction(Icons.Outlined.Close, "关闭定位提示", enabled = active,
                     onClick = { appliedLocate = locateRevision })
             }
         }
-        if (error != null) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        if (catalogFailure != null && !emptyCatalog) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.End) {
-            DetailAction(Icons.Outlined.Info, "目录加载提示", onClick = { shownError = error })
-            DetailAction(Icons.Outlined.Refresh, "重新加载目录", enabled = !loading, onClick = onRetry)
+            DetailAction(Icons.Outlined.Info, "目录加载提示", enabled = active && !sourcePresent,
+                onClick = { shownError = catalogFailure })
+            DetailAction(Icons.Outlined.Refresh, "重新加载目录", enabled = active && !sourcePresent && !loading,
+                onClick = onRetry)
         }
         Box(Modifier.fillMaxWidth().height(2.dp).padding(horizontal = 16.dp)) {
             if (showBusy) LinearProgressIndicator(
@@ -267,15 +277,30 @@ internal fun DetailCatalog(
                 Box(Modifier.fillMaxSize()
                     .scrollable(rememberScrollableState { 0f }, Orientation.Vertical, enabled = paneActive),
                     contentAlignment = Alignment.Center) {
-                    Text(
-                        when {
-                            loading && chapters.isEmpty() -> "正在读取章节"
-                            error != null && chapters.isEmpty() -> "目录暂不可用，点击顶部重试"
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(when {
+                            loading && emptyCatalog -> "正在读取章节"
+                            catalogFailure != null && emptyCatalog -> catalogFailure
                             else -> "暂无章节"
-                        },
-                        color = DetailMuted, fontSize = 13.sp,
-                        modifier = Modifier.padding(24.dp),
-                    )
+                        }, color = DetailMuted, fontSize = 13.sp, textAlign = TextAlign.Center)
+                        if (emptyCatalog && !loading) {
+                            val enabled = paneActive && !sourceLoading
+                            val colors = ButtonDefaults.textButtonColors(contentColor = DetailForeground,
+                                disabledContentColor = DetailMuted)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
+                                if (onLocateSources != null) TextButton(onClick = onLocateSources,
+                                    modifier = Modifier.heightIn(min = 44.dp), enabled = enabled, colors = colors) {
+                                    Text("查看来源")
+                                }
+                                TextButton(onClick = onRetry, modifier = Modifier.heightIn(min = 44.dp),
+                                    enabled = enabled, colors = colors) {
+                                    Text("重试目录")
+                                }
+                            }
+                        }
+                    }
                 }
             } else {
                 val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
@@ -531,6 +556,26 @@ internal fun DetailCatalog(
             }
         }
     }
+}
+
+/** Directory failures can carry upstream text, so display only fixed app wording. */
+private fun detailCatalogFailureLabel(error: String): String = when (error) {
+    "此来源已移除，请重新导入该源。" -> "此来源已移除，可在来源设置中重新导入"
+    "这个正文来源尚未安装或当前版本不兼容。" -> "此来源尚未安装或当前版本不兼容"
+    "Komiic 要求登录后访问；当前公开来源没有附加账号。" -> "此来源要求登录后查看目录"
+    "再漫画隐藏了本作品的章节目录，匿名访问不能确认完整目录。",
+    "再漫画限制了本作品的匿名访问，请查看原站权限说明。" -> "此来源未向匿名访问开放完整目录"
+    "包子要求站点验证或拒绝当前访问；当前来源没有自动验证能力。" -> "此来源要求站点验证或限制当前访问"
+    "包子要求先完成站点验证，未把验证页当成空目录。" -> "此来源要求完成站点验证"
+    "章节目录 超时，请检查网络后重试。" -> "等待章节目录超时"
+    "章节目录 连接或数据读取失败，请检查网络后重试。" -> "未能连接来源或完整读取目录"
+    "章节目录 来源暂时繁忙，请稍后重试。" -> "来源暂时繁忙"
+    "来源章节目录为空或不完整，请稍后刷新。",
+    "如漫画没有返回完整章节目录。" -> "来源未返回完整目录"
+    "MangaDex 暂无可直接读取的中文或英语章节；外链、下架章节不计入可读目录。" -> "MangaDex 暂无可直接阅读的中文或英语章节"
+    "如漫画未返回公开章节目录。", "如漫画暂未返回公开可读章节。", "MangaBZ 暂无公开可读目录。" ->
+        "此来源暂未返回公开章节"
+    else -> "未能读取此来源的章节目录"
 }
 
 /** Least-common slots let two semantic grids retain independent widths without nested scrolling. */

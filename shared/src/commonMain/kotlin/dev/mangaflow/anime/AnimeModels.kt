@@ -204,7 +204,20 @@ data class AnimePlaybackTarget(
     val manualOption: AnimeEpisodeOption? = null,
     val sourceName: String? = null,
     val error: String? = null,
+    val failure: AnimePlaybackFailure? = null,
 )
+
+data class AnimePlaybackFailure(
+    val sourceId: String,
+    val sourceName: String,
+    val stage: String,
+    val reason: String,
+    val unsupported: Boolean = false,
+) {
+    internal val description get() = "$sourceName · $stage\n$reason"
+}
+
+internal enum class AnimeEpisodeAvailability { MATCHED, CHECKING, UNMATCHED, RECENTLY_FAILED, UPCOMING }
 
 enum class AnimeBrowseMode { POPULAR, NEWEST, CALENDAR }
 

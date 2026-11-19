@@ -319,6 +319,7 @@ internal fun AnimeWorkspace(
         controller.dismissSourcePreview()
     }
     fun showSources(episode: AnimeEpisode? = null) {
+        controller.cancelPendingResume()
         if (state.resolving) controller.pausePlaybackResolution()
         sourceEpisode = episode
         sourcesVisible = true
@@ -328,7 +329,8 @@ internal fun AnimeWorkspace(
         controller.play(episode.id, option)
     }
     fun play(episode: AnimeEpisode) {
-        requestPlayback(episode, null)
+        if (controller.episodeAvailability(episode.id) == AnimeEpisodeAvailability.MATCHED) requestPlayback(episode, null)
+        else showSources(episode)
     }
     fun openDirectory(sourceId: String? = null) {
         controller.sourceBrowse.activate(sourceId)
@@ -595,7 +597,7 @@ internal fun AnimeWorkspace(
         }, onPlay = { episodeId, option ->
             sourcesVisible = false
             state.detail?.episodes?.firstOrNull { it.id == episodeId }?.let { requestPlayback(it, option) }
-        })
+        }, onOpenSourceWork = { chooseReference(it, true) })
     AnimeTrackingPanel(trackingVisible, state, controller, backdrop,
         onDismiss = { trackingVisible = false }, onReview = { reviewsVisible = true })
     AnimeProgressReviewPanel(reviewsVisible, state, controller, backdrop, onDismiss = { reviewsVisible = false },

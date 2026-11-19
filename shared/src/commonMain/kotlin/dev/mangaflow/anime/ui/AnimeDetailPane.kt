@@ -42,6 +42,7 @@ import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.anime.AnimeDetail
 import dev.mangaflow.anime.AnimeDiscoveryProvider
 import dev.mangaflow.anime.AnimeEpisode
+import dev.mangaflow.anime.AnimeEpisodeAvailability
 import dev.mangaflow.anime.AnimeEpisodeKind
 import dev.mangaflow.anime.AnimeLibraryEntry
 import dev.mangaflow.anime.AnimeScreenState
@@ -128,6 +129,7 @@ internal fun AnimeDetailPane(
     val resume = detail.episodes.firstOrNull { it.id == savedProgress?.episodeId }
     val first = resume ?: main.firstOrNull { it.id !in completed }
         ?: main.firstOrNull() ?: extra.firstOrNull { it.id !in completed } ?: extra.firstOrNull()
+    val firstAvailability = first?.let { controller.episodeAvailability(it.id, state) }
     val awaitingSources = state.associationChoices.filterValues { it.isNotEmpty() }.keys
     val sourceNames = (bindings.sortedBy { it.catalog.sourceId != state.preferredSourceId }.map { it.catalog.sourceId } +
         state.groupSourceCandidates.map { it.sourceId } + awaitingSources).distinct()
@@ -165,6 +167,7 @@ internal fun AnimeDetailPane(
                     subject = subject,
                     scores = detailScores,
                     episode = first,
+                    availability = firstAvailability,
                     progress = savedProgress.takeIf { resume != null },
                     entry = entry,
                     libraryAvailable = !state.libraryReadUnavailable,
@@ -174,6 +177,7 @@ internal fun AnimeDetailPane(
                     backdrop = backdrop,
                     native = native,
                     onPlay = onPlay,
+                    onSources = { onSources(it) },
                     onFollow = { controller.setFollowed(subject, entry?.followed != true) },
                     onStatus = { controller.setWatchStatus(subject.id, it) },
                     onTracking = onTracking,
@@ -184,7 +188,7 @@ internal fun AnimeDetailPane(
             if (state.libraryReadUnavailable) item(key = "library-read-warning") {
                 AnimeDetailStatus(
                     "临时浏览 · 不保存进度", Icons.Outlined.Info,
-                    detail = "本地追番记录未能读取。可以继续播放，旧收藏与观看记录已保留。",
+                    detail = "本地追番记录未能读取，原收藏与观看记录已保留。",
                 )
             }
             if (discussion != null) item(key = "detail-tabs") {
@@ -349,7 +353,8 @@ internal fun AnimeDetailPane(
                                 episode = episode,
                                 completed = episode.id in completed,
                                 resume = episode.id == resume?.id,
-                                matched = state.episodeOptions[episode.id].orEmpty().count { it.confirmed },
+                                availability = controller.episodeAvailability(episode.id, state),
+                                matched = controller.confirmedPlaybackLines(episode.id, state).size,
                                 backdrop = backdrop,
                                 active = active,
                                 libraryAvailable = !state.libraryReadUnavailable,
@@ -405,6 +410,7 @@ private fun AnimeDetailHero(
     subject: AnimeSubject,
     scores: List<AnimeSourceScore>,
     episode: AnimeEpisode?,
+    availability: AnimeEpisodeAvailability?,
     progress: AnimeWatchProgress?,
     entry: AnimeLibraryEntry?,
     libraryAvailable: Boolean,
@@ -414,6 +420,7 @@ private fun AnimeDetailHero(
     backdrop: HazeState,
     native: Boolean,
     onPlay: (AnimeEpisode) -> Unit,
+    onSources: (AnimeEpisode) -> Unit,
     onFollow: () -> Unit,
     onStatus: (AnimeWatchStatus) -> Unit,
     onTracking: () -> Unit,
@@ -428,8 +435,8 @@ private fun AnimeDetailHero(
     ).joinToString(" · ")
     val actions: @Composable () -> Unit = {
         AnimeDetailActions(
-            episode, progress, entry, libraryAvailable, active, stackActions, backdrop, native,
-            onPlay, onFollow, onStatus, onTracking, onStatusPresence,
+            episode, availability, progress, entry, libraryAvailable, active, stackActions, backdrop, native,
+            onPlay, onSources, onFollow, onStatus, onTracking, onStatusPresence,
         )
     }
     Column(
@@ -510,6 +517,7 @@ private fun AnimeDetailRatingStrip(scores: List<AnimeSourceScore>, backdrop: Haz
 @Composable
 private fun AnimeDetailActions(
     episode: AnimeEpisode?,
+    availability: AnimeEpisodeAvailability?,
     progress: AnimeWatchProgress?,
     entry: AnimeLibraryEntry?,
     libraryAvailable: Boolean,
@@ -518,29 +526,43 @@ private fun AnimeDetailActions(
     backdrop: HazeState,
     native: Boolean,
     onPlay: (AnimeEpisode) -> Unit,
+    onSources: (AnimeEpisode) -> Unit,
     onFollow: () -> Unit,
     onStatus: (AnimeWatchStatus) -> Unit,
     onTracking: () -> Unit,
     onStatusPresence: (Boolean) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    val play: @Composable (Modifier) -> Unit = { modifier ->
-        if (episode != null) MotionButton(
-            onClick = { onPlay(episode) },
-            enabled = active,
-            modifier = modifier.heightIn(min = 48.dp),
-            shape = RoundedCornerShape(14.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = colors.primary, contentColor = colors.onPrimary,
-            ),
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-        ) {
-            Icon(Icons.Outlined.PlayArrow, null, Modifier.size(21.dp))
-            Spacer(Modifier.width(6.dp))
-            Text(
-                (if (progress != null) "继续观看　" else "播放　") + animeEpisodeLabel(episode),
-                maxLines = 2, overflow = TextOverflow.Ellipsis,
-            )
+    val episodeAction: @Composable (Modifier) -> Unit = { modifier ->
+        if (episode != null && availability != null) {
+            val matched = availability == AnimeEpisodeAvailability.MATCHED
+            val action = when (availability) {
+                AnimeEpisodeAvailability.MATCHED -> if (progress != null) "继续观看" else "播放"
+                AnimeEpisodeAvailability.CHECKING -> "查看找源进度"
+                AnimeEpisodeAvailability.UNMATCHED -> "查找线路"
+                AnimeEpisodeAvailability.RECENTLY_FAILED -> "查看其他线路"
+                AnimeEpisodeAvailability.UPCOMING -> upcomingEpisodeLabel(episode, fullDate = true)
+            }
+            MotionButton(
+                onClick = { if (matched) onPlay(episode) else onSources(episode) },
+                enabled = active,
+                modifier = modifier.heightIn(min = 48.dp),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (matched) colors.primary else colors.surfaceContainerHighest,
+                    contentColor = if (matched) colors.onPrimary else colors.onSurface,
+                ),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+            ) {
+                val icon = when (availability) {
+                    AnimeEpisodeAvailability.MATCHED -> Icons.Outlined.PlayArrow
+                    AnimeEpisodeAvailability.UPCOMING -> Icons.Outlined.Schedule
+                    else -> Icons.Outlined.Link
+                }
+                Icon(icon, null, Modifier.size(21.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("$action　${animeEpisodeLabel(episode)}", maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
         }
     }
     val follow: @Composable () -> Unit = {
@@ -548,11 +570,11 @@ private fun AnimeDetailActions(
     }
     Column(Modifier.widthIn(max = 520.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(7.dp)) {
         if (stackActions) {
-            play(Modifier.fillMaxWidth())
+            episodeAction(Modifier.fillMaxWidth())
             follow()
         } else {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                play(Modifier.weight(1f))
+                episodeAction(Modifier.weight(1f))
                 follow()
             }
         }
@@ -721,12 +743,18 @@ private fun AnimeDetailStatus(
     }
 }
 
+private fun upcomingEpisodeLabel(episode: AnimeEpisode, fullDate: Boolean = false): String {
+    val date = episode.airDate?.takeIf { it.isNotBlank() } ?: return "尚未放送"
+    return "预计 ${if (fullDate) date else date.substringAfter('-')}"
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AnimeEpisodeCell(
     episode: AnimeEpisode,
     completed: Boolean,
     resume: Boolean,
+    availability: AnimeEpisodeAvailability,
     matched: Int,
     backdrop: HazeState,
     active: Boolean,
@@ -740,6 +768,14 @@ private fun AnimeEpisodeCell(
     val native = episode.subjectId.startsWith("native:")
     val label = animeEpisodeLabel(episode)
     val subtitle = animeEpisodeSubtitle(episode)
+    val canPlay = availability == AnimeEpisodeAvailability.MATCHED
+    val sourceState = when (availability) {
+        AnimeEpisodeAvailability.MATCHED -> null
+        AnimeEpisodeAvailability.CHECKING -> "查找中"
+        AnimeEpisodeAvailability.UNMATCHED -> "待匹配"
+        AnimeEpisodeAvailability.RECENTLY_FAILED -> "线路暂不可用"
+        AnimeEpisodeAvailability.UPCOMING -> upcomingEpisodeLabel(episode)
+    }
     val interaction = remember(episode.id) { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
     var menuVisible by remember(episode.id) { mutableStateOf(false) }
@@ -754,16 +790,25 @@ private fun AnimeEpisodeCell(
         Column(
             Modifier.fillMaxWidth().heightIn(min = 64.dp).clip(RoundedCornerShape(13.dp))
                 .background(if (resume) colors.primaryContainer else colors.surfaceContainerLow)
-                .motionPress(interaction, pressedScale = .97f)
+                .motionPress(interaction, enabled = active, pressedScale = .97f)
                 .combinedClickable(
-                    interactionSource = interaction, indication = null, role = Role.Button,
-                    onClickLabel = "播放 $label", onClick = onPlay,
+                    interactionSource = interaction, indication = null, enabled = active, role = Role.Button,
+                    onClickLabel = if (canPlay) "播放 $label" else "查看 $label 的来源",
+                    onClick = if (canPlay) onPlay else onSources,
                     onLongClickLabel = "本集操作", onLongClick = { menuVisible = true },
                 )
                 .semantics(mergeDescendants = true) {
                     contentDescription = listOfNotNull(label, subtitle).joinToString(" ")
-                    stateDescription = when { resume -> "续看"; completed -> "已看"; else -> "未看" }
-                    customActions = listOf(CustomAccessibilityAction("本集操作") { menuVisible = true; true })
+                    val progressState = when {
+                        resume && canPlay -> "续看"
+                        resume -> "上次看至本集"
+                        completed -> "已看"
+                        else -> "未看"
+                    }
+                    val availabilityState = if (availability == AnimeEpisodeAvailability.UPCOMING)
+                        upcomingEpisodeLabel(episode, fullDate = true) else sourceState
+                    stateDescription = listOfNotNull(progressState, availabilityState).joinToString("，")
+                    if (active) customActions = listOf(CustomAccessibilityAction("本集操作") { menuVisible = true; true })
                 }.padding(horizontal = 7.dp, vertical = 9.dp),
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
         ) {
@@ -771,14 +816,22 @@ private fun AnimeEpisodeCell(
                 textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.labelLarge,
                 color = if (resume) colors.onPrimaryContainer else colors.onSurface)
-            if (!native) Text(subtitle.orEmpty(), minLines = 1, maxLines = 1,
+            if (!native && (subtitle != null || sourceState == null)) Text(subtitle.orEmpty(), minLines = 1, maxLines = 1,
+                textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (resume) colors.onPrimaryContainer else colors.onSurfaceVariant)
+            if (sourceState != null) Text(sourceState, maxLines = 1,
                 textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.labelSmall,
                 color = if (resume) colors.onPrimaryContainer else colors.onSurfaceVariant)
         }
         if (resume || completed) {
             Icon(
-                if (resume) Icons.Outlined.PlayArrow else Icons.Outlined.Check, null,
+                when {
+                    resume && canPlay -> Icons.Outlined.PlayArrow
+                    resume -> Icons.Outlined.History
+                    else -> Icons.Outlined.Check
+                }, null,
                 Modifier.align(Alignment.TopEnd).padding(4.dp).size(12.dp),
                 tint = if (resume) colors.onPrimaryContainer else colors.onSurfaceVariant,
             )
@@ -794,7 +847,7 @@ private fun AnimeEpisodeCell(
                 }
             },
         ) {
-            AnimeQuietLabel(if (matched == 0) "尚未匹配播放线路" else "$matched 条已匹配线路",
+            AnimeQuietLabel(sourceState ?: "$matched 条已匹配线路",
                 Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
             CompactMenuAction(
                 if (completed) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,

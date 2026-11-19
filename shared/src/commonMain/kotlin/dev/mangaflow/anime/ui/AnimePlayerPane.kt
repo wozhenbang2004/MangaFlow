@@ -86,25 +86,36 @@ internal fun AnimePlayerPane(
     val target = state.playbackTarget
     val episode = target?.episode ?: activeEpisode
     val resolutionError = target?.error
-    val confirmedOptions = remember(episode?.id, state.detail, state.episodeOptions, state.sourceCatalogs) {
+    val confirmedOptions = remember(episode?.id, state.detail, state.episodeOptions, state.sourceCatalogs,
+        state.sourceBindings, state.sourceExtensions) {
         episode?.let { controller.confirmedPlaybackLines(it.id, state) }.orEmpty()
     }
-    val optionCount = confirmedOptions.size
-    val currentOption = target?.manualOption ?: state.selectedPlaybackOption.takeIf {
+    val currentOption = state.selectedPlaybackOption.takeIf {
         target == null && episode != null && state.selectedEpisodeId == episode.id
     }
-    val sourceNames = (listOfNotNull(currentOption) + confirmedOptions).map { it.sourceId to it.sourceName }
+    val usableOptions = remember(episode?.id, confirmedOptions, state.sourceRoutes, target, playback.phase) {
+        confirmedOptions.filter { episode != null && controller.canAttemptPlaybackLine(episode.id, it, state) }
+    }
+    val optionCount = usableOptions.size
     val ordered = remember(detail?.episodes, episode?.kind) { detail?.episodes.orEmpty().filter { it.kind == episode?.kind } }
     val index = ordered.indexOfFirst { it.id == episode?.id }
     val previous = ordered.getOrNull(index - 1).takeIf { index > 0 }
     val next = ordered.getOrNull(index + 1).takeIf { index >= 0 }
+    val nextReady = next?.let { controller.episodeAvailability(it.id, state) == AnimeEpisodeAvailability.MATCHED } == true
     val playerFailure = playback.error ?: if (playback.phase == AnimePlayerPhase.ERROR)
         "播放器未能准备视频，请重试或选择其他来源。" else null
-    val playbackSource = state.selectedPlaybackOption?.sourceName
-    val error = resolutionError ?: playerFailure?.let { message ->
-        playbackSource?.let { "$it · 播放视频\n$message" } ?: message
-    }
+    val playbackSource = currentOption?.sourceName
+    val incident = target?.failure ?: playerFailure?.let { message -> currentOption?.let {
+        AnimePlaybackFailure(it.sourceId, it.sourceName, "播放视频", message)
+    } }
+    val error = incident?.reason ?: resolutionError ?: playerFailure
     val failure = error?.let { listOfNotNull(it, state.playbackRecoveryStopReason).joinToString("\n") }
+    val sourceNames = (listOfNotNull(currentOption.takeIf { failure == null }) + usableOptions)
+        .map { it.sourceId to it.sourceName }
+    val hasAlternative = incident != null && usableOptions.any { it.sourceId != incident.sourceId }
+    val canRetry = if (target?.manualOption != null && episode != null)
+        controller.canAttemptPlaybackLine(episode.id, target.manualOption, state)
+    else optionCount > 0 || target == null && currentOption == null && playback.phase == AnimePlayerPhase.ERROR
     val focus = remember { FocusRequester() }
     val chromeFocus = remember { FocusRequester() }
     val touchExploration = LocalTouchExplorationEnabled.current
@@ -302,10 +313,11 @@ internal fun AnimePlayerPane(
                         AnimeVideoStatus(
                             resolving = state.resolving, autoMatching = state.autoMatching,
                             sourceName = if (target == null) playbackSource else target.sourceName,
-                            failure = failure, playback = playback,
-                            optionsAvailable = optionCount, canChooseSource = episode != null,
+                            failure = failure, incident = incident, playback = playback,
+                            optionsAvailable = optionCount, hasAlternative = hasAlternative,
+                            canChooseSource = episode != null, canRetry = canRetry,
                             compact = videoHeight < 196.dp,
-                            next = next, onRetry = onRetry, onSources = onSources, onEpisode = onEpisode,
+                            next = next, nextReady = nextReady, onRetry = onRetry, onSources = onSources, onEpisode = onEpisode,
                             onKeepPlayback = onKeepPlayback,
                             canKeepPlayback = playback.phase == AnimePlayerPhase.READY && (state.resolving || resolutionError != null),
                             onRestorePlayback = onRestorePlayback, canRestorePlayback = state.canRestorePlayback,
@@ -340,11 +352,11 @@ internal fun AnimePlayerPane(
                     }
                     if (fullscreen && canControl && !touchExploration) MotionIconButton(onClick = { locked = true }, modifier = Modifier.size(44.dp),
                         tooltip = "锁定触控") { Icon(Icons.Outlined.LockOpen, "锁定触控", Modifier.size(20.dp)) }
-                    if (episode != null && !state.resolving) {
+                    if (episode != null && !state.resolving && failure == null) {
                         if (sourceNames.isNotEmpty()) {
                             AnimeSourceBadge(sourceNames, modifier = Modifier.widthIn(max = 90.dp), enabled = active,
                                 selectedId = currentOption?.sourceId, onClick = { interact(); onSources() })
-                        } else if (failure == null) {
+                        } else {
                             MotionIconButton(onClick = { interact(); onSources() }, modifier = Modifier.size(44.dp),
                                 tooltip = "查看来源与线路") {
                                 Icon(Icons.Outlined.SwapHoriz, "查看来源与线路", Modifier.size(21.dp))
@@ -395,7 +407,8 @@ internal fun AnimePlayerPane(
                     state.library.firstOrNull { it.subject.id == detail?.subject?.id }
                 }
                 AnimePlayerEpisodes(detail?.episodes.orEmpty(), episode?.id, entry?.completedEpisodeIds.orEmpty(),
-                    onEpisode, active = active && !obscured && !settingsPresent, modifier = episodePanel)
+                    onEpisode, episodeAvailability = { controller.episodeAvailability(it, state) },
+                    active = active && !obscured && !settingsPresent, modifier = episodePanel)
             }
             if (locked && !playback.inPictureInPicture) MotionIconButton(onClick = { locked = false; interact() },
                 modifier = Modifier.align(Alignment.CenterStart).padding(start = 12.dp).size(48.dp), tooltip = "解除触控锁定") {
@@ -411,8 +424,9 @@ internal fun AnimePlayerPane(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AnimeVideoStatus(
-    resolving: Boolean, autoMatching: Boolean, sourceName: String?, failure: String?, playback: AnimePlayerState,
-    optionsAvailable: Int, canChooseSource: Boolean, compact: Boolean, next: AnimeEpisode?,
+    resolving: Boolean, autoMatching: Boolean, sourceName: String?, failure: String?, incident: AnimePlaybackFailure?,
+    playback: AnimePlayerState, optionsAvailable: Int, hasAlternative: Boolean, canChooseSource: Boolean, canRetry: Boolean,
+    compact: Boolean, next: AnimeEpisode?, nextReady: Boolean,
     onRetry: () -> Unit, onSources: () -> Unit, onEpisode: (AnimeEpisode) -> Unit,
     onKeepPlayback: () -> Unit, canKeepPlayback: Boolean, onRestorePlayback: () -> Unit, canRestorePlayback: Boolean,
 ) {
@@ -437,17 +451,18 @@ private fun AnimeVideoStatus(
         failure != null -> Column(Modifier.widthIn(max = 500.dp).verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            PlayerStageMessage("本集暂时无法播放", failure, maxLines = if (compact) 3 else 5)
+            PlayerStageMessage("本集暂时无法播放", failure, maxLines = if (compact) 3 else 5,
+                incident = incident)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                 verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                if (optionsAvailable > 1) {
+                if (canChooseSource && (hasAlternative || optionsAvailable > 1 || !canRetry)) {
                     MotionButton(onClick = onSources, shape = shape, modifier = Modifier.heightIn(min = 44.dp)) {
-                        Text("换线路")
+                        Text(if (hasAlternative || optionsAvailable > 1) "换线路" else "查看来源")
                     }
-                    MotionTextButton(onClick = onRetry, modifier = Modifier.heightIn(min = 44.dp)) {
+                    if (canRetry) MotionTextButton(onClick = onRetry, modifier = Modifier.heightIn(min = 44.dp)) {
                         Text("重试本集", color = Color.White)
                     }
-                } else {
+                } else if (canRetry) {
                     MotionButton(onClick = onRetry, shape = shape, modifier = Modifier.heightIn(min = 44.dp)) {
                         Text("重试本集")
                     }
@@ -482,16 +497,23 @@ private fun AnimeVideoStatus(
             verticalArrangement = Arrangement.spacedBy(6.dp)) {
             PlayerStageMessage("本集已播完", null)
             if (next != null) MotionButton(onClick = { onEpisode(next) }, shape = shape,
-                modifier = Modifier.heightIn(min = 44.dp)) { Text("播放下一集") }
+                modifier = Modifier.heightIn(min = 44.dp)) { Text(if (nextReady) "播放下一集" else "查看下一集来源") }
         }
     }
 }
 
 @Composable
-private fun PlayerStageMessage(title: String, detail: String?, maxLines: Int = 2) {
+private fun PlayerStageMessage(title: String, detail: String?, maxLines: Int = 2,
+    incident: AnimePlaybackFailure? = null) {
     Column(Modifier.widthIn(max = 480.dp).padding(vertical = 6.dp).semantics { liveRegion = LiveRegionMode.Polite },
         verticalArrangement = Arrangement.spacedBy(5.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+        if (incident != null) Row(verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            AnimeSourceMark(incident.sourceId, incident.sourceName, size = 16.dp, ink = Color.White.copy(alpha = .8f))
+            Text("${incident.sourceName} · ${incident.stage}", color = Color.White.copy(alpha = .8f),
+                style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
         if (!detail.isNullOrBlank()) Text(detail, color = Color.White.copy(alpha = .65f),
             style = MaterialTheme.typography.bodySmall, maxLines = maxLines, overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center)
@@ -573,7 +595,8 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
 @Composable
 private fun AnimePlayerEpisodes(
     episodes: List<AnimeEpisode>, currentId: String?, completed: Set<String>,
-    onEpisode: (AnimeEpisode) -> Unit, active: Boolean, modifier: Modifier = Modifier,
+    onEpisode: (AnimeEpisode) -> Unit, episodeAvailability: (String) -> AnimeEpisodeAvailability,
+    active: Boolean, modifier: Modifier = Modifier,
 ) {
     val subjectId = episodes.firstOrNull()?.subjectId
     var group by rememberSaveable(subjectId) { mutableIntStateOf(0) }
@@ -644,6 +667,7 @@ private fun AnimePlayerEpisodes(
             }
             items(shown, key = { it.id }, contentType = { "episode" }) { episode ->
                 WatchEpisodeCell(episode, current = episode.id == currentId, watched = episode.id in completed,
+                    availability = episodeAvailability(episode.id),
                     enabled = active, onClick = { onEpisode(episode) })
             }
         }
@@ -652,19 +676,32 @@ private fun AnimePlayerEpisodes(
 
 @Composable
 private fun WatchEpisodeCell(
-    episode: AnimeEpisode, current: Boolean, watched: Boolean, enabled: Boolean, onClick: () -> Unit,
+    episode: AnimeEpisode, current: Boolean, watched: Boolean, availability: AnimeEpisodeAvailability,
+    enabled: Boolean, onClick: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     val color = if (current) colors.onPrimary else if (watched) colors.onSurfaceVariant else colors.onSurface
     val stateLabel = if (current) "当前集" else if (watched) "已看完" else "未看完"
+    val lineLabel = when (availability) {
+        AnimeEpisodeAvailability.MATCHED -> null
+        AnimeEpisodeAvailability.CHECKING -> "找源中"
+        AnimeEpisodeAvailability.UNMATCHED -> "待匹配"
+        AnimeEpisodeAvailability.RECENTLY_FAILED -> "线路暂不可用"
+        AnimeEpisodeAvailability.UPCOMING -> "待播"
+    }
     Box(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(11.dp))
         .background(if (current) colors.primary else colors.surfaceContainerHigh)
         .motionPress(interaction, enabled = enabled)
-        .clickable(enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
-        .semantics { selected = current; stateDescription = stateLabel }
+        .clickable(enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button,
+            onClickLabel = if (lineLabel == null) "播放本集" else "查看本集来源", onClick = onClick)
+        .semantics { selected = current; stateDescription = listOfNotNull(stateLabel, lineLabel).joinToString("，") }
         .padding(horizontal = 6.dp, vertical = 6.dp), contentAlignment = Alignment.Center) {
-        Text(animeEpisodeLabel(episode), style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
-            maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, color = color)
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(animeEpisodeLabel(episode), style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
+                maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, color = color)
+            if (lineLabel != null) Text(lineLabel, style = MaterialTheme.typography.labelSmall,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, color = color.copy(alpha = .8f))
+        }
     }
 }

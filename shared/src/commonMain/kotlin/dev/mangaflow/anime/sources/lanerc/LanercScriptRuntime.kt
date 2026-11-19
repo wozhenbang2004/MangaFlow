@@ -127,7 +127,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                         catch (failure: Exception) { hostFailure = failure; throw IllegalStateException("来源编解码未完成。") }
                     })
                     js.defineBinding("__mlUnsupported", FunctionBinding<String> { _ ->
-                        val failure = LanercCapabilityException("此来源需要网页媒体嗅探，当前兼容宿主尚未支持；请选择其他线路或来源。")
+                        val failure = LanercMediaSniffingUnsupported()
                         hostFailure = failure
                         throw failure
                     })
