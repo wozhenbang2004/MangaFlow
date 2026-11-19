@@ -185,6 +185,7 @@ jobs:
       - name: Sign APK and update metadata
         if: env.RELEASE_ALREADY_PUBLISHED != 'true' && env.RELEASE_SUPERSEDED != 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           MANGAFLOW_SIGNING_KEYSTORE_B64: ${{ secrets.MANGAFLOW_SIGNING_KEYSTORE_B64 }}
           MANGAFLOW_SIGNING_PASSWORD: ${{ secrets.MANGAFLOW_SIGNING_PASSWORD }}
         run: |

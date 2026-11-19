@@ -1,5 +1,9 @@
 # MangaFlow · current work
 
+## 跨版本软件更新与 Windows 流畅度 · 2026-11-19
+
+用户原话、历史发布证据和验收范围见 [UPDATE-JUMP-01/02、WIN-RESP-01](../../DESIGN.md#跨版本软件更新与-windows-流畅度--2026-11-19)。Android 签名直达差分、Windows 稳定打包和可用发布选择、桌面渲染与更新线程调整均已接入源码。iOS 沿其签名渠道更新。已完成源码及差异审阅，按项目约定由 main 的既有 CI 构建和发布。后续从本提交的构建日志或实际安装反馈继续，跨版本安装和 Windows 手感待设备确认。
+
 ## 画质增强与智能预处理 · 2026-11-19 16:08（Asia/Shanghai）
 
 当前用户目标为完整 V1.0，原话批次已覆盖本轮规范与「一次性完全落地」。[ENH-01–14 覆盖、M0–M6 状态和未通过项](../design/enhancement-v1-delivery-20261119.md) 是唯一实施交接入口；设计见同目录 enhancement-center-v1，固定引擎和许可见 research/enhancement-engines-20261119。源码集成父版本为 `6e25fab90d3cba96c81967d189b8144017ed907c`，已保留其并发界面重做。

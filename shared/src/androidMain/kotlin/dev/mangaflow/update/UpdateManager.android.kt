@@ -131,9 +131,11 @@ actual class UpdateManager private constructor(private val context: Context) {
             try {
                 val route = DownloadRoutingStore.get(context).snapshot(DownloadCategory.UPDATES)
                 val bytes = readBytes(MANIFEST_URL, MAX_MANIFEST_BYTES, route)
-                val release = verifyManifest(bytes)
+                val manifest = readVerifiedManifest(bytes)
+                val release = manifest.release
+                val current = installed()
                 val now = System.currentTimeMillis()
-                if (release.versionCode <= versionCode(installed())) {
+                if (release.versionCode <= versionCode(current)) {
                     metadata.delete()
                     _state.value = UpdateState(UpdatePhase.CURRENT, message = installationMessage(versionCode(installed()), "已是最新版本"), lastChecked = now)
                 } else {
@@ -148,12 +150,17 @@ actual class UpdateManager private constructor(private val context: Context) {
                     }
                     val ready = readyFile(release)
                     val cached = ready.isFile && runCatching { validateApk(ready, release) }.isSuccess
+                    val delta = if (cached) null else installedBase(manifest, current)?.first
                     _state.value = UpdateState(
                         phase = if (cached) UpdatePhase.READY else UpdatePhase.AVAILABLE,
                         release = release,
                         downloaded = if (cached) release.bytes else 0,
-                        total = release.bytes,
-                        message = if (cached) installationMessage(release.versionCode, "新版本已下载，可继续安装") else "发现新版本 ${release.versionName}",
+                        total = delta?.bytes ?: release.bytes,
+                        message = when {
+                            cached -> installationMessage(release.versionCode, "新版本已下载，可继续安装")
+                            delta != null -> "发现新版本 ${release.versionName} · 增量更新"
+                            else -> "发现新版本 ${release.versionName}"
+                        },
                         lastChecked = now,
                     )
                     if (!manual && automatic) notifyAvailable(release)
@@ -225,10 +232,12 @@ actual class UpdateManager private constructor(private val context: Context) {
             if (AndroidTransferIntents.claim(context, task) == null) return@withContext ApplicationTransferResult.OBSOLETE
             requireNotCancelled()
             val route = task.route
-            val release = verifyManifest(Base64.decode(task.payload.getString("envelope"), Base64.DEFAULT))
+            val manifest = readVerifiedManifest(Base64.decode(task.payload.getString("envelope"), Base64.DEFAULT))
+            val release = manifest.release
             require(release.sha256 == task.payload.getString("sha256") && release.versionCode == task.payload.getLong("versionCode"))
             _state.value = UpdateState(UpdatePhase.DOWNLOADING, release, total = release.bytes, message = "正在后台下载安装包…")
-            val installedVersion = versionCode(installed())
+            val currentPackage = installed()
+            val installedVersion = versionCode(currentPackage)
             require(release.versionCode > installedVersion) {
                 if (release.versionCode == installedVersion) "此版本已安装，请重新检查更新"
                 else "下载任务版本低于当前版本，已阻止降级；请重新检查更新"
@@ -257,68 +266,47 @@ actual class UpdateManager private constructor(private val context: Context) {
                 }
                 incoming.delete()
             }
-            val saved = runCatching { JSONObject(validator.readText()) }.getOrNull()
-            val tag = saved?.optString("etag")?.takeIf { it.startsWith('"') && it.endsWith('"') && !it.startsWith("W/") }
-            val resumeMatches = tag != null && saved != null && saved.optString("sha256") == release.sha256 &&
-                saved.optString("url") == release.url
-            if (incoming.length() > 0L && !resumeMatches) { incoming.delete(); validator.delete() }
-            val offset = incoming.length()
-            if (root.usableSpace < release.bytes - offset + 16L * 1024 * 1024) throw IOException("存储空间不足，请清理后重试")
-            requireNotCancelled()
-            val active = open(release.url, offset, route, tag)
-            connection = active
-            val deadline = System.nanoTime() + 20L * 60 * 1_000_000_000
-            try {
-                val start = if (active.responseCode == 206) {
-                    val range = Regex("bytes (\\d+)-(\\d+)/(\\d+)").matchEntire(active.getHeaderField("Content-Range").orEmpty())
-                        ?: throw IOException("更新服务返回了无效的续传信息")
-                    val end = range.groupValues[2].toLongOrNull()
-                    if (range.groupValues[1].toLongOrNull() != offset || end == null || end != release.bytes - 1 ||
-                        range.groupValues[3].toLongOrNull() != release.bytes || offset > 0L &&
-                        active.getHeaderField("ETag")?.let { it != tag } == true) {
-                        throw IOException("更新服务返回了不匹配的续传信息")
-                    }
-                    offset
-                } else 0L
-                val currentTag = active.getHeaderField("ETag")?.takeIf { it.startsWith('"') && it.endsWith('"') && !it.startsWith("W/") }
-                    ?: tag?.takeIf { start > 0L }
-                if (currentTag != null) {
-                    val atomic = AtomicFile(validator)
-                    val savedOutput = atomic.startWrite()
-                    try {
-                        savedOutput.write(JSONObject().put("etag", currentTag).put("sha256", release.sha256)
-                            .put("url", release.url).toString().toByteArray())
-                        atomic.finishWrite(savedOutput)
-                    } catch (failure: Exception) { atomic.failWrite(savedOutput); throw failure }
-                } else validator.delete()
-                val advertised = active.getHeaderFieldLong("Content-Length", -1)
-                if (advertised >= 0 && advertised != release.bytes - start) throw IOException("安装包大小与发布信息不一致")
-                active.inputStream.use { input ->
-                    FileOutputStream(incoming, start > 0).use { output ->
-                        val buffer = ByteArray(64 * 1024)
-                        var received = start
-                        var lastEmission = 0L
-                        while (true) {
-                            requireNotCancelled()
-                            if (System.nanoTime() > deadline) throw IOException("下载超时，请重试")
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            received += count
-                            if (received > release.bytes) throw IOException("下载内容超出声明大小")
-                            output.write(buffer, 0, count)
-                            val now = System.currentTimeMillis()
-                            if (now - lastEmission >= 200 || received == release.bytes) {
-                                _state.value = _state.value.copy(downloaded = received, total = release.bytes)
-                                lastEmission = now
-                            }
-                        }
-                        if (received != release.bytes) throw IOException("下载未完成，请重试")
-                    }
+            val base = installedBase(manifest, currentPackage)
+            if (base != null && incoming.length() == 0L) {
+                val (delta, installedApk) = base
+                val patch = File(root, delta.sha256 + ".delta.part")
+                val patchValidator = File(root, delta.sha256 + ".delta.validator")
+                val reconstructed = File(root, release.sha256 + ".reconstructed.apk")
+                partial = patch
+                try {
+                    val remaining = delta.bytes - patch.length().coerceIn(0, delta.bytes)
+                    require(root.usableSpace >= release.bytes + remaining + 16L * 1024 * 1024) { "存储空间不足" }
+                    _state.value = _state.value.copy(total = delta.bytes, message = "正在后台下载增量更新…")
+                    downloadUpdateAsset(delta.url, delta.sha256, delta.bytes, patch, patchValidator, route)
+                    requireNotCancelled()
+                    require(sha256(patch) == delta.sha256) { "增量更新摘要不一致" }
+                    _state.value = _state.value.copy(phase = UpdatePhase.VERIFYING, message = "正在合成并校验安装包…")
+                    reconstructApk(installedApk, patch, reconstructed, release.bytes, ::requireNotCancelled)
+                    validateApk(reconstructed, release)
+                    requireNotCancelled()
+                    if (target.exists() && !target.delete()) throw IOException("无法替换旧安装包")
+                    if (!reconstructed.renameTo(target)) throw IOException("无法保存安装包")
+                    patch.delete()
+                    patchValidator.delete()
+                    _state.value = _state.value.copy(phase = UpdatePhase.READY, downloaded = delta.bytes,
+                        total = delta.bytes, message = "增量更新已就绪，安装后保留书架和阅读进度")
+                    return@withContext ApplicationTransferResult.COMPLETED
+                } catch (failure: CancellationException) {
+                    throw failure
+                } catch (_: Exception) {
+                    requireNotCancelled()
+                    patch.delete()
+                    patchValidator.delete()
+                    _state.value = _state.value.copy(phase = UpdatePhase.DOWNLOADING, downloaded = 0,
+                        total = release.bytes, message = "增量更新不可用，正在下载安装包…")
+                } finally {
+                    reconstructed.delete()
+                    connection?.disconnect()
+                    connection = null
                 }
-            } finally {
-                active.disconnect()
-                connection = null
             }
+            partial = incoming
+            downloadUpdateAsset(release.url, release.sha256, release.bytes, incoming, validator, route)
             requireNotCancelled()
             _state.value = _state.value.copy(phase = UpdatePhase.VERIFYING, message = "正在核对安装包…")
             try { validateApk(incoming, release) } catch (invalid: Exception) { incoming.delete(); throw invalid }
@@ -351,6 +339,75 @@ actual class UpdateManager private constructor(private val context: Context) {
                 scheduledWork = null
                 operation.set(false)
             }
+        }
+    }
+
+    private fun downloadUpdateAsset(
+        url: String, sha256: String, size: Long, incoming: File, validator: File, route: DownloadRouteSnapshot,
+    ) {
+        if (incoming.length() > size) incoming.delete()
+        if (incoming.isFile && incoming.length() == size) return
+        val saved = runCatching { JSONObject(validator.readText()) }.getOrNull()
+        val tag = saved?.optString("etag")?.takeIf { it.startsWith('"') && it.endsWith('"') && !it.startsWith("W/") }
+        val resumeMatches = tag != null && saved != null && saved.optString("sha256") == sha256 &&
+            saved.optString("url") == url
+        if (incoming.length() > 0L && !resumeMatches) { incoming.delete(); validator.delete() }
+        val offset = incoming.length()
+        if (root.usableSpace < size - offset + 16L * 1024 * 1024) throw IOException("存储空间不足，请清理后重试")
+        requireNotCancelled()
+        val active = open(url, offset, route, tag)
+        connection = active
+        val deadline = System.nanoTime() + 20L * 60 * 1_000_000_000
+        try {
+            val start = if (active.responseCode == 206) {
+                val range = Regex("bytes (\\d+)-(\\d+)/(\\d+)").matchEntire(active.getHeaderField("Content-Range").orEmpty())
+                    ?: throw IOException("更新服务返回了无效的续传信息")
+                val end = range.groupValues[2].toLongOrNull()
+                if (range.groupValues[1].toLongOrNull() != offset || end == null || end != size - 1 ||
+                    range.groupValues[3].toLongOrNull() != size || offset > 0L &&
+                    active.getHeaderField("ETag")?.let { it != tag } == true) {
+                    throw IOException("更新服务返回了不匹配的续传信息")
+                }
+                offset
+            } else 0L
+            val currentTag = active.getHeaderField("ETag")?.takeIf { it.startsWith('"') && it.endsWith('"') && !it.startsWith("W/") }
+                ?: tag?.takeIf { start > 0L }
+            if (currentTag != null) {
+                val atomic = AtomicFile(validator)
+                val savedOutput = atomic.startWrite()
+                try {
+                    savedOutput.write(JSONObject().put("etag", currentTag).put("sha256", sha256)
+                        .put("url", url).toString().toByteArray())
+                    atomic.finishWrite(savedOutput)
+                } catch (failure: Exception) { atomic.failWrite(savedOutput); throw failure }
+            } else validator.delete()
+            val advertised = active.getHeaderFieldLong("Content-Length", -1)
+            if (advertised >= 0 && advertised != size - start) throw IOException("安装包大小与发布信息不一致")
+            active.inputStream.use { input ->
+                FileOutputStream(incoming, start > 0).use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var received = start
+                    var lastEmission = 0L
+                    while (true) {
+                        requireNotCancelled()
+                        if (System.nanoTime() > deadline) throw IOException("下载超时，请重试")
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        received += count
+                        if (received > size) throw IOException("下载内容超出声明大小")
+                        output.write(buffer, 0, count)
+                        val now = System.currentTimeMillis()
+                        if (now - lastEmission >= 200 || received == size) {
+                            _state.value = _state.value.copy(downloaded = received, total = size)
+                            lastEmission = now
+                        }
+                    }
+                    if (received != size) throw IOException("下载未完成，请重试")
+                }
+            }
+        } finally {
+            active.disconnect()
+            connection = null
         }
     }
 
@@ -720,7 +777,22 @@ actual class UpdateManager private constructor(private val context: Context) {
         return bytes
     }
 
-    private fun verifyManifest(envelope: ByteArray): AppRelease {
+    private data class VerifiedManifest(val release: AppRelease, val deltas: List<ApkDelta>)
+
+    private fun verifyManifest(envelope: ByteArray): AppRelease = readVerifiedManifest(envelope).release
+
+    private fun installedBase(manifest: VerifiedManifest, current: PackageInfo): Pair<ApkDelta, File>? {
+        val version = versionCode(current)
+        val candidates = manifest.deltas.filter { it.baseVersionCode == version }
+        if (candidates.isEmpty()) return null
+        val source = current.applicationInfo?.sourceDir?.let(::File) ?: return null
+        if (source.length() !in 1L..MAX_DELTA_APK_BYTES) return null
+        val digest = try { sha256(source) } catch (_: IOException) { return null }
+        val delta = candidates.firstOrNull { it.baseSha256 == digest } ?: return null
+        return delta to source
+    }
+
+    private fun readVerifiedManifest(envelope: ByteArray): VerifiedManifest {
         require(envelope.size in 1..MAX_MANIFEST_BYTES) { "更新信息大小无效" }
         val wrapper = JSONObject(envelope.toString(Charsets.UTF_8))
         require(wrapper.getString("algorithm") == "SHA256withRSA") { "更新签名格式不支持" }
@@ -751,7 +823,23 @@ actual class UpdateManager private constructor(private val context: Context) {
         require(minSdk in 26..100) { "更新系统要求无效" }
         val parsed = Uri.parse(url)
         require(parsed.scheme == "https" && parsed.host == "github.com" && parsed.userInfo == null && parsed.fragment == null && parsed.query == null && parsed.path?.startsWith("/$REPOSITORY/releases/download/") == true && parsed.path?.endsWith(".apk") == true) { "更新下载地址无效" }
-        return AppRelease(code, name, notes, url, hash, bytes, minSdk, data.optString("sourceCommit"))
+        val release = AppRelease(code, name, notes, url, hash, bytes, minSdk, data.optString("sourceCommit"))
+        val entries = data.optJSONArray("apkDeltas")
+        val deltas = if (entries == null || entries.length() !in 1..8 || bytes > MAX_DELTA_APK_BYTES ||
+            !name.matches(Regex("0[.]1[.][0-9]+"))) emptyList() else (0 until entries.length()).mapNotNull { index ->
+            val entry = entries.optJSONObject(index) ?: return@mapNotNull null
+            val baseCode = entry.optLong("baseVersionCode")
+            val baseSha = entry.optString("baseSha256")
+            val deltaSha = entry.optString("sha256")
+            val deltaBytes = entry.optLong("bytes")
+            val base = baseCode - 10_000
+            val deltaUrl = "https://github.com/$REPOSITORY/releases/download/v$name/MangaFlow-0.1.$base-to-$name.apk.delta"
+            if (entry.optString("format") != "mfd1" || baseCode !in 10_001L until code ||
+                !baseSha.matches(Regex("[a-f0-9]{64}")) || !deltaSha.matches(Regex("[a-f0-9]{64}")) ||
+                deltaBytes !in 1L until bytes || entry.optString("url") != deltaUrl) return@mapNotNull null
+            ApkDelta(baseCode, baseSha, deltaUrl, deltaBytes, deltaSha)
+        }
+        return VerifiedManifest(release, deltas)
     }
 
     private fun validateApk(file: File, release: AppRelease) {
@@ -920,6 +1008,7 @@ actual class UpdateManager private constructor(private val context: Context) {
         actual const val MANIFEST_URL = "https://github.com/$REPOSITORY/releases/latest/download/latest.json"
         private const val CHECK_INTERVAL = 6L * 60 * 60 * 1000
         private const val MAX_MANIFEST_BYTES = 96 * 1024
+        private const val MAX_DELTA_APK_BYTES = 32L * 1024 * 1024
         private const val MAX_APK_BYTES = 512L * 1024 * 1024
         private const val JOB_ID = 84217
         private const val CHANNEL = "app_updates"

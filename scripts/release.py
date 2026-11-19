@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from apk_delta import BASE_COUNT, build_deltas
 from package_runtimes import require_small_apk, runtime_assets
 
 REPOSITORY = "wozhenbang2004/MangaFlow"
@@ -217,11 +218,20 @@ def manifest(apk, private_key, runtime_dir):
             "bytes": target.stat().st_size, "sha256": digest,
         },
     }
+    try:
+        prior_releases = request(f"{API}/releases?per_page={BASE_COUNT + 4}")
+    except OSError as failure:
+        print(f"::warning::Could not list Android delta bases: {failure}")
+        prior_releases = []
+    deltas = build_deltas(prior_releases, target, DIST, REPOSITORY, value["tag"])
+    if deltas:
+        payload["apkDeltas"] = deltas
     # The same private key signs the APK and these exact payload bytes.
     envelope = signed_envelope(payload, private_key)
     (DIST / "latest.json").write_text(json.dumps(envelope, separators=(",", ":")) + "\n", encoding="utf-8")
     sums = []
-    for item in (target, DIST / "latest.json", catalog, *runtime_paths):
+    for item in (target, DIST / "latest.json", catalog, *runtime_paths,
+                 *(DIST / entry["url"].rsplit("/", 1)[1] for entry in deltas)):
         sums.append(hashlib.sha256(item.read_bytes()).hexdigest() + "  " + item.name)
     (DIST / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
     print(f"Prepared {target.name}, signed update/runtime catalogs, {len(runtime_paths)} optional components and SHA256SUMS")
@@ -265,8 +275,19 @@ def publish():
     if json.loads(base64.b64decode(wrapper["payload"], validate=True)) != runtime_payload(value, packages):
         raise RuntimeError("Runtime catalog does not match this release's verified component assets")
     existing = {item["name"]: item for item in release.get("assets", [])}
-    files = [DIST / f"MangaFlow-{value['versionName']}.apk", DIST / "latest.json", catalog,
-             DIST / "SHA256SUMS", *runtime_paths]
+    update_wrapper = json.loads((DIST / "latest.json").read_text(encoding="utf-8"))
+    update = json.loads(base64.b64decode(update_wrapper["payload"], validate=True))
+    delta_files = []
+    for delta in update.get("apkDeltas", []):
+        name = delta["url"].rsplit("/", 1)[1]
+        if not re.fullmatch(r"MangaFlow-0\.1\.\d+-to-" + re.escape(value["versionName"]) + r"\.apk\.delta", name):
+            raise RuntimeError("Invalid Android delta asset name")
+        file = DIST / name
+        if file.stat().st_size != delta["bytes"] or hashlib.sha256(file.read_bytes()).hexdigest() != delta["sha256"]:
+            raise RuntimeError("Android delta bytes differ from the signed manifest")
+        delta_files.append(file)
+    files = [DIST / f"MangaFlow-{value['versionName']}.apk", *delta_files, catalog,
+             DIST / "SHA256SUMS", *runtime_paths, DIST / "latest.json"]
     for file in files:
         data = file.read_bytes()
         expected = "sha256:" + hashlib.sha256(data).hexdigest()

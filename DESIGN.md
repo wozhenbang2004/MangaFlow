@@ -1,3 +1,15 @@
+## 跨版本软件更新与 Windows 流畅度 · 2026-11-19
+
+用户原话：“对我们的漫画软件做好增量更新功能包括跨多个版本的增量更新因为我现在其他项目 pocketworld 的增量更新只能是临近版本，以及做好 widnows 端的适配我感觉 windows 端好卡好卡好不流畅啊是因为我们技术栈的原因吗”。来源为本轮请求，消息 ID 未取得。
+
+| 要求 | 采用方式与验收 |
+| --- | --- |
+| UPDATE-JUMP-01 · Android | 正常签名发版面向最近至多八个已发布版本构建直达差分。重用 APK 中完全相同的压缩字节段，携带目标签名所需的其余字节。使用现有后台任务、线路与断点续传。仅从签名清单中选择与已安装版本和 SHA-256 完全一致的基线，重建后核对原始目标 APK 摘要、版本和签名。缺少合适差分或重建失败时仍可完整下载。已有客户端须先获得支持差分的版本。 |
+| UPDATE-JUMP-02 · Windows | 沿用 update4j 的最新目标文件清单及 jpackage 安装交接。先固定 ProGuard 输出 JAR 的 ZIP 时间戳，再生成安装包及文件清单。兼容运行时下跨过多个版本仍直接比对目标文件。升级自未固定时间戳的版本时可能有一次较大下载。运行时发生变化则使用经校验的完整安装包。最新发布只有 Android 时可发现已发布的 Windows 安装包。 |
+| WIN-RESP-01 · Windows | Haze 玻璃使用上游 Balanced 采样，保留现有玻璃样式与输入行为。窗口外壳仅订阅实际标题变化，安装文件校验和启动辅助程序移出界面线程。Windows 帧时间改善以装机观察为准。 |
+
+发布清单比较显示，Windows `0.1.373`、`0.1.381`、`0.1.386` 到 `0.1.391` 的运行时指纹相同，但均有 137 个目标文件的摘要不同，按旧逻辑估算需下载 151,412,566 字节。抽查 `animation-core-desktop`，两个 JAR 大小一致且 182 个条目的名称与实际内容相同，ZIP 时间戳不同。[ProGuard OutputWriter](https://github.com/Guardsquare/proguard/blob/master/base/src/main/java/proguard/OutputWriter.java) 将当前时间写入归档。[Haze 性能说明](https://chrisbanes.github.io/haze/2.1.0/core-concepts/) 说明采样档位与精度取舍。Windows 装机、升级传输量、滚动/窗口缩放帧时间仍需设备证据。
+
 ## 画质增强与智能预处理 V1.0 · 2026-11-19（ENH-01–14）
 
 用户要求「一次性完全落地」，完整覆盖 Android、Windows、普通漫画、成人漫画与番剧。[需求覆盖、阶段状态、文件统计和未闭合验收](docs/design/enhancement-v1-delivery-20261119.md) 是当前实施入口；[15 系统设计](docs/design/enhancement-center-v1.md) 记录既有 Ovio/Motion/玻璃的采用与设备验收动作。全局「画质与性能」及阅读/播放上下文面板复用同一中心；质量、倍率、补帧和准备模式独立，原画先显示，高级档没有真实模型则明确不可用。

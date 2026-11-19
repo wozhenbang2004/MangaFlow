@@ -16,6 +16,8 @@ import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.WindowState
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import androidx.compose.ui.input.key.*
 import dev.mangaflow.MangaFlowHost
 import dev.mangaflow.initializeMangaFlow
@@ -53,7 +55,11 @@ fun main() {
             var model by remember { mutableStateOf<MangaViewModel?>(null) }
             var closing by remember { mutableStateOf(false) }
             val scope = rememberCoroutineScope()
-            val currentReading = model?.reading?.collectAsState()?.value
+            val title by produceState("漫流", model) {
+                model?.reading?.map { reading ->
+                    reading?.manga?.title?.takeIf { it.isNotBlank() }?.let { "$it · 漫流" } ?: "漫流"
+                }?.distinctUntilChanged()?.collectLatest { value = it }
+            }
             val windowState = rememberWindowState(
                 size = windowPreferences.initialSize,
                 position = windowPreferences.initialPosition,
@@ -68,15 +74,17 @@ fun main() {
                     windowPreferences.save()
                 }
             }
-            val requestClose: () -> Unit = {
-                if (!closing) {
-                    closing = true
-                    windowPreferences.capture(windowState.desktopSnapshot(restoredPlacement))
-                    windowPreferences.save()
-                    scope.launch {
-                        val saved = withContext(Dispatchers.IO) { model?.library?.flushPendingWrites() ?: flushLocalPreferences() }
-                        if (saved) exitApplication()
-                        else { closing = false; model?.notifyStorageFailure() }
+            val requestClose: () -> Unit = remember(windowState, scope) {
+                {
+                    if (!closing) {
+                        closing = true
+                        windowPreferences.capture(windowState.desktopSnapshot(restoredPlacement))
+                        windowPreferences.save()
+                        scope.launch {
+                            val saved = withContext(Dispatchers.IO) { model?.library?.flushPendingWrites() ?: flushLocalPreferences() }
+                            if (saved) exitApplication()
+                            else { closing = false; model?.notifyStorageFailure() }
+                        }
                     }
                 }
             }
@@ -84,7 +92,7 @@ fun main() {
                 DesktopUpdateExit.requestExit = requestClose
                 onDispose { DesktopUpdateExit.requestExit = null }
             }
-            Window(onCloseRequest = requestClose, title = currentReading?.manga?.title?.takeIf { it.isNotBlank() }?.let { "$it · 漫流" } ?: "漫流",
+            Window(onCloseRequest = requestClose, title = title,
                 state = windowState,
                 onPreviewKeyEvent = { event ->
                     when {
@@ -110,7 +118,10 @@ fun main() {
                     }
                 },
                 icon = painterResource("mangaflow.png")) {
-                window.minimumSize = java.awt.Dimension(320, 320)
+                DisposableEffect(window) {
+                    window.minimumSize = java.awt.Dimension(320, 320)
+                    onDispose { }
+                }
                 CompositionLocalProvider(LocalMangaContext provides context) {
                     MangaFlowTheme {
                         DesktopWindowChrome(window, MaterialTheme.colorScheme.background, MaterialTheme.colorScheme.onBackground)

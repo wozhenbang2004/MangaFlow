@@ -7,6 +7,8 @@ import androidx.compose.runtime.remember
 import dev.chrisbanes.haze.HazePerformanceMode
 import dev.chrisbanes.haze.LocalHazePerformanceMode
 import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.LocalPlatformAccessibilityPreferences
 
 /** Map host preferences without adding a rendering/skin settings panel. */
@@ -23,7 +25,8 @@ fun HazeProviders(content: @Composable () -> Unit) {
         )
     }
     CompositionLocalProvider(
-        LocalHazePerformanceMode provides if (MangaHazeRuntime.isLowRamDevice)
+        // Desktop glass samples Compose content at window scale during scroll and resize.
+        LocalHazePerformanceMode provides if (platformKind == PlatformKind.DESKTOP || MangaHazeRuntime.isLowRamDevice)
             HazePerformanceMode.Balanced else HazePerformanceMode.Quality,
         LocalGlassAccessibilitySettings provides accessibility,
         content = content,

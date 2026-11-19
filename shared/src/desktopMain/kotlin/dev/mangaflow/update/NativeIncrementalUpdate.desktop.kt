@@ -25,7 +25,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.util.HexFormat
 import java.util.concurrent.ConcurrentHashMap
+import javax.swing.SwingUtilities
 
 /** The application supplies its normal save-and-close action; updates never kill an unsaved JVM. */
 object DesktopUpdateExit {
@@ -194,7 +196,7 @@ private fun launchDesktopHandoff(plan: File): Boolean {
         "-ExecutionPolicy", "Bypass", "-File", script.canonicalPath,
         "-PlanPath", plan.canonicalPath, "-ParentPid", ProcessHandle.current().pid().toString())
         .redirectErrorStream(true).redirectOutput(File(plan.parentFile, "handoff.log")).start()
-    close()
+    SwingUtilities.invokeLater { close() }
     return true
 }
 
@@ -230,7 +232,7 @@ private fun hash(path: Path): String = Files.newInputStream(path).use { input ->
     hex(digest.digest())
 }
 private fun hash(bytes: ByteArray): String = hex(MessageDigest.getInstance("SHA-256").digest(bytes))
-private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+private fun hex(bytes: ByteArray): String = HexFormat.of().formatHex(bytes)
 private fun escapeXml(value: String): String = value.replace("&", "&amp;").replace("\"", "&quot;").replace("<", "&lt;").replace(">", "&gt;")
 private fun readOfficial(url: String, expectedBytes: Long, proxy: Proxy?): ByteArray = officialConnection(url, proxy).let { connection ->
     try {

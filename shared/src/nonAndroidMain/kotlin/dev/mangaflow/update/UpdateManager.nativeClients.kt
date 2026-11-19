@@ -3,6 +3,7 @@ package dev.mangaflow.update
 import dev.mangaflow.net.writeRelayBinding
 import dev.mangaflow.net.readRelayBinding
 
+import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.net.DownloadCategory
@@ -101,37 +102,33 @@ actual class UpdateManager private constructor(private val context: PlatformCont
                 activeClient = client
                 var releaseMetadata = ""
                 val release = withContext(Dispatchers.IO) {
-                    val response = client.execute(Request.Builder()
-                        .url("https://api.github.com/repos/$REPOSITORY/releases/latest")
-                        .header("Accept", "application/vnd.github+json")
-                        .header("User-Agent", "MangaFlow").build(), 512L * 1024)
-                    require(response.isSuccessful) { "发布服务暂不可用（HTTP ${response.code}）" }
-                    releaseMetadata = response.text()
-                    val json = JSONObject(releaseMetadata)
+                    val suffixes = releaseAssetSuffixes()
+                    val latest = JSONObject(fetchReleaseMetadata(client, MANIFEST_URL))
+                    val selected = windowsInstaller(latest, suffixes)?.let { latest to it } ?: run {
+                        // Android publishes first; Windows assets may still be building for that tag.
+                        val recent = JSONArray(fetchReleaseMetadata(client,
+                            "https://api.github.com/repos/$REPOSITORY/releases?per_page=8"))
+                        (0 until recent.length()).asSequence().mapNotNull { recent.optJSONObject(it) }
+                            .filter { !it.optBoolean("draft") && !it.optBoolean("prerelease") }
+                            .mapNotNull { json -> windowsInstaller(json, suffixes)?.let { json to it } }
+                            .maxByOrNull { (json, _) -> versionOrder(json.optString("tag_name").removePrefix("v")) }
+                            ?: error("近期版本暂未提供 Windows 安装包，请稍后再检查")
+                    }
+                    val (json, asset) = selected
+                    releaseMetadata = json.toString()
                     val version = json.optString("tag_name").removePrefix("v")
                     val code = versionOrder(version)
                     val notes = json.optString("body")
                     val commit = json.optString("target_commitish")
-                    if (platformKind == PlatformKind.IOS) {
-                        AppRelease(code, version, notes, checkedUrl(json.optString("html_url")), "", 0, 0, commit)
-                    } else {
-                        val assets = json.optJSONArray("assets") ?: error("发布信息没有安装包")
-                        val suffixes = releaseAssetSuffixes()
-                        val candidates = (0 until assets.length()).mapNotNull { assets.optJSONObject(it) }
-                        val asset = suffixes.firstNotNullOfOrNull { suffix ->
-                            candidates.firstOrNull { it.optString("name").endsWith(suffix, ignoreCase = true) }
-                        } ?: error("此版本尚未提供当前系统的安装包，可在项目发布页查看")
-                        val digest = asset.optString("digest").removePrefix("sha256:").lowercase()
-                        require(Regex("[a-f0-9]{64}").matches(digest)) { "安装包缺少可信的 SHA-256 发布摘要" }
-                        val bytes = asset.optLong("size")
-                        require(bytes in 1..MAX_INSTALLER_BYTES) { "安装包大小无效" }
-                        AppRelease(code, version, notes, checkedUrl(asset.optString("browser_download_url")), digest, bytes, 0, commit)
-                    }
+                    val digest = asset.optString("digest").removePrefix("sha256:").lowercase()
+                    AppRelease(code, version, notes, checkedUrl(asset.optString("browser_download_url")),
+                        digest, asset.optLong("size"), 0, commit)
                 }
                 retainedRoute = null
                 val now = wallTimeMillis()
                 prefs.edit().putLong("last_check", now).apply()
                 _state.value = if (release.versionCode <= versionOrder(platformVersion(context))) {
+                    incrementalPlan = null
                     UpdateState(UpdatePhase.CURRENT, message = "已是最新版本", lastChecked = now)
                 } else {
                     incrementalPlan = try {
@@ -151,6 +148,29 @@ actual class UpdateManager private constructor(private val context: PlatformCont
                 if (activeClient === taskClient) activeClient = null
                 taskClient?.close()
                 onComplete?.invoke()
+            }
+        }
+    }
+
+    private suspend fun fetchReleaseMetadata(client: NetworkClient, url: String): String {
+        val response = client.execute(Request.Builder().url(url)
+            .header("Accept", "application/vnd.github+json").header("User-Agent", "MangaFlow").build(),
+            4L * 1024 * 1024)
+        require(response.isSuccessful) { "发布服务暂不可用（HTTP ${response.code}）" }
+        return response.text()
+    }
+
+    private fun windowsInstaller(release: JSONObject, suffixes: List<String>): JSONObject? {
+        val tag = release.optString("tag_name")
+        if (!tag.matches(Regex("v[0-9]+[.][0-9]+[.][0-9]+"))) return null
+        val assets = release.optJSONArray("assets") ?: return null
+        val candidates = (0 until assets.length()).mapNotNull { assets.optJSONObject(it) }
+        return suffixes.firstNotNullOfOrNull { suffix ->
+            val name = "MangaFlow-${tag.removePrefix("v")}$suffix"
+            candidates.firstOrNull { asset ->
+                asset.optString("name") == name && asset.optLong("size") in 1..MAX_INSTALLER_BYTES &&
+                    asset.optString("digest").matches(Regex("sha256:[a-fA-F0-9]{64}")) &&
+                    asset.optString("browser_download_url") == "https://github.com/$REPOSITORY/releases/download/$tag/$name"
             }
         }
     }
@@ -266,17 +286,19 @@ actual class UpdateManager private constructor(private val context: PlatformCont
             try {
                 val delta = incrementalPlan
                 if (delta != null) {
-                    check(installNativeIncrementalUpdate(context, delta)) { "无法启动安装辅助程序，请重新下载安装包" }
+                    val launched = withContext(Dispatchers.IO) { installNativeIncrementalUpdate(context, delta) }
+                    check(launched) { "无法启动安装辅助程序，请重新下载安装包" }
                     _state.value = _state.value.copy(message = "正在保存并关闭应用，随后安装更新")
                     return@launch
                 }
                 val suffix = releaseAssetSuffixes().firstOrNull { release.url.substringBefore('?').endsWith(it, true) }
                     ?: error("安装包类型不匹配")
                 val file = StorageFile(root, release.sha256 + suffix)
-                withContext(Dispatchers.IO) {
+                val launched = withContext(Dispatchers.IO) {
                     require(file.length() == release.bytes && sha256File(file.path) == release.sha256) { "安装包校验失败，请重新下载" }
+                    openDownloadedInstaller(context, file.path)
                 }
-                check(openDownloadedInstaller(context, file.path)) { "无法打开系统安装程序，请前往发布页下载安装" }
+                check(launched) { "无法打开系统安装程序，请前往发布页下载安装" }
                 _state.value = _state.value.copy(message = "正在保存并关闭应用，随后启动系统安装程序")
             } catch (failure: Exception) { fail(failure.message ?: "无法继续安装") }
         }
