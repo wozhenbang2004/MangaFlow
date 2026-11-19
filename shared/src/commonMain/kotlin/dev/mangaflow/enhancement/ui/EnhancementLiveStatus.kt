@@ -48,14 +48,14 @@ internal fun EnhancementLiveStatus(
     }
     var expanded by remember(content, sample?.sessionKey) { mutableStateOf(false) }
     val actual = when (sample?.currentEnhanced) {
-        true -> "当前页已增强"
-        false -> "当前页原图"
-        null -> "当前页等待观测"
+        true -> "本页增强文件已备"
+        false -> "本页增强文件未备"
+        null -> "本页增强准备待观测"
     }
     val summary = actual + " · " + when (sample?.nextReady) {
-        true -> "下一页已备好"
-        false -> "下一页未备好"
-        null -> "下一页待观测"
+        true -> "前方增强已备"
+        false -> "前方增强未备"
+        null -> "前方增强待观测"
     }
     EnhancementSection("运行状态", Icons.Outlined.Speed, summary,
         action = { EnhancementDetailToggle(expanded, { expanded = !expanded }) }) {

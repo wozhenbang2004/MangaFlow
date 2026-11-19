@@ -1348,8 +1348,8 @@ fun ReaderScreen(
                             },
                             currentSourceName.takeIf { chapter.variants.size > 1 },
                             if (enhancementPolicy.tier != QualityTier.ORIGINAL)
-                                if (enhancementState.currentEnhanced) "增强 ${enhancementPolicy.scale}×" else "原图" else null,
-                            "下页就绪".takeIf { enhancementState.nextReady }).joinToString(" · "),
+                                if (enhancementState.currentEnhanced) "本页增强已备" else "原图" else null,
+                            "前方增强已备".takeIf { enhancementState.nextReady }).joinToString(" · "),
                             color = colors.onSurface.copy(alpha = .86f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     if (preferences.panelEngine == PanelEngine.OFF &&
@@ -1624,11 +1624,14 @@ fun ReaderScreen(
 
         ReaderExperienceStatus(
             visible = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
+                !showEnhancement && !compareEnhancement &&
                 !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking &&
                 !chapterChangeRequested && !showReaderActions && !readerActionsPresent && repairState.selection == null,
             sessionKey = sourceIdentity, store = experience, budget = experienceBudget,
             standbys = currentSourceStandbys, alternativeCount = alternativeSources.size, backdrop = readerBackdrop,
             preparation = preparation,
+            enhancement = enhancementState, enhancementPolicy = enhancementPolicy,
+            onOpenEnhancement = { showEnhancement = true; controlsVisible = true },
             chapterLoading = loading, chapterUnavailable = error != null,
             imageVisible = imageVisible, localChapter = localImport,
             downloadedChapter = activeDownload?.status == DownloadStatus.COMPLETED,

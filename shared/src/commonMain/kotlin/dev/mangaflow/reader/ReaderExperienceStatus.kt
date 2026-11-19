@@ -51,6 +51,10 @@ import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.ExperienceUsage
 import dev.mangaflow.experience.ReaderStatusPlacement
 import dev.mangaflow.experience.SourceRecoveryMode
+import dev.mangaflow.enhancement.EnhancementPolicy
+import dev.mangaflow.enhancement.QualityTier
+import dev.mangaflow.enhancement.ReaderEnhancementState
+import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.ui.BodySourceMark
 import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.ExperienceSettingsDialog
@@ -105,6 +109,9 @@ internal fun ReaderExperienceStatus(
     onAlignPage: (() -> Unit)? = null,
     onUndoPage: (() -> Unit)? = null,
     onUndoSourceSwitch: (() -> Unit)? = null,
+    enhancement: ReaderEnhancementState = ReaderEnhancementState(),
+    enhancementPolicy: EnhancementPolicy = EnhancementPolicy(),
+    onOpenEnhancement: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val custom by store.overrides.collectAsStateWithLifecycle()
@@ -121,6 +128,7 @@ internal fun ReaderExperienceStatus(
     val expandedWorks = remember(sessionKey) { mutableStateMapOf<ReaderStatusSection, ReaderWork?>() }
     var popoverPresent by remember { mutableStateOf(false) }
     var pendingPolicy by remember(sessionKey) { mutableStateOf(false) }
+    var pendingEnhancement by remember(sessionKey) { mutableStateOf(false) }
     var pendingSources by remember(sessionKey) { mutableStateOf(false) }
     var pendingStandby by remember(sessionKey) { mutableStateOf<Pair<StandbyAction, String>?>(null) }
     var showPolicy by remember(sessionKey) { mutableStateOf(false) }
@@ -128,15 +136,16 @@ internal fun ReaderExperienceStatus(
     var expandedSource by remember(sessionKey) { mutableStateOf<String?>(null) }
     val reportInspection by rememberUpdatedState(onInspectingChange)
     val openSources by rememberUpdatedState(onOpenSources)
+    val openEnhancement by rememberUpdatedState(onOpenEnhancement)
     val retryStandby by rememberUpdatedState(onRetryStandby)
     val useStandby by rememberUpdatedState(onUseStandby)
     val alignPage by rememberUpdatedState(onAlignPage)
     val undoPage by rememberUpdatedState(onUndoPage)
     val undoSourceSwitch by rememberUpdatedState(onUndoSourceSwitch)
-    SideEffect { reportInspection(popoverPresent || selected != null || showPolicy || pendingPolicy || pendingSources || pendingStandby != null) }
+    SideEffect { reportInspection(popoverPresent || selected != null || showPolicy || pendingPolicy || pendingEnhancement || pendingSources || pendingStandby != null) }
     DisposableEffect(Unit) { onDispose { reportInspection(false) } }
     LaunchedEffect(visible) {
-        if (!visible) { selected = null; pendingPolicy = false; showPolicy = false; pendingSources = false; pendingStandby = null }
+        if (!visible) { selected = null; pendingPolicy = false; pendingEnhancement = false; showPolicy = false; pendingSources = false; pendingStandby = null }
     }
     LaunchedEffect(shown) { if (!shown) selected = null }
     LaunchedEffect(selected, popoverPresent) {
@@ -155,6 +164,12 @@ internal fun ReaderExperienceStatus(
         if (visible && pendingSources && !popoverPresent) {
             pendingSources = false
             openSources?.invoke()
+        }
+    }
+    LaunchedEffect(pendingEnhancement, popoverPresent, visible) {
+        if (visible && pendingEnhancement && !popoverPresent) {
+            pendingEnhancement = false
+            openEnhancement?.invoke()
         }
     }
     LaunchedEffect(pendingStandby, popoverPresent, visible) {
@@ -214,9 +229,12 @@ internal fun ReaderExperienceStatus(
     val steps = listOf(preparation.resolving, preparation.originals, preparation.decoding)
     val failed = steps.sumOf { it.failed }
     val deferred = steps.sumOf { it.deferred }
-    val active = steps.sumOf { it.active }
-    val queued = steps.sumOf { it.queued }
+    val active = steps.sumOf { it.active } + enhancement.running
+    val queued = steps.sumOf { it.queued } + enhancement.queued
+    val workKnown = preparation.pages.isNotEmpty() || enhancement.assets.isNotEmpty() ||
+        enhancement.running > 0 || enhancement.queued > 0
     val workMaximum = maxOf(preparation.pages.size.toLong(),
+        maxOf(enhancement.running, enhancement.queued, enhancement.assets.size).toLong(),
         steps.maxOf { maxOf(it.active, it.queued, it.complete, it.deferred, it.failed) }.toLong(),
         nextChapterPreparation?.let { next -> maxOf(next.requestedPages.toLong() + 1L,
             next.activePages.toLong() + 1L, next.queuedPages.toLong() + 1L,
@@ -231,13 +249,13 @@ internal fun ReaderExperienceStatus(
         chapterLoading && preparation.pages.isEmpty() -> ReaderStatusMark.ACTIVE
         preparation.pauseReason != null || deferred > 0 -> ReaderStatusMark.PAUSED
         queued > 0 -> ReaderStatusMark.QUEUED
-        preparation.pages.isEmpty() -> ReaderStatusMark.UNKNOWN
+        !workKnown -> ReaderStatusMark.UNKNOWN
         else -> ReaderStatusMark.IDLE
     }
     val workDetail = when {
         chapterLoading && preparation.pages.isEmpty() -> "正在打开章节，当前阅读窗口尚未建立"
-        preparation.pages.isEmpty() -> "等待建立当前阅读窗口"
-        else -> "实际进行 $active 项，排队 $queued，失败 $failed，暂缓 $deferred"
+        !workKnown -> "等待建立当前阅读窗口"
+        else -> "实际进行 $active 项（含画质处理 ${enhancement.running}），等待或排队 $queued；原图准备失败 $failed，暂缓 $deferred"
     }
     val stageMarks = steps.map { step -> when {
         preparation.pages.isEmpty() -> ReaderStatusMark.UNKNOWN
@@ -247,7 +265,13 @@ internal fun ReaderExperienceStatus(
         step.queued > 0 -> ReaderStatusMark.QUEUED
         step.complete > 0 -> ReaderStatusMark.READY
         else -> ReaderStatusMark.IDLE
-    } }
+    } } + when {
+        enhancement.running > 0 -> ReaderStatusMark.ACTIVE
+        enhancement.queued > 0 -> ReaderStatusMark.QUEUED
+        enhancementPolicy.tier == QualityTier.ORIGINAL -> ReaderStatusMark.DISABLED
+        enhancement.assets.isNotEmpty() -> ReaderStatusMark.READY
+        else -> ReaderStatusMark.UNKNOWN
+    }
     val aheadPages = preparation.pages.filter { it.role == ReaderPreparationRole.AHEAD }
     val aheadMark = originalReadinessMark(aheadPages, preparation.pauseReason)
     val sourceStatus = standbySummary(standbyAvailability, standbys, budget)
@@ -325,7 +349,7 @@ internal fun ReaderExperienceStatus(
                                         preparation.aheadReady.toFloat() / preparation.aheadTarget else null,
                                     selected = isSelected)
                                 ReaderStatusSlot.WORK -> StatusMicro(Icons.Outlined.AccountTree,
-                                    if (preparation.pages.isEmpty()) "—" else stripCount(active), "当前窗口任务", activityMark,
+                                    if (!workKnown) "—" else stripCount(active), "当前窗口任务与画质处理", activityMark,
                                     workDetail,
                                     progress = null, selected = isSelected, stages = stageMarks)
                                 ReaderStatusSlot.SOURCES -> StatusMicro(Icons.Outlined.Layers,
@@ -383,9 +407,9 @@ internal fun ReaderExperienceStatus(
                                     preparation.aheadReady.toFloat() / preparation.aheadTarget else null,
                                 selected = isSelected)
                             ReaderStatusSlot.WORK -> StatusMicro(Icons.Outlined.AccountTree,
-                                if (preparation.pages.isEmpty()) "—" else stripCount(active), "当前窗口工作", activityMark,
-                                if (preparation.pages.isEmpty()) workDetail else
-                                    "原图 ${preparation.originals.active}，解码与核验 ${preparation.decoding.active}，解析 ${preparation.resolving.active}，排队 $queued，失败 $failed，暂缓 $deferred；${steps.sumOf { it.complete }} 项阶段完成；下方三格依次为解析、原图、解码阶段",
+                                if (!workKnown) "—" else stripCount(active), "当前窗口工作与画质处理", activityMark,
+                                if (!workKnown) workDetail else
+                                    "原图 ${preparation.originals.active}，解码与核验 ${preparation.decoding.active}，解析 ${preparation.resolving.active}，画质处理 ${enhancement.running}；等待或排队 $queued；下方四格依次为解析、原图、解码、增强阶段",
                                 progress = null, selected = isSelected, stages = stageMarks)
                             ReaderStatusSlot.SOURCES -> StatusMicro(Icons.Outlined.Layers,
                                 if (sourceStatus.hasTargets) stripCount(standbys.count { it.requestedPages > 0 && it.targetOriginalPresent }) else "—",
@@ -419,12 +443,20 @@ internal fun ReaderExperienceStatus(
                                         PreparationPages(preparation.pages.filter { it.role == ReaderPreparationRole.BEHIND }, ReaderWork.ORIGINAL)
                                     }
                                     preparation.pauseReason?.let { StatusExplanation(it) }
+                                    ReaderEnhancementWork(enhancement, enhancementPolicy,
+                                        expandedWork == ReaderWork.ENHANCEMENT, bodyEnabled,
+                                        onToggle = { toggle(ReaderWork.ENHANCEMENT) },
+                                        onOpen = onOpenEnhancement?.let { { selected = null; pendingEnhancement = true } })
                                     nextChapterPreparation?.let { next ->
                                         NextWorkRow(next, workMaximum, expandedWork == ReaderWork.NEXT, bodyEnabled) { toggle(ReaderWork.NEXT) }
                                         StatusReveal(expandedWork == ReaderWork.NEXT) { NextChapterDetails(next) }
                                     }
                                 }
                                 ReaderStatusSection.WORK -> {
+                                    ReaderEnhancementWork(enhancement, enhancementPolicy,
+                                        expandedWork == ReaderWork.ENHANCEMENT, bodyEnabled,
+                                        onToggle = { toggle(ReaderWork.ENHANCEMENT) },
+                                        onOpen = onOpenEnhancement?.let { { selected = null; pendingEnhancement = true } })
                                     listOf(ReaderWork.RESOLVE, ReaderWork.ORIGINAL, ReaderWork.PREVIEW).forEach { work ->
                                         val counts = work.counts(preparation)
                                         WorkDisclosure(work.icon, work.title, counts.active.toLong(), workMaximum,
@@ -531,7 +563,7 @@ private data class ReaderStatusSummary(
 private enum class StandbyAction { RETRY, USE, ALIGN, UNDO_PAGE, UNDO_SOURCE }
 private enum class ReaderWork(val title: String, val icon: ImageVector) {
     RESOLVE("解析", Icons.Outlined.Link), ORIGINAL("原图", Icons.Outlined.Download),
-    PREVIEW("解码", Icons.Outlined.PhotoSizeSelectLarge),
+    PREVIEW("解码", Icons.Outlined.PhotoSizeSelectLarge), ENHANCEMENT("画质处理", Icons.Outlined.AutoAwesome),
     AHEAD("前方", Icons.Outlined.KeyboardDoubleArrowRight), BEHIND("回看", Icons.Outlined.KeyboardDoubleArrowLeft),
     NEXT("下一话", Icons.AutoMirrored.Outlined.MenuBook), MEMORY("解码内存", Icons.Outlined.Memory), DISK("图片磁盘", Icons.Outlined.Storage);
     fun counts(state: ReaderPreparationState) = when (this) {
@@ -599,7 +631,7 @@ private fun ReaderStatusStrip(selected: ReaderStatusSlot?, retained: ReaderStatu
                 selectionVisible = enabled && selected != null,
                 tooltips = if (enabled) entries.map { slot -> when (slot) {
                     ReaderStatusSlot.PREPARATION -> "预读 · 当前窗口已核实原图"
-                    ReaderStatusSlot.WORK -> "任务 · 解析、原图与解码"
+                    ReaderStatusSlot.WORK -> "任务 · 解析、原图、解码与增强"
                     ReaderStatusSlot.SOURCES -> "补页 · 备用来源与恢复"
                     ReaderStatusSlot.MEMORY -> if (labelsVisible) "内存 · 解码用量与回收" else "缓存 · 上轨内存，下轨磁盘"
                     ReaderStatusSlot.DISK -> "磁盘 · 共享图片缓存与预算"
@@ -645,7 +677,7 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
             }
         }
     }
-    StatusExplanation("底栏依次为预读、任务、补页、内存、磁盘。数字是已备页数、活动任务数与可用源数；99+ 只缩写显示，不限制配置。? 表示尚有未核实项。")
+    StatusExplanation("底栏四项为预读、任务、补页、缓存；缓存详情再分内存和磁盘。数字是已备页数、活动任务数与可用源数；99+ 只缩写显示，不限制配置。? 表示尚有未核实项。")
     when (section) {
         ReaderStatusSection.PREPARATION -> {
             StatusExplanation("已备 / 目标显示当前前读或回看范围内已核实的原图。自动模式按阅读速度逐步派发；? 表示待核实。内存预览和任务完成单独显示。")
@@ -664,8 +696,8 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
             }
         }
         ReaderStatusSection.WORK -> {
-            StatusExplanation("进行中只计已获名额的任务，不是线程数；0 表示此刻没有活动任务。完成按页计，不代表预览仍在内存。底栏三格依次表示解析、原图、解码状态，不是百分比。")
-            StatusExplanation("任务行右侧是进行中数量；下方四项依次是排队、阶段完成、暂缓、失败。")
+            StatusExplanation("进行中只计已获名额的任务，不是线程数；0 表示此刻没有活动任务。完成按页计，不代表预览仍在内存。底栏四格依次表示解析、原图、解码、增强状态，不是百分比。")
+            StatusExplanation("原图阶段的四项依次是排队、阶段完成、暂缓、失败；画质处理单独显示处理中、等待或排队、当前窗口增强已备。")
             FlowRow(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 StatusToken(Icons.Outlined.Link, "解析并发配置", "解析 ${budget.resolveRequests}")
@@ -746,6 +778,63 @@ private fun NextWorkRow(next: ReaderNextChapterPreparation, maximum: Long, expan
         next.originalReadyPages.toLong().takeIf { next.requestedPages > 0 }, next.deferredPages.toLong(), next.failedPages.toLong(),
         completedLabel = "原图已备", phaseDeferred = next.phase == ReaderNextChapterPreparationPhase.DEFERRED,
         onToggle = onToggle)
+}
+
+@Composable
+private fun ReaderEnhancementWork(
+    state: ReaderEnhancementState,
+    policy: EnhancementPolicy,
+    expanded: Boolean,
+    enabled: Boolean,
+    onToggle: () -> Unit,
+    onOpen: (() -> Unit)?,
+) {
+    val colors = MaterialTheme.colorScheme
+    val current = state.assets[state.currentPage]
+    val readiness = if (policy.tier == QualityTier.ORIGINAL) "原画 · 增强未启用"
+        else (if (state.currentEnhanced) "本页增强已备" else "本页增强未备") +
+            if (state.nextReady) " · 前方增强已备" else " · 前方增强未备"
+    MotionTextButton(onClick = onToggle, enabled = enabled,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)) {
+        Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+        Column(Modifier.weight(1f).padding(horizontal = 7.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text("画质处理", style = MaterialTheme.typography.labelLarge, color = colors.onSurface)
+            Text(readiness, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+        }
+        if (state.running > 0) StatusCounter(Icons.Outlined.PlayArrow, state.running.toLong(), "正在增强",
+            iconColor = mangaStatusColors().activity)
+        Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
+            Modifier.padding(start = 6.dp).size(16.dp), tint = colors.onSurfaceVariant)
+    }
+    StatusReveal(expanded) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            StatusExplanation("目标 ${policy.tier.label} · ${policy.scale}×")
+            StatusMetricSlots(maxOf(state.running, state.queued, state.assets.size, 1).toString(), count = 3) { index ->
+                when (index) {
+                    0 -> StatusCounter(Icons.Outlined.PlayArrow, state.running.toLong(), "正在增强的页数")
+                    1 -> StatusCounter(Icons.Outlined.Schedule, state.queued.toLong(), "等待、排队或暂缓的增强页数")
+                    else -> StatusCounter(Icons.Outlined.Check, state.assets.size.toLong(), "当前窗口增强文件已备页数")
+                }
+            }
+            Text("处理中 / 等待或排队 / 窗口已备", style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant)
+            if (current != null) StatusExplanation("本页增强文件 ${current.width} × ${current.height}")
+            val p50 = state.elapsedP50Millis?.let { formatDecimal(it, 0) + " ms" } ?: "—"
+            val p95 = state.elapsedP95Millis?.let { formatDecimal(it, 0) + " ms" } ?: "—"
+            StatusExplanation("整页处理 P50 / P95  $p50 / $p95")
+            state.detail?.let { StatusExplanation("窗口处理反馈：$it") }
+            StatusExplanation("已备表示增强文件可用；原图预读与增强准备分别统计。")
+            onOpen?.let { open ->
+                MotionTextButton(onClick = open, enabled = enabled,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                    contentPadding = PaddingValues(horizontal = 0.dp)) {
+                    Text("画质与性能", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                    Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp))
+                }
+            }
+        }
+    }
 }
 
 @Composable

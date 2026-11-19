@@ -55,10 +55,11 @@ internal fun AnimePlayerSettings(
     onClosed: () -> Unit,
     onPlayDownload: (AnimeDownloadSelection) -> Unit,
     onSources: (AnimeEpisode) -> Unit,
+    initialEnhancementPage: EnhancementPage = EnhancementPage.QUALITY,
 ) {
     var section by remember { mutableStateOf(initialSection) }
-    var enhancementPage by remember { mutableStateOf(EnhancementPage.QUALITY) }
-    var detailParent by remember { mutableStateOf(EnhancementPage.QUALITY) }
+    var enhancementPage by remember { mutableStateOf(initialEnhancementPage) }
+    var detailParent by remember { mutableStateOf(initialEnhancementPage) }
     val enhancementTabs = listOf(EnhancementPage.QUALITY, EnhancementPage.FRAME,
         EnhancementPage.PREPARATION, EnhancementPage.STATUS)
     var speedDraft by remember { mutableStateOf("") }
@@ -74,10 +75,10 @@ internal fun AnimePlayerSettings(
     var error by remember { mutableStateOf<String?>(null) }
     var pendingDownload by remember { mutableStateOf<AnimeDownloadSelection?>(null) }
     var pendingSourceEpisode by remember { mutableStateOf<AnimeEpisode?>(null) }
-    LaunchedEffect(visible, initialSection) {
+    LaunchedEffect(visible, initialSection, initialEnhancementPage) {
         if (visible) {
             section = initialSection; error = null; pendingDownload = null; pendingSourceEpisode = null
-            enhancementPage = EnhancementPage.QUALITY; detailParent = EnhancementPage.QUALITY
+            enhancementPage = initialEnhancementPage; detailParent = initialEnhancementPage
             speedDraft = playback.speed.toString(); holdDraft = state.settings.longPressSpeed.toString()
             openingDraft = state.settings.skipOpeningSeconds.toString(); endingDraft = state.settings.skipEndingSeconds.toString()
             minimumDraft = bufferSeconds(state.settings.bufferMinMs); maximumDraft = bufferSeconds(state.settings.bufferMaxMs)
