@@ -14,6 +14,7 @@ import androidx.media3.effect.BaseGlShaderProgram
 import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
 import androidx.media3.effect.PassthroughShaderProgram
+import dev.mangaflow.enhancement.engine.EngineModel
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -29,6 +30,7 @@ import java.util.concurrent.atomic.AtomicLong
 internal class AndroidAnime4KEffect(
     private val mode: AnimeVideoEnhancementMode,
     private val scale: Int = 2,
+    private val model: EngineModel? = null,
     private val report: (AnimeVideoEnhancementState, () -> Boolean) -> Unit,
 ) : GlEffect {
     private val programRevision = AtomicLong(0L)
@@ -42,7 +44,8 @@ internal class AndroidAnime4KEffect(
         val currentReport: (AnimeVideoEnhancementState, () -> Boolean) -> Unit = { observation, sampleIsCurrent ->
             // A format/HDR transition may instantiate this same effect again. Retired GL
             // programs cannot replace observations from its new input stream.
-            if (programRevision.get() == revision && sampleIsCurrent()) report(observation) {
+            if (programRevision.get() == revision && sampleIsCurrent()) report(observation.copy(
+                modelName = model?.title.takeIf { observation.phase == AnimeVideoEnhancementPhase.ACTIVE })) {
                 programRevision.get() == revision && sampleIsCurrent()
             }
         }
@@ -58,7 +61,9 @@ internal class AndroidAnime4KEffect(
             if (GlUtil.getContextMajorVersion() < 3L) {
                 return unavailable("当前图形上下文不支持 OpenGL ES 3，已保留原画")
             }
-            val plan = Anime4KGlPlan.create(Anime4KShaderLibrary.sources(mode, scale))
+            val shaders = if (model != null) Anime4KOptionalModels(context).shaders(model, scale)
+                else Anime4KShaderLibrary.sources(mode, scale)
+            val plan = Anime4KGlPlan.create(shaders)
             val textureUnits = IntArray(1)
             GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_IMAGE_UNITS, textureUnits, 0)
             GlUtil.checkGlError()

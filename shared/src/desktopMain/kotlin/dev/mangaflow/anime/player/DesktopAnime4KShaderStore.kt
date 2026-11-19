@@ -20,9 +20,13 @@ import java.security.MessageDigest
 /** App-owned, immutable-by-version resources; no media/source identity enters paths. */
 internal object DesktopAnime4KShaderStore {
     fun prepare(context: PlatformContext, mode: AnimeVideoEnhancementMode, scale: Int = 2, model: EngineModel? = null): List<String> {
-        val dedicated = mode == AnimeVideoEnhancementMode.MODEL
-        val shaders = if (dedicated) listOf(DesktopArtCnn.verifiedShader(checkNotNull(model)))
-            else Anime4KShaderLibrary.sources(mode, scale).map { it.name to it.source.encodeToByteArray() }
+        val optional = model?.takeIf { Anime4KOptionalModels.supports(it.engineId) }
+        val dedicated = mode == AnimeVideoEnhancementMode.MODEL && optional == null
+        val shaders = when {
+            dedicated -> listOf(DesktopArtCnn.verifiedShader(checkNotNull(model)))
+            optional != null -> Anime4KOptionalModels(context).shaders(optional, scale).map { it.name to it.source.encodeToByteArray() }
+            else -> Anime4KShaderLibrary.sources(mode, scale).map { it.name to it.source.encodeToByteArray() }
+        }
         if (shaders.isEmpty()) return emptyList()
         val root = Path.of(dataDirectory(context).path).toAbsolutePath().normalize()
         val privateRoot = privateDirectory(root.resolve(if (dedicated) "artcnn" else "anime4k"))

@@ -671,6 +671,7 @@ internal class AndroidAnimePlayer(
         clearRealtimeVideoModel()
         clearRealtimeMotion()
         val mode = options.videoEnhancement
+        val shaderProfile = options.enhancementModel?.takeIf { Anime4KOptionalModels.supports(it.engineId) }
         val phase = when {
             mode == AnimeVideoEnhancementMode.OFF -> AnimeVideoEnhancementPhase.OFF
             nativeVideoOnly || nativeVideoRecoveryPending || nativeVideoRecoveryFailed -> nativeVideoFallbackPhase
@@ -690,7 +691,7 @@ internal class AndroidAnimePlayer(
         try {
             enhancementEffect?.invalidateObservations()
             enhancementEffect = null
-            if (mode == AnimeVideoEnhancementMode.MODEL) {
+            if (mode == AnimeVideoEnhancementMode.MODEL && shaderProfile == null) {
                 applyRealtimeVideoModel(generation, exo, revision)
                 applyRealtimeMotion(generation, exo, revision)
                 return
@@ -725,7 +726,7 @@ internal class AndroidAnimePlayer(
                     })
                 }.orEmpty()
             } else listOf(
-                AndroidAnime4KEffect(mode, options.enhancementScale) { observation, programIsCurrent ->
+                AndroidAnime4KEffect(mode, options.enhancementScale, shaderProfile) { observation, programIsCurrent ->
                     val observedAt = SystemClock.elapsedRealtime()
                     // The callback originates on Media3's GL thread. Both backend and mode
                     // revision must still own this observation when Main finally consumes it.

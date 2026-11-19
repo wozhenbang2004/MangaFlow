@@ -3109,6 +3109,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     private fun preferredRealtimeModel(policy: EnhancementPolicy, snapshot: AnimePlayerState?): EngineModel? {
         val inventory = enhancementCenter.inventory.value.models
+        if (platformKind in setOf(PlatformKind.ANDROID, PlatformKind.DESKTOP) && policy.scale in 1..2 &&
+            policy.tier in setOf(QualityTier.AUTO, QualityTier.LIGHT, QualityTier.BALANCED)) {
+            inventory.firstOrNull {
+                it.id == policy.modelId && dev.mangaflow.anime.player.Anime4KOptionalModels.supports(it.engineId)
+            }?.let { return it.copy(nativeScale = policy.scale) }
+        }
         if (platformKind == PlatformKind.DESKTOP && policy.scale == 2) {
             val modelId = policy.modelId ?: when (policy.tier) {
                 QualityTier.FINE -> if (inventory.any { it.id == "animejanai-live:performance" })
@@ -3156,14 +3162,18 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     private fun preferredOnlineModel(policy: EnhancementPolicy, mode: AnimeVideoEnhancementMode): EngineModel? {
-        if (platformKind != PlatformKind.ANDROID || mode !in setOf(AnimeVideoEnhancementMode.OFF, AnimeVideoEnhancementMode.MODEL) ||
+        if (platformKind != PlatformKind.ANDROID ||
             policy.tier == QualityTier.ORIGINAL || PreparationMode.SMART !in policy.preparation ||
             policy.cacheMiB < 16) return null
-        return enhancementCenter.inventory.value.models.firstOrNull { model ->
-            model.engineId == EnhancementEngineIds.ANDROID_VIDEO_ONNX && EngineContent.VIDEO in model.contents &&
-                model.nativeScale == policy.scale && (policy.modelId == model.id ||
-                policy.modelId == null && policy.tier in setOf(QualityTier.AUTO, QualityTier.BALANCED))
+        val candidates = enhancementCenter.inventory.value.models.filter { model ->
+            model.engineId in setOf(EnhancementEngineIds.ANDROID_CUGAN_VIDEO, EnhancementEngineIds.ANDROID_VIDEO_ONNX) &&
+                EngineContent.VIDEO in model.contents && model.nativeScale == policy.scale
         }
+        if (policy.modelId != null) return candidates.firstOrNull { it.id == policy.modelId }
+        if (mode == AnimeVideoEnhancementMode.FAST ||
+            policy.tier !in setOf(QualityTier.AUTO, QualityTier.BALANCED)) return null
+        return candidates.firstOrNull { it.engineId == EnhancementEngineIds.ANDROID_CUGAN_VIDEO }
+            ?: candidates.firstOrNull()
     }
 
     private fun cancelOnlineVideo(clear: Boolean) {

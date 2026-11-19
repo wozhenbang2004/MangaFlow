@@ -105,11 +105,16 @@ internal class DesktopAnimeVideoEnhancement(
                         check(handle.getPropertyString("glsl-shaders") == expectedList) {
                             "The renderer did not confirm the complete shader list"
                         }
-                        val sample = model?.let { readArtCnnPasses(handle, it.title) }
+                        val optional = model?.takeIf { Anime4KOptionalModels.supports(it.engineId) }
+                        val sample = when {
+                            optional != null -> readAnime4KPasses(handle, optional.title, scale)
+                            model != null -> readArtCnnPasses(handle, model.title)
+                            else -> null
+                        }
                         if (sample == null) {
                             update(generation, state(mode, AnimeVideoEnhancementPhase.CONFIGURED,
                                 if (model == null) "播放器未反馈增强结果，尚不能确认是否生效"
-                                else "模型已加载，等待光栅尺寸和渲染器执行 ArtCNN", width, height))
+                                else "模型已加载，等待渲染器报告实际计算", width, height))
                         } else {
                             val frameTime = handle.getPropertyDoubleOrNull("video-pts")?.takeIf(Double::isFinite)
                             val sourceFps = handle.getPropertyDoubleOrNull("container-fps")?.takeIf { it.isFinite() && it > 0 }
@@ -124,7 +129,8 @@ internal class DesktopAnimeVideoEnhancement(
                                 return@launch
                             }
                             update(generation, state(mode, AnimeVideoEnhancementPhase.ACTIVE,
-                                "2× 亮度超分 · 本次 8 个 GPU pass ${(sample / 10_000L) / 100.0}ms", width, height)
+                                (if (optional == null) "2× 亮度超分 · 8 个 GPU pass" else "${scale}× Anime4K · GPU pass") +
+                                    " ${(sample / 10_000L) / 100.0}ms", width, height)
                                 .copy(modelName = model?.title))
                         }
                     }
@@ -186,6 +192,24 @@ internal class DesktopAnimeVideoEnhancement(
             timings[pass] = nanos
         }
         return timings.values.sum().takeIf { timings.size == 8 && "Depth-To-Space" in timings }
+    }
+
+    private fun readAnime4KPasses(handle: MPVHandle, title: String, scale: Int): Long? {
+        val size = title.substringAfter(' ').substringBefore('/')
+        val prefix = "vo-passes/fresh"
+        val count = handle.getPropertyLongOrNull("$prefix/count")?.takeIf { it in 1..128 }?.toInt() ?: return null
+        var elapsed = 0L
+        var restores = false
+        var upscales = false
+        for (index in 0 until count) {
+            val description = handle.getPropertyString("$prefix/$index/desc") ?: continue
+            if ("Anime4K" !in description || "($size)" !in description) continue
+            val time = handle.getPropertyLongOrNull("$prefix/$index/last")?.takeIf { it in 1..1_000_000_000 } ?: continue
+            elapsed += time
+            restores = restores || "Restore-CNN" in description
+            upscales = upscales || "Upscale-CNN" in description
+        }
+        return elapsed.takeIf { restores && (scale == 1 || upscales) }
     }
 
     private fun state(

@@ -92,7 +92,7 @@ internal class DesktopAnimeJaNaiEnhancement(
                     }
                     if (filter == null) {
                         withContext(Dispatchers.IO) {
-                            val prepared = runtime.session(next.model, frames.takeIf { ratio != null }, ratio)
+                            val prepared = runtime.session(next.model, frames?.model?.takeIf { ratio != null }, ratio)
                             // Returning a resource through a canceled dispatcher hop can lose its owner.
                             try {
                                 withContext(Dispatchers.Main.immediate) {

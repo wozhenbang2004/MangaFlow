@@ -44,6 +44,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
     private val rifeModels = AndroidRifeModels(File(root, "rife-models"))
     private val rifeVulkan = AndroidRifeVulkanModels(this.context)
     private val cugan = AndroidCuganVulkan(this.context, root)
+    private val anime4kVariants = dev.mangaflow.anime.player.Anime4KOptionalModels(this.context)
     private val runtimes = PanelRuntimeStore.get(context)
     private val nativeGate = Mutex()
     private var session: OrtSession? = null
@@ -52,6 +53,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
     override suspend fun inspect(): EngineInventory = withContext(Dispatchers.IO) {
         val installed = models.list()
         val installedVideo = videoModels.list()
+        val installedVariants = anime4kVariants.installed()
         val frameModels = rifeModels.installed()
         val liveRife = rifeVulkan.model()
         val cuganModel = cugan.model()
@@ -98,12 +100,17 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                 if (Build.VERSION.SDK_INT >= 29) videoReadiness else EngineReadiness.UNSUPPORTED,
                 "Android 10+ 可尝试仅硬件执行已导入的 RGB 模型。实际图与设备支持、处理耗时和回退状态在播放中显示。",
                 setOf(1, 2, 4), setOf(EngineContent.VIDEO), realtime = true),
-        ) + anime4kEngineDescriptors(), installed + installedVideo + listOfNotNull(cuganModel, cuganVideoModel),
-            (installed + installedVideo + frameModels + listOfNotNull(cuganModel, liveRife)).sumOf { it.bytes },
+        ) + anime4kEngineDescriptors() + anime4kVariants.descriptors(),
+            installed + installedVideo + installedVariants + listOfNotNull(cuganModel, cuganVideoModel),
+            (installed + installedVideo + installedVariants + frameModels + listOfNotNull(cuganModel, liveRife)).sumOf { it.bytes },
             (runtime?.bytes ?: 0) + (runtimes.states.value[PanelRuntimeId.CUGAN]?.bytes ?: 0), frameModels + listOfNotNull(liveRife))
     }
 
     override suspend fun install(engineId: String, progress: (EngineProgress) -> Unit): EngineInventory {
+        if (dev.mangaflow.anime.player.Anime4KOptionalModels.supports(engineId)) {
+            withContext(Dispatchers.IO) { anime4kVariants.install(engineId, progress) }
+            return inspect()
+        }
         if (engineId == EnhancementEngineIds.ANDROID_RIFE_VULKAN) {
             withContext(Dispatchers.IO) { rifeVulkan.install(progress) }
             return inspect()

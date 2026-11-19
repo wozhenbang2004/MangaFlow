@@ -33,7 +33,10 @@ import androidx.media3.transformer.ExperimentalAnalyzerModeFactory
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
+import dev.mangaflow.enhancement.engine.AndroidCuganSession
+import dev.mangaflow.enhancement.engine.AndroidCuganVulkan
 import dev.mangaflow.enhancement.engine.AndroidRgbVideoProgram
+import dev.mangaflow.enhancement.engine.EnhancementEngineIds
 import dev.mangaflow.enhancement.engine.engineSha256
 import dev.mangaflow.reader.panels.PanelRuntimeId
 import dev.mangaflow.reader.panels.PanelRuntimeStore
@@ -87,9 +90,12 @@ internal suspend fun prepareAndroidAnimeWindow(
         outputWidth.toLong() * outputHeight <= MAX_OUTPUT_PIXELS && scale in setOf(1, 2, 4)) {
         "当前画面尺寸超出在线帧缓存预算"
     }
-    val model = File(request.model.path).canonicalFile
-    check(engineSha256(model) == request.model.sha256) { "预处理模型已变化" }
-    PanelRuntimeStore.get(context).ensureLoaded(PanelRuntimeId.ONNX)
+    val vulkan = request.model.engineId == EnhancementEngineIds.ANDROID_CUGAN_VIDEO
+    val cugan = if (vulkan) AndroidCuganVulkan(context, File(context.noBackupFilesDir, "enhancement")) else null
+    val weights = File(request.model.path).canonicalFile
+    fun verifyModel() = cugan?.matches(request.model) ?: (engineSha256(weights) == request.model.sha256)
+    check(verifyModel()) { "预处理模型已变化" }
+    if (!vulkan) PanelRuntimeStore.get(context).ensureLoaded(PanelRuntimeId.ONNX)
     val owner = AndroidAnimeCache.get(context)
     val release = owner.acquire()
     val client = animeMediaHttpClient(asset, forPrefetch = true)
@@ -98,57 +104,62 @@ internal suspend fun prepareAndroidAnimeWindow(
     val captures = linkedMapOf<Long, AndroidPreparedFrame>()
     var bytes = 0L
     try {
-        OrtSession.SessionOptions().use { options ->
-            options.setIntraOpNumThreads(2)
-            OrtEnvironment.getEnvironment().createSession(model.path, options).use { session ->
-                val upstream = OkHttpDataSource.Factory(client)
-                val cache = animeCacheDataSource(asset, owner, upstream)
-                val read = AtomicLong(0L)
-                val data = DataSource.Factory {
-                    // HLS playlists/keys stay on their live network path; only progressive MP4 uses the media cache here.
-                    val delegate = if (mimeType == MimeTypes.VIDEO_MP4 && owner.targetBytes > 0)
-                        cache.createDataSource() else upstream.createDataSource()
-                    object : DataSource by delegate {
-                        override fun open(dataSpec: DataSpec): Long {
-                            if (read.get() >= request.maximumSourceBytes) throw IOException("在线预处理读取达到预算")
-                            return delegate.open(dataSpec)
-                        }
-                        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-                            val remaining = request.maximumSourceBytes - read.get()
-                            if (remaining <= 0) throw IOException("在线预处理读取达到预算")
-                            val count = delegate.read(buffer, offset, minOf(length.toLong(), remaining).toInt())
-                            if (count > 0 && read.addAndGet(count.toLong()) > request.maximumSourceBytes)
-                                throw IOException("在线预处理读取达到预算")
-                            return count
-                        }
+        suspend fun captureWindow(session: OrtSession?, cuganSession: AndroidCuganSession?) {
+            val upstream = OkHttpDataSource.Factory(client)
+            val cache = animeCacheDataSource(asset, owner, upstream)
+            val read = AtomicLong(0L)
+            val data = DataSource.Factory {
+                // HLS playlists/keys stay on their live network path; only progressive MP4 uses the media cache here.
+                val delegate = if (mimeType == MimeTypes.VIDEO_MP4 && owner.targetBytes > 0)
+                    cache.createDataSource() else upstream.createDataSource()
+                object : DataSource by delegate {
+                    override fun open(dataSpec: DataSpec): Long {
+                        if (read.get() >= request.maximumSourceBytes) throw IOException("在线预处理读取达到预算")
+                        return delegate.open(dataSpec)
+                    }
+                    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                        val remaining = request.maximumSourceBytes - read.get()
+                        if (remaining <= 0) throw IOException("在线预处理读取达到预算")
+                        val count = delegate.read(buffer, offset, minOf(length.toLong(), remaining).toInt())
+                        if (count > 0 && read.addAndGet(count.toLong()) > request.maximumSourceBytes)
+                            throw IOException("在线预处理读取达到预算")
+                        return count
                     }
                 }
-                val effect = GlEffect { _, isHdr ->
-                    if (isHdr) throw VideoFrameProcessingException("HDR 片源保持原画")
-                    val raw = ByteArray(outputWidth * outputHeight * 4)
-                    AndroidRgbVideoProgram(session, width, height, scale, 64L * 1024 * 1024, job::ensureActive,
-                        capture = { time, input, enhanced ->
-                            job.ensureActive()
-                            check(captures.size < 900 && time !in captures) { "预处理帧时间不连续" }
-                            enhanced.get(raw)
-                            val compressed = compressFrame(raw)
-                            check(bytes + compressed.size <= request.maximumResultBytes) { "在线帧缓存达到预算" }
-                            bytes += compressed.size
-                            captures[time] = AndroidPreparedFrame(frameSignature(input, width, height), compressed)
-                        }, onFrame = {})
+            }
+            val effect = GlEffect { _, isHdr ->
+                if (isHdr) throw VideoFrameProcessingException("HDR 片源保持原画")
+                val raw = ByteArray(outputWidth * outputHeight * 4)
+                AndroidRgbVideoProgram(session, width, height, scale, 64L * 1024 * 1024, job::ensureActive,
+                    capture = { time, input, enhanced ->
+                        job.ensureActive()
+                        check(captures.size < 900 && time !in captures) { "预处理帧时间不连续" }
+                        enhanced.get(raw)
+                        val compressed = compressFrame(raw)
+                        check(bytes + compressed.size <= request.maximumResultBytes) { "在线帧缓存达到预算" }
+                        bytes += compressed.size
+                        captures[time] = AndroidPreparedFrame(frameSignature(input, width, height), compressed)
+                    }, cugan = cuganSession, onFrame = {})
+            }
+            coroutineScope {
+                val cancelRequests = launch {
+                    try { awaitCancellation() }
+                    finally { client.dispatcher.cancelAll() }
                 }
-                coroutineScope {
-                    val cancelRequests = launch {
-                        try { awaitCancellation() }
-                        finally { client.dispatcher.cancelAll() }
-                    }
-                    try { exportWindow(context, request, mimeType, data, effect, output) }
-                    finally { cancelRequests.cancel() }
-                }
+                try { exportWindow(context, request, mimeType, data, effect, output) }
+                finally { cancelRequests.cancel() }
+            }
+        }
+        if (cugan != null) {
+            cugan.open(request.model).use { captureWindow(null, it) }
+        } else {
+            OrtSession.SessionOptions().use { options ->
+                options.setIntraOpNumThreads(2)
+                OrtEnvironment.getEnvironment().createSession(weights.path, options).use { captureWindow(it, null) }
             }
         }
         job.ensureActive()
-        check(engineSha256(model) == request.model.sha256 && captures.size >= 2) { "没有完整的预处理画面" }
+        check(verifyModel() && captures.size >= 2) { "没有完整的预处理画面" }
         val times = captures.keys.toList()
         val startUs = request.startMs * 1000L
         val endUs = request.endMs * 1000L

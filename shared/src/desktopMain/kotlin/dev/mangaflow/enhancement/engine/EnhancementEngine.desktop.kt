@@ -20,6 +20,7 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
     private val root = File(context.dataRoot, "enhancement/engines")
     private val runtime = DesktopEngineRuntime(root)
     private val animeJaNai = DesktopAnimeJaNai(root)
+    private val anime4kVariants = dev.mangaflow.anime.player.Anime4KOptionalModels(context)
     private val imports = ImportedEngineModels(File(context.dataRoot, "enhancement/models"), EnhancementEngineIds.MANGAJANAI)
     private val videoImports = ImportedEngineModels(File(context.dataRoot, "enhancement/models/video"), EnhancementEngineIds.VIDEOJANAI)
     private val windows = System.getProperty("os.name").contains("Windows", ignoreCase = true) &&
@@ -27,7 +28,7 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
 
     override suspend fun inspect(): EngineInventory = withContext(Dispatchers.IO) {
         val models = installedModels() + DesktopArtCnn.models.takeIf { windows }.orEmpty() +
-            if (windows) animeJaNai.models() else emptyList()
+            (if (windows) animeJaNai.models() else emptyList()) + anime4kVariants.installed()
         val frameModels = installedFrameModels(runtime.folder(DesktopEnginePackages.video)) +
             if (windows) animeJaNai.frames() else emptyList()
         fun descriptor(pack: DesktopEnginePackage, title: String, video: Boolean): EngineDescriptor {
@@ -65,10 +66,15 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
                 setOf(2), setOf(EngineContent.VIDEO), realtime = true),
             animeJaNai.runtimeDescriptor(windows),
             animeJaNai.frameDescriptor(windows),
-        ) + anime4kEngineDescriptors(), models, models.sumOf { it.bytes } + frameModels.sumOf { it.bytes }, directoryBytes(root), frameModels)
+        ) + anime4kEngineDescriptors() + anime4kVariants.descriptors(),
+            models, models.sumOf { it.bytes } + frameModels.sumOf { it.bytes }, directoryBytes(root), frameModels)
     }
 
     override suspend fun install(engineId: String, progress: (EngineProgress) -> Unit): EngineInventory {
+        if (dev.mangaflow.anime.player.Anime4KOptionalModels.supports(engineId)) {
+            withContext(Dispatchers.IO) { anime4kVariants.install(engineId, progress) }
+            return inspect()
+        }
         check(windows) { "当前组件支持 Windows x64" }
         if (engineId == EnhancementEngineIds.DESKTOP_REALTIME || engineId == EnhancementEngineIds.DESKTOP_REALTIME_RIFE) {
             withContext(Dispatchers.IO) { animeJaNai.install(engineId == EnhancementEngineIds.DESKTOP_REALTIME_RIFE, progress) }

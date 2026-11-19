@@ -231,10 +231,7 @@ internal fun EnhancementSettingsContent(
                         onClick = { navigate(EnhancementPage.TRIALS) })
                 }
                 EnhancementPage.MODELS -> EnhancementModels(inventory, progress, content, draft.modelId,
-                    onSelectModel = { id ->
-                    val selected = inventory.models.firstOrNull { it.id == id }
-                    change(draft.copy(modelId = id, scale = selected?.nativeScale ?: draft.scale))
-                },
+                    onSelectModel = { id -> change(draft.copy(modelId = id)) },
                     onInstall = { center.installEngine(it) }, onRefresh = { center.refreshInventory() }, center = center)
                 EnhancementPage.CACHE -> {
                     EnhancementValue("增强结果", cacheUsage?.let { "${enhancementBytes(it.completedBytes)} · ${it.entries} 份" } ?: "—")
@@ -410,10 +407,7 @@ internal fun EnhancementSettingsContent(
                 }
             }
             EnhancementWorkspace.MODELS -> EnhancementModels(inventory, progress, content, draft.modelId,
-                onSelectModel = { id ->
-                    val selected = inventory.models.firstOrNull { it.id == id }
-                    change(draft.copy(modelId = id, scale = selected?.nativeScale ?: draft.scale))
-                },
+                onSelectModel = { id -> change(draft.copy(modelId = id)) },
                 onInstall = { center.installEngine(it) }, onRefresh = { center.refreshInventory() }, center = center)
             EnhancementWorkspace.TASKS -> EnhancementTasks(scopedTasks, center)
             EnhancementWorkspace.TRIALS -> EnhancementTrials(telemetry.trials.filter { it.content == content })

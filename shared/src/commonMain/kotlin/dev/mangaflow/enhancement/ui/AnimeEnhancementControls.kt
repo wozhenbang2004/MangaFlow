@@ -105,6 +105,7 @@ internal fun AnimeEnhancementNavigation(icon: ImageVector, title: String, value:
 internal fun AnimeEnhancementQuality(policy: EnhancementPolicy, inventory: EngineInventory,
     onChange: (EnhancementPolicy) -> Unit, onOpenModels: () -> Unit) {
     val model = inventory.models.firstOrNull { it.id == policy.modelId }
+    val anime4k = model?.let { dev.mangaflow.anime.player.Anime4KOptionalModels.supports(it.engineId) } == true
     Text("增强档位", style = MaterialTheme.typography.titleSmall)
     Spacer(Modifier.height(8.dp))
     AnimeEnhancementChoices(QualityTier.entries, policy.tier, { it.label }, "画质档位",
@@ -112,11 +113,12 @@ internal fun AnimeEnhancementQuality(policy: EnhancementPolicy, inventory: Engin
     Spacer(Modifier.height(8.dp))
     EnhancementQuiet(when (policy.tier) {
         QualityTier.ORIGINAL -> "保留片源画面，不进行画质增强。"
-        QualityTier.AUTO -> "根据已有测量与设备保护选择轻量或均衡。"
-        QualityTier.LIGHT -> "Anime4K S/S · 较轻的实时处理。"
-        QualityTier.BALANCED -> "Anime4K M/M · 更精细的实时处理。"
+        QualityTier.AUTO -> model?.title?.takeIf { anime4k } ?: "根据已有测量与设备保护选择轻量或均衡。"
+        QualityTier.LIGHT -> model?.title?.takeIf { anime4k } ?: "Anime4K S/S · 较轻的实时处理。"
+        QualityTier.BALANCED -> model?.title?.takeIf { anime4k } ?: "Anime4K M/M · 更精细的实时处理。"
         QualityTier.FINE, QualityTier.ULTRA -> if (model == null)
             "使用兼容的高质量模型，实际执行与回退原因见运行状态。"
+            else if (anime4k) "当前模型用于基础实时档，请选择适合此档的高质量模型。"
             else "${model.title} · 能否即时增强取决于设备、模型和片源。"
     })
     if (policy.tier != QualityTier.ORIGINAL && PreparationMode.IMMEDIATE !in policy.preparation)
