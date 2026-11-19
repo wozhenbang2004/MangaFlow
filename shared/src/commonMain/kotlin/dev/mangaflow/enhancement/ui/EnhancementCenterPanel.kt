@@ -435,46 +435,6 @@ private fun EnhancementModels(inventory: EngineInventory, progress: Map<String, 
         EngineContent.VIDEO in engine.contents else engine.contents.any { it != EngineContent.VIDEO } }
     val uriHandler = LocalUriHandler.current
     if (engines.isEmpty()) EnhancementQuiet("尚未取得引擎信息。")
-    engines.forEach { engine ->
-        EnhancementSection(engine.title, Icons.Outlined.Memory, engineReadinessLabel(engine.readiness)) {
-            EnhancementQuiet(engine.detail)
-            EnhancementValue("支持倍率", engine.supportedScales.sorted().joinToString(" / ") { "$it×" }.ifBlank { "不可用" })
-            EnhancementValue("版本 / 许可", "${engine.version} · ${engine.license}")
-            progress[engine.id]?.let { value ->
-                EnhancementQuiet(value.readableProgress())
-                value.detail?.let { EnhancementQuiet(it) }
-            }
-            if (engine.canInstall) MotionTextButton(onClick = { onInstall(engine.id) }, contentPadding = PaddingValues(horizontal = 0.dp)) {
-                Icon(Icons.Outlined.Download, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
-                Text("安装" + (engine.downloadBytes?.let { " · ${enhancementBytes(it)}" } ?: ""))
-            }
-            val models = inventory.models.filter { it.engineId == engine.id &&
-                (EngineContent.VIDEO in it.contents) == (content == EnhancementContent.ANIME) }
-            models.forEach { model ->
-                MotionTextButton(onClick = { onSelectModel(model.id) }, modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 8.dp)) {
-                    Icon(if (selectedModel == model.id) Icons.Outlined.RadioButtonChecked else Icons.Outlined.RadioButtonUnchecked,
-                        null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(model.title, style = MaterialTheme.typography.bodyMedium)
-                        Text("${model.nativeScale}× · ${enhancementBytes(model.bytes)} · ${model.sha256.take(12)}",
-                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
-            if (engine.id == EnhancementEngineIds.ANDROID_RIFE) {
-                inventory.frameModels.filter { it.engineId == engine.id }.forEach { model ->
-                    EnhancementValue(model.title, "${enhancementBytes(model.bytes)} · ${model.sha256.take(12)}")
-                }
-                MotionTextButton({ uriHandler.openUri(engine.sourceUrl) }, contentPadding = PaddingValues(horizontal = 0.dp)) {
-                    Text("打开官方 RIFE 模型包")
-                }
-            }
-        }
-        EnhancementDivider()
-    }
-
     val offers = enhancementModelOffers.filter { offer ->
         offer.engineId in engines.map { it.id } &&
             (content == EnhancementContent.ANIME) == (EngineContent.VIDEO in offer.contents)
@@ -531,6 +491,46 @@ private fun EnhancementModels(inventory: EngineInventory, progress: Map<String, 
         }
         EnhancementDivider()
     }
+    engines.forEach { engine ->
+        EnhancementSection(engine.title, Icons.Outlined.Memory, engineReadinessLabel(engine.readiness)) {
+            EnhancementQuiet(engine.detail)
+            EnhancementValue("支持倍率", engine.supportedScales.sorted().joinToString(" / ") { "$it×" }.ifBlank { "不可用" })
+            EnhancementValue("版本 / 许可", "${engine.version} · ${engine.license}")
+            progress[engine.id]?.let { value ->
+                EnhancementQuiet(value.readableProgress())
+                value.detail?.let { EnhancementQuiet(it) }
+            }
+            if (engine.canInstall) MotionTextButton(onClick = { onInstall(engine.id) }, contentPadding = PaddingValues(horizontal = 0.dp)) {
+                Icon(Icons.Outlined.Download, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
+                Text("安装" + (engine.downloadBytes?.let { " · ${enhancementBytes(it)}" } ?: ""))
+            }
+            val models = inventory.models.filter { it.engineId == engine.id &&
+                (EngineContent.VIDEO in it.contents) == (content == EnhancementContent.ANIME) }
+            models.forEach { model ->
+                MotionTextButton(onClick = { onSelectModel(model.id) }, modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 8.dp)) {
+                    Icon(if (selectedModel == model.id) Icons.Outlined.RadioButtonChecked else Icons.Outlined.RadioButtonUnchecked,
+                        null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(model.title, style = MaterialTheme.typography.bodyMedium)
+                        Text("${model.nativeScale}× · ${enhancementBytes(model.bytes)} · ${model.sha256.take(12)}",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+            if (engine.id == EnhancementEngineIds.ANDROID_RIFE) {
+                inventory.frameModels.filter { it.engineId == engine.id }.forEach { model ->
+                    EnhancementValue(model.title, "${enhancementBytes(model.bytes)} · ${model.sha256.take(12)}")
+                }
+                MotionTextButton({ uriHandler.openUri(engine.sourceUrl) }, contentPadding = PaddingValues(horizontal = 0.dp)) {
+                    Text("打开官方 RIFE 模型包")
+                }
+            }
+        }
+        EnhancementDivider()
+    }
+
     if (selectedModel != null) MotionTextButton({ onSelectModel(null) }, contentPadding = PaddingValues(horizontal = 0.dp)) {
         Text("恢复自动选模型")
     }
