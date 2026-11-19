@@ -54,6 +54,7 @@ import dev.mangaflow.experience.SourceRecoveryMode
 import dev.mangaflow.enhancement.EnhancementPolicy
 import dev.mangaflow.enhancement.EnhancementContent
 import dev.mangaflow.enhancement.EnhancementSettingsStore
+import dev.mangaflow.enhancement.EnhancementTaskPhase
 import dev.mangaflow.enhancement.QualityTier
 import dev.mangaflow.enhancement.ReaderEnhancementState
 import dev.mangaflow.enhancement.ui.EnhancementReadouts
@@ -803,7 +804,10 @@ private fun ReaderEnhancementWork(
     val colors = MaterialTheme.colorScheme
     val current = state.assets[state.currentPage]
     val task = state.currentTask.takeIf { policy.tier != QualityTier.ORIGINAL }
-    val progress = task?.let(::readerEnhancementTaskProgress)
+    val failure = task?.takeIf { it.phase == EnhancementTaskPhase.FAILED }?.reason
+        ?: state.detail?.takeIf { policy.tier != QualityTier.ORIGINAL && !state.currentEnhanced && task == null }
+    val progress = task?.let { if (it.phase == EnhancementTaskPhase.FAILED) "本页增强失败"
+        else readerEnhancementTaskProgress(it) }
     val readiness = if (policy.tier == QualityTier.ORIGINAL) "原画 · 增强未启用"
         else (if (state.currentEnhanced) "本页增强已备" else progress ?: "本页增强未备") +
             if (state.nextReady) " · 前方增强已备" else " · 前方增强未备"
@@ -820,10 +824,21 @@ private fun ReaderEnhancementWork(
         Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
             Modifier.padding(start = 6.dp).size(16.dp), tint = colors.onSurfaceVariant)
     }
+    if (failure != null) {
+        Text(failure, Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+            style = MaterialTheme.typography.labelSmall, color = mangaStatusColors().error)
+        onOpen?.let { open ->
+            MotionTextButton(onClick = open, enabled = enabled,
+                modifier = Modifier.heightIn(min = 44.dp), contentPadding = PaddingValues(horizontal = 6.dp)) {
+                Text("查看原因与重试", style = MaterialTheme.typography.labelMedium)
+                Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp))
+            }
+        }
+    }
     StatusReveal(expanded) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatusExplanation("目标 ${policy.tier.label} · ${policy.scale}×")
-            task?.let {
+            StatusExplanation("${if (policy.modelId != null) "自选模型" else "预设 ${policy.tier.label}"} · ${policy.scale}×")
+            task?.takeIf { it.phase != EnhancementTaskPhase.FAILED }?.let {
                 StatusExplanation(listOfNotNull(progress, it.reason ?: it.progress?.detail).joinToString(" · "))
             }
             StatusMetricSlots(maxOf(state.running, state.queued, state.assets.size, 1).toString(), count = 3) { index ->
@@ -840,7 +855,7 @@ private fun ReaderEnhancementWork(
             val p95 = state.elapsedP95Millis?.let { formatDecimal(it, 0) + " ms" } ?: "—"
             StatusExplanation(if (state.elapsedP50Millis == null) "尚无已完成整页，完成后显示处理耗时"
                 else "整页处理 P50 / P95  $p50 / $p95")
-            state.detail?.let { StatusExplanation("窗口处理反馈：$it") }
+            state.detail?.takeIf { it != failure }?.let { StatusExplanation("窗口处理反馈：$it") }
             StatusExplanation("已备表示增强文件可用；原图预读与增强准备分别统计。")
             onOpen?.let { open ->
                 MotionTextButton(onClick = open, enabled = enabled,

@@ -23,15 +23,17 @@ internal class AndroidOnnxTiles(
 ) {
     private val input = session.inputInfo.values.single().info as TensorInfo
     private val inputName = session.inputNames.single()
-    private val tileW = tileDimension(input.shape[3], tileSize)
-    private val tileH = tileDimension(input.shape[2], tileSize)
-    private val overlap = maxOf(16, overlapSize).coerceAtMost(minOf(tileW, tileH) / 4)
-    private val stepX = tileW - 2 * overlap
-    private val stepY = tileH - 2 * overlap
-    private val blend = minOf(8, overlap / 2)
     val outWidth = Math.multiplyExact(width, scale)
     val outHeight = Math.multiplyExact(height, scale)
     private val channels = input.shape[1].toInt()
+    private val layout = tileLayout(input.shape[3], input.shape[2], tileSize, overlapSize, budget)
+    private val tileW = layout.width
+    private val tileH = layout.height
+    private val overlap = layout.overlap
+    private val stepX = tileW - 2 * overlap
+    private val stepY = tileH - 2 * overlap
+    private val blend = minOf(8, overlap / 2)
+    val tileDescription: String get() = "${tileW}×${tileH}"
     private val total = ((width.toLong() + stepX - 1) / stepX) * ((height.toLong() + stepY - 1) / stepY)
     private val inputShape = longArrayOf(1, channels.toLong(), tileH.toLong(), tileW.toLong())
     private val environment = OrtEnvironment.getEnvironment()
@@ -45,12 +47,8 @@ internal class AndroidOnnxTiles(
 
     init {
         require(!requireRgb || channels == 3) { "番剧模型需要 RGB 三通道输入" }
-        val tileOutputFloats = tileW.toLong() * tileH * scale * scale * 3
         val stripFloats = outWidth.toLong() * minOf(outHeight, (stepY + 2 * blend) * scale) * 4
         val tailFloats = outWidth.toLong() * minOf(outHeight, 2 * blend * scale) * 4
-        require((tileOutputFloats * 2 + stripFloats + tailFloats + tileW.toLong() * tileH * (channels + 1)) * 4 <= budget) {
-            "分块与输出行缓冲超过当前准入预算，请减小分块"
-        }
         accumulated = FloatArray(Math.toIntExact(stripFloats))
         previous = FloatArray(Math.toIntExact(tailFloats))
         row = IntArray(outWidth)
@@ -142,6 +140,39 @@ internal class AndroidOnnxTiles(
             top = bottom
         }
     }
+
+    /** Decide before allocating the input and row buffers; fixed model dimensions stay exact. */
+    private fun tileLayout(fixedWidth: Long, fixedHeight: Long, requested: Int, requestedOverlap: Int,
+        budget: Long): TileLayout {
+        var tileWidth = tileDimension(fixedWidth, requested)
+        var tileHeight = tileDimension(fixedHeight, requested)
+        val padding = maxOf(16, requestedOverlap).coerceAtMost(minOf(tileWidth, tileHeight) / 4)
+        val minimumDynamicSize = maxOf(64, padding * 4)
+        while (true) {
+            val fade = minOf(8, padding / 2)
+            val rows = (tileHeight - 2 * padding + 2 * fade) * scale
+            val outputFloats = tileWidth.toLong() * tileHeight * scale * scale * 3
+            val stripFloats = outWidth.toLong() * minOf(outHeight, rows) * 4
+            val tailFloats = outWidth.toLong() * minOf(outHeight, 2 * fade * scale) * 4
+            // Include native output plus its Java buffer copy, input, region pixels and PNG row.
+            val bytes = (outputFloats * 2 + stripFloats + tailFloats +
+                tileWidth.toLong() * tileHeight * (channels + 1)) * 4 + outWidth.toLong() * 8 + 1
+            if (bytes <= budget) return TileLayout(tileWidth, tileHeight, padding)
+            val nextWidth = if (fixedWidth <= 0L && tileWidth > minimumDynamicSize)
+                maxOf(minimumDynamicSize, tileWidth - 64) else tileWidth
+            val nextHeight = if (fixedHeight <= 0L && tileHeight > minimumDynamicSize)
+                maxOf(minimumDynamicSize, tileHeight - 64) else tileHeight
+            require(nextWidth != tileWidth || nextHeight != tileHeight) {
+                val minimumMiB = (bytes + 1024 * 1024 - 1) / (1024 * 1024)
+                val availableMiB = budget / (1024 * 1024)
+                "此页的 ${tileWidth}×${tileHeight} 分块缓冲至少需要 ${minimumMiB} MiB，当前处理预算 ${availableMiB} MiB；可选择更低倍率的模型"
+            }
+            tileWidth = nextWidth
+            tileHeight = nextHeight
+        }
+    }
+
+    private data class TileLayout(val width: Int, val height: Int, val overlap: Int)
 
     private fun tileDimension(value: Long, requested: Int): Int {
         if (value <= 0L) return requested.coerceIn(64, 512)

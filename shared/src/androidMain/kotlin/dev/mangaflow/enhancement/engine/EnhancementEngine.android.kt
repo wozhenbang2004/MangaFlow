@@ -283,7 +283,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                 val engineVersion = when (request.engineId) {
                     EnhancementEngineIds.LOCAL_DETAIL -> {
                         require(request.scale == 1) { "轻量处理只支持 1×" }
-                        renderLocal(decoder, output, request.maximumOutputBytes, progress)
+                        renderLocal(decoder, output, request.maximumWorkingBytes, progress)
                         EnhancementEngineIds.LOCAL_DETAIL_VERSION
                     }
                     EnhancementEngineIds.ANDROID_CUGAN -> {
@@ -308,6 +308,9 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                 }
                 currentCoroutineContext().ensureActive()
                 check(engineSha256(source) == sourceHash) { "原始页面已变化，旧增强结果不再使用" }
+                require(output.length() <= request.maximumOutputBytes) {
+                    "增强后的 PNG 超过单图文件大小上限，已保留原图；可降低输出倍率或调整单图压缩上限"
+                }
                 progress(EngineProgress(EngineStage.VALIDATE, detail = "校验完整 PNG 与页面尺寸"))
                 val size = verifyEnginePng(output)
                 check(size.first.toLong() == decoder.width.toLong() * request.scale && size.second.toLong() == decoder.height.toLong() * request.scale)
@@ -441,7 +444,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                 }
                 try {
                     val renderer = AndroidOnnxTiles(session, decoder.width, decoder.height,
-                        request.scale, request.tileSize, request.overlap, request.maximumOutputBytes,
+                        request.scale, request.tileSize, request.overlap, request.maximumWorkingBytes,
                         runOptions = runOptions)
                     val decoderOptions = BitmapFactory.Options().apply {
                         inPreferredConfig = Bitmap.Config.ARGB_8888
@@ -455,11 +458,17 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                             finally { bitmap.recycle() }
                         }, { _, row -> writer.row(row) }, { completed, total ->
                             progress(EngineProgress(EngineStage.PROCESS, completed, total,
-                                detail = if (completed == 0L) "正在处理首个分块 · CPU ONNX" else "重叠分块 · CPU ONNX"))
+                                detail = if (completed == 0L) "正在处理首个 ${renderer.tileDescription} 分块 · CPU ONNX"
+                                    else "${renderer.tileDescription} 重叠分块 · CPU ONNX"))
                         })
                         coroutine.ensureActive()
                         writer.finish()
                     }
+                } catch (failure: Exception) {
+                    // Native RunOptions termination can surface as OrtException. Preserve the
+                    // coroutine owner's cancellation instead of reporting a failed model/page.
+                    coroutine.ensureActive()
+                    throw failure
                 } finally {
                     withContext(NonCancellable) { cancellation.cancelAndJoin() }
                 }

@@ -41,7 +41,7 @@ fun selectRealtimeEnhancement(policy: EnhancementPolicy, resources: ExperienceRe
     val mode = when (policy.tier) {
         QualityTier.LIGHT -> AnimeVideoEnhancementMode.FAST
         QualityTier.BALANCED -> AnimeVideoEnhancementMode.QUALITY
-        QualityTier.AUTO -> if (measuredGpuP95Millis != null && sourceFps != null && sourceFps > 0 &&
+        QualityTier.AUTO -> if (!policy.locked && measuredGpuP95Millis != null && sourceFps != null && sourceFps > 0 &&
             measuredGpuP95Millis >= 1000.0 / sourceFps * .8) AnimeVideoEnhancementMode.FAST else AnimeVideoEnhancementMode.QUALITY
         else -> AnimeVideoEnhancementMode.OFF
     }

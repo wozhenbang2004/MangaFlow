@@ -145,3 +145,85 @@ internal fun enhancementModelSelectionPolicy(content: EnhancementContent, policy
 
 private fun EngineDescriptor.availableForScaleSelection(): Boolean =
     readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.READY_FOR_TRIAL)
+
+internal data class EnhancementPresetDescription(val algorithm: String, val detail: String, val unavailable: Boolean = false)
+
+/** Describes selection, never an assertion that the model has produced or displayed an image. */
+internal fun enhancementPresetDescription(content: EnhancementContent, policy: EnhancementPolicy,
+    inventory: EngineInventory): EnhancementPresetDescription {
+    if (policy.tier == QualityTier.ORIGINAL) return EnhancementPresetDescription(
+        if (content == EnhancementContent.ANIME) "原画" else "原图", "画质增强已关闭，输出倍率与其他设置保留。")
+    if (content != EnhancementContent.ANIME) {
+        val types = when (policy.style) {
+            ImageStyle.MONOCHROME -> listOf(EngineContent.BLACK_WHITE)
+            ImageStyle.COLOR -> listOf(EngineContent.COLOR)
+            ImageStyle.WEBTOON -> listOf(EngineContent.WEBTOON)
+            ImageStyle.AUTO -> listOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON)
+        }
+        val choices = types.map { type -> type to runCatching { selectReaderEnhancementModel(inventory, policy, type) } }
+        fun title(choice: Result<ReaderEnhancementModel>): String = choice.getOrNull()?.let {
+            it.model?.title ?: "本地 1× 轻量修复"
+        } ?: "暂无兼容模型"
+        val titles = choices.map { title(it.second) }.distinct()
+        val algorithm = if (titles.size == 1) titles.single() else choices.joinToString("；") { (type, choice) ->
+            val typeLabel = when (type) {
+                EngineContent.BLACK_WHITE -> "黑白"
+                EngineContent.COLOR -> "彩色"
+                EngineContent.WEBTOON -> "条漫"
+                EngineContent.VIDEO -> "视频"
+            }
+            "$typeLabel：${title(choice)}"
+        }
+        val reason = choices.mapNotNull { it.second.exceptionOrNull()?.message }.distinct().joinToString("；")
+        val behavior = when (policy.tier) {
+            QualityTier.LIGHT -> "1× 本地修复，不使用 AI 放大模型。"
+            QualityTier.AUTO, QualityTier.BALANCED -> if (policy.scale == 1)
+                "当前 1× 使用本地修复；自动与均衡在此配置下效果相同。"
+                else "按图片类型和倍率匹配已就绪模型；自动与均衡当前共用这套选择规则。"
+            QualityTier.FINE, QualityTier.ULTRA ->
+                "精细与极致当前没有独立的漫画模型预设，共用兼容模型选择；档名不会改变同一模型的强度。可通过自选模型更换算法。"
+            QualityTier.ORIGINAL -> ""
+        }
+        return EnhancementPresetDescription(algorithm, listOf(behavior, reason).filter { it.isNotBlank() }.joinToString("\n"),
+            choices.any { it.second.isFailure })
+    }
+    fun profile(id: String, fallback: String, detail: String): EnhancementPresetDescription {
+        val engine = inventory.engines.firstOrNull { it.id == id }
+        val available = engine != null && engine.availableForScaleSelection() && policy.scale in engine.supportedScales
+        return EnhancementPresetDescription(engine?.title ?: fallback,
+            detail + if (available) "" else " 当前 ${policy.scale}× 不能用于此实时预设，请调整输出倍率或自选模型。",
+            unavailable = !available)
+    }
+    return when (policy.tier) {
+        QualityTier.LIGHT -> profile(EnhancementEngineIds.ANIME4K_SMALL, "Anime4K S/S",
+            "固定使用 S/S；1× 只修复，2× 修复并放大。")
+        QualityTier.BALANCED -> profile(EnhancementEngineIds.ANIME4K_MEDIUM, "Anime4K M/M",
+            "固定使用 M/M；1× 只修复，2× 修复并放大。")
+        QualityTier.AUTO -> profile(EnhancementEngineIds.ANIME4K_MEDIUM,
+            "Anime4K M/M", if (policy.locked)
+                "已固定 M/M；内存或温度保护仍可暂用原画。"
+            else "先使用 M/M；取得片源帧率和处理耗时后，接近帧预算时改用 S/S。本次播放降档后保持 S/S。")
+            .let { if (policy.locked) it else it.copy(algorithm = "Anime4K M/M 或 S/S") }
+        QualityTier.FINE, QualityTier.ULTRA -> {
+            val candidates = inventory.models.filter { it.nativeScale == policy.scale && EngineContent.VIDEO in it.contents }
+            val model = when (platformKind) {
+                PlatformKind.DESKTOP -> {
+                    val preferred = if (policy.tier == QualityTier.FINE) "animejanai-live:performance" else "animejanai-live:balanced"
+                    val id = if (inventory.models.any { it.id == preferred }) preferred
+                        else if (policy.tier == QualityTier.FINE) "artcnn:C4F16" else "artcnn:C4F32"
+                    candidates.firstOrNull { it.id == id && it.nativeScale in 1..2 && it.engineId in setOf(
+                        EnhancementEngineIds.DESKTOP_REALTIME, EnhancementEngineIds.DESKTOP_ARTCNN) }
+                }
+                PlatformKind.ANDROID -> candidates.firstOrNull { it.engineId == EnhancementEngineIds.ANDROID_CUGAN_VIDEO }
+                    ?: candidates.firstOrNull { it.engineId == EnhancementEngineIds.ANDROID_VIDEO_ONNX }
+                else -> null
+            }
+            val detail = if (platformKind == PlatformKind.ANDROID)
+                "精细与极致当前共用兼容视频模型选择，没有独立的两级预设；档名不会改变模型强度。可自选 Anime4K 的具体型号。"
+                else "按此预设的固定模型选择；实际能否实时运行，以当前播放状态为准。"
+            EnhancementPresetDescription(model?.title ?: "尚无兼容的实时模型", detail,
+                unavailable = model == null)
+        }
+        QualityTier.ORIGINAL -> EnhancementPresetDescription("原画", "画质增强已关闭。")
+    }
+}

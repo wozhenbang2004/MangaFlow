@@ -28,7 +28,10 @@ internal fun readerEnhancementTaskProgress(task: EnhancementTask): String = when
             null -> "本页增强准备中"
         }
     }
-    EnhancementTaskPhase.FAILED -> "本页增强失败"
+    EnhancementTaskPhase.FAILED -> task.reason?.takeIf { it.isNotBlank() }?.let {
+        val brief = it.replace('\n', ' ').trim()
+        "增强失败 · " + if (brief.length > 48) brief.take(48) + "…" else brief
+    } ?: "本页增强失败"
     EnhancementTaskPhase.PAUSED -> "本页增强暂停"
     EnhancementTaskPhase.CANCELLED -> "本页增强取消"
     EnhancementTaskPhase.COMPLETED -> "本页增强已备"

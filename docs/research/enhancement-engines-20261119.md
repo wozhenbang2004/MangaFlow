@@ -6,6 +6,48 @@ device qualification or a claim that the complete V1.0 acceptance has passed**.
 No local build, benchmark, test, executable installation, media conversion or
 device probe was run during this work, following the current project workflow.
 
+## Manga image budgets, model sizes and comparison · 2026-11-20 Asia/Shanghai
+
+ENH-QUALITY-01–04 follows the user's Anime 6B / 4× failure on a 1426×2048 page.
+The exact catalogued [ONNX artifact at c524eb8](https://huggingface.co/mhmtaufiq/realesrgan-onnx/blob/c524eb8/RealESRGAN_x4plus_anime_6B.onnx)
+was retrieved as a static file: 18,406,820 bytes, SHA-256
+`82f458db35dd94f2200f9a32fd0232c581da861c1b2e5c956d5574b0e9c5aea2`.
+Reading protobuf metadata against the [ONNX v1.19.0 schema](https://github.com/onnx/onnx/blob/v1.19.0/onnx/onnx.proto)
+found IR 10, default-domain opset 18, FP32 input `input`
+`[batch_size, 3, height, width]` and output `output`
+`[batch_size, 3, 4*height, 4*width]`. Height and width are dynamic, so adapting the
+tile size is compatible with this actual export. This was not model installation,
+inference, a benchmark or device qualification.
+
+The old 256/32 image path required 107,986,944 bytes in its own explicit-buffer
+formula, exceeding the default 96 MiB encoded-image limit incorrectly passed as
+working RAM. The new accounting includes PNG row buffers; for this geometry,
+128/32 requires 41,644,609 bytes (about 39.72 MiB), 192/32 about 69.81 MiB, and
+256/32 about 103.03 MiB. These are calculated buffer bounds, excluding native
+model weights/activations, not measured RSS. Choose a compatible dynamic tile
+before allocating; keep padding and fixed model dimensions. Resolve the shared
+working allowance after a cache miss and, for an uninitialized automatic budget,
+after a bounded first resource observation. Encoded output size and cache limits
+remain separate. Live RAM allowance is not a completed-result cache identity.
+
+The pinned [Anime4K advanced guide at 7684e958](https://github.com/bloc97/Anime4K/blob/7684e9586f8dcc738af08a1cdceb024cc184f426/md/GLSL_Instructions_Advanced.md)
+defines S/M/L/VL/UL as increasing CNN sizes and computation, with approximate
+per-step timing examples. Those examples are not this phone's timings or a
+universal visual ranking. MangaFlow's S/S and M/M, and optional L/L/VL/VL/UL/UL,
+are matching Restore/Upscale combinations; 1× uses restoration only, 2× includes
+upscaling. A manual model overrides the old non-original tier. The Android manga
+catalogue does not establish four independently ranked quality presets; UI must
+disclose this, rather than equating 4× or a later list row with better quality.
+
+Manga comparison reuses the current original layer, 1600-pixel enhanced preview
+and visible 512-pixel tiles. The divider affects clipping and a small control,
+not image requests or inference. Its performance cost has not been measured on
+the user's device. Android Anime4K has input/output textures together only during
+`drawFrame`; a reusable paused-frame comparison needs explicit texture lifetime
+and redraw ownership. Windows mpv does not yet expose the matching two pictures.
+This batch therefore implements the manga comparison and leaves video same-frame
+comparison open, rather than claiming that a UI divider completes that pipeline.
+
 ## Live interpolation output review · 2026-11-20 Asia/Shanghai
 
 The AUTO/waiting feedback was traced through the exact [Media3 1.11.1

@@ -263,11 +263,14 @@ class ReaderChapterEnhancementStore(context: PlatformContext, private val center
             source.copyTo(input)
             check(sha256File(input.path) == digest) { "原图在复制时发生变化" }
             job.checkpoint()
+            val workingBytes = readerEnhancementWorkingBytes(center)
+            job.checkpoint()
             val output = center.engine.processImage(EngineImageRequest(input.path, temporary.output.path,
                 model.engine, content, task.policy.scale, model.model,
                 tileSize = parameters.tileSize, overlap = parameters.overlap,
                 maximumOutputBytes = minOf(center.resources.state.value.runtime.maxImageBytes,
-                    task.policy.cacheMiB.toLong() * 1024 * 1024).coerceAtLeast(1)), job.progress)
+                    task.policy.cacheMiB.toLong() * 1024 * 1024).coerceAtLeast(1),
+                maximumWorkingBytes = workingBytes), job.progress)
             job.checkpoint()
             check(output.engineId == parameters.engineId &&
                 output.modelSha256 == identity.modelDigest && StorageFile(output.path) == temporary.output &&

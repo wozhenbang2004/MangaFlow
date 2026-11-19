@@ -135,7 +135,7 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
         try {
             if (request.engineId == EnhancementEngineIds.LOCAL_DETAIL) {
                 require(request.scale == 1) { "轻量处理仅支持 1×；2×/4× 需要真实超分模型" }
-                renderDetail(source, output, request.maximumOutputBytes, progress)
+                renderDetail(source, output, request.maximumWorkingBytes, progress)
             } else {
                 require(request.engineId == EnhancementEngineIds.MANGAJANAI && windows)
                 val model = request.model ?: error("请安装或导入适合此页面的真实模型")
@@ -183,6 +183,9 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
             check(engineSha256(source) == sourceHash) { "处理期间原始页面发生变化，结果已丢弃" }
             request.model?.let { check(engineSha256(File(it.path)) == it.sha256) { "处理期间模型发生变化，结果已丢弃" } }
             progress(EngineProgress(EngineStage.VALIDATE, detail = "校验增强页面"))
+            require(output.length() <= request.maximumOutputBytes) {
+                "增强文件超过单图压缩或增强缓存额度，可调整对应额度后重试"
+            }
             val dimensions = verifyEnginePng(output)
             val local = request.engineId == EnhancementEngineIds.LOCAL_DETAIL
             val result = EngineOutput(destination.canonicalPath, dimensions.first, dimensions.second, engineSha256(output), output.length(),

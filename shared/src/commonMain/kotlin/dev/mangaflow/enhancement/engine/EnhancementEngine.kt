@@ -110,8 +110,10 @@ data class EngineImageRequest(
     val model: EngineModel? = null,
     val tileSize: Int = 256,
     val overlap: Int = 32,
-    /** A hard admission budget, not a measurement of current RAM or VRAM. */
+    /** Maximum encoded result size; never a limit on uncompressed working pixels. */
     val maximumOutputBytes: Long = 256L * 1024 * 1024,
+    /** Explicit tile/row-buffer admission budget, not measured model RAM or VRAM. */
+    val maximumWorkingBytes: Long = maximumOutputBytes,
 )
 
 data class EngineVideoRequest(

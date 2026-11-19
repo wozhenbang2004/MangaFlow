@@ -76,7 +76,7 @@ enum class ExperienceRuntimeField(
     CHECK_TIMEOUT("检查时限", "秒", ExperienceRuntimeGroup.BACKGROUND, help = "一轮线路检查的整体时间预算。"),
     IMAGE_CONNECT("图片连接", "秒", ExperienceRuntimeGroup.BACKGROUND, help = "图片建立连接的等待；平台不支持独立连接计时的端使用请求时限。"),
     IMAGE_TOTAL("单图总时限", "分钟", ExperienceRuntimeGroup.BACKGROUND, help = "单次图片传输的整体时限；无新数据等待单独在多源恢复中配置。"),
-    MATERIALIZATION("原图处理", "MiB", ExperienceRuntimeGroup.CACHE, followsAutomatic = true, help = "后台原图处理工作预算，含脚本压缩缓冲及原生JM还原暂用内存，与磁盘窗口分开。当前页晋升后让它完成；原生像素使用保守预留，不是实测RSS。"),
+    MATERIALIZATION("图片处理内存", "MiB", ExperienceRuntimeGroup.CACHE, followsAutomatic = true, help = "图片处理工作预算，含脚本压缩缓冲、原生JM还原及增强分块缓冲，与单图压缩大小和磁盘窗口分开。增强在此额度内选择兼容分块；原生模型内部内存另受设备保护，额度不是实测RSS。"),
     MAX_IMAGE("单图压缩", "MiB", ExperienceRuntimeGroup.CACHE, help = "脚本和原生读取单图压缩数据/处理结果的允许大小；平台数组和可用内存仍有实际限制。"),
     SCRIPT_PIXELS("还原解码", "Mpx", ExperienceRuntimeGroup.CACHE, help = "脚本及原生JM图片还原前的整图像素预算；每Mpx为1048576像素。"),
     FALLBACK_PIXELS("整图解码", "Mpx", ExperienceRuntimeGroup.CACHE, followsAutomatic = true, help = "缺少原生区域解码时的像素预算；自动Windows16、iOS8，每Mpx为1048576像素。"),

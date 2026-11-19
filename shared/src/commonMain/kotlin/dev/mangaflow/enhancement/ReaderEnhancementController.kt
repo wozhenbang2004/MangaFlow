@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.first
 import kotlin.concurrent.Volatile
 import kotlin.math.abs
 
@@ -91,6 +92,8 @@ internal class ReaderEnhancementController(
     private var pagesPerSecond = 0.0
     private var cacheHits = 0L
     private var cacheLookups = 0L
+    private var imageWorkingLimitMiB = center.resources.state.value.runtime.materializationMiB
+    private var encodedImageLimitMiB = center.resources.state.value.runtime.maxImageMiB
     private val mutableState = MutableStateFlow(ReaderEnhancementState())
     val state: StateFlow<ReaderEnhancementState> = mutableState.asStateFlow()
 
@@ -117,6 +120,21 @@ internal class ReaderEnhancementController(
             synchronized(lock) { cacheMisses.clear() }
             retryUseful()
         } }
+        scope.launch {
+            center.resources.state.map { it.runtime.materializationMiB to it.runtime.maxImageMiB }
+                .distinctUntilChanged().collect { (workingLimit, encodedLimit) ->
+                    val retry = synchronized(lock) {
+                        if (closed || imageWorkingLimitMiB == workingLimit && encodedImageLimitMiB == encodedLimit) false
+                        else {
+                            imageWorkingLimitMiB = workingLimit
+                            encodedImageLimitMiB = encodedLimit
+                            clearFailuresLocked()
+                            true
+                        }
+                    }
+                    if (retry) retryUseful()
+                }
+        }
     }
 
     private fun retryUseful() = synchronized(lock) { wanted.toList() }.forEach(::queueIfUseful)
@@ -376,11 +394,14 @@ internal class ReaderEnhancementController(
                     }
                     source.close()
                     task.checkpoint()
+                    val workingBytes = readerEnhancementWorkingBytes(center)
+                    task.checkpoint()
                     val output = center.engine.processImage(EngineImageRequest(input.path, currentWork.output.path,
                         engineId = selection.engine, content = imageContent, scale = selected.scale, model = selection.model,
                         tileSize = parameters.tileSize, overlap = parameters.overlap,
                         maximumOutputBytes = minOf(center.resources.state.value.runtime.maxImageBytes,
-                            cacheBudgetBytes()).coerceAtLeast(1L)), task.progress)
+                            cacheBudgetBytes()).coerceAtLeast(1L),
+                        maximumWorkingBytes = workingBytes), task.progress)
                     task.checkpoint()
                     check(output.engineId == parameters.engineId &&
                         output.modelSha256 == identity.modelDigest && StorageFile(output.path) == currentWork.output) {
@@ -504,6 +525,19 @@ internal data class ReaderEnhancementParameters(
     val cacheIdentity: String,
 )
 
+/** Resolve only for new inference, after cache lookup; a limit is not a memory-use receipt. */
+internal suspend fun readerEnhancementWorkingBytes(center: EnhancementCenter): Long {
+    val resources = center.resources
+    if (resources.state.value.runtime.materializationMiB == null &&
+        resources.usage.value.resources.sampledAtMillis == null) {
+        resources.refreshResources()
+        check(withTimeoutOrNull(3_000L) {
+            resources.usage.first { it.resources.sampledAtMillis != null }
+        } != null) { "尚未取得本机内存信息，原图可继续阅读；稍后重试或在体验策略设置图片处理内存" }
+    }
+    return resources.state.value.materializationBytes.coerceAtLeast(0L)
+}
+
 /** One normalized request and identity for both live pages and completed-download batches. */
 internal fun readerEnhancementParameters(center: EnhancementCenter, engineId: String,
     content: EngineContent): ReaderEnhancementParameters {
@@ -516,7 +550,7 @@ internal fun readerEnhancementParameters(center: EnhancementCenter, engineId: St
         EnhancementEngineIds.MANGAJANAI -> 128
         else -> 32
     }
-    val identity = listOf("algorithm" to "reader-image-v1", "engine" to engine.id,
+    val identity = listOf("algorithm" to "reader-image-v2-adaptive-tiles", "engine" to engine.id,
         "engineVersion" to engine.version, "content" to content.name,
         "tile" to tile.toString(), "overlap" to overlap.toString()).joinToString("") { (key, value) ->
         "${key.length}:$key${value.length}:$value"
@@ -525,8 +559,10 @@ internal fun readerEnhancementParameters(center: EnhancementCenter, engineId: St
 }
 
 internal fun selectReaderEnhancementModel(center: EnhancementCenter, selected: EnhancementPolicy,
+    image: EngineContent): ReaderEnhancementModel = selectReaderEnhancementModel(center.inventory.value, selected, image)
+
+internal fun selectReaderEnhancementModel(inventory: EngineInventory, selected: EnhancementPolicy,
     image: EngineContent): ReaderEnhancementModel {
-    val inventory = center.inventory.value
     val explicit = selected.modelId?.let { id -> inventory.models.firstOrNull { it.id == id }
         ?: error("所选模型尚未安装，请打开画质与性能安装模型") }
     val automaticModel = selected.tier in setOf(QualityTier.FINE, QualityTier.ULTRA) ||

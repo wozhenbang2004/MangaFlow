@@ -26,6 +26,7 @@ import dev.mangaflow.anime.player.Anime4KOptionalModels
 import dev.mangaflow.enhancement.EnhancementCenter
 import dev.mangaflow.enhancement.EnhancementContent
 import dev.mangaflow.enhancement.EnhancementPolicy
+import dev.mangaflow.enhancement.QualityTier
 import dev.mangaflow.enhancement.enhancementModelSelectionPolicy
 import dev.mangaflow.enhancement.engine.*
 import dev.mangaflow.platform.PlatformKind
@@ -118,6 +119,7 @@ internal fun EnhancementModelList(
     content: EnhancementContent,
     policy: EnhancementPolicy,
     onSelectModel: (EnhancementPolicy) -> Unit,
+    onUsePresets: () -> Unit,
     onOpenModel: (String) -> Unit,
     onOpenEngines: () -> Unit,
     onImport: () -> Unit,
@@ -125,13 +127,12 @@ internal fun EnhancementModelList(
 ) {
     val choices = remember(inventory, content) { modelChoices(inventory, content) }
     val selectedModel = policy.modelId
-    val automatic = enhancementModelSelectionPolicy(content, policy, inventory, null)
-    ModelChoiceRow("自动选择", if (automatic != null) "按当前档位匹配已就绪的模型" else "当前档位暂无可用模型，查看运行组件",
-        selectedModel == null, automatic != null,
-        onClick = { if (automatic != null) onSelectModel(automatic) else onOpenEngines() },
-        actionLabel = automatic?.scale?.takeIf { it != policy.scale }?.let { "选用并改为 ${it}×" },
-        detailsOnly = automatic == null)
+    ModelChoiceRow("使用预设", "返回画质页选择预设算法；保留 ${policy.scale}× 输出设置",
+        selectedModel == null, true, onClick = onUsePresets)
     ModelListTools("可选模型", onImport, onRefresh)
+    EnhancementQuiet("选用后由这个模型决定画质，预设档位不再参与。")
+    if (content == EnhancementContent.ANIME && choices.any { it.profile != null })
+        EnhancementQuiet("Anime4K 的 S、M、L、VL、UL 表示逐渐增大的模型规模，通常也需要更多计算；不保证每段画面都更好。其他系列不按列表顺序排名。")
     if (choices.isEmpty()) EnhancementQuiet("还没有可选模型，可先准备运行组件或导入模型。")
     choices.forEach { choice ->
         val pending = choice.progressKey?.let { progress[it] }
@@ -139,7 +140,7 @@ internal fun EnhancementModelList(
         val selection = selectionId?.let { enhancementModelSelectionPolicy(content, policy, inventory, it) }
         val selected = selectionId != null && selectionId == selectedModel
         val unavailable = selectionId != null && selection == null
-        val summary = listOfNotNull("当前不可选".takeIf { unavailable }, choice.scaleLabel, choice.sizeLabel,
+        val summary = listOfNotNull("当前不可选".takeIf { unavailable }, anime4kSizeLabel(choice.engineId), choice.scaleLabel, choice.sizeLabel,
             choice.stateLabel(selectedModel, pending).takeUnless { unavailable }).joinToString(" · ")
         key(choice.key) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -161,6 +162,15 @@ internal fun EnhancementModelList(
     progress["inventory"]?.takeIf { it.failed }?.detail?.let { EnhancementQuiet(it, error = true) }
     EnhancementDivider()
     AnimeEnhancementNavigation(Icons.Outlined.Memory, "运行组件", onClick = onOpenEngines)
+}
+
+private fun anime4kSizeLabel(engineId: String): String? = when (engineId) {
+    EnhancementEngineIds.ANIME4K_SMALL -> "小型模型"
+    EnhancementEngineIds.ANIME4K_MEDIUM -> "中型模型"
+    "anime4k-optional-l" -> "大型模型"
+    "anime4k-optional-vl" -> "更大型模型"
+    "anime4k-optional-ul" -> "本系列最大模型"
+    else -> null
 }
 
 @Composable
@@ -214,7 +224,7 @@ private fun ModelChoiceRow(
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(summary, style = MaterialTheme.typography.labelSmall,
                 color = if (failed) colors.error else colors.onSurfaceVariant,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
             actionLabel?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = colors.primary) }
         }
     }
@@ -253,6 +263,9 @@ internal fun EnhancementModelDetail(
     Text(choice.title, style = MaterialTheme.typography.titleMedium)
     EnhancementQuiet(listOfNotNull(choice.scaleLabel, choice.sizeLabel,
         choice.stateLabel(selectedModel, pending)).joinToString(" · "))
+    anime4kSizeLabel(choice.engineId)?.let { size ->
+        EnhancementQuiet("$size。S → M → L → VL → UL 的规模逐级增大；选择更大的型号通常增加计算开销，实际流畅度取决于本机和片源。")
+    }
     if (selectionId != null) {
         MotionButton({ selection?.let(onSelectModel) }, modifier = Modifier.fillMaxWidth(), enabled = selection != null && !selected) {
             Icon(if (selected) Icons.Outlined.Check else Icons.Outlined.RadioButtonUnchecked, null, Modifier.size(18.dp))
@@ -304,6 +317,8 @@ internal fun EnhancementModelDetail(
         policy.scale !in choice.scales ->
             EnhancementQuiet("当前输出为 ${policy.scale}×，此模型支持 ${choice.scaleLabel}；安装就绪后可选用兼容倍率。")
     }
+    if (policy.tier == QualityTier.ORIGINAL)
+        EnhancementQuiet("画质增强当前关闭；选用后可回画质页开启，模型与倍率会保留。")
     if (engine != null) AnimeEnhancementNavigation(Icons.Outlined.Memory, "运行组件",
         "${engine.title} · ${engineReadinessLabel(engine.readiness)}", onClick = { onOpenEngine(engine.id) })
     EnhancementDivider()

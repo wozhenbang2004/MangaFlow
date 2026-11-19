@@ -129,41 +129,63 @@ internal fun EnhancementQuality(content: EnhancementContent, policy: Enhancement
         it.readiness == EngineReadiness.BUILT_IN }
     val selectedTitle = model?.title ?: builtIn?.title
     val supportedScales = enhancementOutputScales(content, policy, inventory)
-    Text("增强档位", style = MaterialTheme.typography.titleSmall)
-    EnhancementChoices(QualityTier.entries, policy.tier,
-        label = { if (!anime && it == QualityTier.ORIGINAL) "原图" else it.label },
-        onSelect = { tier ->
-            onChange(policy.copy(tier = tier,
-                realtimeEnhancementEnabled = if (anime) tier != QualityTier.ORIGINAL else policy.realtimeEnhancementEnabled,
-                preparation = if (anime && tier != QualityTier.ORIGINAL)
-                    policy.preparation + PreparationMode.IMMEDIATE else policy.preparation))
-        }, description = if (anime) "画质档位，选择增强档位即开启播放时增强" else "画质档位")
-    EnhancementQuiet(when {
-        policy.tier == QualityTier.ORIGINAL -> if (anime) "保留片源画面，选择增强档位即可开启播放时增强。" else "保留原图。"
-        selectedTitle == null && policy.modelId != null -> "所选模型不可用，可重新选择；你的档位会保留。"
-        anime && !policy.realtimeEnhancementEnabled -> "播放时画质增强已关闭，所选档位与已备结果保留。"
-        anime && selectedTitle != null -> "手动选用 $selectedTitle；输出倍率与补帧单独设置。"
-        policy.tier == QualityTier.AUTO -> "依据已有测量和设备负载选择档位。"
-        policy.tier == QualityTier.LIGHT -> "优先降低处理开销。"
-        policy.tier == QualityTier.BALANCED -> "兼顾清晰度与处理开销。"
-        else -> "需要兼容的高质量模型，运行效果以实际观测为准。"
-    })
-    if (anime && policy.tier != QualityTier.ORIGINAL) {
+    val custom = policy.modelId != null
+    Text("画质方案", style = MaterialTheme.typography.titleSmall)
+    MotionTabs(if (custom) 1 else 0, listOf("使用预设", "自选模型"),
+        onSelect = { if (it == 0) {
+            if (custom) onChange(policy.copy(modelId = null))
+        } else onOpenModels() }, modifier = Modifier.fillMaxWidth(), controlHeight = 44.dp,
+        treatment = MotionTabTreatment.Soft, fullWidthIndicator = true,
+        track = MaterialTheme.colorScheme.onSurface.copy(alpha = .035f), role = Role.RadioButton)
+    if (custom) {
+        AnimeEnhancementNavigation(Icons.Outlined.Memory, "当前模型",
+            selectedTitle ?: "所选模型不可用 · 点此检查", onClick = onOpenModels)
+        EnhancementQuiet("由这个模型决定恢复算法；输出倍率单独设置，不再叠加预设档位。")
+        SettingsToggle(if (anime) "播放时画质增强" else "阅读时画质增强",
+            policy.tier != QualityTier.ORIGINAL && (!anime || policy.realtimeEnhancementEnabled),
+            Icons.Outlined.AutoAwesome, onCheckedChange = { enabled ->
+                onChange(policy.copy(
+                    tier = if (enabled) policy.tier.takeUnless { it == QualityTier.ORIGINAL } ?: QualityTier.BALANCED
+                        else if (anime) policy.tier else QualityTier.ORIGINAL,
+                    realtimeEnhancementEnabled = if (anime) enabled else policy.realtimeEnhancementEnabled,
+                    preparation = if (anime && enabled) policy.preparation + PreparationMode.IMMEDIATE else policy.preparation,
+                ))
+            })
+        EnhancementQuiet(if (anime) "关闭后显示原画，模型、倍率与已备结果保留；补帧独立设置。"
+            else "关闭后显示原图，模型、倍率与已完成的增强结果保留。")
+        if (!anime && policy.tier != QualityTier.ORIGINAL &&
+            PreparationMode.IMMEDIATE !in policy.preparation && PreparationMode.SMART !in policy.preparation)
+            EnhancementQuiet("当前仅显示已备结果；需要处理新页面时，可在提前准备中开启。")
+    } else {
+        EnhancementChoices(QualityTier.entries, policy.tier,
+            label = { if (!anime && it == QualityTier.ORIGINAL) "原图" else it.label },
+            onSelect = { tier ->
+                onChange(policy.copy(tier = tier, modelId = null,
+                    realtimeEnhancementEnabled = if (anime) tier != QualityTier.ORIGINAL else policy.realtimeEnhancementEnabled,
+                    preparation = if (anime && tier != QualityTier.ORIGINAL)
+                        policy.preparation + PreparationMode.IMMEDIATE else policy.preparation))
+            }, description = "切换预设算法，保持输出倍率")
+        val preset = enhancementPresetDescription(content, policy, inventory)
+        EnhancementValue("预设算法", preset.algorithm, preset.detail)
+        if (preset.unavailable) AnimeEnhancementNavigation(Icons.Outlined.Memory, "准备兼容模型",
+            "查看模型与运行组件", onClick = onOpenModels)
+    }
+    if (anime && !custom && policy.tier != QualityTier.ORIGINAL) {
         SettingsToggle("播放时画质增强", policy.realtimeEnhancementEnabled, Icons.Outlined.AutoAwesome,
             onCheckedChange = { onChange(policy.copy(realtimeEnhancementEnabled = it,
                 preparation = if (it) policy.preparation + PreparationMode.IMMEDIATE else policy.preparation)) })
         EnhancementQuiet("只控制画质，补帧独立设置。关闭后显示原画，已备结果保留。")
     }
     Spacer(Modifier.height(8.dp))
-    AnimeEnhancementNavigation(Icons.Outlined.Memory, "画质模型",
-        selectedTitle ?: if (policy.modelId == null) "自动选择" else "所选模型不可用", onClick = onOpenModels)
     AnimeEnhancementNavigation(Icons.Outlined.Tune, "输出与策略",
         listOfNotNull(when {
             policy.scale !in supportedScales -> "${policy.scale}× · 当前不可用"
             policy.scale == 1 -> "1× 原尺寸修复"
             else -> "${policy.scale}×"
         },
-            policy.style.label.takeUnless { anime }, "锁定档位".takeIf { policy.locked }).joinToString(" · "),
+            policy.style.label.takeUnless { anime }, "固定模型".takeIf {
+                anime && policy.modelId == null && policy.tier == QualityTier.AUTO && policy.locked
+            }).joinToString(" · "),
         onClick = onOpenOptions)
 }
 
@@ -189,18 +211,20 @@ internal fun EnhancementQualityOptions(content: EnhancementContent, policy: Enha
         ).joinToString(""))
     }
     if (policy.tier == QualityTier.ORIGINAL) EnhancementQuiet(if (anime)
-        "当前仍播放原画；倍率会在选用增强档位后使用。" else "当前仍显示原图；倍率会在选用增强档位后使用。")
+        "当前仍播放原画；开启画质增强后使用这个倍率。" else "当前仍显示原图；开启画质增强后使用这个倍率。")
     if (!anime) {
         Spacer(Modifier.height(12.dp))
         Text("漫画类型", style = MaterialTheme.typography.titleSmall)
         EnhancementChoices(ImageStyle.entries, policy.style, label = { it.label },
             onSelect = { onChange(policy.copy(style = it)) }, description = "漫画内容类型", columns = 2)
     }
-    Spacer(Modifier.height(12.dp))
-    EnhancementDivider()
-    SettingsToggle("锁定所选档位", policy.locked, Icons.Outlined.Lock,
-        onCheckedChange = { onChange(policy.copy(locked = it)) })
-    EnhancementQuiet("开启后保留所选档位；设备保护触发时暂用原画。")
+    if (anime && policy.modelId == null && policy.tier == QualityTier.AUTO) {
+        Spacer(Modifier.height(12.dp))
+        EnhancementDivider()
+        SettingsToggle("固定自动方案模型", policy.locked, Icons.Outlined.Lock,
+            onCheckedChange = { onChange(policy.copy(locked = it)) })
+        EnhancementQuiet("开启后固定使用 Anime4K M/M，不因处理变慢切到 S/S；内存或温度保护仍会暂用原画。")
+    }
 }
 
 @Composable

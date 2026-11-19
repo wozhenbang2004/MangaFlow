@@ -138,6 +138,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.DontMemoize
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableFloatState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -452,8 +453,8 @@ fun ReaderScreen(
     var readerStatusInspecting by remember(chapterId) { mutableStateOf(false) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showEnhancement by rememberSaveable { mutableStateOf(false) }
-    var compareEnhancement by remember(chapterId) { mutableStateOf(false) }
-    var enhancementDivider by remember(chapterId) { mutableFloatStateOf(.5f) }
+    var comparisonTarget by remember(chapterId) { mutableStateOf<ReaderComparisonTarget?>(null) }
+    val enhancementDivider = remember(chapterId) { mutableFloatStateOf(.5f) }
     var showPanelModels by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) { if (!PanelReadingAvailable) showPanelModels = false }
     var showComments by remember(chapterId) { mutableStateOf(false) }
@@ -534,6 +535,9 @@ fun ReaderScreen(
         enhancementCenter.settings.policy(enhancementContent, enhancement.sessionKey)
     }
     val enhancementState by enhancement.state.collectAsStateWithLifecycle()
+    val latestComparisonOwner by rememberUpdatedState(enhancement to pageIndex)
+    val compareEnhancement = comparisonTarget?.matches(enhancement, pageIndex,
+        enhancementState.assets[pageIndex], enhancementPolicy) == true
     val warmSourceStandbys by rememberUpdatedState(onWarmSourceStandbys)
     val prefetchedPageFailed by rememberUpdatedState(onPrefetchPageFailed)
     val cancelSourceStandbys by rememberUpdatedState(onCancelSourceStandbys)
@@ -566,8 +570,11 @@ fun ReaderScreen(
             readerForeground && !leavingReader && !chapterChangeRequested,
             enhancementPolicy, experience.state.value)
     }
-    LaunchedEffect(enhancement, pageIndex) { compareEnhancement = false }
-    BackHandler(enabled = active && compareEnhancement) { compareEnhancement = false }
+    val comparisonSnapshot = comparisonTarget
+    LaunchedEffect(comparisonSnapshot, compareEnhancement) {
+        if (!compareEnhancement && comparisonTarget == comparisonSnapshot) comparisonTarget = null
+    }
+    BackHandler(enabled = active && compareEnhancement) { comparisonTarget = null }
     LaunchedEffect(sourceIdentity, chapter, pageIndex, pages, standbyActive, loading, error,
         sourcePickerBlocking, chapterChangeRequested, experienceBudget.standbySources, preparation.direction) {
         // A stalled or failed visible image is exactly when spare sources matter. Do not
@@ -1089,7 +1096,9 @@ fun ReaderScreen(
     CompositionLocalProvider(LocalReaderActionFinished provides { if (desktop) keyboardFocusRestore++ },
         LocalReaderEnhancement provides enhancement,
         LocalReaderEnhancementPresentation provides ReaderEnhancementPresentation(enhancement, enhancementState,
-            enhancementDivider.takeIf { compareEnhancement }),
+            comparisonFraction = enhancementDivider.takeIf { compareEnhancement },
+            comparisonPageIndex = pageIndex.takeIf { compareEnhancement },
+            onComparisonFractionChange = { enhancementDivider.floatValue = it.coerceIn(0f, 1f) }),
         LocalReaderPreparationTracker provides preparationTracker,
         LocalReaderCacheRangeOwner provides cacheRangeOwner,
         LocalReaderPageRepair provides ReaderRepairRenderContext(repairState, repairs) { index, waiting ->
@@ -1741,13 +1750,7 @@ fun ReaderScreen(
             LiquidGlassSurface(state = readerBackdrop, role = GlassSurfaceRole.NAVIGATION, softCard = true,
                 modifier = Modifier.align(Alignment.BottomCenter).windowInsetsPadding(readerNavigationInsets())
                     .padding(horizontal = 20.dp, vertical = 12.dp).widthIn(max = 400.dp).fillMaxWidth()) {
-                Row(Modifier.padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("原图", style = MaterialTheme.typography.labelMedium)
-                    MotionSlider(enhancementDivider, { enhancementDivider = it },
-                        Modifier.weight(1f).padding(horizontal = 12.dp), valueRange = 0f..1f)
-                    Text("增强", style = MaterialTheme.typography.labelMedium)
-                    ReaderIcon(Icons.Rounded.Close, "结束当前页比较") { compareEnhancement = false }
-                }
+                ReaderComparisonControls(enhancementDivider) { comparisonTarget = null }
             }
         }
         AnimatedVisibility(
@@ -1791,9 +1794,18 @@ fun ReaderScreen(
         sessionKey = enhancement.sessionKey, onDismiss = { showEnhancement = false },
         readerState = enhancementState, onRetryTask = enhancement::retryTask, onCancelTask = enhancement::cancelTask,
         onClosed = { keyboardFocusRestore++ },
-        onCompare = if (enhancementState.assets[pageIndex] == null) null else ({
-            compareEnhancement = true; enhancementDivider = .5f; controlsVisible = false
-        }),
+        onCompare = enhancementState.assets[pageIndex]?.let { result ->
+            val target = ReaderComparisonTarget(enhancement, pageIndex, result, enhancementPolicy)
+            return@let {
+                val (owner, index) = latestComparisonOwner
+                val selected = enhancementCenter.settings.policy(enhancementContent, owner.sessionKey)
+                if (target.matches(owner, index, owner.state.value.assets[index], selected)) {
+                    comparisonTarget = target
+                    enhancementDivider.floatValue = .5f
+                    controlsVisible = false
+                }
+            }
+        },
     )
     PanelModelsDialog(visible = showPanelModels, backdrop = readerBackdrop) { showPanelModels = false }
     ReaderSpreadDialog(
@@ -1865,6 +1877,36 @@ fun ReaderScreen(
                 ?: sourceDisplayName(chapter.sourceId)
             PrivateChapterDiscussion(chapter.title, name, privateDiscussion, colors.background, colors.onSurface,
                 onClose = { showComments = false })
+        }
+    }
+}
+
+private data class ReaderComparisonTarget(
+    val owner: ReaderEnhancementController,
+    val pageIndex: Int,
+    val asset: ReaderEnhancedPage,
+    val policy: EnhancementPolicy,
+) {
+    fun matches(owner: ReaderEnhancementController, pageIndex: Int, asset: ReaderEnhancedPage?,
+        policy: EnhancementPolicy): Boolean = this.owner === owner && this.pageIndex == pageIndex &&
+        asset != null && asset.identity == this.asset.identity &&
+        asset.sourceCacheIdentity == this.asset.sourceCacheIdentity &&
+        this.policy.tier == policy.tier && this.policy.scale == policy.scale &&
+        this.policy.style == policy.style && this.policy.modelId == policy.modelId
+}
+
+/** Only this small control and the comparison drawing read the changing fraction. */
+@Composable
+private fun ReaderComparisonControls(divider: MutableFloatState, onClose: () -> Unit) {
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+        Row(Modifier.padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("左侧原图", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+            MotionSlider(divider.floatValue, { divider.floatValue = it },
+                Modifier.weight(1f).padding(horizontal = 12.dp)
+                    .semantics { contentDescription = "当前页原图与增强的分界位置" },
+                valueRange = 0f..1f, formatValue = { "原图 ${(it * 100f).roundToInt()}%" })
+            Text("右侧增强", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+            ReaderIcon(Icons.Rounded.Close, "结束当前页比较", onClick = onClose)
         }
     }
 }
@@ -3808,6 +3850,7 @@ private fun ReaderPageImage(
             resource != null && enhanced.sourceCacheIdentity ==
                 (loadedImage?.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId))
         }
+        val comparison = enhancementPresentation?.takeIf { it.comparisonPageIndex == logicalPageIndex }
         Box(pageModifier.clipToBounds(), contentAlignment = Alignment.Center) {
             if (request != null && !awaitingPrefetch && imageError == null && (pageVisible || loadedImage != null)) key(reload) {
                 if (paged) {
@@ -3839,7 +3882,8 @@ private fun ReaderPageImage(
                     }
                     ReaderEnhancedLayer(enhancedAsset, Modifier.matchParentSize(), pagedAlignment,
                         zoom = imageState.zoomableState, spread = spreadViewport,
-                        comparisonFraction = enhancementPresentation?.comparisonFraction)
+                        comparisonFraction = comparison?.comparisonFraction,
+                        onComparisonFractionChange = comparison?.onComparisonFractionChange)
                     imageState.detailNotice?.takeIf { imageState.detailError == null }?.let { message ->
                         Text(message, Modifier.align(Alignment.BottomCenter).padding(16.dp),
                             color = Color.Gray, fontSize = 11.sp)
@@ -3881,7 +3925,8 @@ private fun ReaderPageImage(
                         }
                     }
                     ReaderEnhancedLayer(enhancedAsset, Modifier.matchParentSize(), Alignment.TopCenter,
-                        visibleWindow = visibleWindow, comparisonFraction = enhancementPresentation?.comparisonFraction)
+                        visibleWindow = visibleWindow, comparisonFraction = comparison?.comparisonFraction,
+                        onComparisonFractionChange = comparison?.onComparisonFractionChange)
                 }
             }
             if (!paged) detailStatus?.let { status ->

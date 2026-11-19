@@ -87,7 +87,7 @@ internal class AndroidCuganVulkan(context: Context, root: File) {
         val coroutine = currentCoroutineContext()
         progress(EngineProgress(EngineStage.MODEL_LOAD, detail = "加载 ncnn Vulkan 和 Real-CUGAN NOSE"))
         open(model).use { session ->
-            val tiles = session.tiles(decoder.width, decoder.height, request.maximumOutputBytes)
+            val tiles = session.tiles(decoder.width, decoder.height, request.maximumWorkingBytes)
             val options = BitmapFactory.Options().apply {
                 inPreferredConfig = Bitmap.Config.ARGB_8888
                 inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)

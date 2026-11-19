@@ -217,6 +217,7 @@ internal fun EnhancementSettingsContent(
             return
         }
         change(selection)
+        onPageChange(EnhancementPage.QUALITY)
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (sessionKey != null && page in setOf(EnhancementPage.QUALITY, EnhancementPage.FRAME, EnhancementPage.PREPARATION))
@@ -225,9 +226,9 @@ internal fun EnhancementSettingsContent(
                 EnhancementPage.MODELS, EnhancementPage.MODEL_DETAIL))
             EnhancementQuiet(if (activeKey != null) if (anime) "应用于本次播放" else "应用于本次阅读"
                 else "应用于${content.settingsLabel}默认设置")
-        if (anime && draft.tier == QualityTier.ORIGINAL &&
+        if (draft.tier == QualityTier.ORIGINAL &&
             page in setOf(EnhancementPage.MODELS, EnhancementPage.MODEL_DETAIL))
-            EnhancementQuiet("当前使用原画；模型选择会保存，返回画质页选择增强档位后启用。")
+            EnhancementQuiet("画质增强当前关闭；选用模型后，可在画质页开启。")
         when (page) {
             EnhancementPage.QUALITY -> {
                 EnhancementQuality(content, draft, inventory, ::change,
@@ -254,6 +255,26 @@ internal fun EnhancementSettingsContent(
                     }
                     if (actualReason != null) EnhancementQuiet("当前播放：$actualReason",
                         error = effect.phase == AnimeVideoEnhancementPhase.FAILED)
+                }
+                if (!anime && sessionKey != null) {
+                    val failure = readerState?.currentTask?.takeIf { it.phase == EnhancementTaskPhase.FAILED }
+                    if (failure != null && onCompare == null) {
+                        EnhancementQuiet("本页增强失败：${failure.reason ?: readerState?.detail ?: "尚未取得失败详情"}", error = true)
+                        if (onRetryTask != null) MotionTextButton(onClick = {
+                            if (!onRetryTask(failure.id)) notice = "本页任务已变化，请查看最新状态。"
+                        }, contentPadding = PaddingValues(horizontal = 0.dp)) {
+                            Icon(Icons.Outlined.Refresh, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("重试本页增强")
+                        }
+                    }
+                    AnimeEnhancementNavigation(Icons.Outlined.Compare, "原图 / 增强对比",
+                        when {
+                            onCompare != null -> "拖动竖线比较当前页，复用已完成结果"
+                            failure != null -> "本页增强失败，取得增强结果后才能对比"
+                            readerState?.currentTask?.phase == EnhancementTaskPhase.RUNNING -> "本页增强完成后可对比"
+                            else -> "当前页尚无增强结果，完成增强后可对比"
+                        }, enabled = onCompare != null, onClick = { onCompare?.invoke() })
                 }
                 qualityFooter?.invoke()
                 if (editSession && sessionKey != null && sessions[sessionKey]?.content == content)
@@ -388,6 +409,7 @@ internal fun EnhancementSettingsContent(
             EnhancementPage.DISPLAY -> EnhancementDisplayControls(content)
             EnhancementPage.MODELS -> EnhancementModelList(inventory, progress, content, draft,
                 onSelectModel = ::selectModel, onOpenModel = ::openModel,
+                onUsePresets = { change(draft.copy(modelId = null)); onPageChange(EnhancementPage.QUALITY) },
                 onOpenEngines = { onPageChange(EnhancementPage.ENGINES) },
                 onImport = { onPageChange(EnhancementPage.IMPORT) }, onRefresh = { center.refreshInventory() })
             EnhancementPage.MODEL_DETAIL -> EnhancementModelDetail(inventory, progress, content, modelKey,
@@ -467,9 +489,10 @@ internal fun EnhancementSettingsContent(
                 EnhancementQuiet(if (sessionKey == null || anime && animePlayback?.isPlaying != true)
                     "打开实际内容后可记录性能；已有记录仍可查看。"
                     else "记录真实内容的短时表现，不代表长时间稳定性。")
-                if (onCompare != null) AnimeEnhancementNavigation(Icons.Outlined.Compare,
-                    if (anime) "同帧原画 / 增强" else "原图 / 增强对比", onClick = onCompare)
-                else EnhancementQuiet(if (anime) "当前播放器尚不支持同帧画面对比。" else "当前页有增强结果后可比较。")
+                if (anime) {
+                    if (onCompare != null) AnimeEnhancementNavigation(Icons.Outlined.Compare, "同帧原画 / 增强", onClick = onCompare)
+                    else EnhancementQuiet("当前播放器尚不支持同帧画面对比。")
+                }
                 EnhancementDivider()
                 EnhancementTrials(telemetry.trials.filter { it.content == content })
             }
