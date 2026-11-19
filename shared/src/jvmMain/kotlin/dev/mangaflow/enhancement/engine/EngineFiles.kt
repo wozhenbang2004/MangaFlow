@@ -166,7 +166,9 @@ internal fun verifyEnginePng(file: File): Pair<Int, Int> {
 }
 
 internal class ImportedEngineModels(private val root: File, private val engineId: String) {
-    fun import(source: File, scale: Int, content: EngineContent, title: String = source.nameWithoutExtension): EngineModel {
+    fun import(source: File, scale: Int, content: EngineContent, title: String = source.nameWithoutExtension,
+        license: String = "用户导入；请按模型原许可使用",
+        contents: Set<EngineContent> = setOf(content)): EngineModel {
         require(source.isFile && source.extension.equals("onnx", true)) { "请选择 ONNX 模型文件" }
         require(source.length() in 1..(2L * 1024 * 1024 * 1024)) { "模型文件为空或超过 2 GiB" }
         require(scale in setOf(1, 2, 4)) { "当前导入支持 1×、2×、4× 模型" }
@@ -193,6 +195,8 @@ internal class ImportedEngineModels(private val root: File, private val engineId
             setProperty("title", title.take(256))
             setProperty("scale", scale.toString())
             setProperty("content", content.name)
+            setProperty("contents", contents.joinToString(",") { it.name })
+            setProperty("license", license.take(256))
             setProperty("sha256", hash)
         }
         File(root, "$hash.properties").outputStream().use { properties.store(it, "Imported ONNX data weights") }
@@ -215,8 +219,12 @@ internal class ImportedEngineModels(private val root: File, private val engineId
         title = properties.getProperty("title") ?: file.nameWithoutExtension,
         path = file.canonicalPath, sha256 = properties.getProperty("sha256"),
         nativeScale = properties.getProperty("scale").toInt().also { require(it in setOf(1, 2, 4)) },
-        contents = setOf(EngineContent.valueOf(properties.getProperty("content"))),
-        license = "用户导入；请按模型原许可使用", version = "sha256:${properties.getProperty("sha256").take(12)}",
+        contents = properties.getProperty("contents")?.split(",")?.mapNotNull { entry ->
+            EngineContent.entries.firstOrNull { it.name == entry }
+        }?.takeIf { it.isNotEmpty() }?.toSet()
+            ?: setOf(EngineContent.valueOf(properties.getProperty("content"))),
+        license = properties.getProperty("license", "用户导入；请按模型原许可使用"),
+        version = "sha256:${properties.getProperty("sha256").take(12)}",
         bytes = file.length(),
     )
 }

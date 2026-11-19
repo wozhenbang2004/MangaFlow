@@ -50,6 +50,45 @@ data class EngineInventory(
     val frameModels: List<EngineModel> = emptyList(),
 )
 
+
+data class EnhancementModelOffer(
+    val id: String,
+    val title: String,
+    val detail: String,
+    val engineId: String,
+    val sourceUrl: String,
+    val downloadUrl: String,
+    val sha256: String,
+    val sizeLabel: String,
+    val scale: Int,
+    val contents: Set<EngineContent>,
+    val license: String,
+)
+
+/** Pinned published model files. Installation is not proof of runtime compatibility. */
+val enhancementModelOffers = listOf(
+    EnhancementModelOffer(
+        "animesharp-v2-mosr-soft-fp32", "AnimeSharp V2 · 柔和",
+        "2× 动漫插画与压缩修复；非商用条款，首次试用后确认手机性能",
+        EnhancementEngineIds.ANDROID_ONNX,
+        "https://huggingface.co/Kim2091/AnimeSharpV2",
+        "https://huggingface.co/Kim2091/AnimeSharpV2/resolve/62e044a759142d60eae771c232dc70bf4cbec6c9/2x-AnimeSharpV2_MoSR_Soft_fp32.onnx",
+        "53164f683476d2013752867979cfc8018a5fa4c0dcb7a0ffdf207581fbe67ff7",
+        "约 17.4 MB", 2, setOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON),
+        "CC BY-NC-SA 4.0 · 非商用",
+    ),
+    EnhancementModelOffer(
+        "realesrgan-anime-6b-fp32", "Real-ESRGAN · Anime 6B",
+        "4× 动漫与插画超分；黑白漫画的文字、网点与清晰度需本机验证",
+        EnhancementEngineIds.ANDROID_ONNX,
+        "https://huggingface.co/mhmtaufiq/realesrgan-onnx",
+        "https://huggingface.co/mhmtaufiq/realesrgan-onnx/resolve/c524eb8/RealESRGAN_x4plus_anime_6B.onnx",
+        "82f458db35dd94f2200f9a32fd0232c581da861c1b2e5c956d5574b0e9c5aea2",
+        "约 18.4 MB", 4, setOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON),
+        "Real-ESRGAN BSD-3-Clause · 第三方 ONNX 导出",
+    ),
+)
+
 /** FPS is completed processing throughput, never display FPS or hardware GPU utilization. */
 data class EngineProgress(
     val stage: EngineStage,
@@ -144,6 +183,8 @@ interface EnhancementEngine {
     suspend fun install(engineId: String, progress: (EngineProgress) -> Unit = {}): EngineInventory
     /** Imports data weights only; native executables are accepted only through pinned installers. */
     suspend fun importModel(sourcePath: String, nativeScale: Int, content: EngineContent): EngineModel
+    suspend fun downloadModel(offer: EnhancementModelOffer, progress: (EngineProgress) -> Unit = {}): EngineModel =
+        error("当前平台没有适配此模型的直接下载流程")
     /** Reads real image dimensions and sampled color; geometry alone never classifies a page as adult. */
     suspend fun describeImage(sourcePath: String): EngineImageInfo
     suspend fun processImage(request: EngineImageRequest, progress: (EngineProgress) -> Unit = {}): EngineOutput

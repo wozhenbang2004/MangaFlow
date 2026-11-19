@@ -17,6 +17,11 @@ import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.reader.panels.PanelRuntimeId
 import dev.mangaflow.reader.panels.PanelRuntimeStore
 import java.io.File
+import java.net.URI
+import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption
 import java.util.UUID
@@ -118,6 +123,81 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
         } else {
             require(uri.scheme == null || uri.scheme == "file") { "只接受用户选择的本机模型文件" }
             destination.import(File(if (uri.scheme == "file") checkNotNull(uri.path) else sourcePath), nativeScale, content)
+        }
+    }
+
+
+    /** HTTPS-only, pinned digest download. Failed transfers never publish model metadata. */
+    override suspend fun downloadModel(offer: EnhancementModelOffer,
+        progress: (EngineProgress) -> Unit): EngineModel = withContext(Dispatchers.IO) {
+        require(offer.engineId == EnhancementEngineIds.ANDROID_ONNX &&
+            offer in enhancementModelOffers && offer.sha256.matches(Regex("[0-9a-f]{64}"))) {
+            "仅允许下载已核对来源与摘要的 Android 图像模型"
+        }
+        val folder = File(root, "model-downloads").also { check(it.isDirectory || it.mkdirs()) }
+        val temporary = File(folder, "${offer.id}-${UUID.randomUUID()}.onnx")
+        val client = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
+            .connectTimeout(20, TimeUnit.SECONDS).readTimeout(40, TimeUnit.SECONDS)
+            .callTimeout(15, TimeUnit.MINUTES).build()
+        fun checkedUrl(value: String): URI {
+            val uri = URI(value)
+            val host = uri.host?.lowercase().orEmpty()
+            check(uri.scheme == "https" && uri.port == -1 && uri.userInfo == null &&
+                (host == "huggingface.co" || host.endsWith(".hf.co") ||
+                    host.endsWith(".huggingface.co") || host.endsWith(".cloudfront.net") ||
+                    host.endsWith(".amazonaws.com"))) { "模型来源重定向不符合 HTTPS 下载规则" }
+            return uri
+        }
+        try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            var address = offer.downloadUrl
+            var redirects = 0
+            var downloaded = 0L
+            while (true) {
+                val checked = checkedUrl(address)
+                val response = client.newCall(Request.Builder().url(checked.toString()).get()
+                    .header("Accept-Encoding", "identity").build()).execute()
+                if (response.code in 300..399) {
+                    val target = response.use { it.header("Location") }
+                        ?: error("模型下载重定向缺少地址")
+                    check(++redirects <= 6) { "模型下载重定向过多" }
+                    address = checked.resolve(target).toString()
+                    continue
+                }
+                response.use { result ->
+                    check(result.isSuccessful) { "模型下载 HTTP ${result.code}" }
+                    val body = result.body ?: error("模型下载响应为空")
+                    java.io.FileOutputStream(temporary).buffered().use { output ->
+                        body.byteStream().use { input ->
+                            val buffer = ByteArray(64 * 1024)
+                            while (true) {
+                                currentCoroutineContext().ensureActive()
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                downloaded += count
+                                check(downloaded <= 2L * 1024 * 1024 * 1024) { "模型文件超过 2 GiB" }
+                                output.write(buffer, 0, count)
+                                digest.update(buffer, 0, count)
+                                progress(EngineProgress(EngineStage.DOWNLOAD, downloaded,
+                                    body.contentLength().takeIf { it > 0L },
+                                    detail = offer.title, bytes = downloaded))
+                            }
+                        }
+                    }
+                }
+                break
+            }
+            check(downloaded > 0L) { "模型文件为空" }
+            val actual = digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+            progress(EngineProgress(EngineStage.VERIFY, detail = "校验发布者提供的 SHA-256"))
+            check(actual == offer.sha256) { "模型 SHA-256 与固定版本不符，已拒绝安装" }
+            progress(EngineProgress(EngineStage.INSTALL, detail = "保存已校验模型到本机"))
+            models.import(temporary, offer.scale, offer.contents.first(),
+                offer.title, offer.license, offer.contents)
+        } finally {
+            temporary.delete()
+            client.dispatcher.executorService.shutdown()
+            client.connectionPool.evictAll()
         }
     }
 

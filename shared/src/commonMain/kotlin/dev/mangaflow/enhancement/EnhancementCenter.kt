@@ -2,6 +2,8 @@ package dev.mangaflow.enhancement
 
 import dev.mangaflow.enhancement.engine.*
 import dev.mangaflow.experience.ExperiencePolicyStore
+import dev.mangaflow.reader.panels.PanelRuntimeId
+import dev.mangaflow.reader.panels.PanelRuntimeStore
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.storage.StorageLock
@@ -28,6 +30,7 @@ class EnhancementCenter private constructor(context: PlatformContext) {
     private val inventoryWriter = Mutex()
     private val installLock = StorageLock()
     private val installations = mutableMapOf<String, Job>()
+    private val modelDownloads = mutableMapOf<String, Deferred<EngineModel>>()
     private val mutableInventory = MutableStateFlow(EngineInventory(emptyList()))
     val inventory: StateFlow<EngineInventory> = mutableInventory.asStateFlow()
     private val mutableEngineProgress = MutableStateFlow<Map<String, EngineProgress>>(emptyMap())
@@ -37,6 +40,36 @@ class EnhancementCenter private constructor(context: PlatformContext) {
     init {
         scope.launch { for (write in writes) write() }
         refreshInventory()
+
+        // Android runtime download() only enqueues the OS-managed transfer.
+        scope.launch {
+            var lastReadiness: Pair<Boolean, Boolean>? = null
+            PanelRuntimeStore.get(app).states.collect { states ->
+                val runtime = states[PanelRuntimeId.ONNX] ?: return@collect
+                val readiness = runtime.installed to runtime.downloading
+                if (lastReadiness != readiness) {
+                    lastReadiness = readiness
+                    refreshInventory()
+                }
+                if (mutableInventory.value.engines.any { it.id == EnhancementEngineIds.ANDROID_ONNX }) {
+                    val status = when {
+                        runtime.downloading -> EngineProgress(EngineStage.DOWNLOAD,
+                            (runtime.progress?.let { (it * runtime.totalBytes).toLong() } ?: runtime.bytes)
+                                .coerceAtLeast(0L), runtime.totalBytes.takeIf { it > 0L },
+                            detail = "ONNX 运行库正在后台下载", bytes = runtime.bytes)
+                        runtime.installed -> null
+                        runtime.error != null -> EngineProgress(EngineStage.INSTALL, detail = runtime.error)
+                        else -> null
+                    }
+                    mutableEngineProgress.update { current ->
+                        if (status == null) current - EnhancementEngineIds.ANDROID_ONNX -
+                            EnhancementEngineIds.ANDROID_VIDEO_ONNX
+                        else current + (EnhancementEngineIds.ANDROID_ONNX to status) +
+                            (EnhancementEngineIds.ANDROID_VIDEO_ONNX to status)
+                    }
+                }
+            }
+        }
     }
 
     fun refreshInventory(): Job = scope.launch {
@@ -55,10 +88,17 @@ class EnhancementCenter private constructor(context: PlatformContext) {
         installations[id]?.takeIf { it.isActive } ?: scope.launch(start = CoroutineStart.LAZY) {
             try {
                 engine.install(id) { progress -> mutableEngineProgress.update { it + (id to progress) } }
-                // Re-read under the same writer: another import may have completed during installation.
-                inventoryWriter.withLock { mutableInventory.value = engine.inspect() }
-                mutableEngineProgress.update { it + (id to EngineProgress(EngineStage.COMPLETE,
-                    detail = "安装已完成；实际输出与性能请在当前设备试用。")) }
+                val inventory = inventoryWriter.withLock {
+                    engine.inspect().also { mutableInventory.value = it }
+                }
+                val readiness = inventory.engines.firstOrNull { it.id == id }?.readiness
+                mutableEngineProgress.update { current -> current + (id to
+                    if (readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.NEEDS_MODELS,
+                            EngineReadiness.READY_FOR_TRIAL))
+                        EngineProgress(EngineStage.COMPLETE,
+                            detail = "运行库已准备；仍须选择模型并通过设备试用。")
+                    else EngineProgress(EngineStage.DOWNLOAD,
+                        detail = "已加入后台下载，安装与校验尚未完成。")) }
             } catch (cancel: CancellationException) { throw cancel }
             catch (error: Exception) { mutableEngineProgress.update { it + (id to
                 EngineProgress(EngineStage.INSTALL, detail = error.message ?: "安装未完成，请重试")) } }
@@ -69,6 +109,28 @@ class EnhancementCenter private constructor(context: PlatformContext) {
         val model = engine.importModel(sourcePath, nativeScale, content)
         inventoryWriter.withLock { mutableInventory.value = engine.inspect() }
         model
+    }
+
+
+    /** Application-lifetime work is not cancelled when the sheet is dismissed. */
+    fun downloadModel(offer: EnhancementModelOffer): Deferred<EngineModel> = synchronized(installLock) {
+        modelDownloads[offer.id]?.takeIf { it.isActive } ?: scope.async(start = CoroutineStart.LAZY) {
+            val key = "model:${offer.id}"
+            try {
+                val model = engine.downloadModel(offer) { value ->
+                    mutableEngineProgress.update { it + (key to value) }
+                }
+                inventoryWriter.withLock { mutableInventory.value = engine.inspect() }
+                mutableEngineProgress.update { it + (key to EngineProgress(EngineStage.COMPLETE,
+                    detail = "模型已校验安装；还需在本机试用。")) }
+                model
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) {
+                mutableEngineProgress.update { it + (key to EngineProgress(EngineStage.INSTALL,
+                    detail = failure.message ?: "模型下载未完成")) }
+                throw failure
+            }
+        }.also { modelDownloads[offer.id] = it; it.start() }
     }
 
     /** Accepted settings edits survive a panel closing and are committed in click order. */
