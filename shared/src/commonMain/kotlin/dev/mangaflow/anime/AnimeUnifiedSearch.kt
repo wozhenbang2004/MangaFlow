@@ -61,6 +61,11 @@ internal class AnimeUnifiedSearch(
         fun requireAvailable() = checkNotNull(snapshot) { error ?: "网络线路不可用。" }
     }
     private data class Source(val revision: String, val route: Route)
+    private data class SearchPageResult(
+        val matchedTerm: String,
+        val items: List<AnimeSourceTitle>,
+        val attemptedTerms: Set<String> = emptySet(),
+    )
 
     private val mutableState = MutableStateFlow(AnimeUnifiedSearchState())
     val state = mutableState.asStateFlow()
@@ -69,10 +74,12 @@ internal class AnimeUnifiedSearch(
     private val scriptPermits = Semaphore(2)
     private val sourceJobs = mutableMapOf<String, Job>()
     private val sourceTerms = mutableMapOf<String, String>()
+    private val emptyFirstPageAttempts = mutableMapOf<String, Set<String>>()
     private val overlappingPages = mutableSetOf<String>()
     private var sourceKeys = emptyMap<String, Source>()
     private var indexRoute: Route? = null
     private var indexJob: Job? = null
+    private var firstPageIndexTerms = emptyList<String>()
     private var generation = 0L
 
     fun search(query: String, indexOnly: Boolean) {
@@ -83,6 +90,7 @@ internal class AnimeUnifiedSearch(
             sourceJobs.values.forEach { it.cancel() }
             sourceJobs.clear()
             sourceTerms.clear()
+            emptyFirstPageAttempts.clear()
             overlappingPages.clear()
             sourceKeys = emptyMap()
             indexRoute = null
@@ -100,6 +108,7 @@ internal class AnimeUnifiedSearch(
         if (refreshIndex) {
             indexJob?.cancel()
             indexRoute = route
+            firstPageIndexTerms = emptyList()
         }
         val available = if (search.indexOnly) emptyList() else repository.providers
         val providers = available.mapNotNull { provider ->
@@ -112,6 +121,7 @@ internal class AnimeUnifiedSearch(
         (refreshed + removed).forEach {
             sourceJobs.remove(it)?.cancel()
             sourceTerms.remove(it)
+            emptyFirstPageAttempts.remove(it)
         }
         overlappingPages.removeAll(refreshed + removed)
         sourceKeys = nextKeys
@@ -169,9 +179,17 @@ internal class AnimeUnifiedSearch(
                     metadata.browse(AnimeBrowseMode.POPULAR, state.query, page, null, "", null, forceRefresh = forceRefresh)
                 } ?: error("番剧资料搜索超时，请重试。")
                 check(result.page == page) { "番剧资料返回了不同页码。" }
-                if (current()) publish(mutableState.value.copy(index = AnimeSearchIndex(
+                val indexTerms = if (page == 1) withContext(Dispatchers.Default) {
+                    searchTermsFromIndex(state.query, result.items)
+                } else emptyList()
+                if (!current()) return@launch
+                if (page == 1) firstPageIndexTerms = indexTerms
+                publish(mutableState.value.copy(index = AnimeSearchIndex(
                     items = ((if (page == 1) emptyList() else previous.items) + result.items).distinctBy(AnimeSubject::id),
                     page = page, hasMore = result.hasMore)), regroup = true)
+                if (page == 1) emptyFirstPageAttempts.keys.toList().forEach { sourceId ->
+                    repository.provider(sourceId)?.let(::retryWithIndexTerms)
+                }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
@@ -184,13 +202,26 @@ internal class AnimeUnifiedSearch(
         }
     }
 
-    private fun requestSource(provider: AnimeProvider) {
+    private fun requestSource(provider: AnimeProvider) = requestSource(provider, emptyList())
+
+    // The index and providers run independently. Recheck an empty first page
+    // when a confirmed alias arrives, without repeating any completed term.
+    private fun retryWithIndexTerms(provider: AnimeProvider) {
+        val attempted = emptyFirstPageAttempts[provider.id] ?: return
+        val newTerms = firstPageIndexTerms.filter { it !in attempted }
+        if (newTerms.isNotEmpty()) requestSource(provider, newTerms)
+    }
+
+    private fun requestSource(provider: AnimeProvider, newTerms: List<String>) {
         val state = mutableState.value
         val key = sourceKeys[provider.id] ?: return
         val previous = state.sources.firstOrNull { it.providerId == provider.id } ?: return
         if (state.query.isBlank() || previous.loading || previous.loadingMore) return
         val owner = generation
-        val page = nextPage(previous.page) ?: return
+        val lateRetry = newTerms.isNotEmpty()
+        if (lateRetry && (previous.page != 1 || previous.items.isNotEmpty() || previous.error != null)) return
+        val page = if (lateRetry) 1 else nextPage(previous.page) ?: return
+        if (page == 1) emptyFirstPageAttempts.remove(provider.id)
         val term = sourceTerms[provider.id] ?: state.query
         publishSource(previous.copy(loading = page == 1, loadingMore = page > 1, error = null))
         // Register the exact job before it can start on the immediate main dispatcher.
@@ -205,10 +236,11 @@ internal class AnimeUnifiedSearch(
                 key.route.requireAvailable()
                 suspend fun find() = permits.withPermit {
                     if (!current()) return@withPermit null
-                    withTimeoutOrNull(SEARCH_TIMEOUT_MILLIS) { searchPage(provider, term, page) }
+                    withTimeoutOrNull(SEARCH_TIMEOUT_MILLIS) { searchPage(provider, term, page, newTerms) }
                         ?: error("搜索超时，请重试。")
                 }
-                val (matchedTerm, found) = (if (provider is LanercProvider) scriptPermits.withPermit { find() } else find())
+                val (matchedTerm, found, attemptedTerms) =
+                    (if (provider is LanercProvider) scriptPermits.withPermit { find() } else find())
                     ?: return@launch
                 if (!current()) return@launch
                 check(found.all { it.sourceId == provider.id && (it.sourceRevision == null || it.sourceRevision == key.revision) }) {
@@ -223,34 +255,50 @@ internal class AnimeUnifiedSearch(
                     (added.isNotEmpty() || overlappingPages.add(provider.id))
                 publishSource(previous.copy(items = previous.items + added, page = page,
                     hasMore = hasMore, error = null), regroup = added.isNotEmpty())
+                if (page == 1 && found.isEmpty() && !lateRetry) {
+                    emptyFirstPageAttempts[provider.id] = attemptedTerms
+                    retryWithIndexTerms(provider)
+                }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
-                if (current()) publishSource(previous.copy(error = failure.message ?: "这个来源暂未响应。"))
+                if (current()) publishSource(previous.copy(page = if (lateRetry) 0 else previous.page,
+                    error = failure.message ?: "这个来源暂未响应。"))
             }
         }
         sourceJobs[provider.id] = job
         job.start()
     }
 
-    private suspend fun searchPage(provider: AnimeProvider, term: String, page: Int): Pair<String, List<AnimeSourceTitle>> {
-        val primary = provider.search(term, page)
-        if (page != 1 || primary.isNotEmpty()) return term to primary
-        val index = mutableState.value.index.items
-        val alternatives = withContext(Dispatchers.Default) {
-            val key = normalizedBodySourceTitle(term)
-            val subject = index.singleOrNull {
-                key.isNotBlank() && (normalizedBodySourceTitle(it.title) == key ||
-                    normalizedBodySourceTitle(it.originalTitle) == key)
+    private suspend fun searchPage(
+        provider: AnimeProvider, term: String, page: Int, newTerms: List<String>,
+    ): SearchPageResult {
+        val attempted = linkedSetOf<String>()
+        suspend fun find(terms: List<String>): SearchPageResult? {
+            for (candidate in terms) {
+                if (!attempted.add(candidate)) continue
+                val found = provider.search(candidate, page)
+                if (found.isNotEmpty()) return SearchPageResult(candidate, found)
             }
-            val aliases = subject?.let { listOf(it.title, it.originalTitle) }.orEmpty()
-            bodySourceSearchTerms(term, aliases).filter { it != term }
+            return null
         }
-        for (alternative in alternatives) {
-            val matches = provider.search(alternative, page)
-            if (matches.isNotEmpty()) return alternative to matches
+        find(newTerms.ifEmpty { listOf(term) })?.let { return it }
+        if (page == 1 && newTerms.isEmpty()) {
+            val index = mutableState.value.index.items
+            val alternatives = withContext(Dispatchers.Default) { searchTermsFromIndex(term, index) }
+            find(alternatives)?.let { return it }
         }
-        return term to primary
+        return SearchPageResult(term, emptyList(), attempted)
+    }
+
+    private fun searchTermsFromIndex(term: String, index: List<AnimeSubject>): List<String> {
+        val key = normalizedBodySourceTitle(term)
+        val subject = index.singleOrNull {
+            key.isNotBlank() && (normalizedBodySourceTitle(it.title) == key ||
+                normalizedBodySourceTitle(it.originalTitle) == key)
+        }
+        val aliases = subject?.let { listOf(it.title, it.originalTitle) }.orEmpty()
+        return bodySourceSearchTerms(term, aliases)
     }
 
     private fun publishSource(row: AnimeSourceResult, regroup: Boolean = false) {

@@ -136,8 +136,11 @@ internal class ReaderPageRepairController(
         chapter = updated; viewportWidth = width; viewportHeight = height
     }
 
-    private fun valid() = !closed && isCurrent() && primaryEnvironment.isNotEmpty() &&
-        primaryEnvironment == environment(chapter.sourceId, primaryOwner, chapter.id, repository.imageHeaders(primaryOwner, chapter.id))
+    private fun valid(): Boolean {
+        if (closed || !isCurrent() || primaryEnvironment.isEmpty()) return false
+        val headers = runCatching { repository.imageHeaders(primaryOwner, chapter.id) }.getOrNull() ?: return false
+        return primaryEnvironment == environment(chapter.sourceId, primaryOwner, chapter.id, headers)
+    }
 
     private fun environment(source: String, owner: String, chapterId: String, headers: Map<String, String>): String? = runCatching { repairDigest(buildString {
         append(source).append('\u0000').append(owner).append('\u0000').append(chapterId).append('\u0000')

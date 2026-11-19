@@ -1492,6 +1492,8 @@ class UnifiedMangaRepository(
     }
 
     override fun imageHeaders(mangaId: String, chapterId: String): Map<String, String> {
+        // Imported chapters read files and have no provider request context.
+        if (mangaId.startsWith("local:")) return emptyMap()
         if (chapterId.isBlank()) {
             val cover = SourceKeys.decodeManga(mangaId)
             if (cover.sourceId == "copy") return copy.imageHeaders(cover.mangaId, "")

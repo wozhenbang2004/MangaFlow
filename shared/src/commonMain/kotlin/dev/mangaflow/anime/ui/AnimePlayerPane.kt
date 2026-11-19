@@ -27,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -132,6 +133,8 @@ internal fun AnimePlayerPane(
     var centerFocused by remember { mutableStateOf(false) }
     var focusChromeOnReveal by remember { mutableStateOf(false) }
     var locked by rememberSaveable { mutableStateOf(false) }
+    var episodesVisible by rememberSaveable { mutableStateOf(true) }
+    val episodeListState = key(detail?.subject?.id) { rememberSaveableStateHolder() }
     var holdingFast by remember { mutableStateOf(false) }
     var settingsVisible by remember { mutableStateOf(false) }
     var settingsPresent by remember { mutableStateOf(false) }
@@ -259,7 +262,7 @@ internal fun AnimePlayerPane(
                     }
                 }
             }.focusable()) {
-            val sideBySide = if (desktop) maxWidth >= 736.dp
+            val sideBySide = if (desktop) episodesVisible && maxWidth >= 736.dp
                 else maxWidth >= 650.dp && (maxWidth >= 920.dp || maxHeight < 520.dp)
             val railWidth = if (desktop) (maxWidth * .26f).coerceIn(248.dp, 328.dp)
                 else (maxWidth * .32f).coerceIn(214.dp, 330.dp)
@@ -269,7 +272,7 @@ internal fun AnimePlayerPane(
             val reserveEpisodes = if (room >= 368.dp) 164.dp else if (room >= 260.dp) 108.dp else 0.dp
             val videoHeight = when {
                 fillVideo -> maxHeight
-                desktop && sideBySide -> minOf(room, videoWidth * .5625f)
+                desktop && (sideBySide || !episodesVisible) -> minOf(room, videoWidth * .5625f)
                 sideBySide -> room
                 else -> (videoWidth * .5625f).coerceAtLeast(minOf(184.dp, room))
                     .coerceAtMost((room - reserveEpisodes).coerceAtLeast(1.dp))
@@ -442,6 +445,15 @@ internal fun AnimePlayerPane(
                             tooltip = "来源与线路") {
                             Icon(Icons.Outlined.SwapHoriz, "来源与线路", Modifier.size(20.dp))
                         }
+                        if (desktop && !fillVideo && detail != null) {
+                            val label = if (episodesVisible) "收起选集" else "展开选集"
+                            MotionIconButton(onClick = { episodesVisible = !episodesVisible; interact() },
+                                modifier = Modifier.size(44.dp).semantics {
+                                    stateDescription = if (episodesVisible) "选集已展开" else "选集已收起"
+                                }, tooltip = label) {
+                                Icon(Icons.Outlined.ViewSidebar, label, Modifier.size(20.dp))
+                            }
+                        }
                         MotionIconButton(onClick = { showSettings(AnimePlayerPanel.GENERAL) }, modifier = Modifier.size(44.dp),
                             tooltip = "播放设置") {
                             Icon(Icons.Outlined.Settings, "播放设置", Modifier.size(20.dp))
@@ -513,7 +525,7 @@ internal fun AnimePlayerPane(
                     }
                 }
             }
-            if (!fillVideo) {
+            if (!fillVideo && episodesVisible) {
                 val episodePanel = if (sideBySide) Modifier.align(Alignment.TopEnd).offset(y = videoTop)
                     .width(railWidth).height(room)
                 else Modifier.offset(y = episodeTop).fillMaxWidth()
@@ -521,10 +533,12 @@ internal fun AnimePlayerPane(
                 val entry = remember(detail?.subject?.id, state.library) {
                     state.library.firstOrNull { it.subject.id == detail?.subject?.id }
                 }
-                AnimePlayerEpisodes(detail?.episodes.orEmpty(), episode?.id, entry?.completedEpisodeIds.orEmpty(),
-                    onEpisode, episodeAvailability = { controller.episodeAvailability(it, state) },
-                    active = active && !obscured && !settingsPresent, desktopRail = desktop && sideBySide,
-                    modifier = episodePanel)
+                episodeListState.SaveableStateProvider("episodes") {
+                    AnimePlayerEpisodes(detail?.episodes.orEmpty(), episode?.id, entry?.completedEpisodeIds.orEmpty(),
+                        onEpisode, episodeAvailability = { controller.episodeAvailability(it, state) },
+                        active = active && !obscured && !settingsPresent, desktopRail = desktop && sideBySide,
+                        modifier = episodePanel)
+                }
             }
             if (locked && !playback.inPictureInPicture) MotionIconButton(onClick = { locked = false; interact() },
                 modifier = Modifier.align(Alignment.CenterStart).padding(start = 12.dp).size(48.dp), tooltip = "解除触控锁定") {
@@ -750,7 +764,9 @@ private fun AnimePlayerEpisodes(
     var group by rememberSaveable(subjectId) { mutableIntStateOf(0) }
     var reversed by rememberSaveable(subjectId) { mutableStateOf(false) }
     var query by rememberSaveable(subjectId) { mutableStateOf("") }
-    var searchVisible by remember { mutableStateOf(false) }
+    var searchVisible by rememberSaveable(subjectId) { mutableStateOf(false) }
+    var lastSelectedEpisodeId by rememberSaveable(subjectId) { mutableStateOf<String?>(null) }
+    var lastScrolledEpisodeId by rememberSaveable(subjectId) { mutableStateOf<String?>(null) }
     val scroll = rememberLazyGridState()
     val native = subjectId?.startsWith("native:") == true
     val (main, extra) = remember(episodes, native) {
@@ -758,8 +774,10 @@ private fun AnimePlayerEpisodes(
     }
     val selectedGroup = if (main.isEmpty() && extra.isNotEmpty()) 1 else if (extra.isEmpty()) 0 else group
     LaunchedEffect(currentId, episodes) {
+        if (currentId == lastSelectedEpisodeId) return@LaunchedEffect
         episodes.firstOrNull { it.id == currentId }?.let {
             group = if (native || it.kind == AnimeEpisodeKind.MAIN) 0 else 1
+            lastSelectedEpisodeId = it.id
         }
     }
     val selected = if (selectedGroup == 1) extra else main
@@ -770,9 +788,13 @@ private fun AnimePlayerEpisodes(
             animeEpisodeLabel(it).contains(term, ignoreCase = true) || it.title.contains(term, ignoreCase = true)
         }
     }
-    LaunchedEffect(currentId, selectedGroup, reversed, shown) {
+    LaunchedEffect(currentId, shown) {
+        if (currentId == lastScrolledEpisodeId) return@LaunchedEffect
         val index = shown.indexOfFirst { it.id == currentId }
-        if (index >= 0 && scroll.layoutInfo.visibleItemsInfo.none { it.key == currentId }) scroll.scrollToItem(index)
+        if (index >= 0) {
+            if (scroll.layoutInfo.visibleItemsInfo.none { it.key == currentId }) scroll.scrollToItem(index)
+            lastScrolledEpisodeId = currentId
+        }
     }
     val panelPadding = 16.dp
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)

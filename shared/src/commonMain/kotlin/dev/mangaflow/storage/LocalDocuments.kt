@@ -8,8 +8,9 @@ import okio.FileSystem
 import okio.SYSTEM
 
 internal fun localDocumentFile(uri: String): StorageFile {
-    val path = if (uri.startsWith("file://", true)) {
-        val raw = uri.substring(7)
+    val path = if (uri.startsWith("file:", ignoreCase = true)) {
+        // The desktop chooser emits file:/D:/…, while StorageFile emits file:///D:/….
+        val raw = uri.substring(5).removePrefix("//")
         require(raw.startsWith('/')) { "只能读取本机文件。" }
         raw.decodeURLPart().let { if (Regex("^/[A-Za-z]:/").containsMatchIn(it)) it.drop(1) else it }
     } else uri.also { require(!it.contains("://")) { "此文件地址无法在本机读取。" } }
