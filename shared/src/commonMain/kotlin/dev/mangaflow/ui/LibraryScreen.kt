@@ -220,7 +220,6 @@ fun LibraryScreen(
         source.id to remember(source, repository, siteAccountRevision) { ProfileSiteShelf(source, repository) }
     } }
     val siteShelf = siteSource?.let { siteShelves[it.id] }
-    }
     val siteVisible = active && !showHistory && siteShelf != null
     val siteJobs = rememberCoroutineScope()
     var siteJob by remember(siteShelf) { mutableStateOf<kotlinx.coroutines.Job?>(null) }
