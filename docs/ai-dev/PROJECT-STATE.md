@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Android 开播阻断修复 · 2026-11-20
+
+用户“现在呢”后提供两张实际失败截图，AniCh与金牌均报 `getBackBufferDurationUs not implemented`；安装版本未知。原话、依据和修复边界见 [ANIME-LOAD-01](../design/anime-redesign-20261119.md#android-开播接口回归--anime-load-01--2026-11-20)。已在最新main `582e112` 上修复Android自定义LoadControl的Java默认方法转发遗漏，显式覆盖Media3 1.11.1实际使用的全部现代接口，保留每player allocator记账与当前动态缓冲策略；并行合入的缓存异常隔离和本机初始化错误分类完整保留。
+
+源码与独立调用链复核完成，各只读分工已冻结；root唯一集成并按最新main的expected-head提交，正常CI只确认启动，不等待产物，不做纯状态提交。未测试、本地编译/构建、媒体请求或UI操作，实际开播恢复待对应修复包反馈。保留已合入并行恢复/RIFE、浅色缓冲轨、模型倍率、独立番剧专区和统一缓存；此前425打包成功不等于设备播放成功。
+
 ## 全线路失败反馈 · 2026-11-20
 
 用户反馈更新后所有番剧均显示线路失败。本次从主线 `2e33e5e` 接续；已发布 Android 0.1.425 对应 `442cf6f`，用户实际版本和底层错误仍待确认。[ANIME-STARTUP-01–03](../design/anime-redesign-20261119.md#全线路失败反馈与本机故障隔离--anime-startup-0103--2026-11-20) 保留原话、确定的源码缺口及验证边界。

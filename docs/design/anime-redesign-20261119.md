@@ -1,5 +1,15 @@
 # 番剧全流程重做 · 2026-11-19
 
+## Android 开播接口回归 · ANIME-LOAD-01 · 2026-11-20
+
+用户连续询问“现在呢”，随后发“。。。”并提供 `1000122199.png`、`1000122198.png`。已查看：同一集在 AniCh 与金牌两个来源均显示“本集暂时无法播放”，具体错误相同：`getBackBufferDurationUs not implemented`；视频输入、呈现及缓冲均无观测。安装版本和消息ID未提供，不将截图认定为特定APK。初始修复基线为 `b8fbd4bf24d6babd8ae66ec77fab39a892293473`，发布前无损接入最新main `582e1127fd25ad6cecb9c2426f32ae349490160b`；包含并行播放恢复、RIFE、此前缓冲轨，以及并行合入的缓存异常隔离和本机初始化错误分类。
+
+源码原因：ANIME-PREP 引入的 `AndroidAnimeLoadControl` 仅显式实现加载/起播判断，其余依赖 `LoadControl by delegate`。锁定 [Media3 1.11.1 LoadControl](https://github.com/androidx/media/blob/1.11.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/LoadControl.java) 的Java默认方法不是可依赖的Kotlin自动转发面：带PlayerId的回看时长方法会转入抛出同名异常的弃用无参实现。`ExoPlayerImplInternal` 构造器先调用该方法，随后调用同类的关键帧回看方法；因此故障可在读取视频前发生，与某一个来源或增强模型无关。`onTracksSelected` 的现代默认实现也直接抛错，仅补截图所示方法不足以覆盖同一缺陷。
+
+本次移除隐式委托，显式转发内核使用的八项现代接口：准备、轨道选择、停止、释放、按player获取allocator、回看时长、从关键帧保留回看、列表预加载。两项自定义加载/起播判断保持；准备时重置当前加载状态，轨道变更后恢复最新有效容量。Allocator继续使用DefaultLoadControl返回的按player记账包装器，不直接暴露底层DefaultAllocator，不调用弃用overload，不通过吞异常或固定假值启动播放器。当前手动缓冲目标、原片缓存、下一集准备及浅色缓冲轨均沿现有所有者。
+
+独立只读复核覆盖了Media3内核全部10项实际调用（8项显式转发、2项自定义）、可空轨道数组签名和player生命周期；`git diff --check` 无诊断。本次为播放器适配层修复，没有UI结构/组件/文案变更，15系统设计沿既有ANIME-PREP/ANIME-PLAY基线，不新增界面迁移。未执行测试、本地编译/构建、媒体探测或设备操作；正常main提交仅确认CI启动，运行与视觉效果仍待对应安装版本反馈。此前0.1.425打包成功不能作为本次播放恢复证据。
+
 ## 全线路失败反馈与本机故障隔离 · ANIME-STARTUP-01–03 · 2026-11-20
 
 用户原话：“你他妈改了坏了啊现在番一个都看不了全是线路失败”。消息 ID、当前安装版本和原始错误尚未提供；本次接续时正式 Android 0.1.425 对应 `442cf6f`，主线已到 `2e33e5e`。这是播放恢复任务，不把没有设备日志的推断写成已确认根因。

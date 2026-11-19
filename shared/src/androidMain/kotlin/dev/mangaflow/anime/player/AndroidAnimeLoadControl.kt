@@ -3,9 +3,15 @@
 package dev.mangaflow.anime.player
 
 import androidx.media3.common.C
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.Util
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.LoadControl
+import androidx.media3.exoplayer.analytics.PlayerId
+import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId
+import androidx.media3.exoplayer.source.TrackGroupArray
+import androidx.media3.exoplayer.trackselection.ExoTrackSelection
+import androidx.media3.exoplayer.upstream.Allocator
 import androidx.media3.exoplayer.upstream.DefaultAllocator
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -32,13 +38,49 @@ internal class AndroidAnimeLoadControl(
         .setTargetBufferBytes(initialTarget)
         .setPrioritizeTimeOverSizeThresholds(false)
         .build(),
-) : LoadControl by delegate {
+) : LoadControl {
     private data class Configuration(val options: AnimePlayerOptions, val target: Int)
     @Volatile private var configuration = Configuration(initial, initialTarget)
     private val reevaluate = AtomicBoolean(true)
     // Only the ExoPlayer playback thread reads/writes this hysteresis state.
     private var loading = false
     val effectiveForwardBytes: Long get() = configuration.target.toLong()
+
+    // Media3's Java default methods are not a safe Kotlin `by` delegation surface:
+    // several fall through to deprecated overloads that throw "not implemented".
+    // Forward the pinned player's complete lifecycle and buffer contract explicitly.
+    override fun onPrepared(playerId: PlayerId) {
+        loading = false
+        reevaluate.set(true)
+        delegate.onPrepared(playerId)
+    }
+
+    override fun onTracksSelected(parameters: LoadControl.Parameters, trackGroups: TrackGroupArray,
+        trackSelections: Array<out ExoTrackSelection?>) {
+        delegate.onTracksSelected(parameters, trackGroups, trackSelections)
+        allocator.setTargetBufferSize(configuration.target)
+    }
+
+    override fun onStopped(playerId: PlayerId) {
+        loading = false
+        delegate.onStopped(playerId)
+    }
+
+    override fun onReleased(playerId: PlayerId) {
+        loading = false
+        delegate.onReleased(playerId)
+    }
+
+    // Preserve DefaultLoadControl's per-player allocation accounting wrapper.
+    override fun getAllocator(playerId: PlayerId): Allocator = delegate.getAllocator(playerId)
+
+    override fun getBackBufferDurationUs(playerId: PlayerId): Long = delegate.getBackBufferDurationUs(playerId)
+
+    override fun retainBackBufferFromKeyframe(playerId: PlayerId): Boolean = delegate.retainBackBufferFromKeyframe(playerId)
+
+    override fun shouldContinuePreloading(playerId: PlayerId, timeline: Timeline,
+        mediaPeriodId: MediaPeriodId, bufferedDurationUs: Long): Boolean =
+        delegate.shouldContinuePreloading(playerId, timeline, mediaPeriodId, bufferedDurationUs)
 
     fun update(options: AnimePlayerOptions) {
         val last = configuration
