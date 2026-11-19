@@ -419,7 +419,9 @@ internal fun selectReaderEnhancementModel(center: EnhancementCenter, selected: E
             selected.scale in engine.supportedScales) { engine.detail }
         return ReaderEnhancementModel(model.engineId, model)
     }
-    check(selected.tier in setOf(QualityTier.LIGHT, QualityTier.AUTO)) { "请在模型详情选择已安装的${selected.tier.label}模型" }
+    check(selected.tier in setOf(QualityTier.LIGHT, QualityTier.AUTO, QualityTier.BALANCED)) {
+        "请先选择并安装兼容的${selected.tier.label}模型"
+    }
     check(selected.scale == 1) { "轻量修复支持 1×；当前倍率需要兼容的 AI 模型" }
     return ReaderEnhancementModel(EnhancementEngineIds.LOCAL_DETAIL, null)
 }

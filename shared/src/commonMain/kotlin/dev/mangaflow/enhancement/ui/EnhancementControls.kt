@@ -149,9 +149,15 @@ internal fun EnhancementQualityControls(
         EnhancementChoices(QualityTier.entries, policy.tier,
             label = { if (content != EnhancementContent.ANIME && it == QualityTier.ORIGINAL) "原图" else it.label },
             onSelect = { onChange(policy.copy(tier = it)) }, description = "目标画质档位")
-        if (policy.tier in setOf(QualityTier.FINE, QualityTier.ULTRA) && model == null) {
-            EnhancementQuiet("这一档需要指定兼容的高质量模型；准备好之前使用原画。")
-            MotionTextButton(onOpenModels, contentPadding = PaddingValues(horizontal = 0.dp)) { Text("选择或安装模型") }
+        val needsNeural = policy.tier in setOf(QualityTier.FINE, QualityTier.ULTRA) ||
+            (policy.tier == QualityTier.BALANCED && policy.scale > 1)
+        if (needsNeural && model == null)
+            EnhancementQuiet("这一档尚未选择兼容的 AI 模型，未就绪前保持原图。")
+        MotionTextButton(onOpenModels, modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(vertical = 8.dp)) {
+            Icon(Icons.Outlined.Memory, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(model?.title ?: "选择或下载增强模型")
         }
         SettingsToggle("锁定所选档位", policy.locked, Icons.Outlined.Lock,
             onCheckedChange = { onChange(policy.copy(locked = it)) })
@@ -173,10 +179,6 @@ internal fun EnhancementQualityControls(
             if (content != EnhancementContent.ANIME) EnhancementChoices(ImageStyle.entries, policy.style,
                 label = { it.label }, onSelect = { onChange(policy.copy(style = it)) },
                 description = "漫画内容类型", columns = 2)
-            MotionTextButton(onOpenModels, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(vertical = 8.dp)) {
-                Icon(Icons.Outlined.Memory, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
-                Text(model?.title ?: "自动选模型 · 管理引擎")
-            }
             if (model != null) EnhancementQuiet("${model.version} · 原生 ${model.nativeScale}× · ${model.license}")
             if (policy.tier in setOf(QualityTier.FINE, QualityTier.ULTRA)) {
                 EnhancementQuiet("高级档只使用兼容的真实模型；安装完成后还需在当前设备试用。")

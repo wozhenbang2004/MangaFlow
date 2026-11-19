@@ -13,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
@@ -230,7 +231,10 @@ internal fun EnhancementSettingsContent(
                         onClick = { navigate(EnhancementPage.TRIALS) })
                 }
                 EnhancementPage.MODELS -> EnhancementModels(inventory, progress, content, draft.modelId,
-                    onSelectModel = { change(draft.copy(modelId = it)) },
+                    onSelectModel = { id ->
+                    val selected = inventory.models.firstOrNull { it.id == id }
+                    change(draft.copy(modelId = id, scale = selected?.nativeScale ?: draft.scale))
+                },
                     onInstall = { center.installEngine(it) }, onRefresh = { center.refreshInventory() }, center = center)
                 EnhancementPage.CACHE -> {
                     EnhancementValue("增强结果", cacheUsage?.let { "${enhancementBytes(it.completedBytes)} · ${it.entries} 份" } ?: "—")
@@ -406,7 +410,10 @@ internal fun EnhancementSettingsContent(
                 }
             }
             EnhancementWorkspace.MODELS -> EnhancementModels(inventory, progress, content, draft.modelId,
-                onSelectModel = { change(draft.copy(modelId = it)) },
+                onSelectModel = { id ->
+                    val selected = inventory.models.firstOrNull { it.id == id }
+                    change(draft.copy(modelId = id, scale = selected?.nativeScale ?: draft.scale))
+                },
                 onInstall = { center.installEngine(it) }, onRefresh = { center.refreshInventory() }, center = center)
             EnhancementWorkspace.TASKS -> EnhancementTasks(scopedTasks, center)
             EnhancementWorkspace.TRIALS -> EnhancementTrials(telemetry.trials.filter { it.content == content })
@@ -455,6 +462,63 @@ private fun EnhancementModels(inventory: EngineInventory, progress: Map<String, 
                     }
                 }
             }
+        }
+        EnhancementDivider()
+    }
+
+    val offers = enhancementModelOffers.filter { offer ->
+        offer.engineId in engines.map { it.id } &&
+            (content == EnhancementContent.ANIME) == (EngineContent.VIDEO in offer.contents)
+    }
+    if (offers.isNotEmpty()) {
+        val uriHandler = LocalUriHandler.current
+        val scope = rememberCoroutineScope()
+        var offerNotice by remember(content) { mutableStateOf<String?>(null) }
+        EnhancementSection("在线模型目录", Icons.Outlined.Download, "选择并安装") {
+            EnhancementQuiet("模型权重与 ONNX 运行库分别安装；下载时校验 SHA-256，首次试用才会验证设备兼容性。")
+            offers.forEach { offer ->
+                val installed = inventory.models.firstOrNull {
+                    it.engineId == offer.engineId && it.sha256 == offer.sha256
+                }
+                val pending = progress["model:${offer.id}"]
+                Text(offer.title, style = MaterialTheme.typography.bodyMedium)
+                EnhancementQuiet("${offer.scale}× · ${offer.sizeLabel} · ${offer.license}")
+                EnhancementQuiet(offer.detail)
+                if (pending != null) {
+                    EnhancementQuiet(pending.readableProgress())
+                    pending.detail?.let { EnhancementQuiet(it, pending.stage == EngineStage.INSTALL) }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    MotionTextButton(onClick = {
+                        if (installed != null) onSelectModel(installed.id)
+                        else {
+                            offerNotice = null
+                            val receipt = center.downloadModel(offer)
+                            scope.launch {
+                                try {
+                                    val model = receipt.await()
+                                    onSelectModel(model.id)
+                                    offerNotice = "${offer.title} 已校验安装并选中；请在当前页面试用。"
+                                } catch (cancel: CancellationException) { throw cancel }
+                                catch (failure: Exception) {
+                                    offerNotice = failure.message ?: "模型下载或校验失败"
+                                }
+                            }
+                        }
+                    }, enabled = pending?.stage !in setOf(EngineStage.DOWNLOAD, EngineStage.VERIFY, EngineStage.INSTALL),
+                        contentPadding = PaddingValues(horizontal = 0.dp)) {
+                        Icon(if (installed != null) Icons.Outlined.RadioButtonChecked else Icons.Outlined.Download,
+                            null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (installed != null) "选择已安装模型" else "下载并安装")
+                    }
+                    MotionTextButton(onClick = { uriHandler.openUri(offer.sourceUrl) },
+                        contentPadding = PaddingValues(horizontal = 0.dp)) { Text("来源详情") }
+                }
+                EnhancementDivider()
+            }
+            offerNotice?.let { EnhancementQuiet(it) }
         }
         EnhancementDivider()
     }
