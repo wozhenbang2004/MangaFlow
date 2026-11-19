@@ -76,7 +76,7 @@ internal fun AnimePlayerPane(
     onKeepPlayback: () -> Unit,
     onRestorePlayback: () -> Unit,
     onPlayDownload: (AnimeDownloadSelection) -> Unit,
-    onSources: () -> Unit,
+    onSources: (AnimeEpisode?) -> Unit,
     onEpisode: (AnimeEpisode) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -151,6 +151,7 @@ internal fun AnimePlayerPane(
     val canControl = !state.resolving && failure == null &&
         (playback.phase == AnimePlayerPhase.READY || playback.ended)
     fun interact() { controlsVisible = true; interactionEpoch++ }
+    fun showSources() { interact(); onSources(episode) }
     fun showSettings(section: AnimePlayerPanel) {
         interact(); settingsSection = section; settingsPresent = true; settingsVisible = true
     }
@@ -317,7 +318,7 @@ internal fun AnimePlayerPane(
                             optionsAvailable = optionCount, hasAlternative = hasAlternative,
                             canChooseSource = episode != null, canRetry = canRetry,
                             compact = videoHeight < 196.dp,
-                            next = next, nextReady = nextReady, onRetry = onRetry, onSources = onSources, onEpisode = onEpisode,
+                            next = next, nextReady = nextReady, onRetry = onRetry, onSources = ::showSources, onEpisode = onEpisode,
                             onKeepPlayback = onKeepPlayback,
                             canKeepPlayback = playback.phase == AnimePlayerPhase.READY && (state.resolving || resolutionError != null),
                             onRestorePlayback = onRestorePlayback, canRestorePlayback = state.canRestorePlayback,
@@ -352,16 +353,20 @@ internal fun AnimePlayerPane(
                     }
                     if (fullscreen && canControl && !touchExploration) MotionIconButton(onClick = { locked = true }, modifier = Modifier.size(44.dp),
                         tooltip = "锁定触控") { Icon(Icons.Outlined.LockOpen, "锁定触控", Modifier.size(20.dp)) }
-                    if (episode != null && !state.resolving && failure == null) {
-                        if (sourceNames.isNotEmpty()) {
+                    if (episode != null && (state.resolving || failure == null)) {
+                        if (sourceNames.isNotEmpty() && !state.resolving) {
                             AnimeSourceBadge(sourceNames, modifier = Modifier.widthIn(max = 90.dp), enabled = active,
-                                selectedId = currentOption?.sourceId, onClick = { interact(); onSources() })
+                                selectedId = currentOption?.sourceId, onClick = ::showSources)
                         } else {
-                            MotionIconButton(onClick = { interact(); onSources() }, modifier = Modifier.size(44.dp),
+                            MotionIconButton(onClick = ::showSources, modifier = Modifier.size(44.dp),
                                 tooltip = "查看来源与线路") {
                                 Icon(Icons.Outlined.SwapHoriz, "查看来源与线路", Modifier.size(21.dp))
                             }
                         }
+                    }
+                    MotionIconButton(onClick = { showSettings(AnimePlayerPanel.GENERAL) },
+                        modifier = Modifier.size(44.dp), tooltip = "播放设置") {
+                        Icon(Icons.Outlined.Settings, "播放设置", Modifier.size(20.dp))
                     }
                     if (canControl || fullscreen) MotionIconButton(onClick = ::toggleFullscreen, modifier = Modifier.size(44.dp),
                         tooltip = if (fullscreen) "退出全屏 · F" else "全屏 · F") {
@@ -390,7 +395,7 @@ internal fun AnimePlayerPane(
                         AnimePlayerControls(controller.player, playback,
                             previous, next, onEpisode, onToggle = ::toggle,
                             onInteraction = ::interact, onHoldControls = { controlsHeld = it },
-                            onSettings = ::showSettings, nextPrepared = state.nextEpisodeReady,
+                            onSettings = ::showSettings, nextPreparation = state.nextEpisodePreparation,
                             workspaceNotice = state.notice, onDismissNotice = controller::dismissNotice,
                             modifier = Modifier.widthIn(max = 960.dp).fillMaxWidth()
                                 .then(if (fillVideo) Modifier.windowInsetsPadding(safeInsets.only(WindowInsetsSides.Bottom)) else Modifier)
@@ -417,7 +422,7 @@ internal fun AnimePlayerPane(
         }
         if (!playback.inPictureInPicture) AnimePlayerSettings(settingsVisible, settingsSection, controller, state, playback, backdrop,
             onDismiss = { settingsVisible = false; interact() }, onClosed = { settingsPresent = false },
-            onPlayDownload = onPlayDownload)
+            onPlayDownload = onPlayDownload, onSources = onSources)
     }
 }
 
@@ -525,7 +530,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
     previous: AnimeEpisode?, next: AnimeEpisode?, onEpisode: (AnimeEpisode) -> Unit,
     onToggle: () -> Unit, onInteraction: () -> Unit,
     onHoldControls: (Boolean) -> Unit, workspaceNotice: String?, onDismissNotice: () -> Unit,
-    onSettings: (AnimePlayerPanel) -> Unit, nextPrepared: Boolean,
+    onSettings: (AnimePlayerPanel) -> Unit, nextPreparation: AnimeNextEpisodePreparation?,
     modifier: Modifier = Modifier) {
     var scrub by remember(state.sessionGeneration) { mutableStateOf<Long?>(null) }
     val duration = state.durationMs
@@ -576,7 +581,9 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
                     if (state.ended) "重播" else if (state.playWhenReady) "暂停" else "播放", Modifier.size(26.dp))
             }
             if (next != null) MotionIconButton(onClick = { onInteraction(); onEpisode(next) },
-                modifier = Modifier.size(44.dp), tooltip = if (nextPrepared) "下一集 · 播放地址已准备" else "下一集") {
+                modifier = Modifier.size(44.dp),
+                tooltip = nextPreparation?.takeIf { it.episodeId == next.id }
+                    ?.let { "下一集 · ${animePreparationLabel(it)}" } ?: "下一集") {
                 Icon(Icons.Outlined.SkipNext, "下一集", Modifier.size(22.dp))
             }
             Spacer(Modifier.weight(1f))
@@ -585,11 +592,18 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
                 Text(animeSpeedLabel(state.speed), style = MaterialTheme.typography.labelLarge,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            MotionIconButton(onClick = { onSettings(AnimePlayerPanel.GENERAL) }, modifier = Modifier.size(44.dp), tooltip = "播放设置") {
-                Icon(Icons.Outlined.Settings, "播放设置", Modifier.size(20.dp))
-            }
         }
     }
+}
+
+internal fun animePreparationLabel(preparation: AnimeNextEpisodePreparation): String = when {
+    preparation.cachedBytes > 0L -> {
+        val size = if (preparation.cachedBytes >= 1024L) "${preparation.cachedBytes / 1024L} KiB"
+            else "${preparation.cachedBytes} B"
+        "起始媒体已写入缓存 · $size"
+    }
+    preparation.addressResolved -> "播放地址已解析"
+    else -> "正在解析播放地址"
 }
 
 @Composable

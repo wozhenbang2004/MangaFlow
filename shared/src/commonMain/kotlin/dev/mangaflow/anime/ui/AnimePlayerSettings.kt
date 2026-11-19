@@ -46,6 +46,7 @@ internal fun AnimePlayerSettings(
     onDismiss: () -> Unit,
     onClosed: () -> Unit,
     onPlayDownload: (AnimeDownloadSelection) -> Unit,
+    onSources: (AnimeEpisode) -> Unit,
 ) {
     var section by remember { mutableStateOf(initialSection) }
     var speedDraft by remember { mutableStateOf("") }
@@ -60,9 +61,10 @@ internal fun AnimePlayerSettings(
     var retryDraft by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var pendingDownload by remember { mutableStateOf<AnimeDownloadSelection?>(null) }
+    var pendingSourceEpisode by remember { mutableStateOf<AnimeEpisode?>(null) }
     LaunchedEffect(visible, initialSection) {
         if (visible) {
-            section = initialSection; error = null; pendingDownload = null
+            section = initialSection; error = null; pendingDownload = null; pendingSourceEpisode = null
             speedDraft = playback.speed.toString(); holdDraft = state.settings.longPressSpeed.toString()
             openingDraft = state.settings.skipOpeningSeconds.toString(); endingDraft = state.settings.skipEndingSeconds.toString()
             minimumDraft = bufferSeconds(state.settings.bufferMinMs); maximumDraft = bufferSeconds(state.settings.bufferMaxMs)
@@ -71,14 +73,22 @@ internal fun AnimePlayerSettings(
         }
     }
     val capabilities = playback.capabilities
+    val target = state.playbackTarget
+    val currentMedia = playback.takeIf {
+        target == null && state.selectedEpisodeId != null && it.episodeId == state.selectedEpisodeId && it.assetKey != null
+    }
+    val episode = target?.episode ?: state.detail?.episodes?.firstOrNull { it.id == state.selectedEpisodeId }
     val sectionScrolls = remember { mutableMapOf<AnimePlayerPanel, LazyListState>() }
     val sectionScroll = remember(section) { sectionScrolls.getOrPut(section) { LazyListState() } }
     fun show(next: AnimePlayerPanel) { section = next; error = null }
     EnhancementPanelHost(visible, backdrop, onDismiss, maximumWidth = 480.dp, onClosed = {
         val request = pendingDownload
+        val sourceEpisode = pendingSourceEpisode
         pendingDownload = null
+        pendingSourceEpisode = null
         onClosed()
         if (request != null) onPlayDownload(request)
+        else if (sourceEpisode != null) onSources(sourceEpisode)
     }, surface = { modifier, body -> AnimePanelSurface(backdrop, modifier) { body() } }) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
                 Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp),
@@ -153,14 +163,20 @@ internal fun AnimePlayerSettings(
                                 state.settings.skipOpeningSeconds.toString() + " / " + state.settings.skipEndingSeconds + " 秒") { show(AnimePlayerPanel.SKIP) } }
                             item { AnimeSectionTitle("连续播放") }
                             item { SettingsToggle("自动播放下一集", state.settings.autoPlayNext, Icons.Outlined.PlayCircleOutline,
-                                onCheckedChange = { controller.updatePlaybackSettings(state.settings.copy(autoPlayNext = it)) }) }
+                                onCheckedChange = { enabled -> controller.updatePlaybackSettings { it.copy(autoPlayNext = enabled) } }) }
                             item { SettingsToggle("提前准备下一集", state.settings.prepareNextEpisode, Icons.Outlined.DownloadForOffline,
-                                onCheckedChange = { controller.updatePlaybackSettings(state.settings.copy(prepareNextEpisode = it)) }) }
+                                onCheckedChange = { enabled -> controller.updatePlaybackSettings { it.copy(prepareNextEpisode = enabled) } }) }
+                            state.nextEpisodePreparation?.let { preparation ->
+                                val next = state.detail?.episodes?.firstOrNull { it.id == preparation.episodeId }
+                                if (next != null) item {
+                                    AnimeQuietLabel("${animeEpisodeLabel(next)} · ${animePreparationLabel(preparation)}")
+                                }
+                            }
                             item { SettingsToggle("失败后尝试已确认的来源", state.settings.automaticSourceRecovery, Icons.Outlined.SwapHoriz,
-                                onCheckedChange = { controller.updatePlaybackSettings(state.settings.copy(automaticSourceRecovery = it)) }) }
+                                onCheckedChange = { enabled -> controller.updatePlaybackSettings { it.copy(automaticSourceRecovery = enabled) } }) }
                             if (AnimePlayerCapability.BACKGROUND_AUDIO in capabilities) item {
                                 SettingsToggle("后台播放声音", state.settings.backgroundAudio, Icons.Outlined.Headphones,
-                                    onCheckedChange = { controller.updatePlaybackSettings(state.settings.copy(backgroundAudio = it)) })
+                                    onCheckedChange = { enabled -> controller.updatePlaybackSettings { it.copy(backgroundAudio = enabled) } })
                             }
                             if (AnimePlayerCapability.PICTURE_IN_PICTURE in capabilities) item {
                                 CompactMenuAction(Icons.Outlined.PictureInPictureAlt, "进入画中画", onClick = {
@@ -183,23 +199,37 @@ internal fun AnimePlayerSettings(
                                     onSelect = { controller.player.setVideoScale(AnimeVideoScale.entries[it]) },
                                     modifier = Modifier.fillMaxWidth(), controlHeight = 44.dp, treatment = MotionTabTreatment.Soft)
                             }
-                            if (playback.videoWidth != null && playback.videoHeight != null) item {
-                                AnimeQuietLabel("视频 " + playback.videoWidth + " × " + playback.videoHeight)
+                            item {
+                                AnimeSectionTitle("优先清晰度")
+                                val heights = listOf(0, 480, 720, 1080, 2160)
+                                AnimeChoiceStrip(heights.map { if (it == 0) "自动" else "${it}p" },
+                                    heights.indexOf(state.settings.preferredSourceHeight), onSelect = {
+                                        val height = heights[it]
+                                        controller.updatePlaybackSettings { it.copy(preferredSourceHeight = height) }
+                                    }, modifier = Modifier.fillMaxWidth())
+                                AnimeQuietLabel("重新开播时，从来源明确提供的选项中优先取不超过目标的最高档。")
+                            }
+                            item {
+                                val dimensions = currentMedia?.let { media ->
+                                    if (media.videoWidth != null && media.videoHeight != null)
+                                        "${media.videoWidth} × ${media.videoHeight}" else null
+                                }
+                                AnimeQuietLabel("当前解码画质 · ${dimensions ?: "—"}")
                             }
                             item(key = "enhancement-center") {
                                 EnhancementSettingsContent(EnhancementContent.ANIME,
-                                    sessionKey = playback.assetKey?.let { animeEnhancementSessionKey(playback) },
-                                    animePlayback = playback)
+                                    sessionKey = currentMedia?.let(::animeEnhancementSessionKey),
+                                    animePlayback = currentMedia)
                             }
-                            if (state.playbackResolutions.isNotEmpty()) {
+                            if (currentMedia != null && state.playbackResolutions.isNotEmpty()) {
                                 item { AnimeSectionTitle("来源画质") }
                                 items(state.playbackResolutions, key = { "resolution:" + it.id }) { resolution ->
                                     AnimeSelection(resolution.label, selected = resolution.id == state.selectedResolutionId,
                                         onClick = { controller.selectResolution(resolution.id) })
                                 }
                             }
-                            val videoTracks = playback.tracks.filter { it.kind == AnimeTrackKind.VIDEO }
-                            if (AnimePlayerCapability.VIDEO_TRACKS in capabilities) {
+                            val videoTracks = currentMedia?.tracks.orEmpty().filter { it.kind == AnimeTrackKind.VIDEO }
+                            if (currentMedia != null && videoTracks.isNotEmpty() && AnimePlayerCapability.VIDEO_TRACKS in capabilities) {
                                 item { AnimeSectionTitle("视频轨道") }
                                 item { AnimeSelection("自动选择", selected = videoTracks.none { it.selected },
                                     onClick = { controller.player.selectTrack(AnimeTrackKind.VIDEO, null) }) }
@@ -207,9 +237,6 @@ internal fun AnimePlayerSettings(
                                     AnimeSelection(track.label, selected = track.selected,
                                         onClick = { controller.player.selectTrack(track.kind, track.id) })
                                 }
-                            }
-                            if (state.playbackResolutions.isEmpty() && videoTracks.isEmpty()) item {
-                                AnimeQuietLabel("片源没有提供其他清晰度。")
                             }
                         }
                         AnimePlayerPanel.AUDIO, AnimePlayerPanel.SUBTITLES -> {
@@ -256,7 +283,7 @@ internal fun AnimePlayerSettings(
                                     error = "倍速必须是大于零的数字。"
                                 else {
                                     controller.player.setSpeed(speed)
-                                    controller.updatePlaybackSettings(state.settings.copy(longPressSpeed = hold)); error = null
+                                    controller.updatePlaybackSettings { it.copy(longPressSpeed = hold) }; error = null
                                 }
                             }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("应用速度") } }
                         }
@@ -283,28 +310,45 @@ internal fun AnimePlayerSettings(
                             item { MotionButton(onClick = {
                                 val opening = openingDraft.trim().toIntOrNull(); val ending = endingDraft.trim().toIntOrNull()
                                 if (opening == null || ending == null || opening < 0 || ending < 0) error = "秒数必须是非负整数。"
-                                else { controller.updatePlaybackSettings(state.settings.copy(skipOpeningSeconds = opening,
-                                    skipEndingSeconds = ending)); error = null }
+                                else { controller.updatePlaybackSettings { it.copy(skipOpeningSeconds = opening,
+                                    skipEndingSeconds = ending) }; error = null }
                             }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("应用跳过设置") } }
                         }
                         AnimePlayerPanel.BUFFER -> {
-                            if (state.selectedEpisodeId != null) item {
-                                AnimeSectionTitle("当前播放")
-                                val option = state.selectedPlaybackOption
-                                val route = state.playbackRouteMode?.let(::downloadRouteLabel)
-                                AnimeQuietLabel(listOfNotNull(option?.sourceName, route).joinToString(" · ")
-                                    .ifBlank { "离线文件" })
-                                val firstFrame = state.playbackFirstFrameMs
-                                AnimeQuietLabel(when {
-                                    firstFrame != null -> "本次播放会话 · 打开至首帧 ${firstFrame} 毫秒"
-                                    playback.hasVideoTracks == false -> "当前媒体只有音频"
-                                    playback.firstFrameRendered == null -> "当前内核未提供首帧观测"
-                                    playback.phase == AnimePlayerPhase.ERROR -> "本次未收到视频帧"
-                                    else -> "等待首个视频帧"
-                                })
+                            item {
+                                AnimeSectionTitle("本集诊断", episode?.let(::animeEpisodeLabel))
+                                val source = target?.sourceName ?: target?.failure?.sourceName
+                                    ?: state.selectedPlaybackOption?.sourceName.takeIf { currentMedia != null }
+                                val route = state.playbackRouteMode?.takeIf { currentMedia != null }?.let(::downloadRouteLabel)
+                                val stage = when {
+                                    state.resolving && state.autoMatching -> "正在查找线路"
+                                    state.resolving -> "正在解析播放地址"
+                                    target?.error != null -> target.failure?.stage ?: "取址未完成"
+                                    currentMedia?.phase == AnimePlayerPhase.OPENING -> "正在打开媒体"
+                                    currentMedia?.phase == AnimePlayerPhase.ERROR -> "媒体打开或播放失败"
+                                    currentMedia?.playbackSuppressed == true -> "播放暂时被系统挂起"
+                                    currentMedia?.isBuffering == true -> "正在缓冲"
+                                    currentMedia?.isPlaying == true -> "正在播放"
+                                    currentMedia?.ended == true -> "本集已播完"
+                                    currentMedia?.phase == AnimePlayerPhase.READY -> "已暂停"
+                                    else -> "等待媒体"
+                                }
+                                AnimeQuietLabel(listOfNotNull(stage, source, route).joinToString(" · "))
+                                (target?.failure?.reason ?: target?.error ?: currentMedia?.error)?.let { AnimeQuietLabel(it) }
+                                val firstFrame = state.playbackFirstFrameMs.takeIf { currentMedia != null }?.let { "$it ms" }
+                                val buffered = currentMedia?.bufferedAheadMs?.takeIf { it >= 0 }?.let { animeTime(it) }
+                                val speed = currentMedia?.downloadBytesPerSecond?.takeIf { it >= 0 }?.let(::animeSourceRate)
+                                AnimeQuietLabel("打开至首帧 ${firstFrame ?: "—"} · 已缓冲 ${buffered ?: "—"}")
+                                AnimeQuietLabel("实播传输速率 · ${speed ?: "—"}")
+                                if (episode != null) MotionTextButton(onClick = {
+                                    pendingSourceEpisode = episode
+                                    onDismiss()
+                                }, modifier = Modifier.heightIn(min = 44.dp)) { Text("查看本集线路") }
                             }
-                            if (AnimePlayerCapability.BUFFER_CONTROL in capabilities) {
-                                item { AnimeQuietLabel("秒数是播放器的准备目标，实际缓存量由当前资源与可用预算决定。") }
+                            val configureBuffer = AnimePlayerCapability.BUFFER_CONTROL in capabilities ||
+                                currentMedia == null || playback.phase in setOf(AnimePlayerPhase.OPENING, AnimePlayerPhase.ERROR)
+                            if (configureBuffer) {
+                                item { AnimeQuietLabel("缓冲目标会保存，实际缓存量随内核、媒体与可用预算变化。") }
                                 item { AnimeTextField(minimumDraft, { minimumDraft = it; error = null }, "最小缓冲（秒）") }
                                 item { AnimeTextField(maximumDraft, { maximumDraft = it; error = null }, "最大缓冲（秒）") }
                                 item { AnimeTextField(startDraft, { startDraft = it; error = null }, "起播缓冲（秒）") }
@@ -318,9 +362,9 @@ internal fun AnimePlayerSettings(
                                 if (minimum == null || maximum == null || start == null || rebuffer == null || retries == null ||
                                     retries < 0 || maximum <= 0 || maximum < minimum || minimum < start || minimum < rebuffer)
                                     error = "最大缓冲 ≥ 最小缓冲 ≥ 起播及恢复缓冲，恢复次数不能为负。"
-                                else { controller.updatePlaybackSettings(state.settings.copy(bufferMinMs = minimum,
+                                else { controller.updatePlaybackSettings { it.copy(bufferMinMs = minimum,
                                     bufferMaxMs = maximum, bufferStartMs = start, bufferRebufferMs = rebuffer,
-                                    automaticRecoveryAttempts = retries)); error = null }
+                                    automaticRecoveryAttempts = retries) }; error = null }
                             }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("应用缓冲设置") } }
                         }
                         AnimePlayerPanel.DOWNLOADS -> Unit

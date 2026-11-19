@@ -42,7 +42,7 @@ internal class AnimeLocalStreamBridge private constructor(
             if (resource == null) { output.error(404, "Unknown offline resource"); return }
             check(resource.file.isFile && resource.file.length() == resource.size) { "Offline resource changed" }
             val rangeHeader = request.headers["range"]
-            val range = if (rangeHeader == null) 0L to (resource.size - 1L) else parseRange(rangeHeader, resource.size)
+            val range = if (rangeHeader == null) 0L to (resource.size - 1L) else animeByteRange(rangeHeader, resource.size)
             if (range == null) {
                 output.headers(416, mapOf("Content-Range" to "bytes */${resource.size}", "Content-Length" to "0"))
                 return
@@ -71,20 +71,6 @@ internal class AnimeLocalStreamBridge private constructor(
         finally { connection.close() }
     }
 
-    private fun parseRange(value: String, size: Long): Pair<Long, Long>? {
-        if (size <= 0) return null
-        val match = Regex("bytes=([0-9]*)-([0-9]*)").matchEntire(value.trim()) ?: return null
-        val first = match.groupValues[1]
-        val last = match.groupValues[2]
-        if (first.isEmpty()) {
-            val count = last.toLongOrNull()?.takeIf { it > 0 } ?: return null
-            return (size - count.coerceAtMost(size)) to (size - 1)
-        }
-        val start = first.toLongOrNull()?.takeIf { it in 0 until size } ?: return null
-        val end = if (last.isEmpty()) size - 1 else last.toLongOrNull()?.coerceAtMost(size - 1) ?: return null
-        return (start to end).takeIf { end >= start }
-    }
-
     companion object {
         suspend fun create(lease: AnimeLocalMediaLease, scope: CoroutineScope): AnimeLocalStreamBridge {
             var pending: AnimeLocalStreamBridge? = null
@@ -98,4 +84,18 @@ internal class AnimeLocalStreamBridge private constructor(
             } catch (failure: Throwable) { pending?.close(); throw failure }
         }
     }
+}
+
+internal fun animeByteRange(value: String, size: Long): Pair<Long, Long>? {
+    if (size <= 0) return null
+    val match = Regex("bytes=([0-9]*)-([0-9]*)").matchEntire(value.trim()) ?: return null
+    val first = match.groupValues[1]
+    val last = match.groupValues[2]
+    if (first.isEmpty()) {
+        val count = last.toLongOrNull()?.takeIf { it > 0 } ?: return null
+        return (size - count.coerceAtMost(size)) to (size - 1)
+    }
+    val start = first.toLongOrNull()?.takeIf { it in 0 until size } ?: return null
+    val end = if (last.isEmpty()) size - 1 else last.toLongOrNull()?.coerceAtMost(size - 1) ?: return null
+    return (start to end).takeIf { end >= start }
 }

@@ -50,16 +50,19 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Application-owned explicit offline work. The durable queue resumes PAUSED after process death.
+ * Application-owned explicit offline work. Android's scheduled worker may restore pending intent.
  * Downloads never share the disposable player cache or the watch-progress document.
  */
 class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineScope) {
-    val capabilities = AnimeDownloadCapabilities(videoContainers = animeOfflineVideoContainers())
+    val capabilities = AnimeDownloadCapabilities(videoContainers = animeOfflineVideoContainers(),
+        systemBackgroundExecution = animeSystemDownloadExecution(),
+        processBackgroundExecution = animeProcessDownloadExecution())
     private val context = context.applicationContext
     private val root = StorageFile(this.context.filesDir, "anime-downloads")
     private val scope = CoroutineScope(applicationScope.coroutineContext +
@@ -71,8 +74,9 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
     private val readers = mutableMapOf<String, Int>()
     private val mutableState = MutableStateFlow(AnimeDownloadsState())
     val state: StateFlow<AnimeDownloadsState> = mutableState.asStateFlow()
-    private val foreground = atomic(true)
+    private val foreground = atomic(false)
     private val playbackBusy = atomic(false)
+    private var backgroundExecutions = 0
     private var activeId: String? = null
     private var activeGeneration: String? = null
     private var activeJob: Job? = null
@@ -113,19 +117,22 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
                             return@forEach
                         }
                         val valid = saved.entry.status == AnimeDownloadStatus.COMPLETED && filesValid(saved)
+                        val pending = saved.desired && capabilities.systemBackgroundExecution &&
+                            saved.entry.status in PENDING_STATUSES
                         val entry = saved.entry.copy(status = when {
                             valid -> AnimeDownloadStatus.COMPLETED
                             saved.entry.status == AnimeDownloadStatus.COMPLETED -> AnimeDownloadStatus.FAILED
                             saved.entry.status == AnimeDownloadStatus.FAILED -> AnimeDownloadStatus.FAILED
+                            pending -> AnimeDownloadStatus.QUEUED
                             else -> AnimeDownloadStatus.PAUSED
                         }, error = when {
-                            valid -> null
+                            valid || pending -> null
                             saved.entry.status == AnimeDownloadStatus.COMPLETED -> "离线文件缺失或大小改变，请重新下载"
-                            saved.entry.status in setOf(AnimeDownloadStatus.QUEUED, AnimeDownloadStatus.DOWNLOADING, AnimeDownloadStatus.WAITING) ->
+                            saved.entry.status in PENDING_STATUSES ->
                                 "上次下载已暂停；点继续可恢复下载，来源不支持续传时会重新下载"
                             else -> saved.entry.error
                         })
-                        synchronized(lock) { records[entry.id] = saved.copy(entry = entry, desired = false) }
+                        synchronized(lock) { records[entry.id] = saved.copy(entry = entry, desired = pending) }
                     } catch (cancel: CancellationException) { throw cancel }
                     catch (_: Exception) { unreadable = true }
                 }
@@ -133,6 +140,11 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
                     publish(if (unreadable) "部分离线记录无法读取，原有文件已保留" else null)
                 }
                 ready.complete(Unit)
+                if (hasPendingWork()) {
+                    // Recover intent even if the process exited between saving it and scheduling the worker.
+                    requestBackgroundExecution(recover = true)
+                    action { synchronized(lock) { kick() } }
+                }
             } catch (failure: Throwable) {
                 synchronized(lock) { mutableState.value = mutableState.value.copy(loading = false, notice = readablePlayerError(failure)) }
                 ready.completeExceptionally(failure)
@@ -178,7 +190,7 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
                 planIdentity = if (changed) null else previous?.planIdentity)
             save(record); records[id] = record
             if (activeId == id) activeJob?.cancel()
-            publish(null); kick()
+            publish(null); requestBackgroundExecution(); kick()
             id
         }
     }
@@ -203,7 +215,7 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
                 entry = old.entry.copy(status = AnimeDownloadStatus.QUEUED, error = null, updatedAt = wallTimeMillis()))
             save(next); records[id] = next
             if (activeId == id) activeJob?.cancel()
-            publish(); kick()
+            publish(); requestBackgroundExecution(); kick()
         }
     }
 
@@ -220,7 +232,38 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
     }
 
     fun setForeground(value: Boolean) {
-        if (foreground.getAndSet(value) != value) action { synchronized(lock) { deferActiveIfNeeded(); kick() } }
+        if (foreground.getAndSet(value) != value) action {
+            synchronized(lock) { deferActiveIfNeeded(); kick() }
+            if (value && hasPendingWork()) requestBackgroundExecution(recover = true)
+        }
+    }
+
+    internal suspend fun hasPendingWork(): Boolean {
+        ready.await()
+        return state.value.entries.any { it.status in PENDING_STATUSES }
+    }
+
+    /** The worker holds the system execution lease. This store remains the only media writer. */
+    internal suspend fun runWithBackgroundExecution(onEntry: suspend (AnimeDownloadEntry) -> Unit) {
+        ready.await()
+        synchronized(lock) { backgroundExecutions++ }
+        try {
+            synchronized(lock) {
+                if (state.value.notice == BACKGROUND_SCHEDULE_ERROR) publish(null)
+                kick()
+            }
+            state.first { snapshot ->
+                val entry = snapshot.entries.firstOrNull { it.status == AnimeDownloadStatus.DOWNLOADING }
+                    ?: snapshot.entries.lastOrNull { it.status in PENDING_STATUSES }
+                if (entry != null) onEntry(entry)
+                entry == null
+            }
+        } finally {
+            withContext(NonCancellable + Dispatchers.IO) { synchronized(lock) {
+                backgroundExecutions--
+                runCatching { deferActiveIfNeeded(); kick() }.onFailure { publish(readablePlayerError(it)) }
+            } }
+        }
     }
 
     /** The current video owns bandwidth while opening/buffering; existing explicit work waits. */
@@ -268,8 +311,27 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
         actions.trySend(block)
     }
 
+    private fun requestBackgroundExecution(recover: Boolean = false) {
+        if (!capabilities.systemBackgroundExecution) return
+        scope.launch {
+            try {
+                scheduleAnimeDownloadExecution(context, recover)
+                synchronized(lock) { if (state.value.notice == BACKGROUND_SCHEDULE_ERROR) publish(null) }
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) {
+                synchronized(lock) {
+                    if (records.values.any { it.desired && !it.removed } && backgroundExecutions == 0) {
+                        publish(BACKGROUND_SCHEDULE_ERROR)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun executionAllowed() = foreground.value || capabilities.processBackgroundExecution || backgroundExecutions > 0
+
     private fun deferActiveIfNeeded() {
-        if (foreground.value && !playbackBusy.value) return
+        if (executionAllowed() && !playbackBusy.value) return
         val id = activeId ?: return
         val old = records[id]?.takeIf { it.desired && !it.removed } ?: return
         val next = old.copy(generation = randomUuid(), entry = old.entry.copy(status = AnimeDownloadStatus.WAITING,
@@ -281,7 +343,7 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
     private fun kick() {
         if (activeJob != null || !scope.isActive) return
         val candidate = records.values.firstOrNull { it.desired && !it.removed } ?: return
-        if (!foreground.value || playbackBusy.value) {
+        if (!executionAllowed() || playbackBusy.value) {
             if (candidate.entry.status != AnimeDownloadStatus.WAITING || candidate.entry.error != waitReason()) {
                 val next = candidate.copy(entry = candidate.entry.copy(status = AnimeDownloadStatus.WAITING, error = waitReason()))
                 save(next); records[next.entry.id] = next; publish()
@@ -305,7 +367,11 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
         activeJob = job; publish(); job.start()
     }
 
-    private fun waitReason() = if (!foreground.value) "回到应用后继续下载" else "正在为当前播放让出带宽，缓冲完成后继续"
+    private fun waitReason() = when {
+        playbackBusy.value -> "正在为当前播放让出带宽，缓冲完成后继续"
+        capabilities.systemBackgroundExecution -> "等待 Android 安排后台下载，回到应用也可继续"
+        else -> "回到应用后继续下载"
+    }
 
     private suspend fun run(initial: Record) {
         val id = initial.entry.id
@@ -316,7 +382,7 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
         fun guard() = synchronized(lock) {
             if (records[id]?.let { it.generation == generation && it.desired && !it.removed } != true)
                 throw CancellationException("Offline task replaced")
-            if (!foreground.value || playbackBusy.value) {
+            if (!executionAllowed() || playbackBusy.value) {
                 deferActiveIfNeeded()
                 throw CancellationException("Current playback has priority")
             }
@@ -362,8 +428,7 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
             val entryName: String
             if (resources != null) { saved = resources; entryName = resources.single().name }
             else {
-                val (base, text) = fetchAnimePlaylist(asset, transport)
-                val plan = parseAnimeHlsDownload(base, text)
+                val plan = loadAnimeHlsDownload(asset, transport, ::guard)
                 guard()
                 val previousPlan = synchronized(lock) { records.getValue(id).planIdentity }
                 if (previousPlan != null && previousPlan != plan.identity) clearMediaFiles(folder, ::guard)
@@ -378,14 +443,17 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
                         { bytes, _ -> progress(retained + bytes, null, index, plan.resources.size) })
                     parts += result; retained += result.bytes
                 }
-                guard()
-                val playlist = StorageFile(folder, "media.m3u8")
-                val atomic = StorageAtomicFile(playlist)
-                val output = atomic.startWrite()
-                try { output.write(plan.playlist.encodeToByteArray()); atomic.finishWrite(output) }
-                catch (failure: Throwable) { atomic.failWrite(output); throw failure }
-                saved = parts + AnimeSavedResource(playlist.name, "application/vnd.apple.mpegurl", playlist.length())
-                entryName = playlist.name
+                entryName = "media.m3u8"
+                val manifests = plan.childPlaylists + (entryName to plan.playlist)
+                saved = parts + manifests.map { (name, text) ->
+                    guard()
+                    val playlist = StorageFile(folder, name)
+                    val atomic = StorageAtomicFile(playlist)
+                    val output = atomic.startWrite()
+                    try { output.write(text.encodeToByteArray()); atomic.finishWrite(output) }
+                    catch (failure: Throwable) { atomic.failWrite(output); throw failure }
+                    AnimeSavedResource(name, "application/vnd.apple.mpegurl", playlist.length())
+                }
             }
             synchronized(lock) {
                 guard()
@@ -478,7 +546,8 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
             .put("status", row.status.name).put("bytes", row.downloadedBytes).put("total", row.totalBytes ?: -1L)
             .put("completedFiles", row.completedFiles).put("totalFiles", row.totalFiles ?: -1)
             .put("error", row.error).put("created", row.createdAt).put("updated", row.updatedAt)
-            .put("generation", record.generation).put("request", record.requestIdentity).put("removed", record.removed)
+            .put("generation", record.generation).put("request", record.requestIdentity)
+            .put("desired", record.desired).put("removed", record.removed)
             .put("reset", record.resetRequired).put("entry", record.entryName).put("plan", record.planIdentity)
             .put("resources", JSONArray(record.resources.map { JSONObject().put("name", it.name).put("mime", it.mimeType).put("bytes", it.bytes) }))
     }
@@ -496,7 +565,8 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
             json.optInt("totalFiles", -1).takeIf { it >= 0 }, json.optString("error", null),
             json.getLong("created"), json.getLong("updated"))
         val resources = json.getJSONArray("resources")
-        return Record(row, json.getString("generation"), json.getString("request"), removed = json.optBoolean("removed"),
+        return Record(row, json.getString("generation"), json.getString("request"), desired = json.optBoolean("desired"),
+            removed = json.optBoolean("removed"),
             resetRequired = json.optBoolean("reset"), entryName = json.optString("entry", null),
             planIdentity = json.optString("plan", null), resources = (0 until resources.length()).map { index ->
                 val item = resources.getJSONObject(index)
@@ -528,7 +598,9 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
 
     private companion object {
         val ID = Regex("[a-f0-9]{64}")
-        val FILE_NAME = Regex("(?:media\\.(?:bin|m3u8)|(?:segment|init)-[0-9]+\\.bin)")
+        val FILE_NAME = Regex("(?:media\\.bin|(?:media|video|audio)\\.m3u8|(?:segment|init)-[0-9]+\\.bin)")
+        val PENDING_STATUSES = setOf(AnimeDownloadStatus.QUEUED, AnimeDownloadStatus.DOWNLOADING, AnimeDownloadStatus.WAITING)
+        const val BACKGROUND_SCHEDULE_ERROR = "Android 暂未接收后台下载任务，留在应用内可继续下载"
         const val MAX_MANIFEST_BYTES = 4L * 1024 * 1024
     }
 }

@@ -237,6 +237,7 @@ data class SourceManagementState(
     val scanning: Boolean = false,
     val domainOptions: List<String> = emptyList(),
     val sourceDomain: String = "",
+    val chapters: List<Chapter> = emptyList(),
 )
 
 data class AuthorWorksState(
@@ -310,7 +311,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     val unifiedChapters = services.unifiedChapters
     val repository = services.repository
     val copyExplore = CopyExploreController(repository.copy, viewModelScope) { "copy" in repository.enabledSources() }
-    private var copyExploreSourceScope = repository.sourceConfigurationKey()
+    private var copyExploreSourceScope = repository.sourceConfigurationKey(adult = false)
     val bodySources = services.bodySources
     val sourcePlugins = services.sourcePlugins
     internal val starterSources = services.starterSources
@@ -395,7 +396,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private val _readerSourceSwitchUndoAvailable = MutableStateFlow(false)
     val readerSourceSwitchUndoAvailable = _readerSourceSwitchUndoAvailable.asStateFlow()
     private var sourceManagementJob: Job? = null
-    private var sourceManagementRequest = 0L
+    @Volatile private var sourceManagementRequest = 0L
     private val _libraryOpening = MutableStateFlow<LibraryOpenState?>(null)
     val libraryOpening = _libraryOpening.asStateFlow()
     val refreshingDownloads = services.preparations.refreshingDownloads
@@ -464,9 +465,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         }
         viewModelScope.launch {
             services.sourceConfiguration.drop(1).collect { scope ->
+                val ordinaryScope = repository.sourceConfigurationKey(adult = false)
                 if (scope == services.sourceConfiguration.value && scope == repository.sourceConfigurationKey() &&
-                    scope != copyExploreSourceScope) {
-                    copyExploreSourceScope = scope
+                    ordinaryScope != copyExploreSourceScope) {
+                    copyExploreSourceScope = ordinaryScope
                     invalidateCopySearchDirectory()
                 }
                 val current = _browse.value
@@ -475,8 +477,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 cancelNextChapterPrefetch(clearIntent = false)
                 if (services.sourceConfiguration.value == scope && repository.sourceConfigurationKey() == scope)
                     resumeNextChapterIntent(intent)
+                listOfNotNull(_detail.value?.manga, _reading.value?.manga)
+                    .distinctBy { it.id }.filter { isAdultSource(it.sourceId) }.forEach { discoverWorkSources(it) }
                 if ((current.isFederatedSearch || current.searchTarget == SearchTarget.TRANSLATION_GROUP) &&
-                    current.sourceScope != scope) showBrowse(current.copy(
+                    current.sourceScope != ordinaryScope) showBrowse(current.copy(
                     items = emptyList(), sourceMatches = emptyMap(), sourceChoiceIds = emptySet(),
                     searchSources = emptyMap(), sourceNextPages = emptyMap(), hasMore = false,
                     loading = true, loadingMore = false, refreshing = false, error = null,
@@ -834,7 +838,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         browseJob?.cancel()
         val requestId = ++browseRequestId
         val generation = browseCache.generation
-        val configured = selection.copy(sourceScope = repository.sourceConfigurationKey(),
+        val configured = selection.copy(sourceScope = repository.sourceConfigurationKey(adult = false),
             alignedTagSources = emptyMap()).withSearchTagDirectory().withCurrentTagBindings()
         val memory = browseCache.cached(configured.cacheKey)
         _browse.value = memory?.restore(configured) ?: configured
@@ -872,10 +876,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val identities = _browse.map { it.tagSearchIdentities() }.distinctUntilChanged()
         combine(identities, unifiedChapters.revision, repository.sourceDiscovery,
             repository.sourceErrors, services.sourceConfiguration) { selection, _, discovery, failures, configuration ->
-            val aligned = if (selection == null || selection.sourceScope != configuration) emptyMap()
+            val aligned = if (selection == null || selection.sourceScope != repository.sourceConfigurationKey(adult = false)) emptyMap()
             else withContext(Dispatchers.IO) {
-                val eligible = repository.sources.filterNot { it.adult }.map { it.id }.toSet()
-                    .intersect(repository.enabledSources())
+                val eligible = repository.enabledSources()
                 val direct = selection.groups.values.flatten()
                 val alreadyShown = direct.mapTo(mutableSetOf(), ::federatedMangaIdentity)
                 val saved = try {
@@ -2013,11 +2016,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         offline: List<Chapter>, primaryObserved: Boolean): List<Chapter> {
         if (previous.isEmpty()) return retainedChapters(primary, offline)
         val installed = repository.sources.mapTo(mutableSetOf()) { it.id }
+        val primarySource = SourceKeys.decodeManga(workId).sourceId
         val settings = unifiedChapters.settings(workId)
         val unobserved = buildSet {
             if (!primaryObserved) add(SourceKeys.decodeManga(workId))
             settings.links.forEach { link ->
                 if (link.confirmedAt > 0L && link.manga.sourceId in installed &&
+                    repository.sharesSourceProfile(primarySource, link.manga.sourceId) &&
                     repository.loadedSourceDetail(link.manga.id) == null) add(SourceKeys.decodeManga(link.manga.id))
             }
         }
@@ -2065,7 +2070,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val workIds = listOfNotNull(detailWorkId, readingWorkId).distinct()
         val catalogs = withContext(Dispatchers.Default) {
             workIds.forEach(repository::reconcileSourceDiscovery)
-            workIds.associateWith { repository.cachedCatalog(it) }
+            workIds.associateWith { repository.activeCatalog(it) }
         }
         fun currentProjection(): Boolean = request == projectionRequestId &&
             settingsRevision == unifiedChapters.revision.value && catalogRevision == repository.catalogRevision.value
@@ -2117,14 +2122,14 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val work = _detail.value?.manga ?: _reading.value?.manga ?: return
         if (work.sourceUrl == LOCAL_SOURCE_URL) return
         closeSourceManagement()
-        val privateWork = isAdultSource(work.sourceId)
-        val available = repository.sources.filter { it.id != work.sourceId && isAdultSource(it.id) == privateWork }
+        val available = repository.sources.filter { it.id != work.sourceId &&
+            repository.canAssociateWorkSource(work, it.id) }
         val first = available.firstOrNull()?.id.orEmpty()
         _sourceManagement.value = SourceManagementState(
             work = work,
             sourceId = first,
             sources = available.map { it.id to it.name },
-            linked = unifiedChapters.linkedSources(work.id).filter { it.confirmedAt > 0L }.map { it.manga },
+            linked = repository.confirmedLinkedWorks(work),
             preferredSource = unifiedChapters.settings(work.id).preferredSources.firstOrNull() ?: work.sourceId,
             domainOptions = sourceDomainOptions(first), sourceDomain = sourceDomain(first),
         )
@@ -2133,7 +2138,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     private fun sourceIdentityReviews(work: Manga): List<ReviewSource> =
-        (_detail.value?.takeIf { it.manga.id == work.id }?.reviews.orEmpty() + reviews.cachedSources(work))
+        if (isAdultSource(work.sourceId)) emptyList()
+        else (_detail.value?.takeIf { it.manga.id == work.id }?.reviews.orEmpty() + reviews.cachedSources(work))
             .filter { it.status == ReviewStatus.READY }.distinct()
 
     private fun sourceAliases(work: Manga): List<String> =
@@ -2141,12 +2147,11 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             .filter(String::isNotBlank).distinct()
 
     private fun isAdultSource(sourceId: String): Boolean =
-        bodySources.entries.value.any { it.source.id == sourceId && it.adult }
+        repository.isAdultSource(sourceId) || bodySources.entries.value.any { it.source.id == sourceId && it.adult }
 
     private fun discoverWorkSources(work: Manga, force: Boolean = false, metadataOnly: Boolean = false,
         onlySourceId: String? = null) {
         if (work.sourceId == "catalog") return
-        if (isAdultSource(work.sourceId)) return
         if (!metadataOnly) services.sourceChecks.watch(work)
         val ready = sourceIdentityReviews(work)
         val aliases = sourceAliases(work)
@@ -2181,13 +2186,12 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val state = _sourceManagement.value ?: return
         val work = state.work
         val settings = unifiedChapters.settings(work.id)
+        val linkedWorks = repository.confirmedLinkedWorks(work)
         val discovered = repository.sourceDiscovery.value[work.id].orEmpty()
         val chapters = _detail.value?.takeIf { it.manga.id == work.id }?.detail?.chapters
             ?: _reading.value?.takeIf { it.manga.id == work.id }?.chapters.orEmpty()
-        val results = repository.sources.filter { isAdultSource(it.id) == isAdultSource(work.sourceId) }.map { source ->
-            val linked = source.id == work.sourceId || settings.links.any {
-                it.manga.sourceId == source.id && it.confirmedAt > 0L
-            }
+        val results = repository.sources.filter { repository.sharesSourceProfile(work.sourceId, it.id) }.map { source ->
+            val linked = source.id == work.sourceId || linkedWorks.any { it.sourceId == source.id }
             val existingChapters = chapters.count { chapter -> chapter.variants.any { it.sourceId == source.id } ||
                 chapter.variants.isEmpty() && chapter.sourceId == source.id }
             val alignedChapters = chapters.count { chapter ->
@@ -2203,7 +2207,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             when {
                 source.id in settings.excludedSources -> SourceDiscoveryResult(source.id, source.name,
                     SourceDiscoveryStatus.DISABLED, message = "已取消关联，可手动重新添加")
-                source.id !in repository.enabledSources() && source.id != work.sourceId -> SourceDiscoveryResult(source.id, source.name,
+                !repository.canAssociateWorkSource(work, source.id) && source.id != work.sourceId -> SourceDiscoveryResult(source.id, source.name,
                     SourceDiscoveryStatus.DISABLED, message = "已在漫画源设置中停用")
                 discovery?.status in listOf(SourceDiscoveryStatus.QUEUED, SourceDiscoveryStatus.SEARCHING,
                     SourceDiscoveryStatus.RETRYING, SourceDiscoveryStatus.FAILED) -> discovery!!.copy(
@@ -2221,8 +2225,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     SourceDiscoveryStatus.NO_MATCH, message = "尚未检查")
             }
         }
+        val available = repository.sources.filter { it.id != work.sourceId && repository.canAssociateWorkSource(work, it.id) }
+            .map { it.id to it.name }
         _sourceManagement.update { if (it?.work?.id == work.id) it.copy(
-            linked = settings.links.filter { it.confirmedAt > 0L }.map { link -> link.manga },
+            linked = linkedWorks, sources = available, chapters = chapters,
             preferredSource = settings.preferredSources.firstOrNull() ?: work.sourceId,
             discovery = results, scanning = discovered.values.any { result -> result.status in setOf(
                 SourceDiscoveryStatus.QUEUED, SourceDiscoveryStatus.SEARCHING, SourceDiscoveryStatus.RETRYING) },
@@ -2241,7 +2247,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     fun chooseBodySource(sourceId: String) {
         val state = _sourceManagement.value ?: return
-        if (state.connecting || state.sources.none { it.first == sourceId }) return
+        if (state.connecting || state.sources.none { it.first == sourceId } ||
+            !repository.canAssociateWorkSource(state.work, sourceId)) return
         sourceManagementRequest++
         sourceManagementJob?.cancel()
         val candidates = repository.sourceDiscovery.value[state.work.id]?.get(sourceId)?.candidates.orEmpty()
@@ -2279,9 +2286,11 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     fun searchBodySource(sourceId: String, query: String) {
         val state = _sourceManagement.value ?: return
-        if (state.connecting || state.sources.none { it.first == sourceId }) return
+        if (state.connecting || state.sources.none { it.first == sourceId } ||
+            !repository.canAssociateWorkSource(state.work, sourceId)) return
         sourceManagementJob?.cancel()
         val request = ++sourceManagementRequest
+        val configuration = repository.sourceConfigurationKey()
         _sourceManagement.value = state.copy(sourceId = sourceId, query = query, loading = true,
             candidates = emptyList(), error = null, domainOptions = sourceDomainOptions(sourceId),
             sourceDomain = sourceDomain(sourceId))
@@ -2296,10 +2305,15 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 val result = foregroundRequest("来源搜索") { withContext(Dispatchers.IO) {
                     var found = dev.mangaflow.data.MangaPage(emptyList(), false)
                     for (term in bodySourceSearchTerms(query, aliases)) {
+                        require(repository.sourceConfigurationKey() == configuration &&
+                            repository.canAssociateWorkSource(state.work, sourceId)) { "来源设置已变化，请重新选择。" }
                         found = repository.searchSource(sourceId, term)
                         if (found.items.isNotEmpty()) break
                     }
-                    found
+                    require(repository.sourceConfigurationKey() == configuration &&
+                        repository.canAssociateWorkSource(state.work, sourceId)) { "来源设置已变化，请重新选择。" }
+                    found.copy(items = found.items.filter { it.sourceId == sourceId &&
+                        runCatching { SourceKeys.decodeManga(it.id).sourceId == sourceId }.getOrDefault(false) })
                 } }
                 if (request == sourceManagementRequest) _sourceManagement.update { it?.copy(
                     candidates = result.items, loading = false,
@@ -2314,35 +2328,28 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     fun attachBodySource(workId: String, manga: Manga) {
         val state = _sourceManagement.value ?: return
-        if (state.work.id != workId || state.connecting || state.sources.none { it.first == manga.sourceId }) return
+        if (state.work.id != workId || state.connecting || state.sources.none { it.first == manga.sourceId } ||
+            !repository.canAssociateWorkSource(state.work, manga.sourceId)) return
         sourceManagementJob?.cancel()
         val request = ++sourceManagementRequest
+        val configuration = repository.sourceConfigurationKey()
         _sourceManagement.value = state.copy(connecting = true, loading = false, error = null)
         sourceManagementJob = viewModelScope.launch {
             try {
                 val catalog = foregroundRequest("来源目录") { repository.detailSource(manga.sourceId, manga.id) }
                 if (request != sourceManagementRequest) return@launch
-                require(catalog.chapters.isNotEmpty()) { "这个版本暂时没有可读章节。" }
-                val baseline = repository.loadedSourceDetail(workId)
+                require(catalog.manga.id == manga.id && catalog.manga.sourceId == manga.sourceId) {
+                    "已选作品和返回的目录不一致，请重新选择。"
+                }
                 withContext(Dispatchers.IO) {
                     // Choosing the row confirms the work, not its chapter numbering or edition.
-                    val sameChapterSystem = dev.mangaflow.data.SourceDiscoveryIdentity.chapterSystemMatches(baseline, catalog)
-                    val nativeEditions = catalog.chapters.flatMap { it.variants }.map { it.edition }
-                        .filter(String::isNotBlank).distinct()
-                    val volumeOnly = catalog.chapters.all {
-                        dev.mangaflow.data.ChapterSemantics.parse(it)?.system?.startsWith("volume") == true
-                    }
-                    val edition = if (nativeEditions.size == 1) nativeEditions.single()
-                        else if (volumeOnly) "单行本" else "连载版"
-                    unifiedChapters.attach(state.work.id, catalog.manga,
-                        language = repository.sources.firstOrNull { it.id == manga.sourceId }?.language.orEmpty(),
-                        edition = edition, sameChapterSystem = sameChapterSystem)
+                    repository.attachWorkSource(state.work, catalog, configuration) { request == sourceManagementRequest }
                 }
                 if (request != sourceManagementRequest) return@launch
                 withContext(Dispatchers.Default) { repository.reconcileSourceDiscovery(workId) }
                 refreshUnifiedProjection()
                 _sourceManagement.update { it?.copy(connecting = false,
-                    linked = unifiedChapters.linkedSources(state.work.id).filter { it.confirmedAt > 0L }.map { link -> link.manga }) }
+                    linked = repository.confirmedLinkedWorks(state.work)) }
                 messages.send("已关联正文版本；原阅读记录与下载保留。")
             } catch (cancel: CancellationException) { throw cancel
             } catch (failure: Exception) {
@@ -2354,9 +2361,34 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     fun detachBodySource(manga: Manga) {
         val state = _sourceManagement.value ?: return
+        if (state.connecting || repository.confirmedLinkedWorks(state.work).none { it.id == manga.id }) return
         changeUnified {
             unifiedChapters.detach(state.work.id, manga.id)
-            _sourceManagement.update { it?.copy(linked = unifiedChapters.linkedSources(state.work.id).filter { it.confirmedAt > 0L }.map { link -> link.manga }) }
+            _sourceManagement.update { if (it?.work?.id == state.work.id)
+                it.copy(linked = repository.confirmedLinkedWorks(state.work)) else it }
+        }
+    }
+
+    /** Only the work's current native catalogue can confirm a cross-source chapter pair. */
+    fun alignManagedChapter(chapter: Chapter, version: ChapterVariant, target: Chapter?) {
+        val state = _sourceManagement.value ?: return
+        val work = state.work.takeIf { isAdultSource(it.sourceId) } ?: return
+        val versionWorkId = SourceKeys.manga(version.sourceId, version.mangaId)
+        if (state.connecting || version.sourceId == work.sourceId ||
+            repository.confirmedLinkedWorks(work).none { it.id == versionWorkId } ||
+            state.chapters.none { it.id == chapter.id && it.variants.any { entry -> entry.storageId == version.storageId } })
+            return
+        val targetId = target?.let { it.logicalId.ifBlank { it.id } }
+        if (target != null && state.chapters.none { candidate ->
+                candidate.id == target.id && candidate.variants.any {
+                    SourceKeys.manga(it.sourceId, it.mangaId) == work.id
+                }
+            }) return
+        changeUnified {
+            check(repository.canAssociateWorkSource(work, version.sourceId) &&
+                repository.confirmedLinkedWorks(work).any { it.id == versionWorkId }) { "关联版本已更新，请重新选择章节。" }
+            if (targetId == null) unifiedChapters.split(work.id, version.storageId)
+            else unifiedChapters.associate(work.id, version.storageId, targetId)
         }
     }
 
@@ -2513,7 +2545,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val request = sourceReadRequest
         val currentChapter = findSourceChapter(catalog, chapter.id)
         val currentVariant = currentChapter?.variants?.firstOrNull { it.storageId == variant.storageId }
-        if (currentChapter == null || currentVariant == null) {
+        if (currentChapter == null || currentVariant == null ||
+            currentVariant.sourceId != work.sourceId && !repository.sharesSourceProfile(work.sourceId, currentVariant.sourceId)) {
             _chapterSourceOperation.value = ChapterSourceOperation(
                 error = "章节来源已更新，请重新选择。", targetSource = variant.sourceName)
             return
@@ -2976,10 +3009,11 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val epoch = readingRequestId
         val logical = current.logicalId.ifBlank { current.id }
         val configuration = repository.sourceConfigurationKey()
-        val links = unifiedChapters.linkedSources(manga.id)
-        val confirmed = links.filter { it.confirmedAt > 0L }
-            .map { it.manga.id }.toSet() + manga.id
-        val enabled = repository.enabledSources()
+        val links = unifiedChapters.linkedSources(manga.id).filter { link ->
+            repository.sharesSourceProfile(manga.sourceId, link.manga.sourceId)
+        }
+        val confirmed = repository.confirmedLinkedWorks(manga).map { it.id }.toSet() + manga.id
+        val enabled = repository.enabledSources(isAdultSource(manga.sourceId))
         val alternatives = current.variants.filter { it.storageId != current.id }.distinctBy { it.sourceId }
         val confirmedAlternatives = alternatives.filter { SourceKeys.manga(it.sourceId, it.mangaId) in confirmed }
         val candidates = confirmedAlternatives.filter { it.sourceId in enabled }
@@ -3023,11 +3057,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val session = _reading.value?.takeIf { it.manga.id == manga.id && it.collection == null } ?: return
         val current = session.chapters.firstOrNull { it.id == chapter.id } ?: return
         val variant = current.variants.firstOrNull { it.storageId == variantId && it.storageId != current.id } ?: return
-        if (variant.sourceId !in repository.enabledSources()) return
+        if (!repository.canAssociateWorkSource(manga, variant.sourceId)) return
         val owner = SourceKeys.manga(variant.sourceId, variant.mangaId)
-        if (owner != manga.id && unifiedChapters.linkedSources(manga.id).none {
-                it.manga.id == owner && it.confirmedAt > 0L
-            }) return
+        if (owner != manga.id && repository.confirmedLinkedWorks(manga).none { it.id == owner }) return
         readerStandbys.retry(manga.id, current.id, variantId)
     }
 

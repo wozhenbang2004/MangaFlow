@@ -1,7 +1,6 @@
 package dev.mangaflow.enhancement.engine
 
 import ai.onnxruntime.OnnxJavaType
-import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
@@ -18,12 +17,9 @@ import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.reader.panels.PanelRuntimeId
 import dev.mangaflow.reader.panels.PanelRuntimeStore
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption
 import java.util.UUID
-import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
@@ -38,6 +34,7 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
     private val context = context.applicationContext
     private val root = File(this.context.noBackupFilesDir, "enhancement")
     private val models = ImportedEngineModels(File(root, "models"), EnhancementEngineIds.ANDROID_ONNX)
+    private val videoModels = ImportedEngineModels(File(root, "video-models"), EnhancementEngineIds.ANDROID_VIDEO_ONNX)
     private val runtimes = PanelRuntimeStore.get(context)
     private val nativeGate = Mutex()
     private var session: OrtSession? = null
@@ -45,12 +42,16 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
 
     override suspend fun inspect(): EngineInventory = withContext(Dispatchers.IO) {
         val installed = models.list()
+        val installedVideo = videoModels.list()
         val runtime = runtimes.states.value[PanelRuntimeId.ONNX]
-        val readiness = when {
+        fun modelReadiness(models: List<EngineModel>) = when {
             runtime?.installed != true -> EngineReadiness.NOT_INSTALLED
-            installed.isEmpty() -> EngineReadiness.NEEDS_MODELS
+            models.isEmpty() -> EngineReadiness.NEEDS_MODELS
             else -> EngineReadiness.READY_FOR_TRIAL
         }
+        val readiness = modelReadiness(installed)
+        val videoReadiness = modelReadiness(installedVideo)
+        val canInstall = runtime?.installed != true && runtime?.downloading != true
         EngineInventory(listOf(
             EngineDescriptor(EnhancementEngineIds.LOCAL_DETAIL, "轻量线条处理", EnhancementEngineIds.LOCAL_DETAIL_VERSION,
                 "MangaFlow", "https://github.com/wozhenbang2004/MangaFlow", EngineReadiness.BUILT_IN,
@@ -63,26 +64,33 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                     EngineReadiness.NEEDS_MODELS -> "运行库已准备；导入 1×/2×/4× 模型后在真实页面试用"
                     else -> "CPU 原生推理与重叠分块；未声明 Vulkan 或手机性能验证"
                 }, setOf(1, 2, 4), setOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON),
-                canInstall = runtime?.installed != true && runtime?.downloading != true),
+                canInstall = canInstall),
             EngineDescriptor(EnhancementEngineIds.ANDROID_RIFE, "RIFE 运动补帧", "待 Media3 原生适配", "MIT · rife-ncnn-vulkan",
                 "https://github.com/nihui/rife-ncnn-vulkan", EngineReadiness.UNSUPPORTED,
                 "当前没有经过此设备验证的 Media3/Vulkan 补帧链路；保持原始帧率", emptySet(),
                 setOf(EngineContent.VIDEO), supportsInterpolation = true, realtime = true),
-            EngineDescriptor(EnhancementEngineIds.VIDEOJANAI, "番剧高质量离线处理", "Windows 组件", "GPL-3.0",
-                "https://github.com/the-database/VideoJaNai", EngineReadiness.UNSUPPORTED,
-                "当前 Android 未集成视频解码、AI 推理与硬件编码离线链路；可继续实时 Anime4K 或原画",
-                setOf(1, 2, 4), setOf(EngineContent.VIDEO), supportsInterpolation = true),
-        ) + anime4kEngineDescriptors(), installed, installed.sumOf { it.bytes }, runtime?.bytes ?: 0)
+            EngineDescriptor(EnhancementEngineIds.ANDROID_VIDEO_ONNX, "番剧 ONNX 离线增强", ANDROID_VIDEO_ENGINE_VERSION,
+                "Apache-2.0 / MIT；模型遵循各自许可", "https://github.com/androidx/media/tree/1.11.1/libraries/transformer",
+                videoReadiness, when (videoReadiness) {
+                    EngineReadiness.NOT_INSTALLED -> "先准备签名 ONNX 运行库，再导入适用的 FP32 NCHW RGB 视频模型"
+                    EngineReadiness.NEEDS_MODELS -> "导入 1×/2×/4× FP32 NCHW RGB 模型后，可增强已下载的 SDR MP4"
+                    else -> "使用 Android 编解码器和 CPU ONNX，保留逐帧时间轴和 AAC 音轨；速度与设备兼容性待实际试用"
+                }, setOf(1, 2, 4), setOf(EngineContent.VIDEO), canInstall = canInstall,
+                videoOutput = EngineVideoContainer.MP4),
+        ) + anime4kEngineDescriptors(), installed + installedVideo, (installed + installedVideo).sumOf { it.bytes }, runtime?.bytes ?: 0)
     }
 
     override suspend fun install(engineId: String, progress: (EngineProgress) -> Unit): EngineInventory {
-        require(engineId == EnhancementEngineIds.ANDROID_ONNX) { "当前设备没有这一引擎的可安装组件" }
+        require(engineId in setOf(EnhancementEngineIds.ANDROID_ONNX, EnhancementEngineIds.ANDROID_VIDEO_ONNX)) {
+            "当前设备没有这一引擎的可安装组件"
+        }
         progress(EngineProgress(EngineStage.DOWNLOAD, detail = "已交给现有组件下载队列，遵守系统后台执行限制"))
         runtimes.download(PanelRuntimeId.ONNX)
         return inspect()
     }
 
     override suspend fun importModel(sourcePath: String, nativeScale: Int, content: EngineContent): EngineModel = withContext(Dispatchers.IO) {
+        val destination = if (content == EngineContent.VIDEO) videoModels else models
         val uri = Uri.parse(sourcePath)
         if (uri.scheme == "content") {
             val name = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
@@ -105,11 +113,11 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                         }
                     }
                 } ?: error("无法读取所选模型文件")
-                models.import(temporary, nativeScale, content, name.substringBeforeLast('.'))
+                destination.import(temporary, nativeScale, content, name.substringBeforeLast('.'))
             } finally { temporary.delete() }
         } else {
             require(uri.scheme == null || uri.scheme == "file") { "只接受用户选择的本机模型文件" }
-            models.import(File(if (uri.scheme == "file") checkNotNull(uri.path) else sourcePath), nativeScale, content)
+            destination.import(File(if (uri.scheme == "file") checkNotNull(uri.path) else sourcePath), nativeScale, content)
         }
     }
 
@@ -188,7 +196,27 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
     }
 
     override suspend fun processVideo(request: EngineVideoRequest, progress: (EngineProgress) -> Unit): EngineOutput =
-        throw UnsupportedOperationException("当前 Android 没有已适配并验证的离线视频 AI 编码链路，原视频保持可用")
+        withContext(Dispatchers.IO) {
+            nativeGate.withLock {
+                val model = requireNotNull(request.model) { "请选择适用的番剧 ONNX 模型" }
+                require(model.engineId == EnhancementEngineIds.ANDROID_VIDEO_ONNX && EngineContent.VIDEO in model.contents &&
+                    model.nativeScale == request.scale) { "视频模型类型或倍率不匹配" }
+                require(request.targetFps == null && request.frameMultiplier == null && request.segmentSeconds == 0) {
+                    "当前 Android 离线引擎支持整集画质处理，使用原始帧率"
+                }
+                check(engineSha256(File(model.path)) == model.sha256) { "模型已改变，请重新选择" }
+                try {
+                    runtimes.ensureLoaded(PanelRuntimeId.ONNX)
+                    progress(EngineProgress(EngineStage.MODEL_LOAD, detail = "准备真实 ONNX CPU 模型"))
+                    prepareAndroidVideo(context, request, model, modelSession(model), progress)
+                } catch (memory: OutOfMemoryError) {
+                    session?.close(); session = null; sessionIdentity = null
+                    throw IllegalStateException("当前模型或输出尺寸超出手机内存预算，原视频保持可用", memory)
+                } catch (link: LinkageError) {
+                    throw IllegalStateException("设备的原生推理组件不可用，原视频保持可用", link)
+                }
+            }
+        }
 
     override suspend fun close() = withContext(NonCancellable + Dispatchers.Default) {
         nativeGate.withLock { session?.close(); session = null; sessionIdentity = null }
@@ -247,113 +275,24 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
 
     private suspend fun renderOnnx(decoder: BitmapRegionDecoder, output: File, request: EngineImageRequest,
         session: OrtSession, progress: (EngineProgress) -> Unit) {
-        val info = session.inputInfo.values.single().info as TensorInfo
-        val tileW = info.shape[3].takeIf { it > 0 }?.toInt() ?: request.tileSize.coerceIn(64, 512)
-        val tileH = info.shape[2].takeIf { it > 0 }?.toInt() ?: request.tileSize.coerceIn(64, 512)
-        require(tileW in 32..1024 && tileH in 32..1024) { "当前模型固定分块过大，无法满足手机预算" }
-        val overlap = maxOf(16, request.overlap).coerceAtMost(minOf(tileW, tileH) / 4)
-        val stepX = tileW - 2 * overlap; val stepY = tileH - 2 * overlap
-        val blend = minOf(8, overlap / 2)
-        val scale = request.scale; val width = decoder.width; val height = decoder.height
-        val outWidth = Math.multiplyExact(width, scale); val outHeight = Math.multiplyExact(height, scale)
-        val channels = info.shape[1].toInt()
-        val tileOutputFloats = tileW.toLong() * tileH * scale * scale * 3
-        val stripFloats = outWidth.toLong() * (stepY + 2 * blend) * scale * 4
-        require((tileOutputFloats * 2 + stripFloats * 2 + tileW.toLong() * tileH * channels) * 4 <= request.maximumOutputBytes) {
-            "分块与输出行缓冲超过当前准入预算，请减小分块"
+        val coroutine = currentCoroutineContext()
+        val renderer = AndroidOnnxTiles(session, decoder.width, decoder.height,
+            request.scale, request.tileSize, request.overlap, request.maximumOutputBytes)
+        val decoderOptions = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+            inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
         }
-        val environment = OrtEnvironment.getEnvironment()
-        val data = ByteBuffer.allocateDirect(tileW * tileH * channels * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
-        var previous = FloatArray(0); var previousTop = 0; var previousRows = 0
-        var completed = 0L
-        val total = ((width.toLong() + stepX - 1) / stepX) * ((height.toLong() + stepY - 1) / stepY)
-        EnginePngWriter(output, outWidth, outHeight).use { writer ->
-            var top = 0
-            while (top < height) {
-                currentCoroutineContext().ensureActive()
-                val bottom = minOf(height, top + stepY)
-                val bandTop = maxOf(0, top - blend) * scale; val bandBottom = minOf(height, bottom + blend) * scale
-                val bandRows = bandBottom - bandTop
-                val accumulated = FloatArray(Math.multiplyExact(Math.multiplyExact(outWidth, bandRows), 4))
-                if (previousRows > 0) previous.copyInto(accumulated, (previousTop - bandTop) * outWidth * 4)
-                var left = 0
-                while (left < width) {
-                    currentCoroutineContext().ensureActive()
-                    val right = minOf(width, left + stepX)
-                    val originX = (left - overlap).coerceIn(0, maxOf(0, width - tileW))
-                    val originY = (top - overlap).coerceIn(0, maxOf(0, height - tileH))
-                    val regionW = minOf(width, tileW); val regionH = minOf(height, tileH)
-                    val bitmap = decoder.decodeRegion(Rect(originX, originY, originX + regionW, originY + regionH),
-                        BitmapFactory.Options().apply {
-                            inPreferredConfig = Bitmap.Config.ARGB_8888
-                            inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
-                        }) ?: error("无法解码模型分块")
-                    val inputPixels = IntArray(regionW * regionH)
-                    try { bitmap.getPixels(inputPixels, 0, regionW, 0, 0, regionW, regionH) } finally { bitmap.recycle() }
-                    require(inputPixels.all { it ushr 24 == 255 }) { "当前 AI 模型路径不改写透明像素；保留原图" }
-                    data.clear()
-                    for (channel in 0 until channels) for (y in 0 until tileH) for (x in 0 until tileW) {
-                        val pixel = inputPixels[reflect(y, regionH) * regionW + reflect(x, regionW)]
-                        val value = if (channels == 1) ((pixel ushr 16 and 255) * 77 + (pixel ushr 8 and 255) * 150 + (pixel and 255) * 29) / 256f
-                            else (pixel ushr (16 - channel * 8) and 255).toFloat()
-                        data.put(value / 255f)
-                    }
-                    data.rewind()
-                    OnnxTensor.createTensor(environment, data, longArrayOf(1, channels.toLong(), tileH.toLong(), tileW.toLong())).use { tensor ->
-                        session.run(mapOf(session.inputNames.single() to tensor)).use { result ->
-                            val image = result[0] as? OnnxTensor ?: error("模型未输出图像张量")
-                            val shape = image.info.shape
-                            require(image.info.type == OnnxJavaType.FLOAT && shape.size == 4 && shape[0] == 1L && shape[1] in longArrayOf(1, 3) &&
-                                shape[2] == tileH.toLong() * scale && shape[3] == tileW.toLong() * scale) { "模型实际输出与声明倍率或格式不符" }
-                            val values = image.floatBuffer
-                            val outputChannels = shape[1].toInt(); val tw = tileW * scale; val plane = tw * tileH * scale
-                            val drawLeft = maxOf(0, left - blend) * scale; val drawRight = minOf(width, right + blend) * scale
-                            for (y in bandTop until bandBottom) for (x in drawLeft until drawRight) {
-                                val px = x.toFloat() / scale; val py = y.toFloat() / scale
-                                val weight = blendWeight(px, left, right, width, blend) * blendWeight(py, top, bottom, height, blend)
-                                val index = (y - bandTop) * outWidth * 4 + x * 4
-                                val sample = (y - originY * scale) * tw + x - originX * scale
-                                for (channel in 0..2) {
-                                    val value = values.get((if (outputChannels == 1) 0 else channel) * plane + sample)
-                                    require(value.isFinite()) { "模型输出含非有限像素" }
-                                    accumulated[index + channel] += value.coerceIn(0f, 1f) * weight
-                                }
-                                accumulated[index + 3] += weight
-                            }
-                        }
-                    }
-                    completed++
-                    progress(EngineProgress(EngineStage.PROCESS, completed, total, detail = "重叠分块 · CPU ONNX"))
-                    left = right
-                }
-                val flushBottom = if (bottom == height) bandBottom else (bottom - blend) * scale
-                val row = IntArray(outWidth)
-                for (y in bandTop until flushBottom) {
-                    for (x in 0 until outWidth) {
-                        val p = (y - bandTop) * outWidth * 4 + x * 4; val weight = accumulated[p + 3]
-                        check(weight > 0f) { "分块没有完整覆盖页面" }
-                        fun channel(offset: Int) = (accumulated[p + offset] / weight * 255f).roundToInt().coerceIn(0, 255)
-                        row[x] = (255 shl 24) or (channel(0) shl 16) or (channel(1) shl 8) or channel(2)
-                    }
-                    writer.row(row)
-                }
-                previousTop = flushBottom; previousRows = bandBottom - flushBottom
-                previous = if (previousRows == 0) FloatArray(0) else accumulated.copyOfRange((flushBottom - bandTop) * outWidth * 4, accumulated.size)
-                top = bottom
-            }
+        EnginePngWriter(output, renderer.outWidth, renderer.outHeight).use { writer ->
+            renderer.render(coroutine::ensureActive, { left, top, width, height, pixels ->
+                val bitmap = decoder.decodeRegion(Rect(left, top, left + width, top + height), decoderOptions)
+                    ?: error("无法解码模型分块")
+                try {
+                    bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+                } finally { bitmap.recycle() }
+            }, { _, row -> writer.row(row) }, { completed, total ->
+                progress(EngineProgress(EngineStage.PROCESS, completed, total, detail = "重叠分块 · CPU ONNX"))
+            })
             writer.finish()
         }
-    }
-
-    private fun reflect(value: Int, length: Int): Int {
-        if (length <= 1) return 0
-        val cycle = (length - 1) * 2; val at = value % cycle
-        return if (at < length) at else cycle - at
-    }
-
-    private fun blendWeight(value: Float, start: Int, end: Int, limit: Int, band: Int): Float = when {
-        start > 0 && value < start + band -> ((value - (start - band) + 0.5f) / (2 * band)).coerceIn(0.001f, 1f)
-        end < limit && value > end - band -> (((end + band) - value - 0.5f) / (2 * band)).coerceIn(0.001f, 1f)
-        else -> 1f
     }
 }

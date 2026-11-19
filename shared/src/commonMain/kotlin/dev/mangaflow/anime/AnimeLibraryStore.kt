@@ -172,7 +172,8 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             it.updatedAt > (before.clearedHistoryAt[subjectId] ?: -1L) }
     }
 
-    suspend fun setSettings(settings: AnimePlaybackSettings) = update { it.copy(settings = settings.validate()) }
+    suspend fun updateSettings(change: (AnimePlaybackSettings) -> AnimePlaybackSettings) =
+        update { it.copy(settings = change(it.settings).validate()) }
 
     suspend fun setDiscoveryColumns(columns: Int) = update {
         require(columns >= 0) { "列数不能小于零。" }
@@ -346,6 +347,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("resume", entry.resume?.let(::encodeProgress)).put("updated", entry.updatedAt)
         .put("revision", entry.revision).put("folder", entry.folder).put("pinned", entry.pinned)
         .put("excludedSourceIds", JSONArray(entry.excludedSourceIds.sorted()))
+        .put("nativeMetadata", entry.nativeMetadata?.let(::encodeSubject))
 
     private fun decodeEntry(json: JSONObject) = AnimeLibraryEntry(
         subject = decodeSubject(json.getJSONObject("subject")),
@@ -356,6 +358,8 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         updatedAt = json.getLong("updated"), revision = json.getLong("revision"),
         folder = json.optString("folder"), pinned = json.optBoolean("pinned"),
         excludedSourceIds = json.optJSONArray("excludedSourceIds")?.let { strings(it).toSet() } ?: emptySet(),
+        nativeMetadata = json.optJSONObject("nativeMetadata")?.let(::decodeSubject)
+            ?.takeIf { it.canonicalBangumiId() != null },
     )
 
     private fun encodeSubject(subject: AnimeSubject) = AnimeDocumentCodec.subject(subject)
@@ -408,6 +412,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("bufferStartMs", value.bufferStartMs).put("bufferRebufferMs", value.bufferRebufferMs)
         .put("automaticRecoveryAttempts", value.automaticRecoveryAttempts)
         .put("videoEnhancement", value.videoEnhancement.name)
+        .put("preferredSourceHeight", value.preferredSourceHeight)
 
     private fun decodeSettings(json: JSONObject): AnimePlaybackSettings {
         val defaults = AnimePlaybackSettings()
@@ -424,6 +429,8 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             bufferStartMs = json.optInt("bufferStartMs", defaults.bufferStartMs),
             bufferRebufferMs = json.optInt("bufferRebufferMs", defaults.bufferRebufferMs),
             automaticRecoveryAttempts = json.optInt("automaticRecoveryAttempts", defaults.automaticRecoveryAttempts),
+            preferredSourceHeight = json.optInt("preferredSourceHeight", defaults.preferredSourceHeight)
+                .takeIf { it in listOf(0, 480, 720, 1080, 2160) } ?: defaults.preferredSourceHeight,
             videoEnhancement = AnimeVideoEnhancementMode.entries.firstOrNull {
                 it.name == json.optString("videoEnhancement")
             } ?: defaults.videoEnhancement,

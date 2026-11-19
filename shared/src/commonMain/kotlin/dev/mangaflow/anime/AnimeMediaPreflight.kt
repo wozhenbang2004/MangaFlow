@@ -23,7 +23,7 @@ internal data class AnimeMediaPreflight(
 internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset): AnimeMediaPreflight {
     val now = wallTimeMillis()
     val url = runCatching { animePublicUrl(asset.url) }.getOrNull()
-        ?: return AnimeMediaPreflight(now, failure = "媒体地址不符合公开 HTTPS 安全规则")
+        ?: return AnimeMediaPreflight(now, verified = false, failure = "媒体地址不符合公开 HTTPS 安全规则")
     val builder = Request.Builder().url(url).get()
         .header("Range", "bytes=0-65535").header("Accept-Encoding", "identity")
     asset.headers.forEach { (name, value) ->
@@ -48,7 +48,7 @@ internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset):
                     }
                     accepted
                 }, onChunk = { bytes, count -> body.write(bytes, 0, count) })
-        } ?: return AnimeMediaPreflight(wallTimeMillis())
+        } ?: return AnimeMediaPreflight(wallTimeMillis(), failure = "限量读取超时，媒体尚未验证")
         val elapsed = (monotonicTimeMillis() - start).coerceAtLeast(1L)
         val failure = when (response.code) {
             401, 403 -> "HTTP ${response.code} · 当前媒体地址被拒绝"
@@ -58,8 +58,13 @@ internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset):
         }
         if (failure != null) return AnimeMediaPreflight(wallTimeMillis(), response.code,
             verified = false, failure = failure, elapsedMs = elapsed)
-        if (!accepted) return AnimeMediaPreflight(wallTimeMillis(), response.code,
-            verified = null, elapsedMs = elapsed)
+        if (!accepted) {
+            val reason = when (response.code) {
+                200, 206, 416 -> "服务器未提供可检查的限量响应"
+                else -> "HTTP ${response.code} · 本次未取得媒体样本"
+            }
+            return AnimeMediaPreflight(wallTimeMillis(), response.code, failure = reason, elapsedMs = elapsed)
+        }
         val bytes = body.readByteArray()
         val text = bytes.decodeToString().trimStart('\uFEFF', ' ', '\r', '\n', '\t')
         val hls = text.startsWith("#EXTM3U") && text.contains("#EXT-X-")
@@ -77,14 +82,23 @@ internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset):
         val quality = heights.maxOrNull()?.let { "${it}p" }
         val sampleRate = bytes.size.takeIf { recognized && it >= 16_384 && elapsed >= 150L }
             ?.let { it.toLong() * 1_000L / elapsed }
-        return AnimeMediaPreflight(wallTimeMillis(), response.code, verified = recognized,
-            failure = if (!recognized && htmlOrJson) "媒体请求返回网页或接口内容，未提供视频" else null,
+        val identified = when {
+            recognized -> true
+            htmlOrJson -> false
+            else -> null
+        }
+        val reason = when (identified) {
+            true -> null
+            false -> "媒体请求返回网页或接口内容，未提供视频"
+            null -> "样本不足以识别媒体格式"
+        }
+        return AnimeMediaPreflight(wallTimeMillis(), response.code, verified = identified, failure = reason,
             quality = quality, sampleBytesPerSecond = sampleRate, elapsedMs = elapsed)
     } catch (cancel: CancellationException) {
         throw cancel
     } catch (_: Exception) {
         // An uninspectable range is inconclusive; the player may have a different media path.
-        return AnimeMediaPreflight(wallTimeMillis())
+        return AnimeMediaPreflight(wallTimeMillis(), failure = "限量读取未完成，媒体尚未验证")
     } finally {
         client.close()
     }

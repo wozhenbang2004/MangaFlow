@@ -10,6 +10,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import dev.mangaflow.anime.AnimePlaybackAsset
+import dev.mangaflow.platform.monotonicTimeMillis
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +46,7 @@ import org.openani.mediamp.source.UriMediaData
 internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : SessionAnimePlayer(scope) {
     val engine = MutableStateFlow<MediampPlayer?>(null)
     private var bridge: AnimeStreamBridge? = null
+    private var cachedStartup: Pair<AnimePlaybackAsset, AnimeBufferedStartup>? = null
     private var localBridge: AnimeLocalStreamBridge? = null
     private var localLease: AnimeLocalMediaLease? = null
     private var observers: CoroutineScope? = null
@@ -60,10 +62,29 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
     protected open fun validateAsset(asset: AnimePlaybackAsset) {}
     protected open fun validateLocalMedia(lease: AnimeLocalMediaLease) {}
 
+    override suspend fun cacheStartup(asset: AnimePlaybackAsset, byteLimit: Long, validUntil: Long): Long {
+        val media = AnimeStreamBridge.warmStartup(asset, playerScope, byteLimit, validUntil) ?: return 0L
+        currentCoroutineContext().ensureActive()
+        if (monotonicTimeMillis() >= validUntil) return 0L
+        val receipt = asset to media
+        cachedStartup = receipt
+        playerScope.launch {
+            delay((validUntil - monotonicTimeMillis()).coerceAtLeast(0L))
+            if (cachedStartup === receipt) cachedStartup = null
+        }
+        return media.bytes.size.toLong()
+    }
+
     override suspend fun openNative(request: AnimePlayerRequest, generation: Long) {
+        val prepared = cachedStartup?.takeIf { (asset, media) ->
+            !request.bypassMediaCache && request.localMedia == null && monotonicTimeMillis() < media.validUntil &&
+                asset.playbackIdentity() == request.asset.playbackIdentity() &&
+                asset.url == request.asset.url && asset.headers == request.asset.headers
+        }?.second
+        cachedStartup = null
         val transport = if (request.localMedia == null) {
             validateAsset(request.asset)
-            AnimeStreamBridge.create(request.asset, playerScope).also {
+            AnimeStreamBridge.create(request.asset, playerScope, prepared).also {
                 if (!isCurrent(generation)) { it.close(); return }
                 bridge = it
             }

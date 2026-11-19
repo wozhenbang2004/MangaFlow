@@ -95,7 +95,11 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                 treatment = MotionTabTreatment.Soft)
             LazyColumn(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                item { AnimeQuietLabel("下载在应用前台进行；播放时优先保障当前视频。") }
+                item { AnimeQuietLabel(when {
+                    controller.downloads.capabilities.systemBackgroundExecution -> "Android 可在后台继续下载，系统暂停时会等待恢复。"
+                    controller.downloads.capabilities.processBackgroundExecution -> "窗口切到后台可继续下载，退出应用后可在下次手动继续。"
+                    else -> "返回应用后继续下载。"
+                }) }
                 if (downloads.notice != null) item { AnimeQuietLabel(downloads.notice.orEmpty()) }
                 if (enhancement.notice != null) item { AnimeQuietLabel(enhancement.notice.orEmpty()) }
                 if (rows.any { it.status == AnimeDownloadStatus.COMPLETED }) item {
@@ -207,7 +211,7 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
         AnimeQuietLabel(listOfNotNull(
             fraction?.takeIf { entry.status != AnimeDownloadStatus.COMPLETED }?.let { "${(it * 100).toInt()}%" },
             animeDownloadBytes(entry.downloadedBytes) + (total?.let { " / " + animeDownloadBytes(it) } ?: " · 总量未知"),
-            entry.totalFiles?.takeIf { it > 1 }?.let { entry.completedFiles.toString() + " / " + it + " 段" },
+            entry.totalFiles?.takeIf { it > 1 }?.let { "${entry.completedFiles} / $it 个文件" },
         ).joinToString(" · "))
         if (!entry.error.isNullOrBlank()) AnimeDiscoveryInlineStatus(entry.error, showIssue = true)
         versions.forEach { version ->

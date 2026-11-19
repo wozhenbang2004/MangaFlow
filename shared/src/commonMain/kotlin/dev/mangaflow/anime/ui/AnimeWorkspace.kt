@@ -256,7 +256,7 @@ internal fun AnimeWorkspace(
         }
     }
     fun chooseReference(title: AnimeSourceTitle, videoSource: Boolean) {
-        controller.knownDiscoverySubject(title)?.let { known ->
+        controller.knownDiscoverySubject(title, allowIndexIdentity = !videoSource)?.let { known ->
             browseCandidate = null
             pendingAssociation = if (videoSource && known.externalIds["native-source"] == null &&
                 !controller.stillBound(known.id, title))
@@ -287,7 +287,7 @@ internal fun AnimeWorkspace(
             return
         }
         val reference = candidates.first()
-        val known = candidates.mapNotNull(controller::knownDiscoverySubject).distinctBy { it.id }.singleOrNull()
+        val known = candidates.mapNotNull { controller.knownDiscoverySubject(it) }.distinctBy { it.id }.singleOrNull()
         val native = controller.sourceSubject(reference)
         val subject = known ?: native
         pendingAssociation = preview?.takeIf { it in candidates }?.let { AnimeSourceAssociation(it, subject.id) }
@@ -331,10 +331,6 @@ internal fun AnimeWorkspace(
     fun requestPlayback(episode: AnimeEpisode, option: AnimeEpisodeOption?) {
         controller.dismissNotice()
         controller.play(episode.id, option)
-    }
-    fun play(episode: AnimeEpisode) {
-        if (controller.episodeAvailability(episode.id) == AnimeEpisodeAvailability.MATCHED) requestPlayback(episode, null)
-        else showSources(episode)
     }
     fun openDirectory(sourceId: String? = null) {
         controller.sourceBrowse.activate(sourceId)
@@ -417,11 +413,7 @@ internal fun AnimeWorkspace(
                         onKeepPlayback = controller::cancelPlaybackResolution,
                         onRestorePlayback = controller::restorePreviousPlayback,
                         onPlayDownload = ::playDownload,
-                        onSources = {
-                            val currentId = state.selectedEpisodeId ?: playback.episodeId
-                            val current = state.detail?.episodes?.firstOrNull { it.id == currentId }
-                            showSources(state.playbackTarget?.episode ?: current)
-                        },
+                        onSources = ::showSources,
                         onEpisode = ::play, modifier = Modifier.fillMaxSize())
                 } else {
                     val shownState = shown.detailState
@@ -509,7 +501,7 @@ internal fun AnimeWorkspace(
                                         remember(shownDetail.subject.id) {
                                             detailScrolls.getOrPut(shownDetail.subject.id) { LazyListState() }
                                         },
-                                        onPlay = ::play, onOpenRelated = ::openRelated, onSources = ::showSources,
+                                        onPlay = { requestPlayback(it, null) }, onOpenRelated = ::openRelated, onSources = ::showSources,
                                         onTracking = { trackingVisible = true }, modifier = Modifier.fillMaxSize(),
                                         active = active && shown.key == route.key && !overlayVisible && !searchPresent)
                                 }

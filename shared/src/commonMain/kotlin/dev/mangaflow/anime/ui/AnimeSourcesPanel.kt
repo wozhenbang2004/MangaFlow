@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 
@@ -165,9 +166,13 @@ internal fun AnimeSourcesPanel(
     }
     val measuring = probeEpisode != null && state.measuringEpisodeSourcesId == probeEpisode.id
     val motion = LocalMotionEnabled.current
+    LaunchedEffect(visible, subjectId, focusEpisode?.id) {
+        if (visible && focusEpisode != null) controller.verifyEpisodeSources(focusEpisode.id)
+    }
     // Opening the source sheet automatically verifies a small amount of actual media data.
     // Catalog updates trigger another pass; the controller caches each line/route for five minutes.
-    LaunchedEffect(visible, subjectId, probeEpisode?.id, state.episodeOptions) {
+    LaunchedEffect(visible, subjectId, probeEpisode?.id, state.episodeOptions, state.sourceRoutes,
+        state.resolving, state.autoMatching, state.settings.preferredSourceHeight, recovering) {
         if (visible && subjectId != null && probeEpisode != null &&
             !state.resolving && !state.autoMatching && !recovering)
             controller.measureEpisodeSources(probeEpisode.id)
@@ -330,9 +335,17 @@ internal fun AnimeSourcesPanel(
                                     modifier = Modifier.heightIn(min = 44.dp)) {
                                     Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp))
                                     Spacer(Modifier.width(5.dp))
-                                    Text(if (availability == AnimeEpisodeAvailability.RECENTLY_FAILED) "重试自动选线" else "自动选线播放")
+                                    Text("自动选线播放")
                                 }
-                                else -> MotionTextButton(onClick = controller::retrySourceAggregation, enabled = !finding,
+                                availability == AnimeEpisodeAvailability.RECENTLY_FAILED -> MotionTextButton(
+                                    onClick = { controller.measureEpisodeSources(focusEpisode.id, force = true) }, enabled = !measuring,
+                                    modifier = Modifier.heightIn(min = 44.dp)) {
+                                    Icon(Icons.Outlined.Refresh, null, Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("重新探测本集线路")
+                                }
+                                else -> MotionTextButton(onClick = { controller.verifyEpisodeSources(focusEpisode.id, retry = true) },
+                                    enabled = !finding,
                                     modifier = Modifier.heightIn(min = 44.dp)) {
                                     if (finding) MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
                                     else Icon(Icons.Outlined.Search, null, Modifier.size(16.dp))
@@ -384,7 +397,7 @@ internal fun AnimeSourcesPanel(
                                 showManual && (recovering || manualTarget?.error != null) -> "上次手动指定"
                                 current != null && recovering -> "上次使用"
                                 lines.isNotEmpty() && attemptable.isEmpty() -> "线路暂不可用"
-                                lines.isNotEmpty() && available.isEmpty() -> "近期播放失败"
+                                lines.isNotEmpty() && available.isEmpty() -> "本集线路近期失败"
                                 available.size > 1 -> "${available.size} 条线路"
                                 error != null -> if (catalog == null) "目录读取失败" else "目录更新失败"
                                 reading -> "读取目录中"
@@ -493,7 +506,13 @@ internal fun AnimeSourcesPanel(
                                                 if (showDetails) {
                                                     AnimeSourceMetricsDetails(optionMeasurements, modifier = Modifier.padding(start = 8.dp),
                                                         routeLabel = routeLabel)
-                                                    if (failure != null) AnimeQuietLabel(failure, Modifier.padding(start = 8.dp))
+                                                    if (failure != null && failure != optionMeasurements?.mediaFailure)
+                                                        AnimeQuietLabel(failure, Modifier.padding(start = 8.dp))
+                                                    if (!sourceDisabled && optionMeasurements?.mediaVerified != true)
+                                                        MotionTextButton(onClick = {
+                                                            controller.measureEpisodeSources(focusEpisode.id, force = true, onlyLine = option)
+                                                        }, enabled = !measuring && !state.resolving,
+                                                            modifier = Modifier.heightIn(min = 44.dp)) { Text("重新探测此线路") }
                                                 }
                                             }
                                         }
@@ -566,7 +585,7 @@ internal fun AnimeSourcesPanel(
                                     }
                                 } else Spacer(Modifier.weight(1f))
                                 if (pending.isNotEmpty() && bindings.isNotEmpty()) AnimeSourceTool(Icons.Outlined.Link,
-                                    "待确认的片源，${pending.size} 个", selected = candidatesExpanded, count = pending.size,
+                                    "候选片源，${pending.size} 个", selected = candidatesExpanded, count = pending.size,
                                     onClick = { toggleTool(AnimeSourceTools.CANDIDATES) })
                                 AnimeSourceTool(Icons.Outlined.Search, "手动查找片源", selected = manageExpanded,
                                     onClick = { toggleTool(AnimeSourceTools.SEARCH) })
@@ -578,22 +597,44 @@ internal fun AnimeSourcesPanel(
                         }
                         if (pending.isNotEmpty() && candidatesExpanded) {
                             item(key = "pending-heading") {
-                                Text("待确认的片源", Modifier.padding(start = 8.dp, top = 6.dp),
+                                Text("候选片源", Modifier.padding(start = 8.dp, top = 6.dp),
                                     style = MaterialTheme.typography.labelLarge)
                             }
                             items(pending, key = { "pending:" + it.referenceKey() }) { title ->
                                 val name = animeSourceName(title.sourceId, state)
+                                val progress = state.sourceAggregation[title.sourceId]
+                                val check = progress?.candidateChecks?.firstOrNull { it.title.referenceKey() == title.referenceKey() }
+                                val checkedEpisode = state.detail?.episodes?.firstOrNull { it.id == progress?.episodeId }
+                                val retryable = check?.phase in setOf(AnimeAssociationPhase.UNAVAILABLE, AnimeAssociationPhase.MEDIA_RETRY)
                                 AnimeSourceProviderRow(title.sourceId, name,
                                     listOfNotNull(title.title, title.year?.toString()).joinToString(" · "),
                                     onClickLabel = "核对${name}的目录", onClick = { openPreview(title) },
-                                    trailing = { Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant) })
+                                    supporting = {
+                                        if (check != null) {
+                                            val scope = checkedEpisode?.let(::animeEpisodeLabel)
+                                            AnimeQuietLabel(listOfNotNull(scope, check.message).joinToString(" · "))
+                                            check.lines.forEach { line ->
+                                                AnimeQuietLabel(listOf(animeSourceGroupLabel(line.group), line.message,
+                                                    formatInstantMillis(line.observedAt, "MM-dd HH:mm")).joinToString(" · "))
+                                            }
+                                        }
+                                    },
+                                    trailing = {
+                                        if (retryable) MotionIconButton(onClick = {
+                                            controller.verifyEpisodeSources(focusEpisode?.id ?: checkedEpisode?.id,
+                                                retry = true, sourceId = title.sourceId)
+                                        }, modifier = Modifier.size(44.dp), tooltip = "重试${name}的核对") {
+                                            Icon(Icons.Outlined.Refresh, "重试来源核对", Modifier.size(18.dp))
+                                        } else Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    })
                             }
                         }
                         if (canInspect && aggregationExpanded) {
                             if (state.sourceAggregationTotal > 0 && !state.sourceAggregationRunning) item(key = "aggregation-summary") {
                                 val unfinished = state.sourceAggregation.values.count { it.phase in setOf(
-                                    AnimeAssociationPhase.UNAVAILABLE, AnimeAssociationPhase.QUEUED, AnimeAssociationPhase.SEARCHING) }
+                                    AnimeAssociationPhase.UNAVAILABLE, AnimeAssociationPhase.MEDIA_RETRY,
+                                    AnimeAssociationPhase.QUEUED, AnimeAssociationPhase.SEARCHING) }
                                 AnimeQuietLabel(if (unfinished > 0) "本轮已结束 · $unfinished 个未完成" else "本轮核对已结束",
                                     Modifier.padding(start = 8.dp))
                             }
@@ -603,9 +644,16 @@ internal fun AnimeSourcesPanel(
                                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     val name = animeSourceName(sourceId, state)
                                     Box(Modifier.width(36.dp), contentAlignment = Alignment.Center) { AnimeSourceMark(sourceId, name, size = 15.dp) }
-                                    Text(name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    AnimeQuietLabel(animeAssociationPhaseLabel(progress.phase))
+                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        AnimeQuietLabel(progress.message ?: animeAssociationPhaseLabel(progress.phase))
+                                    }
+                                    if (progress.phase == AnimeAssociationPhase.UNAVAILABLE)
+                                        MotionIconButton(onClick = {
+                                            controller.verifyEpisodeSources(focusEpisode?.id, retry = true, sourceId = sourceId)
+                                        }, modifier = Modifier.size(44.dp), tooltip = "重试${name}的核对") {
+                                            Icon(Icons.Outlined.Refresh, "重试来源核对", Modifier.size(18.dp))
+                                        }
                                 }
                             }
                             item(key = "retry-source-aggregation") {
@@ -832,6 +880,8 @@ private fun animeAssociationPhaseLabel(phase: AnimeAssociationPhase): String = w
     AnimeAssociationPhase.LINKED -> "作品已关联"
     AnimeAssociationPhase.NO_MATCH -> "未找到可靠候选"
     AnimeAssociationPhase.NEEDS_SELECTION -> "待确认作品或版本"
+    AnimeAssociationPhase.EPISODE_UNMATCHED -> "目录中暂无本集"
+    AnimeAssociationPhase.MEDIA_RETRY -> "本集媒体需重试"
     AnimeAssociationPhase.UNAVAILABLE -> "搜索或目录读取未完成"
     AnimeAssociationPhase.EXCLUDED -> "已排除自动关联"
 }

@@ -7,12 +7,14 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -27,14 +29,22 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil3.compose.rememberAsyncImagePainter
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.anime.AnimeDetail
@@ -43,11 +53,18 @@ import dev.mangaflow.anime.AnimeEpisode
 import dev.mangaflow.anime.AnimeEpisodeAvailability
 import dev.mangaflow.anime.AnimeEpisodeKind
 import dev.mangaflow.anime.AnimeLibraryEntry
+import dev.mangaflow.anime.AnimeNativeMetadataSearch
 import dev.mangaflow.anime.AnimeScreenState
 import dev.mangaflow.anime.AnimeSourceScore
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeWatchProgress
 import dev.mangaflow.anime.AnimeWatchStatus
+import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
+import dev.mangaflow.experience.sourceNetwork
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.platform.imagePlatformContext
+import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.CompactMenuAction
 import dev.mangaflow.ui.CommunityComment
@@ -55,6 +72,8 @@ import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.ReviewSourceMark
 import dev.mangaflow.ui.detailMetricScore
+import dev.mangaflow.ui.mangaFontFamily
+import dev.mangaflow.ui.mangaNumberText
 import dev.mangaflow.ui.motion.*
 
 @Composable
@@ -100,6 +119,11 @@ internal fun AnimeDetailPane(
         selectedGroup != null && catalog.episodes.none { it.group == selectedGroup }
     } == true
     val entry = state.library.firstOrNull { it.subject.id == subject.id }
+    val nativeMetadata = entry?.nativeMetadata.takeIf { native }
+    val metadataSearch = state.nativeMetadataSearch?.takeIf { it.subjectId == subject.id }
+    var metadataQuery by rememberSaveable(subject.id, "metadata-query") { mutableStateOf(subject.title) }
+    var reviewedMetadata by rememberSaveable(subject.id, "metadata-candidate") { mutableStateOf<String?>(null) }
+    var unlinkMetadata by rememberSaveable(subject.id, "metadata-unlink") { mutableStateOf(false) }
     val completed = entry?.completedEpisodeIds.orEmpty()
     var episodeTab by rememberSaveable(subject.id) { mutableIntStateOf(0) }
     var episodeReversed by rememberSaveable(subject.id) { mutableStateOf(false) }
@@ -132,12 +156,11 @@ internal fun AnimeDetailPane(
     val sourceNames = (bindings.sortedBy { it.catalog.sourceId != state.preferredSourceId }.map { it.catalog.sourceId } +
         state.groupSourceCandidates.map { it.sourceId } + awaitingSources).distinct()
         .map { it to animeSourceName(it, state) }
-    val detailScores = remember(state.detailScores, subject) {
+    val canonicalInfo = if (native) nativeMetadata else subject
+    val detailScores = remember(state.detailScores, canonicalInfo) {
         buildList {
-            if (!native && subject.id.startsWith("bangumi:")) {
-                subject.rating?.takeIf { it > 0 && it <= 10.0 }?.let {
-                    add(AnimeSourceScore(AnimeDiscoveryProvider.BANGUMI, it, 10))
-                }
+            canonicalInfo?.rating?.takeIf { it > 0 && it <= 10.0 }?.let {
+                add(AnimeSourceScore(AnimeDiscoveryProvider.BANGUMI, it, 10))
             }
             addAll(state.detailScores.filter { it.scale > 0 && it.rating.isFinite() &&
                 it.rating > 0 && it.rating <= it.scale.toDouble() })
@@ -163,6 +186,8 @@ internal fun AnimeDetailPane(
             item(key = "identity") {
                 AnimeDetailHero(
                     subject = subject,
+                    metadata = canonicalInfo,
+                    nativeSourceName = nativeSource?.let { animeSourceName(it, state) },
                     scores = detailScores,
                     episode = first,
                     availability = firstAvailability,
@@ -196,8 +221,27 @@ internal fun AnimeDetailPane(
             }
             if (detailTab == 1) {
                 item(key = "description") {
-                    if (subject.description.isNotBlank() || subject.tags.isNotEmpty()) AnimeDetailDescription(subject)
+                    val info = canonicalInfo ?: subject
+                    if (info.description.isNotBlank() || info.tags.isNotEmpty()) AnimeDetailDescription(info)
                     else AnimeMessage("暂无简介", subject.originalTitle.takeIf { it != subject.title && it.isNotBlank() })
+                }
+                if (native && !state.libraryReadUnavailable) {
+                    nativeMetadataPicker(nativeMetadata, metadataSearch, active, metadataQuery, reviewedMetadata,
+                        unlinkMetadata,
+                        onQueryChange = { metadataQuery = it },
+                        onSearch = {
+                            reviewedMetadata = null
+                            unlinkMetadata = false
+                            controller.searchNativeMetadata(subject.id, metadataQuery)
+                        },
+                        onReview = { reviewedMetadata = it },
+                        onRequestUnlink = { unlinkMetadata = it },
+                        onSave = { controller.setNativeMetadata(subject.id, it) },
+                        onClose = {
+                            unlinkMetadata = false
+                            reviewedMetadata = null
+                            controller.dismissNativeMetadataSearch(subject.id)
+                        })
                 }
                 if (state.relatedSubjects.isNotEmpty()) {
                     item(key = "related-heading") { AnimeSectionTitle("相关番剧", modifier = Modifier.semantics { heading() }) }
@@ -356,6 +400,11 @@ internal fun AnimeDetailPane(
                     else -> AnimeDetailStatus("暂无集数", Icons.Outlined.Info)
                 }
             }
+            if (savedProgress != null && resume == null && !state.detailLoading) item(key = "missing-resume") {
+                AnimeDetailStatus("上次位置 ${animeTime(savedProgress.positionMs)} 已保留", Icons.Outlined.History,
+                    detail = "当前线路暂未找到上次观看的剧集。", actionLabel = "查看作品线路",
+                    actionIcon = Icons.Outlined.Link, onAction = { onSources(null) })
+            }
             items(episodeRows, key = { row -> row.first().id }) { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     row.forEach { episode ->
@@ -405,9 +454,89 @@ internal fun AnimeDetailPane(
     }
 }
 
+private fun LazyListScope.nativeMetadataPicker(
+    linked: AnimeSubject?,
+    search: AnimeNativeMetadataSearch?,
+    active: Boolean,
+    query: String,
+    reviewedId: String?,
+    unlink: Boolean,
+    onQueryChange: (String) -> Unit,
+    onSearch: () -> Unit,
+    onReview: (String) -> Unit,
+    onRequestUnlink: (Boolean) -> Unit,
+    onSave: (String?) -> Unit,
+    onClose: () -> Unit,
+) {
+    item(key = "native-metadata") {
+        Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            AnimeSectionTitle("Bangumi 资料", linked?.let { listOfNotNull(it.title, it.year?.toString()).joinToString(" · ") }) {
+                if (search == null) MotionTextButton(onClick = onSearch,
+                    enabled = active && query.isNotBlank(), modifier = Modifier.heightIn(min = 44.dp)) {
+                    Text(if (linked == null) "查找关联" else "更换关联")
+                } else {
+                    MotionIconButton(onClick = onClose, enabled = active && !search.saving,
+                        modifier = Modifier.size(44.dp), tooltip = "关闭资料选择") {
+                        Icon(Icons.Outlined.Close, null, Modifier.size(18.dp))
+                    }
+                }
+            }
+            if (search != null) {
+                val editable = active && !search.saving
+                if (unlink && linked != null) {
+                    Text("解除 ${linked.title} 的资料与评论关联？", style = MaterialTheme.typography.bodyMedium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MotionTextButton(onClick = { onRequestUnlink(false) }, enabled = editable) { Text("保留关联") }
+                        MotionButton(onClick = { onSave(null) }, enabled = editable) { Text("解除关联") }
+                    }
+                } else {
+                    AnimeTextField(query, onQueryChange, "全名或原名", enabled = editable,
+                        onSubmit = { if (editable && query.isNotBlank()) onSearch() })
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MotionTextButton(onClick = onSearch, enabled = editable && query.isNotBlank()) { Text("搜索 Bangumi") }
+                        if (linked != null) MotionTextButton(onClick = { onRequestUnlink(true) }, enabled = editable) {
+                            Text("解除关联")
+                        }
+                    }
+                }
+                when {
+                    search.saving -> AnimeDetailStatus("正在保存资料关联", Icons.Outlined.Info, loading = true)
+                    search.loading -> AnimeDetailStatus("正在查找 ${search.query}", Icons.Outlined.Search, loading = true)
+                    search.error != null -> AnimeDetailStatus("资料操作未完成", Icons.Outlined.Info, detail = search.error)
+                    !unlink && search.candidates.isEmpty() -> AnimeQuietLabel("未找到 ${search.query} 的资料，可用原名或加上季度再搜索。")
+                    !unlink -> AnimeQuietLabel("选择相同作品与季度，以关联简介和作品评论。")
+                }
+            }
+        }
+    }
+    if (search != null && !unlink) items(search.candidates, key = { "metadata:${it.id}" }) { candidate ->
+        val reviewed = candidate.id == reviewedId
+        val enabled = active && !search.saving
+        Column(Modifier.motionInputGate(enabled)) {
+            AnimeSubjectRow(candidate, subtitle = listOfNotNull(
+                candidate.year?.toString(), candidate.episodeCount?.let { "$it 集" },
+                "#${candidate.id.substringAfter(':')}",
+                candidate.originalTitle.takeIf { it.isNotBlank() && it != candidate.title },
+            ).joinToString(" · "), onOpen = { if (enabled) onReview(candidate.id) }, trailing = {
+                if (reviewed || candidate.id == linked?.id) Icon(Icons.Outlined.Check, "已选择", Modifier.size(18.dp))
+            })
+            if (reviewed && candidate.id != linked?.id) {
+                Column(Modifier.padding(start = 68.dp, bottom = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(candidate.title, style = MaterialTheme.typography.bodyMedium)
+                    MotionButton(onClick = { onSave(candidate.id) }, enabled = enabled,
+                        modifier = Modifier.heightIn(min = 44.dp)) { Text("确认关联") }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun AnimeDetailHero(
     subject: AnimeSubject,
+    metadata: AnimeSubject?,
+    nativeSourceName: String?,
     scores: List<AnimeSourceScore>,
     episode: AnimeEpisode?,
     availability: AnimeEpisodeAvailability?,
@@ -428,45 +557,84 @@ private fun AnimeDetailHero(
     onRatingPresence: (Boolean) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    val metadata = listOfNotNull(
-        subject.year?.toString(),
-        subject.episodeCount?.takeIf { it > 0 }?.let { "$it 集" },
+    val facts = listOfNotNull(
+        nativeSourceName,
+        (subject.year ?: metadata?.year)?.toString(),
+        (subject.episodeCount ?: metadata?.episodeCount)?.takeIf { it > 0 }?.let {
+            if (native && subject.episodeCount == null) "Bangumi 共 $it 集" else "$it 集"
+        },
     ).joinToString(" · ")
-    val actions: @Composable () -> Unit = {
-        AnimeDetailActions(
-            episode, availability, progress, entry, libraryAvailable, active, stackActions, backdrop, native,
-            onPlay, onSources, onFollow, onStatus, onTracking, onStatusPresence,
-        )
-    }
-    Column(
-        Modifier.fillMaxWidth().padding(vertical = if (wide) 20.dp else 10.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(if (wide) 25.dp else 14.dp),
-        ) {
-            AnimePoster(subject, Modifier.width(if (wide) 152.dp else 104.dp).aspectRatio(2f / 3f))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (wide) 8.dp else 5.dp)) {
-                Text(subject.title, Modifier.semantics { heading() },
-                    style = if (wide) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleLarge,
-                    maxLines = 3, overflow = TextOverflow.Ellipsis)
-                if (subject.originalTitle.isNotBlank() && subject.originalTitle != subject.title) {
-                    Text(subject.originalTitle, style = MaterialTheme.typography.bodySmall,
-                        color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                }
-                if (metadata.isNotBlank()) {
-                    Text(metadata, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                }
-                if (scores.isNotEmpty()) AnimeDetailRatingStrip(scores, backdrop, active, onRatingPresence)
-                if (wide) {
-                    Spacer(Modifier.height(4.dp))
-                    actions()
+    val alternateTitle = listOfNotNull(subject.originalTitle, metadata?.originalTitle, metadata?.title)
+        .firstOrNull { it.isNotBlank() && it != subject.title }
+    val artwork = metadata?.takeIf { subject.coverUrl.isBlank() && it.coverUrl.isNotBlank() } ?: subject
+    val context = LocalMangaContext.current
+    val motion = LocalMotionEnabled.current
+    val density = LocalDensity.current
+    BoxWithConstraints(Modifier.fillMaxWidth().clipToBounds()) {
+        val stacked = maxWidth < 300.dp || density.fontScale > 1.35f
+        val posterWidth = minOf(maxWidth * if (stacked) .54f else .42f, 224.dp)
+        val imageWidth = with(density) { (posterWidth.roundToPx() * 2).coerceIn(1, 1200) }
+        val request = remember(context, artwork.coverUrl, artwork.externalIds, imageWidth, motion) {
+            val source = artwork.externalIds["native-source"] ?: BANGUMI_PROVIDER
+            ImageRequest.Builder(imagePlatformContext(context)).data(artwork.coverUrl)
+                .sourceNetwork(source, DownloadCategory.ANIME).size(imageWidth, imageWidth * 3 / 2)
+                .crossfade(if (motion) MangaMotion.Quick else 0).build()
+        }
+        val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Fit)
+        val surface = colors.surface
+        // The same bounded cover decode supplies the sharp poster and the detail's artwork field.
+        if (artwork.coverUrl.isNotBlank()) {
+            Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize())
+            Box(Modifier.matchParentSize().background(Brush.verticalGradient(
+                0f to surface.copy(alpha = .52f), .54f to surface.copy(alpha = .80f), .89f to surface, 1f to surface,
+            )))
+            if (!stacked) Box(Modifier.matchParentSize().background(Brush.horizontalGradient(
+                0f to Color.Transparent, .28f to Color.Transparent, .64f to surface.copy(alpha = .86f), 1f to surface,
+            )))
+        }
+        val artworkPoster: @Composable () -> Unit = {
+            LiquidGlassSurface(backdrop, Modifier.width(posterWidth), cornerRadius = 12.dp,
+                role = GlassSurfaceRole.ARTWORK, elevation = 0.dp, softCard = false) {
+                Box(Modifier.fillMaxWidth().padding(2.dp).aspectRatio(2f / 3f), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.Tv, null, Modifier.size(28.dp), tint = colors.onSurfaceVariant.copy(alpha = .26f))
+                    Image(painter, contentDescription = null, contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)))
                 }
             }
         }
-        if (!wide) actions()
+        val artworkInformation: @Composable (Modifier) -> Unit = { modifier ->
+            Column(modifier, verticalArrangement = Arrangement.spacedBy(if (wide) 7.dp else 5.dp)) {
+                val titleStyle = if (wide) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleLarge
+                Text(subject.title, Modifier.semantics { heading() },
+                    style = titleStyle.copy(fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontWeight = FontWeight.SemiBold))
+                if (alternateTitle != null) {
+                    Text(alternateTitle, style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                if (facts.isNotBlank()) {
+                    Text(facts, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                }
+                if (scores.isNotEmpty()) AnimeDetailRatingStrip(scores, backdrop, active, onRatingPresence)
+            }
+        }
+        Column(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (stacked) {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { artworkPoster() }
+                artworkInformation(Modifier.fillMaxWidth())
+            } else {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(if (wide) 24.dp else 14.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    artworkPoster()
+                    artworkInformation(Modifier.weight(1f))
+                }
+            }
+            AnimeDetailActions(
+                episode, availability, progress, entry, libraryAvailable, active, stackActions, backdrop, native,
+                onPlay, onSources, onFollow, onStatus, onTracking, onStatusPresence,
+            )
+        }
     }
 }
 
@@ -531,27 +699,28 @@ private fun AnimeDetailActions(
     val colors = MaterialTheme.colorScheme
     val episodeAction: @Composable (Modifier) -> Unit = { modifier ->
         if (episode != null && availability != null) {
-            val matched = availability == AnimeEpisodeAvailability.MATCHED
+            val play = availability != AnimeEpisodeAvailability.RECENTLY_FAILED &&
+                availability != AnimeEpisodeAvailability.UPCOMING
             val action = when (availability) {
-                AnimeEpisodeAvailability.MATCHED -> if (progress != null) "继续观看" else "播放"
-                AnimeEpisodeAvailability.CHECKING -> "查看找源进度"
-                AnimeEpisodeAvailability.UNMATCHED -> "查找线路"
+                AnimeEpisodeAvailability.MATCHED, AnimeEpisodeAvailability.CHECKING, AnimeEpisodeAvailability.UNMATCHED ->
+                    if (progress != null) "继续观看" else "播放"
                 AnimeEpisodeAvailability.RECENTLY_FAILED -> "查看其他线路"
                 AnimeEpisodeAvailability.UPCOMING -> upcomingEpisodeLabel(episode, fullDate = true)
             }
             MotionButton(
-                onClick = { if (matched) onPlay(episode) else onSources(episode) },
+                onClick = { if (play) onPlay(episode) else onSources(episode) },
                 enabled = active,
                 modifier = modifier.heightIn(min = 48.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (matched) colors.primary else colors.surfaceContainerHighest,
-                    contentColor = if (matched) colors.onPrimary else colors.onSurface,
+                    containerColor = if (play) colors.primary else colors.surfaceContainerHighest,
+                    contentColor = if (play) colors.onPrimary else colors.onSurface,
                 ),
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
             ) {
                 val icon = when (availability) {
-                    AnimeEpisodeAvailability.MATCHED -> Icons.Outlined.PlayArrow
+                    AnimeEpisodeAvailability.MATCHED, AnimeEpisodeAvailability.CHECKING,
+                    AnimeEpisodeAvailability.UNMATCHED -> Icons.Outlined.PlayArrow
                     AnimeEpisodeAvailability.UPCOMING -> Icons.Outlined.Schedule
                     else -> Icons.Outlined.Link
                 }
@@ -562,7 +731,13 @@ private fun AnimeDetailActions(
         }
     }
     val follow: @Composable () -> Unit = {
-        AnimeDetailFollow(entry, backdrop, libraryAvailable, active, native, onFollow, onStatus, onTracking, onStatusPresence)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (episode != null) MotionIconButton(onClick = { onSources(episode) }, enabled = active,
+                modifier = Modifier.size(44.dp), tooltip = "${animeEpisodeLabel(episode)} 的线路") {
+                Icon(Icons.Outlined.Link, "本集线路", Modifier.size(20.dp))
+            }
+            AnimeDetailFollow(entry, backdrop, libraryAvailable, active, native, onFollow, onStatus, onTracking, onStatusPresence)
+        }
     }
     Column(Modifier.widthIn(max = 520.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(7.dp)) {
         if (stackActions) {
@@ -585,7 +760,7 @@ private fun AnimeDetailActions(
                         Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(colors.primary))
                     }
                 }
-                Text(if (duration == null) position else "$position / ${animeTime(duration)}",
+                Text(mangaNumberText(if (duration == null) position else "$position / ${animeTime(duration)}"),
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
                     modifier = Modifier.semantics { contentDescription = "已观看 $position" })
             }
@@ -736,6 +911,8 @@ private fun AnimeEpisodeCell(
     val label = animeEpisodeLabel(episode)
     val subtitle = animeEpisodeSubtitle(episode)
     val canPlay = availability == AnimeEpisodeAvailability.MATCHED
+    val canAutoStart = availability != AnimeEpisodeAvailability.RECENTLY_FAILED &&
+        availability != AnimeEpisodeAvailability.UPCOMING
     val sourceState = when (availability) {
         AnimeEpisodeAvailability.MATCHED -> null
         AnimeEpisodeAvailability.CHECKING -> "查找中"
@@ -760,8 +937,8 @@ private fun AnimeEpisodeCell(
                 .motionPress(interaction, enabled = active, pressedScale = .97f)
                 .combinedClickable(
                     interactionSource = interaction, indication = null, enabled = active, role = Role.Button,
-                    onClickLabel = if (canPlay) "播放 $label" else "查看 $label 的来源",
-                    onClick = if (canPlay) onPlay else onSources,
+                    onClickLabel = if (canAutoStart) "播放 $label" else "查看 $label 的来源",
+                    onClick = if (canAutoStart) onPlay else onSources,
                     onLongClickLabel = "本集操作", onLongClick = { menuVisible = true },
                 )
                 .semantics(mergeDescendants = true) {

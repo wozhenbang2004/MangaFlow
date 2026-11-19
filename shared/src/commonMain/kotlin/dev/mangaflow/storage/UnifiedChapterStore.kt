@@ -9,6 +9,7 @@ import dev.mangaflow.data.ChapterSemantics
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
+import dev.mangaflow.data.SourceDiscoveryIdentity
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.resolveChapter
 import dev.mangaflow.data.sourceDisplayName
@@ -205,7 +206,8 @@ class UnifiedChapterStore(context: Context) {
         old.copy(manualLinks = old.manualLinks - variantStorageId, separated = old.separated + variantStorageId)
     }
 
-    fun build(workManga: Manga, baseChapters: List<Chapter>, linkedCatalogs: List<MangaDetail> = emptyList()): List<Chapter> {
+    fun build(workManga: Manga, baseChapters: List<Chapter>, linkedCatalogs: List<MangaDetail> = emptyList(),
+        adultProfile: Boolean = false): List<Chapter> {
         if (workManga.sourceUrl == DownloadStore.LOCAL_SOURCE_URL) return baseChapters
         val state = settings(workManga.id)
         data class Bucket(val chapter: Chapter, val variants: MutableList<ChapterVariant>, val order: Int)
@@ -232,7 +234,18 @@ class UnifiedChapterStore(context: Context) {
         // A saved projection may already contain linked-only cells. They are not primary raw chapters.
         val nativeBase = nativeDirectory(workManga, baseChapters)
         val nativeCatalogs = linkedCatalogs.map { it.copy(chapters = nativeDirectory(it.manga, it.chapters)) }
+        val primaryCatalogue = MangaDetail(workManga, nativeBase)
+        val compatibleAdultCatalogues = if (adultProfile) nativeCatalogs.filter { catalogue ->
+            SourceDiscoveryIdentity.adultTitleMatches(workManga, catalogue.manga) &&
+                SourceDiscoveryIdentity.adultCatalogLanguagesMatch(primaryCatalogue, catalogue)
+        }.mapTo(mutableSetOf()) { it.manga.id } else emptySet()
+        val wholeWorkCatalogues = if (adultProfile && nativeBase.size == 1) nativeCatalogs.filter { catalogue ->
+            catalogue.manga.id in compatibleAdultCatalogues &&
+                state.links.any { it.manga.id == catalogue.manga.id && it.confirmedAt > 0L && it.sameChapterSystem } &&
+                SourceDiscoveryIdentity.adultWholeWorkChaptersMatch(primaryCatalogue, catalogue)
+        }.mapTo(mutableSetOf()) { it.manga.id } else emptySet()
         val verifiedVolumeSources = nativeCatalogs.filter { catalog ->
+            (!adultProfile || catalog.manga.id in compatibleAdultCatalogues) &&
             state.links.any { it.manga.id == catalog.manga.id && it.confirmedAt > 0L } &&
                 ChapterSemantics.volumeSystemMatches(nativeBase, catalog.chapters)
         }.map { it.manga.id }.toSet()
@@ -272,7 +285,8 @@ class UnifiedChapterStore(context: Context) {
             val upstreamMangaId = manga.sourceMangaId.ifBlank { ref.mangaId }
             val upstreamChapter = if (SourceKeys.isEncoded(chapter.id))
                 SourceKeys.decodeChapter(manga.id, chapter.id).chapterId else chapter.sourceChapterId.ifBlank { chapter.id }
-            val confirmedSystem = isBase || link?.sameChapterSystem == true
+            val confirmedSystem = isBase || (link?.sameChapterSystem == true &&
+                (!adultProfile || manga.id in compatibleAdultCatalogues))
             val meaning = ChapterSemantics.parse(chapter, confirmedSystem)
             val confirmedVolume = meaning?.system == "volume" && (isBase || manga.id in verifiedVolumeSources)
             val canMergeMeaning = confirmedSystem || confirmedVolume
@@ -284,7 +298,8 @@ class UnifiedChapterStore(context: Context) {
             val edition = variant.edition
             val storageId = variant.storageId
             // Matching requires verified work identity and chapter system, by the user or discovery.
-            val semanticKey = meaning?.key?.let { ChapterSemantics.editionFamily(edition, meaning, confirmedSystem) + "\u0000" + it }
+            val semanticKey = if (isBase && wholeWorkCatalogues.isNotEmpty() || manga.id in wholeWorkCatalogues)
+                "complete-work" else meaning?.key?.let { ChapterSemantics.editionFamily(edition, meaning, confirmedSystem) + "\u0000" + it }
             val ambiguous = semanticKey != null && (semanticKey in ambiguousBaseKeys ||
                 semanticKey in ambiguousLinkedKeys[manga.id].orEmpty())
             val independent = if (isBase && !SourceKeys.isEncoded(chapter.id)) chapter.logicalId.ifBlank { chapter.id }

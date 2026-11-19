@@ -164,6 +164,18 @@ cache namespaces.
 
 ## Android implementation and native research boundary
 
+The subsequent experience-parity batch adds Android offline video restoration via
+[Media3 Transformer 1.11.1](https://github.com/androidx/media/tree/1.11.1/libraries/transformer)
+and the existing signed ONNX Runtime 1.31.1 CPU backend. The adapter uses the
+upstream `DefaultVideoFrameProcessor` original SDR working space and
+`BaseGlShaderProgram` frame contract. Android's extractors and codecs provide
+actual compressed AAC comparison, frame timing validation and full AVC decode
+validation before the cache owner publishes a new MP4. No new weights are
+bundled. The input contract is an SDR progressive MP4 with one video track and
+at most one AAC track, plus a user-supplied single-input/single-output FP32 NCHW
+RGB image model. Android online enhancement, RIFE and Vulkan inference remain
+outside the implemented backend. These are source/API observations.
+
 Android reuses `PanelRuntimeStore`'s signed per-ABI ONNX Runtime 1.31.1 component
 and existing [upstream Java API](https://onnxruntime.ai/docs/api/java/ai/onnxruntime/OnnxTensor.html).
 The implemented path is explicitly CPU inference: one retained FP32 NCHW

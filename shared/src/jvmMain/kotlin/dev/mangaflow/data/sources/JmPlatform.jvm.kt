@@ -376,7 +376,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
         SourceRegistrationField("confirm", "确认密码", secret = true),
         SourceRegistrationField("gender", "性别", choices = listOf(
             SourceChoice("Male", "男"), SourceChoice("Female", "女"))),
-    ))
+    ), authorSearch = SourceSearchCoverage.NATIVE_INDEX, tagSearch = SourceSearchCoverage.NATIVE_INDEX)
 
     override suspend fun feeds(): List<SourceFeed> {
         val foundation = listOf(
@@ -705,7 +705,14 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
         }
     }
 
-    override suspend fun setFavorite(mangaId: String, folderId: String, favorite: Boolean): Unit = clientCall { active ->
+    override suspend fun setFavorite(mangaId: String, folderId: String, favorite: Boolean) =
+        changeFavorite(mangaId, folderId, favorite, expectedAccount = null)
+
+    override suspend fun setFavoriteForAccount(mangaId: String, folderId: String, favorite: Boolean, expectedAccount: String) =
+        changeFavorite(mangaId, folderId, favorite, expectedAccount)
+
+    private suspend fun changeFavorite(mangaId: String, folderId: String, favorite: Boolean, expectedAccount: String?): Unit = clientCall { active ->
+        check(expectedAccount == null || expectedAccount == connectionProbeIdentity()) { "禁漫账号已变化，请重新检查收藏。" }
         requireAccount()
         val id = nativeMangaId(mangaId)
         val folder = folderId.toIntOrNull()?.takeIf { it >= 0 } ?: throw SourceException("禁漫收藏夹编号无效。")
@@ -726,15 +733,22 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
         return clientCall { active ->
             val result = active.getComments(ForumQuery.album(id).mode(ForumMode.MANHUA).page(page + 1).build())
             val rows = result.list().orEmpty()
-            val comments = rows.map { row ->
-                require(row.aid().isNullOrBlank() || row.aid() == id) { "禁漫评论不属于当前作品。" }
-                SourceComment(row.commentId().orEmpty(), row.nickname().orEmpty().ifBlank { row.username().orEmpty() },
-                    row.content().orEmpty(), row.photo()?.takeIf { it.startsWith("https://") }.orEmpty(),
-                    row.postDate().orEmpty(), maxOf(row.likes(), row.voteUp(), 0))
-            }
+            val comments = rows.map { row -> sourceComment(row, id, includeReplies = true) }
             // Public jm.js and the native forum contract use six top-level comments per page.
             SourceCommentPage(comments, rows.isNotEmpty() && (page + 1) * 6 < result.total())
         }
+    }
+
+    private fun sourceComment(row: io.github.jukomu.jmcomic.api.model.JmComment, mangaId: String,
+        includeReplies: Boolean): SourceComment {
+        require(row.aid().isNullOrBlank() || row.aid() == mangaId) { "禁漫评论不属于当前作品。" }
+        val replies = if (includeReplies) row.replys().orEmpty().mapNotNull { reply ->
+            reply.takeIf { it.parentCommentId().isNullOrBlank() || it.parentCommentId() == row.commentId() }
+                ?.let { sourceComment(it, mangaId, includeReplies = false) }
+        }.distinctBy { it.id } else emptyList()
+        return SourceComment(row.commentId().orEmpty(), row.nickname().orEmpty().ifBlank { row.username().orEmpty() },
+            row.content().orEmpty(), row.photo()?.takeIf { it.startsWith("https://") }.orEmpty(),
+            row.postDate().orEmpty(), maxOf(row.likes(), row.voteUp(), 0), inlineReplies = replies)
     }
 
     private fun requireAccount() = check(accountName.isNotBlank()) { "请先登录禁漫账号。" }

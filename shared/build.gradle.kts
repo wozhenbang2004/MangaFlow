@@ -162,7 +162,7 @@ kotlin {
         }
         androidMain.dependencies {
             listOf("exoplayer", "exoplayer-hls", "exoplayer-dash", "datasource-okhttp",
-                "database", "session", "ui", "ui-compose", "effect").forEach { module ->
+                "database", "session", "ui", "ui-compose", "effect", "transformer").forEach { module ->
                 implementation("androidx.media3:media3-$module:$media3Version")
             }
             implementation(project.dependencies.platform("com.squareup.okhttp3:okhttp-bom:$okHttpVersion"))

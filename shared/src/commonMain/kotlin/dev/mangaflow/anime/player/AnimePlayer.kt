@@ -119,6 +119,8 @@ data class AnimePlayerState(
 
 interface AnimePlayer {
     val state: StateFlow<AnimePlayerState>
+    /** Optional original-media bytes confirmed in the backend's playback cache. */
+    suspend fun cacheStartup(asset: AnimePlaybackAsset, byteLimit: Long, validUntil: Long): Long = 0L
     fun open(request: AnimePlayerRequest)
     fun play()
     fun pause()
@@ -425,6 +427,14 @@ internal fun AnimePlaybackAsset.playbackIdentity(): String {
     val pieces = listOf(sourceId, sourceRevision, sessionEpoch.toString(), id, edition, route.toString())
     val identity = pieces.joinToString("") { "${it.length}:$it" }
     return sha256(identity.encodeToByteArray()).joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
+}
+
+internal fun isAnimeStartupVideoPrefix(bytes: ByteArray, size: Int = bytes.size): Boolean {
+    val mp4 = size >= 8 && bytes.decodeToString(4, 8) in setOf("ftyp", "styp", "moof", "sidx", "moov")
+    val transport = size >= 5 * 188 && (0 until 5).all { bytes[it * 188] == 0x47.toByte() }
+    val matroska = size >= 4 && bytes[0] == 0x1a.toByte() && bytes[1] == 0x45.toByte() &&
+        bytes[2] == 0xdf.toByte() && bytes[3] == 0xa3.toByte()
+    return mp4 || transport || matroska
 }
 
 internal fun readablePlayerError(failure: Throwable): String {

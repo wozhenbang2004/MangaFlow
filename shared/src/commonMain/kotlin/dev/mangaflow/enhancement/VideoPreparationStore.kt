@@ -45,6 +45,7 @@ data class VideoEnhancementVersion(
     val outputModifiedAt: Long = 0L,
     val progress: EngineProgress? = null,
     val reason: String? = null,
+    val container: EngineVideoContainer = EngineVideoContainer.MATROSKA,
 ) {
     val label: String get() = listOfNotNull(width?.let { w -> height?.let { "$w × $it" } },
         fps?.let { "${(it * 100).toInt() / 100.0} FPS" }).joinToString(" · ").ifEmpty { "${scale}× · ${frameMode.label}" }
@@ -84,10 +85,11 @@ class VideoPreparationStore(
                         require(file.length() in 1..32_768)
                         val old = decode(JSONObject(file.readText()))
                         require(old.id == folder.name)
-                        val output = output(old.id)
+                        val output = output(old)
                         val valid = old.phase == EnhancementTaskPhase.COMPLETED && output.isFile && output.length() == old.bytes
                         val row = if (valid) old else old.copy(phase = EnhancementTaskPhase.PAUSED,
-                            reason = "上次处理已中断，点击继续可复用通过校验的片段")
+                            reason = if (old.container == EngineVideoContainer.MATROSKA) "上次处理已中断，点击继续可复用通过校验的片段"
+                                else "上次处理已中断，继续时将从原视频重新处理")
                         synchronized(lock) { records[row.id] = row }
                     }.onFailure { synchronized(lock) { publish("部分增强记录无法读取；原视频与已有文件已保留") } }
                 }
@@ -95,7 +97,7 @@ class VideoPreparationStore(
             // Verification is deliberately off the opening path. Raw playback never waits for a multi-GB hash.
             val verify = synchronized(lock) { records.values.filter { it.phase == EnhancementTaskPhase.COMPLETED } }
             verify.forEach { row ->
-                val file = output(row.id)
+                val file = output(row)
                 val held = synchronized(lock) {
                     if (file.isFile && file.length() == row.bytes) {
                         readers[row.id] = (readers[row.id] ?: 0) + 1; true
@@ -152,23 +154,32 @@ class VideoPreparationStore(
                 "尚未取得当前播放显示器的实际刷新率；请明确选择 2×、60 FPS、120 FPS 或自定义目标"
             }
             val inventory = center.engine.inspect()
-            val descriptor = inventory.engines.firstOrNull { it.id == EnhancementEngineIds.VIDEOJANAI }
+            val descriptor = inventory.engines.firstOrNull { it.videoOutput != null }
             require(descriptor != null && descriptor.readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.READY_FOR_TRIAL)) {
                 descriptor?.detail ?: "当前平台尚无可执行的离线视频增强引擎"
             }
+            val container = checkNotNull(descriptor.videoOutput)
+            require(policy.frameMode == FrameMode.ORIGINAL || descriptor.supportsInterpolation) {
+                "当前离线引擎仅支持画质增强，请选择原始帧率"
+            }
             val model = if (policy.tier == QualityTier.ORIGINAL) null else inventory.models.firstOrNull {
-                it.id == policy.modelId && EngineContent.VIDEO in it.contents
-            } ?: if (policy.tier in setOf(QualityTier.AUTO, QualityTier.BALANCED)) inventory.models.firstOrNull {
-                EngineContent.VIDEO in it.contents && it.nativeScale == policy.scale
+                it.id == policy.modelId && it.engineId == descriptor.id && EngineContent.VIDEO in it.contents
+            } ?: if (policy.modelId == null && policy.tier in setOf(QualityTier.AUTO, QualityTier.BALANCED)) inventory.models.firstOrNull {
+                it.engineId == descriptor.id && EngineContent.VIDEO in it.contents && it.nativeScale == policy.scale
             } else null
             require(policy.tier == QualityTier.ORIGINAL || model != null) { "请在画质与性能中选择已安装的视频模型" }
             val scale = if (policy.tier == QualityTier.ORIGINAL) 1 else policy.scale
             require(scale in descriptor.supportedScales) { "该引擎不支持所选倍率" }
+            require(model == null || model.nativeScale == scale) { "所选倍率与视频模型原生倍率不一致" }
             val original = downloads.playback(downloadId)
             val lease = original.localMedia.acquire(original.asset)
-            val inputStamp = sourceStamp(lease)
-            val digest = try { sourceDigest(lease).also { check(sourceStamp(lease) == inputStamp) { "原视频仍在变化" } } }
-                finally { lease.close() }
+            val (inputStamp, digest) = lease.use {
+                if (container == EngineVideoContainer.MP4) require(it.resources.size == 1 && it.entry.mimeType == "video/mp4") {
+                    "当前 Android 支持已下载的单文件 MP4 增强；原下载仍可播放"
+                }
+                val stamp = sourceStamp(it)
+                stamp to sourceDigest(it).also { _ -> check(sourceStamp(it) == stamp) { "原视频仍在变化" } }
+            }
             val source = sourceIdentity(original)
             val rifeVersion = when (policy.frameQuality) {
                 FrameQuality.LIGHT -> "4.25-lite"
@@ -187,13 +198,13 @@ class VideoPreparationStore(
             val id = EnhancedAssetIdentity.digest("${source.length}:$source|$digest|$parameters")
             val row = synchronized(lock) {
                 val old = records[id]
-                if (old != null && (id in activeJobs || old.phase == EnhancementTaskPhase.COMPLETED && output(id).isFile)) return@launch
+                if (old != null && (id in activeJobs || old.phase == EnhancementTaskPhase.COMPLETED && output(old).isFile)) return@launch
                 VideoEnhancementVersion(id, downloadId, source, digest, inputStamp, model?.id, modelDigest, descriptor.version,
                     policy.tier, scale, policy.frameMode, policy.frameQuality, policy.customFps, true,
                     EnhancementTaskPhase.QUEUED, (old?.generation ?: 0L) + 1,
-                    old?.createdAt ?: wallTimeMillis(), wallTimeMillis()).also {
+                    old?.createdAt ?: wallTimeMillis(), wallTimeMillis(), container = container).also {
                         check((readers[id] ?: 0) == 0) { "该增强版本正在播放" }
-                        if (output(id).exists()) check(output(id).delete()) { "无法清理未发布的增强输出" }
+                        if (output(it).exists()) check(output(it).delete()) { "无法清理未发布的增强输出" }
                         save(it); records[id] = it; activeJobs += id; publish()
                     }
             }
@@ -210,7 +221,7 @@ class VideoPreparationStore(
                     check(sourceStamp(originalLease) == inputStamp) { "原视频资源已更新，请重新创建增强任务" }
                     job.checkpoint()
                     val folder = directory(id)
-                    val temp = StorageFile(folder, "output-${randomUuid()}.mkv")
+                    val temp = StorageFile(folder, "output-${randomUuid()}.${container.extension}")
                     try {
                         val result = center.engine.processVideo(EngineVideoRequest(
                             sourcePath = originalLease.entry.file.path, destinationPath = temp.path,
@@ -221,12 +232,12 @@ class VideoPreparationStore(
                             rifeVersion = rifeVersion, rifeEnsemble = ensemble, expectedRifeSha256 = rife?.sha256,
                             // Scene protection is mandatory. Threshold zero treats nearly every change as a cut.
                             sceneThreshold = .15,
-                            segmentSeconds = 60,
+                            segmentSeconds = if (container == EngineVideoContainer.MATROSKA) 60 else 0,
                         ), job.progress)
                         job.checkpoint()
                         checkNotNull(result.video) { "视频输出缺少时间轴与音轨校验回执" }
                         check(result.sha256 == sha256File(temp.path)) { "视频输出摘要不一致" }
-                        check(result.modelSha256 == row.modelDigest && result.engineVersion == row.engineVersion) {
+                        check(result.modelSha256 == row.modelDigest && result.engineVersion == row.engineVersion && result.engineId == descriptor.id) {
                             "输出所用模型或引擎与任务身份不一致"
                         }
                         check(sourceStamp(originalLease) == inputStamp && sourceDigest(originalLease) == digest) {
@@ -234,18 +245,18 @@ class VideoPreparationStore(
                         }
                         synchronized(lock) {
                             check(records[id]?.generation == row.generation) { "处理任务已改变" }
-                            check((readers[id] ?: 0) == 0 && !output(id).exists()) { "已有增强版本仍在使用" }
+                            check((readers[id] ?: 0) == 0 && !output(row).exists()) { "已有增强版本仍在使用" }
                             syncStorageFile(temp)
-                            check(temp.renameTo(output(id))) { "增强视频无法原子发布" }
+                            check(temp.renameTo(output(row))) { "增强视频无法原子发布" }
                             val done = row.copy(phase = EnhancementTaskPhase.COMPLETED, width = result.width,
                                 height = result.height, fps = result.video.fps, durationMillis = result.video.durationMillis,
                                 bytes = result.bytes, outputDigest = result.sha256,
-                                outputModifiedAt = output(id).lastModified(), updatedAt = wallTimeMillis())
+                                outputModifiedAt = output(row).lastModified(), updatedAt = wallTimeMillis())
                             save(done); records[id] = done; publish()
-                            verifiedOutputs[id] = outputStamp(output(id), result.sha256)
+                            verifiedOutputs[id] = outputStamp(output(row), result.sha256)
                         }
                         StorageFile(folder, "segments").deleteRecursively()
-                        result.copy(path = output(id).path)
+                        result.copy(path = output(row).path)
                     } finally { temp.delete() }
                 }
             }
@@ -287,13 +298,13 @@ class VideoPreparationStore(
         val source = original.localMedia.acquire(original.asset)
         val validSource = try { sourceStamp(source) == row.sourceStamp } finally { source.close() }
         if (!validSource) return@withContext original
-        val file = output(row.id)
+        val file = output(row)
         val valid = synchronized(lock) {
             file.isFile && file.length() == row.bytes && records[row.id] == row &&
                 verifiedOutputs[row.id] == outputStamp(file, row.outputDigest.orEmpty())
         }
         if (!valid) return@withContext original
-        val asset = original.asset.copy(url = file.toURI(), mimeType = "video/x-matroska", subtitles = emptyList())
+        val asset = original.asset.copy(url = file.toURI(), mimeType = row.container.mimeType, subtitles = emptyList())
         val capability = AnimeLocalMedia(original.localMedia.downloadId, asset.id, asset.episodeId, asset.sourceId,
             asset.sourceEpisodeId, asset.sourceRevision, asset.sessionEpoch, asset.edition, enhancedVersion = true) {
             synchronized(lock) {
@@ -302,7 +313,7 @@ class VideoPreparationStore(
                     "增强缓存已清理，请重新打开原视频"
                 }
                 readers[row.id] = (readers[row.id] ?: 0) + 1
-                AnimeLocalMediaLease(file.name, mapOf(file.name to AnimeLocalResource(file, "video/x-matroska", row.bytes))) {
+                AnimeLocalMediaLease(file.name, mapOf(file.name to AnimeLocalResource(file, row.container.mimeType, row.bytes))) {
                     synchronized(lock) { release(row.id) }
                 }
             }
@@ -329,7 +340,7 @@ class VideoPreparationStore(
     suspend fun usage(): EnhancedAssetUsage = withContext(Dispatchers.IO) {
         ready.await(); synchronized(lock) {
             val completed = records.values.filter { it.phase == EnhancementTaskPhase.COMPLETED }
-                .sumOf { output(it.id).takeIf { file -> file.isFile }?.length() ?: 0L }
+                .sumOf { output(it).takeIf { file -> file.isFile }?.length() ?: 0L }
             val total = directoryBytes(root)
             EnhancedAssetUsage(completed, (total - completed).coerceAtLeast(0L),
                 records.values.count { it.phase == EnhancementTaskPhase.COMPLETED }, readers.count { it.value > 0 })
@@ -348,14 +359,14 @@ class VideoPreparationStore(
     }
 
     private fun cacheEntry(row: VideoEnhancementVersion): AuxiliaryCacheEntry? {
-        val file = output(row.id)
+        val file = output(row)
         if (!file.isFile) return null
         return AuxiliaryCacheEntry(row.id, directoryBytes(directory(row.id)), file.lastModified(),
             "${row.generation}:${row.outputDigest}:${row.bytes}")
     }
     private fun release(id: String) { val n = (readers[id] ?: 1) - 1; if (n <= 0) readers.remove(id) else readers[id] = n }
     private fun directory(id: String) = StorageFile(root, id.also { require(it.matches(DIGEST)) })
-    private fun output(id: String) = StorageFile(directory(id), "enhanced.mkv")
+    private fun output(row: VideoEnhancementVersion) = StorageFile(directory(row.id), "enhanced.${row.container.extension}")
     private fun publish(notice: String? = mutableState.value.notice) {
         mutableState.value = VideoPreparationState(records.values.sortedByDescending { it.createdAt }, loading = false, notice = notice)
     }
@@ -390,6 +401,7 @@ class VideoPreparationStore(
         .put("created", r.createdAt).put("updated", r.updatedAt).put("width", r.width ?: 0).put("height", r.height ?: 0)
         .put("fps", r.fps ?: -1.0).put("duration", r.durationMillis ?: -1).put("bytes", r.bytes)
         .put("outputDigest", r.outputDigest ?: "").put("outputModified", r.outputModifiedAt).put("reason", r.reason ?: "")
+        .put("container", r.container.name)
     private fun decode(j: JSONObject): VideoEnhancementVersion {
         require(j.optInt("schema") == 1)
         return VideoEnhancementVersion(j.getString("id"), j.getString("download"), j.getString("source"), j.getString("sourceDigest"), j.optString("sourceStamp"),
@@ -399,7 +411,8 @@ class VideoPreparationStore(
             EnhancementTaskPhase.valueOf(j.getString("phase")), j.getLong("generation"), j.getLong("created"), j.getLong("updated"),
             j.optInt("width").takeIf { it > 0 }, j.optInt("height").takeIf { it > 0 }, j.optDouble("fps", -1.0).takeIf { it > 0 },
             j.optLong("duration", -1).takeIf { it >= 0 }, j.optLong("bytes"), j.optString("outputDigest").takeIf { it.isNotBlank() },
-            outputModifiedAt = j.optLong("outputModified"), reason = j.optString("reason").takeIf { it.isNotBlank() })
+            outputModifiedAt = j.optLong("outputModified"), reason = j.optString("reason").takeIf { it.isNotBlank() },
+            container = EngineVideoContainer.valueOf(j.optString("container", EngineVideoContainer.MATROSKA.name)))
     }
     private companion object { val DIGEST = Regex("[a-f0-9]{64}"); const val PREFIX = "video-enhance:" }
 }

@@ -62,14 +62,18 @@ internal fun AnimeSourceMetricsStrip(measurements: AnimePlaybackMeasurements?, m
         val frame = measurements?.firstFrameMs?.takeIf { it >= 0 }?.let(::animeSourceDuration)
         val address = measurements?.addressMs?.takeIf { it >= 0 }?.let(::animeSourceDuration)
         val failure = measurements?.mediaFailure
+        val evidenceAt = measurements?.mediaObservedAt ?: 0L
+        val latestProbeFailed = measurements != null && measurements.mediaVerified == false &&
+            (measurements.playbackObservedAt ?: 0L) < evidenceAt
         when {
-            failure != null -> SourceMetricToken(Icons.Outlined.Link,
+            latestProbeFailed && failure != null -> SourceMetricToken(Icons.Outlined.Link,
                 measurements?.mediaHttpStatus?.toString() ?: "失败", scope + failure,
                 Modifier.width(82.dp * scale), waiting = true)
             speed != null -> SourceMetricToken(Icons.Outlined.Speed, speed, scope + "播放实测传输速率 $speed", Modifier.width(82.dp * scale))
             probeSpeed != null -> SourceMetricToken(Icons.Outlined.Speed, probeSpeed, scope + "64 KiB 以内的小样本传输速率 $probeSpeed，非持续播放速率", Modifier.width(82.dp * scale))
             frame != null -> SourceMetricToken(Icons.Outlined.Timer, frame, scope + "播放实测首帧 $frame", Modifier.width(82.dp * scale))
             address != null -> SourceMetricToken(Icons.Outlined.Link, address, scope + "解析地址耗时 $address", Modifier.width(82.dp * scale))
+            failure != null -> SourceMetricToken(Icons.Outlined.Link, "未验证", scope + failure, Modifier.width(82.dp * scale))
             else -> SourceMetricToken(Icons.Outlined.Speed, null, scope + "尚未取得网络实测数据",
                 Modifier.width(82.dp * scale))
         }
@@ -121,7 +125,7 @@ internal fun AnimeSourceMetricsDetails(measurements: AnimePlaybackMeasurements?,
             measurements?.mediaObservedAt != null -> "尚未验证"
             else -> null
         }
-        SourceMetricDetail(Icons.Outlined.Link, "媒体预探测", mediaState, waiting = measurements?.mediaFailure != null)
+        SourceMetricDetail(Icons.Outlined.Link, "媒体预探测", mediaState, waiting = measurements?.mediaVerified == false)
         measurements?.mediaSampleMs?.let { SourceMetricDetail(Icons.Outlined.Timer,
             "预探测耗时", animeSourceDuration(it)) }
         routeLabel?.let { SourceMetricDetail(Icons.Outlined.Tune, "线路设置", it) }
@@ -161,7 +165,7 @@ private fun animeDeclaredQuality(measurements: AnimePlaybackMeasurements): Strin
 private fun animeSourceDuration(millis: Long): String =
     if (millis >= 1_000L) "${formatDecimal(millis / 1_000.0, 1)} s" else "$millis ms"
 
-private fun animeSourceRate(bytesPerSecond: Long): String = when {
+internal fun animeSourceRate(bytesPerSecond: Long): String = when {
     bytesPerSecond >= 1_073_741_824L -> "${formatDecimal(bytesPerSecond / 1_073_741_824.0, 1)} GiB/s"
     bytesPerSecond >= 1_048_576L -> "${formatDecimal(bytesPerSecond / 1_048_576.0, 1)} MiB/s"
     bytesPerSecond >= 1_024L -> "${formatDecimal(bytesPerSecond / 1_024.0, 0)} KiB/s"

@@ -10,7 +10,6 @@ import dev.mangaflow.platform.storage.StorageFile
 import dev.mangaflow.platform.storage.StorageLock
 import dev.mangaflow.platform.storage.filesDir
 import dev.mangaflow.platform.wallTimeMillis
-import dev.mangaflow.storage.DownloadStore
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.beginDownloadExecution
 import dev.mangaflow.storage.readManga
@@ -59,6 +58,7 @@ class SourceCheckController(
     private val mutableState = MutableStateFlow(SourceCheckScheduleState())
     val state = mutableState.asStateFlow()
     @Volatile private var records = Record()
+    @Volatile private var focusedAdult: Manga? = null
     @Volatile private var storageFailed = false
     @Volatile private var restoreGeneration = 0L
 
@@ -103,6 +103,7 @@ class SourceCheckController(
             library.backupRestored.drop(1).collect {
                 ready.await()
                 restoreGeneration++
+                focusedAdult = null
                 repository.invalidateSourceChecks()
                 try { change { it.copy(focused = null, stamps = emptyMap(), lastCompletedAt = 0L) } }
                 catch (cancelled: CancellationException) { throw cancelled }
@@ -131,6 +132,15 @@ class SourceCheckController(
     /** Only the current unsaved work is retained; saved shelf/history membership remains authoritative. */
     fun watch(work: Manga) {
         if (!eligible(work)) return
+        if (repository.isAdultSource(work.sourceId)) {
+            // Unsaved adult works are process-local. Saved favorites and history are restored
+            // through their existing owners, and use the same opted-in background schedule.
+            if (focusedAdult == work) return
+            focusedAdult = work
+            mutableState.update { it.copy(nextCheckAt = 0L) }
+            if (preferences.value.enabled) resume()
+            return
+        }
         operations.scope.launch {
             ready.await()
             if (storageFailed || records.focused == work) return@launch
@@ -178,7 +188,7 @@ class SourceCheckController(
             prepareSources()
             currentCoroutineContext().ensureActive()
             if (storageFailed || !preferences.value.enabled || generation != restoreGeneration) return
-            if (repository.enabledSources().isEmpty()) {
+            if (repository.enabledSources().isEmpty() && repository.enabledSources(adult = true).isEmpty()) {
                 mutableState.update { it.copy(nextCheckAt = 0L) }
                 return
             }
@@ -229,11 +239,9 @@ class SourceCheckController(
     }
 
     private fun targets(): List<Manga> = (library.favorites.value + library.history.value.map { it.manga } +
-        listOfNotNull(records.focused)).distinctBy { it.id }.filter(::eligible)
+        listOfNotNull(records.focused, focusedAdult)).distinctBy { it.id }.filter(::eligible)
 
-    private fun eligible(work: Manga): Boolean = work.id.isNotBlank() && work.title.isNotBlank() &&
-        work.sourceId != "catalog" && work.sourceUrl != DownloadStore.LOCAL_SOURCE_URL &&
-        repository.sources.any { it.id == work.sourceId && !it.adult }
+    private fun eligible(work: Manga): Boolean = repository.canScheduleSourceCheck(work)
 
     private fun fresh(stamp: Stamp?, configuration: String, now: Long): Boolean = stamp != null &&
         stamp.configuration == configuration && now - stamp.at in 0L until preferences.value.intervalMillis

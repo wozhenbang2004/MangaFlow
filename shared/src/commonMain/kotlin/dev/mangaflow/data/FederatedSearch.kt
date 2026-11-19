@@ -1,5 +1,7 @@
 package dev.mangaflow.data
 
+import dev.mangaflow.data.sources.SourceSearchCoverage
+
 data class FederatedSearchSource(
     val sourceId: String,
     val sourceName: String,
@@ -8,6 +10,7 @@ data class FederatedSearchSource(
     val hasMore: Boolean = false,
     val nextPage: Int? = null,
     val failedPage: Int? = null,
+    val coverage: SourceSearchCoverage? = null,
 )
 
 data class FederatedSearchPage(
@@ -29,7 +32,7 @@ internal fun federatedMangaIdentity(manga: Manga): Pair<String, String> {
 }
 
 /** One serialized search load owns these bounded derivatives; no shared ICU instance is retained. */
-internal class FederatedSearchGrouper(query: String) {
+internal class FederatedSearchGrouper(query: String, private val adult: Boolean = false) {
     private data class AuthorSignature(val names: Set<String>)
     private val titles = LinkedHashMap<String, String>()
     private val authors = LinkedHashMap<List<String>, AuthorSignature>()
@@ -61,10 +64,25 @@ internal class FederatedSearchGrouper(query: String) {
     fun group(hits: List<Manga>, previous: Map<String, List<Manga>> = emptyMap()): List<FederatedSearchGroup> {
         val previousOrder = previous.keys.withIndex().associate { it.value to it.index }
         val sourceOrder = hits.withIndex().associate { federatedMangaIdentity(it.value) to it.index }
-        return hits.distinctBy(::federatedMangaIdentity).groupBy { manga ->
+        val titleBuckets = hits.distinctBy(::federatedMangaIdentity).groupBy { manga ->
             // Keep sequel symbols, numbers and edition words in the complete title.
             normalizedTitle(manga.title).ifBlank { "identity:${federatedMangaIdentity(manga)}" }
-        }.values.map { matches ->
+        }.values
+        val buckets = if (!adult) titleBuckets else titleBuckets.flatMap { matches ->
+            // A verified conflict still gives that result its own card. Missing author
+            // information can share a candidate group, with each native version selectable.
+            val candidates = mutableListOf<MutableList<Manga>>()
+            for (manga in matches.sortedBy { previousOrder[it.id] ?: Int.MAX_VALUE }) {
+                val compatible = candidates.firstOrNull { group -> group.all { other ->
+                    SourceDiscoveryIdentity.adultTitleMatches(other, manga) &&
+                        SourceDiscoveryIdentity.authorEvidence(other, manga) !=
+                            SourceDiscoveryIdentity.AuthorEvidence.CONFLICT
+                } }
+                if (compatible == null) candidates += mutableListOf(manga) else compatible += manga
+            }
+            candidates
+        }
+        return buckets.map { matches ->
             // An early non-Copy response must not permanently own the group when Copy arrives.
             val ordered = matches.sortedWith(compareByDescending<Manga> { isCopy(it) }
                 .thenBy { previousOrder[it.id] ?: Int.MAX_VALUE })
@@ -79,7 +97,7 @@ internal class FederatedSearchGrouper(query: String) {
                 }
             }
             val needsChoice = ordered.size > 1 && (
-                ordered.groupBy { federatedMangaIdentity(it).first }.any { it.value.size > 1 } || unverifiedAuthors
+                adult || ordered.groupBy { federatedMangaIdentity(it).first }.any { it.value.size > 1 } || unverifiedAuthors
                 )
             FederatedSearchGroup(canonical, ordered, needsChoice)
         }.sortedWith(compareByDescending<FederatedSearchGroup> { group -> group.matches.any(::isCopy) }
@@ -113,3 +131,6 @@ internal class FederatedSearchGrouper(query: String) {
 
 internal fun groupFederatedSearch(hits: List<Manga>, previous: Map<String, List<Manga>> = emptyMap(),
     query: String = ""): List<FederatedSearchGroup> = FederatedSearchGrouper(query).group(hits, previous)
+
+internal fun groupAdultSearch(hits: List<Manga>, previous: Map<String, List<Manga>> = emptyMap()): List<FederatedSearchGroup> =
+    FederatedSearchGrouper("", adult = true).group(hits, previous)

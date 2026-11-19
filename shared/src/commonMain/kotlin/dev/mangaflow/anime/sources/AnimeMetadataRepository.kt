@@ -7,6 +7,7 @@ import dev.mangaflow.anime.AnimeEpisodeKind
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeBrowseMode
 import dev.mangaflow.anime.AnimeDocumentCodec
+import dev.mangaflow.anime.canonicalBangumiId
 import dev.mangaflow.experience.ContentCacheKind
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
@@ -35,6 +36,17 @@ class AnimeMetadataRepository(context: PlatformContext) {
 
     suspend fun discover(): List<AnimeSubject> = browse().items
     suspend fun search(query: String): List<AnimeSubject> = browse(query = query).items
+
+    /** A source-provided reference is a picker suggestion until the user confirms the exact entry. */
+    internal suspend fun subjectByBangumiId(id: Int): AnimeSubject? = withContext(Dispatchers.Default) {
+        require(id > 0)
+        val http = AnimeHttp(BANGUMI_PROVIDER)
+        try {
+            bangumiSubject(http.json(BANGUMI_API.newBuilder().addPathSegment("subjects")
+                .addPathSegment(id.toString()).build(), AnimeSourceStage.METADATA))
+                ?.takeIf { it.canonicalBangumiId() == id }
+        } finally { http.close() }
+    }
 
     suspend fun cachedBrowse(mode: AnimeBrowseMode, query: String, page: Int, year: Int?, tag: String,
         weekday: Int?): AnimeMetadataPage? = cache.read(browseKey(mode, query, page, year, tag, weekday))?.let {

@@ -2,6 +2,7 @@ package dev.mangaflow.anime.player
 
 import dev.mangaflow.anime.AnimePlaybackAsset
 import dev.mangaflow.anime.AnimeSubtitle
+import dev.mangaflow.anime.downloads.parseAnimeHlsDownload
 import dev.mangaflow.anime.sources.animePublicUrl
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrl
@@ -9,6 +10,7 @@ import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.net.NetworkResponse
 import dev.mangaflow.net.Request
 import dev.mangaflow.platform.randomUuid
+import dev.mangaflow.platform.monotonicTimeMillis
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
@@ -37,6 +39,13 @@ internal expect class AnimeLoopbackServer(
     fun close()
 }
 
+internal data class AnimeBufferedStartup(
+    val url: HttpUrl,
+    val bytes: ByteArray,
+    val contentType: String,
+    val validUntil: Long,
+)
+
 /**
  * Native backends only receive unguessable loopback URLs. Remote media traffic
  * stays in the same NetworkClient route as source resolution. This is a stream
@@ -45,6 +54,7 @@ internal expect class AnimeLoopbackServer(
 internal class AnimeStreamBridge private constructor(
     private val asset: AnimePlaybackAsset,
     parentScope: CoroutineScope,
+    private val startup: AnimeBufferedStartup?,
 ) {
     private enum class Kind { AUTO, MANIFEST, MEDIA, KEY, SUBTITLE }
     private data class Resource(
@@ -119,6 +129,26 @@ internal class AnimeStreamBridge private constructor(
             val range = request.headers["range"]
             require(range == null || Regex("bytes=(?:[0-9]+-[0-9]*|-[0-9]+)").matches(range)) {
                 "播放器发送了不支持的 Range 请求"
+            }
+            val buffered = startup?.takeIf {
+                monotonicTimeMillis() < it.validUntil && resource.kind == Kind.MEDIA &&
+                    resource.url == it.url && '?' !in request.target
+            }
+            if (buffered != null) {
+                val size = buffered.bytes.size.toLong()
+                val requested = if (range == null) 0L to (size - 1L) else animeByteRange(range, size)
+                if (requested == null) {
+                    output.headers(416, mapOf("Content-Range" to "bytes */$size", "Content-Length" to "0"))
+                    return
+                }
+                val (start, end) = requested
+                val count = (end - start + 1L).toInt()
+                val headers = linkedMapOf("Content-Type" to buffered.contentType, "Content-Length" to count.toString(),
+                    "Accept-Ranges" to "bytes", "Cache-Control" to "private, no-store")
+                if (range != null) headers["Content-Range"] = "bytes $start-$end/$size"
+                output.headers(if (range == null) 200 else 206, headers)
+                if (request.method == "GET") connection.write(buffered.bytes, start.toInt(), count)
+                return
             }
             var url = resource.url
             // Native HLS clients may append only these reload parameters.
@@ -307,10 +337,71 @@ internal class AnimeStreamBridge private constructor(
         }
     }
 
+    private data class WarmResponse(val url: HttpUrl, val bytes: ByteArray, val contentType: String?)
+
+    private suspend fun readWarmResource(resource: Resource, maximumBytes: Long): WarmResponse? {
+        if (maximumBytes <= 0L) return null
+        var url = resource.url
+        repeat(9) {
+            val body = Buffer()
+            val request = Request.Builder().url(url).get().header("Accept-Encoding", "identity")
+            scopedHeaders(resource, url).forEach { (name, value) -> request.header(name, value) }
+            var accepted = false
+            val response = client.downloadWithHeaders(request.build(), maximumBytes, onResponse = { received ->
+                val length = received.header("Content-Length")?.toLongOrNull()
+                accepted = received.code == 200 && (length == null || length in 1L..maximumBytes) &&
+                    received.header("Content-Encoding")?.equals("identity", true) != false
+                accepted
+            }, onChunk = { bytes, count -> body.write(bytes, 0, count) })
+            if (response.code in setOf(301, 302, 303, 307, 308)) {
+                url = response.header("Location")?.let(url::resolve)?.let { checkedUrl(it.toString()) } ?: return null
+            } else {
+                if (!accepted || body.size == 0L ||
+                    response.header("Content-Length")?.toLongOrNull()?.let { it != body.size } == true) return null
+                return WarmResponse(url, body.readByteArray(), response.header("Content-Type"))
+            }
+        }
+        return null
+    }
+
+    private suspend fun warmHls(byteLimit: Long, validUntil: Long): AnimeBufferedStartup? {
+        val primary = checkedUrl(asset.url)
+        if (asset.mimeType?.contains("mpegurl", true) != true &&
+            !primary.encodedPath.endsWith(".m3u8", true) && !primary.encodedPath.endsWith(".m3u", true)) return null
+        var resource = Resource(primary, asset.headers, primary, Kind.MANIFEST)
+        val playlistBudget = minOf(256 * 1024L, byteLimit / 4L)
+        var remaining = byteLimit
+        var response = readWarmResource(resource, playlistBudget) ?: return null
+        remaining -= response.bytes.size
+        var text = response.bytes.decodeToString()
+        if (text.contains("#EXT-X-STREAM-INF:")) {
+            val rewritten = rewriteManifest(resource, response.url, text)
+            val variant = rewritten.lineSequence().firstOrNull { it.startsWith("http://127.0.0.1:") } ?: return null
+            val path = variant.substringAfter("http://127.0.0.1:${server.port}")
+            resource = synchronized(lock) { resources[path] }?.takeIf { it.kind == Kind.MANIFEST } ?: return null
+            response = readWarmResource(resource, minOf(playlistBudget, remaining)) ?: return null
+            remaining -= response.bytes.size
+            text = response.bytes.decodeToString()
+        }
+        val segment = parseAnimeHlsDownload(response.url, text).resources.firstOrNull { it.name.startsWith("segment-") }
+            ?: return null
+        val segmentUrl = checkedUrl(segment.url)
+        val media = readWarmResource(resource.copy(url = segmentUrl, kind = Kind.MEDIA), remaining) ?: return null
+        if (!isAnimeStartupVideoPrefix(media.bytes)) return null
+        return AnimeBufferedStartup(segmentUrl, media.bytes, media.contentType ?: "application/octet-stream", validUntil)
+    }
+
     companion object {
         private const val MAX_MANIFEST_BYTES = 4L * 1024 * 1024
         private val PUBLIC_HEADERS = setOf("user-agent", "referer", "origin", "accept", "accept-language")
-        suspend fun create(asset: AnimePlaybackAsset, scope: CoroutineScope): AnimeStreamBridge {
+        suspend fun warmStartup(asset: AnimePlaybackAsset, scope: CoroutineScope, byteLimit: Long,
+            validUntil: Long): AnimeBufferedStartup? {
+            val bridge = create(asset, scope)
+            try { return bridge.warmHls(byteLimit, validUntil) }
+            finally { bridge.close() }
+        }
+
+        suspend fun create(asset: AnimePlaybackAsset, scope: CoroutineScope, startup: AnimeBufferedStartup? = null): AnimeStreamBridge {
             var pending: AnimeStreamBridge? = null
             return try {
                 withContext(Dispatchers.IO) {
@@ -319,7 +410,7 @@ internal class AnimeStreamBridge private constructor(
                         "当前平台的统一路由暂不支持 DASH，请选择 HLS 或视频文件线路"
                     }
                     require(!primary.encodedPath.endsWith(".pls", true)) { "当前线路不是受支持的视频文件或 HLS 清单" }
-                    val bridge = AnimeStreamBridge(asset, scope)
+                    val bridge = AnimeStreamBridge(asset, scope, startup)
                     try {
                         bridge.server = AnimeLoopbackServer(bridge.scope, bridge::handle)
                         pending = bridge

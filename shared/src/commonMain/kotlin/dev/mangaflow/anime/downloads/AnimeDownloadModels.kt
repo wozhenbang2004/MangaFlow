@@ -4,6 +4,7 @@ import dev.mangaflow.anime.AnimeEpisode
 import dev.mangaflow.anime.AnimePlaybackAsset
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.player.AnimeLocalMedia
+import dev.mangaflow.platform.PlatformContext
 
 enum class AnimeDownloadStatus { QUEUED, DOWNLOADING, WAITING, PAUSED, COMPLETED, FAILED }
 
@@ -37,12 +38,16 @@ data class AnimeDownloadsState(
 data class AnimeDownloadCapabilities(
     val progressiveFiles: Boolean = true,
     val videoContainers: Set<String> = setOf("MP4", "MKV", "WebM", "TS"),
-    /** Finite, unencrypted HLS media playlists with whole-file TS/fMP4 resources. */
+    /** Finite, unencrypted TS/fMP4 playlists, including one video variant with a declared default audio rendition. */
     val staticHls: Boolean = true,
     val systemBackgroundExecution: Boolean = false,
+    val processBackgroundExecution: Boolean = false,
 )
 
 internal expect fun animeOfflineVideoContainers(): Set<String>
+internal expect fun animeSystemDownloadExecution(): Boolean
+internal expect fun animeProcessDownloadExecution(): Boolean
+internal expect fun scheduleAnimeDownloadExecution(context: PlatformContext, recover: Boolean)
 
 data class AnimeDownloadedPlayback(
     val subject: AnimeSubject,

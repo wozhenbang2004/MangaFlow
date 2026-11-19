@@ -133,6 +133,8 @@ data class AnimeLibraryEntry(
     val pinned: Boolean = false,
     /** Explicit per-work exclusions survive background association and process restarts. */
     val excludedSourceIds: Set<String> = emptySet(),
+    /** A user-confirmed reference for native work information and work-level discussion. */
+    val nativeMetadata: AnimeSubject? = null,
 )
 
 data class AnimeSourceBinding(
@@ -232,6 +234,7 @@ internal data class AnimePlaybackMeasurements(
     val addressObservedAt: Long? = null,
     /** A bounded media response is not a decoded first frame or sustained download rate. */
     val mediaObservedAt: Long? = null,
+    val mediaPreferredHeight: Int? = null,
     val mediaHttpStatus: Int? = null,
     val mediaVerified: Boolean? = null,
     val mediaFailure: String? = null,
@@ -262,6 +265,7 @@ data class AnimePlaybackSettings(
     val bufferRebufferMs: Int = 3_000,
     val automaticRecoveryAttempts: Int = 2,
     val videoEnhancement: AnimeVideoEnhancementMode = AnimeVideoEnhancementMode.OFF,
+    val preferredSourceHeight: Int = 0,
 ) {
     fun validate(): AnimePlaybackSettings {
         require(skipOpeningSeconds >= 0 && skipEndingSeconds >= 0) { "跳过时长不能小于零。" }
@@ -271,9 +275,16 @@ data class AnimePlaybackSettings(
             "缓冲上限应不小于下限；起播与重新缓冲应不大于下限。"
         }
         require(automaticRecoveryAttempts >= 0) { "自动恢复次数不能小于零。" }
+        require(preferredSourceHeight in listOf(0, 480, 720, 1080, 2160)) { "未知的来源清晰度目标。" }
         return this
     }
 }
+
+data class AnimeNextEpisodePreparation(
+    val episodeId: String,
+    val addressResolved: Boolean = false,
+    val cachedBytes: Long = 0L,
+)
 
 data class AnimeScreenState(
     val libraryReadUnavailable: Boolean = false,
@@ -285,6 +296,7 @@ data class AnimeScreenState(
     val detailLoading: Boolean = false,
     val detailError: String? = null,
     val detailScores: List<AnimeSourceScore> = emptyList(),
+    val nativeMetadataSearch: AnimeNativeMetadataSearch? = null,
     val groupSourceCandidates: List<AnimeSourceTitle> = emptyList(),
     val associationChoices: Map<String, List<AnimeSourceTitle>> = emptyMap(),
     val library: List<AnimeLibraryEntry> = emptyList(),
@@ -330,7 +342,7 @@ data class AnimeScreenState(
     val searchHistory: List<String> = emptyList(),
     val sleepDeadlineMs: Long? = null,
     val sleepAtEpisodeEnd: Boolean = false,
-    val nextEpisodeReady: Boolean = false,
+    val nextEpisodePreparation: AnimeNextEpisodePreparation? = null,
     val playbackResolutions: List<AnimeResolution> = emptyList(),
     val selectedResolutionId: String? = null,
     val canRestorePlayback: Boolean = false,
@@ -339,3 +351,17 @@ data class AnimeScreenState(
     val sourceOperationIds: Set<String> = emptySet(),
     val sourcePreparation: Map<String, dev.mangaflow.anime.sources.lanerc.SourcePreparationState> = emptyMap(),
 )
+
+data class AnimeNativeMetadataSearch(
+    val subjectId: String,
+    val query: String,
+    val candidates: List<AnimeSubject> = emptyList(),
+    val loading: Boolean = false,
+    val saving: Boolean = false,
+    val error: String? = null,
+)
+
+internal fun AnimeSubject.canonicalBangumiId(): Int? = externalIds["bangumi"]?.toIntOrNull()?.takeIf {
+    it > 0 && id == "bangumi:$it" && externalIds["bangumi"] == it.toString() &&
+        "native-source" !in externalIds
+}

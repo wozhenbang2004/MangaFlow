@@ -23,48 +23,53 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
-import dev.mangaflow.account.JmFavoriteChoice
-import dev.mangaflow.account.JmShelfSyncState
+import dev.mangaflow.account.AdultFavoriteChoice
+import dev.mangaflow.account.AdultShelfSyncState
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 
-/** Single adult-profile JM comparison sheet. Read-only until an explicit per-row choice. */
+/** Source-owned comparison. Read-only until an explicit per-row choice. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun JmShelfSyncSheet(
-    state: JmShelfSyncState,
+internal fun AdultShelfSyncSheet(
+    state: AdultShelfSyncState,
+    sourceName: String,
     backdrop: HazeState?,
     onCheck: () -> Unit,
-    onApply: (Long, Map<String, JmFavoriteChoice>) -> Unit,
+    onApply: (Long, Map<String, AdultFavoriteChoice>) -> Unit,
     onCancel: () -> Unit,
     onOpenAccount: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    var chosen by remember(state.revision) { mutableStateOf<Map<String, JmFavoriteChoice>>(emptyMap()) }
+    var chosen by remember(state.revision) { mutableStateOf<Map<String, AdultFavoriteChoice>>(emptyMap()) }
     var confirmRemoval by remember(state.revision) { mutableStateOf(false) }
-    val actions = chosen.filterValues { it != JmFavoriteChoice.SKIP }
+    var openAccountAfterExit by remember { mutableStateOf(false) }
+    val actions = chosen.filterValues { it != AdultFavoriteChoice.SKIP }
     val deletions = actions.values.count {
-        it == JmFavoriteChoice.REMOVE_REMOTE || it == JmFavoriteChoice.REMOVE_LOCAL
+        it == AdultFavoriteChoice.REMOVE_REMOTE || it == AdultFavoriteChoice.REMOVE_LOCAL
     }
     val live = state.checked && !state.busy && state.owner != null
-    fun select(id: String, choice: JmFavoriteChoice) {
+    fun select(id: String, choice: AdultFavoriteChoice) {
         if (!live) return
         chosen = if (chosen[id] == choice) chosen - id else chosen + (id to choice)
         confirmRemoval = false
     }
-    MotionBottomSheet(backdrop = backdrop, onDismissRequest = onDismiss) { dismiss ->
+    MotionBottomSheet(backdrop = backdrop, onDismissRequest = {
+        onDismiss()
+        if (openAccountAfterExit) onOpenAccount()
+    }) { dismiss ->
         Column(Modifier.fillMaxWidth().heightIn(max = (LocalMangaWindow.current.height - 64.dp).coerceAtLeast(160.dp))
             .padding(horizontal = 20.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.Sync, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
-                Text("禁漫收藏差异", Modifier.weight(1f).padding(start = 7.dp),
+                Text("${sourceName}收藏差异", Modifier.weight(1f).padding(start = 7.dp),
                     style = MaterialTheme.typography.titleMedium)
                 if (state.busy) MotionTextButton(onClick = onCancel) {
                     Text("取消", fontSize = 12.sp)
-                } else MotionIconButton(onClick = onCheck, tooltip = "重新读取 JM 收藏",
+                } else MotionIconButton(onClick = onCheck, tooltip = "重新读取${sourceName}收藏",
                     modifier = Modifier.size(40.dp)) {
                     Icon(Icons.Outlined.Refresh, "重新读取", Modifier.size(18.dp))
                 }
@@ -72,25 +77,23 @@ internal fun JmShelfSyncSheet(
                     Icon(Icons.Outlined.Close, "关闭", Modifier.size(18.dp))
                 }
             }
-            Text(if (state.owner == null) "成人书架 · JM 账号未连接"
-                else "成人书架 · " + state.owner,
-                fontSize = 11.sp, color = colors.onSurfaceVariant)
+            state.owner?.let { owner -> Text("成人书架 · $owner", fontSize = 11.sp, color = colors.onSurfaceVariant) }
             if (state.checked) {
-                Text("本机 ${state.localCount}  ·  JM ${state.remoteCount}  ·  差异 ${state.differences.size}",
+                Text("本机 ${state.localCount}  ·  $sourceName ${state.remoteCount}  ·  差异 ${state.differences.size}",
                     fontSize = 12.sp, color = colors.onSurfaceVariant)
             }
-            if (state.busy) QuietLoading(if (state.applying) "正在执行已确认的变更…" else "正在完整读取禁漫收藏…")
+            if (state.busy) QuietLoading(if (state.applying) "正在执行已确认的变更…" else "正在读取${sourceName}收藏…")
             state.error?.let {
                 Text(it, fontSize = 12.sp, color = colors.error)
             }
             state.completed?.let {
                 Text(it, fontSize = 12.sp, color = colors.onSurfaceVariant)
             }
-            if (state.owner == null && !state.busy) {
-                MotionTextButton(onClick = onOpenAccount) { Text("去成人区登录禁漫", fontSize = 12.sp) }
+            if (state.loginRequired && !state.busy) {
+                MotionTextButton(onClick = { openAccountAfterExit = true; dismiss() }) { Text("登录${sourceName}", fontSize = 12.sp) }
             }
             if (state.checked && state.differences.isEmpty()) {
-                Text("JM 与成人书架中的禁漫作品已对齐。其他成人来源不会上传到 JM。",
+                Text("本机书架中的${sourceName}作品已与站点收藏对齐。",
                     fontSize = 12.sp, color = colors.onSurfaceVariant)
             }
             if (state.checked && state.differences.isNotEmpty()) {
@@ -103,17 +106,17 @@ internal fun JmShelfSyncSheet(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(diff.manga.title, Modifier.weight(1f), fontSize = 13.sp,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(if (diff.inLocal) "仅本机" else "仅 JM", fontSize = 10.sp,
+                                Text(if (diff.inLocal) "仅本机" else "仅$sourceName", fontSize = 10.sp,
                                     color = colors.onSurfaceVariant)
                             }
-                            val primary = if (diff.inLocal) JmFavoriteChoice.UPLOAD_REMOTE
-                                else JmFavoriteChoice.IMPORT_LOCAL
-                            val removal = if (diff.inLocal) JmFavoriteChoice.REMOVE_LOCAL
-                                else JmFavoriteChoice.REMOVE_REMOTE
+                            val primary = if (diff.inLocal) AdultFavoriteChoice.UPLOAD_REMOTE
+                                else AdultFavoriteChoice.IMPORT_LOCAL
+                            val removal = if (diff.inLocal) AdultFavoriteChoice.REMOVE_LOCAL
+                                else AdultFavoriteChoice.REMOVE_REMOTE
                             FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                                JmShelfChoice(if (diff.inLocal) "同步到 JM" else "导入本机",
+                                AdultShelfChoice(if (diff.inLocal) "同步到$sourceName" else "导入本机",
                                     diff.manga.title, chosen[diff.key] == primary, live) { select(diff.key, primary) }
-                                JmShelfChoice(if (diff.inLocal) "移出本机" else "从 JM 移除",
+                                AdultShelfChoice(if (diff.inLocal) "移出本机" else "从${sourceName}移除",
                                     diff.manga.title, chosen[diff.key] == removal, live, destructive = true) {
                                     select(diff.key, removal)
                                 }
@@ -122,7 +125,7 @@ internal fun JmShelfSyncSheet(
                     }
                 }
                 if (confirmRemoval && deletions > 0) {
-                    Text("将删除 ${deletions} 项已选择的收藏（本机或 JM）。此操作不可撤销，其他收藏不会改变。",
+                    Text("确认删除已选的 $deletions 项收藏（本机或$sourceName）。",
                         fontSize = 11.sp, color = colors.error)
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -147,7 +150,7 @@ internal fun JmShelfSyncSheet(
 
 
 @Composable
-private fun JmShelfChoice(
+private fun AdultShelfChoice(
     label: String, title: String, chosen: Boolean, enabled: Boolean,
     destructive: Boolean = false, onChoose: () -> Unit,
 ) {

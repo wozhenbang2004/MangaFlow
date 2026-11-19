@@ -22,6 +22,8 @@ data class SourceDiscoveryResult(
 /** Candidate ordering is never evidence. Full identities and the two actual directories are checked. */
 internal object SourceDiscoveryIdentity {
     private val unknownAuthors = setOf("未知", "佚名", "暂无", "不详", "作者", "unknown", "anonymous", "null")
+    private val adultVersionMarker = Regex("完整版|全彩|彩色版|无修|无删减|修正版|修订版|重制版|汉化版|简中版|繁中版|英文版|日文版|韩文版|uncensored|censored|fullcolor|remaster|(?:vol(?:ume)?|part)[0-9]+|第?[0-9一二三四五六七八九十]+[卷册部]")
+    private val completeBookLabel = Regex("(?:全(?:一|1)[话章册卷]|全本|整本|完整[篇本]|单篇|oneshot|complete)")
 
     enum class AuthorEvidence { MATCH, UNKNOWN, CONFLICT }
 
@@ -50,6 +52,21 @@ internal object SourceDiscoveryIdentity {
 
     fun titleMatches(work: Manga, candidate: Manga, aliases: List<String>): Boolean =
         sharedTitles(work, candidate, aliases).isNotEmpty()
+
+    /** Protect explicit translation, revised, colored and collected editions during alias matching. */
+    fun adultTitleMatches(work: Manga, candidate: Manga, aliases: List<String> = emptyList()): Boolean {
+        fun markers(manga: Manga) = adultVersionMarker.findAll(normalizedBodySourceTitle(manga.title))
+            .map { it.value }.toSet()
+        val primaryType = normalizedBodySourceTitle(work.contentType)
+        val targetType = normalizedBodySourceTitle(candidate.contentType)
+        return markers(work) == markers(candidate) &&
+            (primaryType.isBlank() || targetType.isBlank() || primaryType == targetType) &&
+            titleMatches(work, candidate, aliases)
+    }
+
+    fun adultWorkMatches(work: Manga, candidate: Manga, aliases: List<String>): Boolean =
+        adultTitleMatches(work, candidate, aliases) &&
+            authorsMatch(work, candidate) && workMatches(work, candidate, aliases, sameChapterSystem = false)
 
     private fun authors(manga: Manga): Set<String> =
         (manga.authors + manga.authorAliases).flatMap { name ->
@@ -152,6 +169,44 @@ internal object SourceDiscoveryIdentity {
         // Compare them in full; count integer portions only to avoid proving a whole
         // numbering system from three fragments of the same chapter.
         return primary.intersect(target).map { it.substringBefore('.') }.distinct().size >= 3
+    }
+
+    /** Auto-alignment needs native language and edition evidence in addition to catalogue numbers. */
+    fun adultChapterSystemMatches(base: MangaDetail?, candidate: MangaDetail): Boolean {
+        if (base == null || !adultTitleMatches(base.manga, candidate.manga)) return false
+        if (!adultCatalogLanguagesMatch(base, candidate)) return false
+        return adultWholeWorkChaptersMatch(base, candidate) || chapterSystemMatches(base, candidate)
+    }
+
+    fun adultCatalogLanguagesMatch(base: MangaDetail, candidate: MangaDetail): Boolean {
+        fun languages(detail: MangaDetail): Set<String> = detail.chapters.asSequence().flatMap { it.variants.asSequence() }
+            .map(ChapterVariant::language).distinct()
+            .map { variant ->
+                when (val language = normalizedBodySourceTitle(variant)) {
+                    "简中", "简体中文", "zhcn", "zhhans" -> "zh-hans"
+                    "繁中", "繁体中文", "zhtw", "zhhk", "zhhant" -> "zh-hant"
+                    "日文", "日语", "jajp", "ja" -> "ja"
+                    "英文", "英语", "enus", "engb", "en" -> "en"
+                    "韩文", "韩语", "kokr", "ko" -> "ko"
+                    else -> language
+                }
+            }.toSet()
+        val primary = languages(base)
+        val unverified = setOf("", "未知", "unknown", "und", "多语言", "多语")
+        return primary.size == 1 && primary.single() !in unverified && primary == languages(candidate)
+    }
+
+    /** A single returned entry can be a preview or part 1. Require explicit whole-work labels. */
+    fun adultWholeWorkChaptersMatch(base: MangaDetail, candidate: MangaDetail): Boolean {
+        if (!adultWorkMatches(base.manga, candidate.manga, emptyList())) return false
+        fun completeBook(detail: MangaDetail): Boolean {
+            val chapter = detail.chapters.singleOrNull() ?: return false
+            val native = chapter.variants.singleOrNull() ?: return false
+            return completeBookLabel.matches(normalizedBodySourceTitle(native.title)) &&
+                native.sourceId == detail.manga.sourceId &&
+                SourceKeys.manga(native.sourceId, native.mangaId) == detail.manga.id
+        }
+        return completeBook(base) && completeBook(candidate)
     }
 
     fun signature(work: Manga, aliases: List<String>, base: MangaDetail?): String = buildString {

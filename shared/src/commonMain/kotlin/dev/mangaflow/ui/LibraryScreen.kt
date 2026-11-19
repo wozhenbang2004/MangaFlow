@@ -120,7 +120,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import dev.mangaflow.LibraryOpenState
 import dev.mangaflow.account.CopyShelfSyncState
-import dev.mangaflow.account.JmShelfSyncState
+import dev.mangaflow.account.AdultShelfSyncState
 import dev.mangaflow.account.CopyShelfMetadata
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.Manga
@@ -167,8 +167,8 @@ fun LibraryScreen(
     excludedSourceIds: Set<String> = emptySet(),
     copySyncState: CopyShelfSyncState? = null,
     onCopySync: (() -> Unit)? = null,
-    jmSyncState: JmShelfSyncState? = null,
-    onJmSync: (() -> Unit)? = null,
+    siteSyncStates: Map<String, AdultShelfSyncState> = emptyMap(),
+    onSiteSync: ((String) -> Unit)? = null,
     onImportCopy: (() -> Unit)? = null,
     preferredResumeTargets: Map<String, SavedResumeTarget> = emptyMap(),
     cloudFavorites: List<Manga> = emptyList(),
@@ -529,8 +529,9 @@ fun LibraryScreen(
                                 SiteShelfControls(siteShelf, siteVisible,
                                     onFolder = { id -> runSiteAction { load(id) } },
                                     onRefresh = { runSiteAction { load(refreshFolders = true) } },
-                                    onSync = onJmSync.takeIf { siteShelf.source.id == "jmcomic" },
-                                    syncCount = jmSyncState?.differences?.size ?: 0)
+                                    onSync = onSiteSync?.takeIf { siteShelf.source.id in siteSyncStates }
+                                        ?.let { action -> { action(siteShelf.source.id) } },
+                                    syncCount = siteSyncStates[siteShelf.source.id]?.differences?.size ?: 0)
                             }
                             val collectionError = siteShelf?.collectionError
                             if (siteShelf != null && collectionError != null) item(key = "site-collection-error", span = {
@@ -977,8 +978,9 @@ private fun SiteShelfControls(
                 compact = true, treatment = MotionTabTreatment.Soft, controlHeight = 44.dp)
         } else Spacer(Modifier.weight(1f))
         if (onSync != null) MotionIconButton(onClick = onSync, enabled = active,
-            modifier = Modifier.size(44.dp), tooltip = if (syncCount > 0) "查看 $syncCount 项禁漫收藏差异" else "禁漫同步") {
-            Icon(Icons.Outlined.Sync, "禁漫同步", Modifier.size(18.dp))
+            modifier = Modifier.size(44.dp), tooltip = if (syncCount > 0) "查看 $syncCount 项${shelf.source.name}收藏差异"
+                else "同步${shelf.source.name}收藏") {
+            Icon(Icons.Outlined.Sync, "同步${shelf.source.name}收藏", Modifier.size(18.dp))
         }
         MotionIconButton(onClick = onRefresh, enabled = canEdit,
             modifier = Modifier.size(44.dp), tooltip = "刷新站点收藏") {

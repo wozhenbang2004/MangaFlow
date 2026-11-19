@@ -106,7 +106,7 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
             SourceRegistrationField("answer2", "答案 2", secret = true),
             SourceRegistrationField("question3", "安全问题 3"),
             SourceRegistrationField("answer3", "答案 3", secret = true),
-        ))
+        ), tagSearch = SourceSearchCoverage.CATEGORY_OR_KEYWORD, commentReplies = true)
 
     override suspend fun accountState() = SourceAccountState(_signedIn.value)
 
@@ -160,10 +160,18 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
     override suspend fun favorites(folderId: String, page: Int): MangaPage = withContext(Dispatchers.IO) {
         require(folderId == "default") { "哔咔只提供一个收藏夹。" }
         checkPage(page)
-        listing(call("users/favourite?page=${page + 1}&s=dd").getJSONObject("data").getJSONObject("comics"), page + 1)
+        listing(call("users/favourite?page=${page + 1}&s=dd").getJSONObject("data").getJSONObject("comics"),
+            page + 1, requireComplete = true)
     }
 
-    override suspend fun setFavorite(mangaId: String, folderId: String, favorite: Boolean): Unit = accountLock.withLock {
+    override suspend fun setFavorite(mangaId: String, folderId: String, favorite: Boolean) =
+        changeFavorite(mangaId, folderId, favorite, expectedAccount = null)
+
+    override suspend fun setFavoriteForAccount(mangaId: String, folderId: String, favorite: Boolean, expectedAccount: String) =
+        changeFavorite(mangaId, folderId, favorite, expectedAccount)
+
+    private suspend fun changeFavorite(mangaId: String, folderId: String, favorite: Boolean, expectedAccount: String?): Unit = accountLock.withLock {
+        check(expectedAccount == null || expectedAccount == connectionProbeIdentity()) { "哔咔账号已变化，请重新检查收藏。" }
         require(folderId == "default") { "哔咔只提供一个收藏夹。" }
         val id = nativeMangaId(mangaId)
         val current = call("comics/$id").getJSONObject("data").getJSONObject("comic")
@@ -173,8 +181,18 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
     }
 
     override suspend fun comments(mangaId: String, page: Int): SourceCommentPage = withContext(Dispatchers.IO) {
+        commentPage("comics/${nativeMangaId(mangaId)}/comments", page)
+    }
+
+    override suspend fun commentReplies(mangaId: String, parentId: String, page: Int): SourceCommentPage = withContext(Dispatchers.IO) {
+        nativeMangaId(mangaId)
+        require(parentId.matches(Regex("[a-fA-F0-9]{24}"))) { "哔咔评论编号无效。" }
+        commentPage("comments/$parentId/childrens", page)
+    }
+
+    private suspend fun commentPage(path: String, page: Int): SourceCommentPage {
         checkPage(page)
-        val data = call("comics/${nativeMangaId(mangaId)}/comments?page=${page + 1}")
+        val data = call("$path?page=${page + 1}")
             .getJSONObject("data").getJSONObject("comments")
         val rows = data.getJSONArray("docs")
         require(data.optInt("page", page + 1) == page + 1) { "哔咔评论页码不一致。" }
@@ -182,9 +200,10 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
             val user = row.getJSONObject("_user")
             SourceComment(row.bodyId("_id"), user.bodyText("name"), row.bodyText("content"),
                 user.optJSONObject("avatar")?.let { runCatching { mediaUrl(it) }.getOrDefault("") }.orEmpty(),
-                row.bodyText("created_at"), row.optInt("likesCount", 0).coerceAtLeast(0))
+                row.bodyText("created_at"), row.optInt("likesCount", 0).coerceAtLeast(0),
+                replyCount = row.optInt("commentsCount", -1).takeIf { it >= 0 })
         }
-        SourceCommentPage(comments, page + 1 < data.optInt("pages", 1))
+        return SourceCommentPage(comments, page + 1 < data.optInt("pages", 1))
     }
 
     override suspend fun discover(page: Int): MangaPage = withContext(Dispatchers.IO) {
@@ -277,7 +296,7 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
 
     private fun checkPage(page: Int) = require(page in 0..499) { "哔咔分页超出范围。" }
 
-    private fun listing(data: JSONObject, expectedPage: Int): MangaPage {
+    private fun listing(data: JSONObject, expectedPage: Int, requireComplete: Boolean = false): MangaPage {
         val docs = data.optJSONArray("docs") ?: throw SourceException("哔咔作品列表暂不兼容。")
         val works = (0 until minOf(docs.length(), 200)).mapNotNull { i ->
             docs.optJSONObject(i)?.let { row -> runCatching { toManga(row) }.getOrNull() }
@@ -286,6 +305,8 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
             throw SourceException("来源返回的作品列表无法识别，请更新来源后重试。")
         val totalPages = data.optInt("pages", -1)
         val current = data.optInt("page", -1)
+        if (requireComplete && (works.size != docs.length() || totalPages > 500))
+            throw SourceException("哔咔收藏清单未能完整读取。")
         if (current != expectedPage || current !in 1..500 || totalPages !in 0..100_000 ||
             (totalPages > 0 && current > totalPages) || (totalPages == 0 && works.isNotEmpty()))
             throw SourceException("来源返回的分页信息无效，请刷新后重试。")

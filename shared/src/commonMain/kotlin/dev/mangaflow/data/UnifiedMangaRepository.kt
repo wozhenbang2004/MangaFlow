@@ -21,6 +21,8 @@ import dev.mangaflow.net.checked
 import dev.mangaflow.data.plugins.sourceImageRevisions
 import dev.mangaflow.data.plugins.ScriptBodySource
 import dev.mangaflow.storage.UnifiedChapterStore
+import dev.mangaflow.storage.BodySourceRegistryEntry
+import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.storage.UnifiedWorkSettings
 import dev.mangaflow.storage.ReaderCatalogStore
 import kotlinx.coroutines.CancellationException
@@ -73,8 +75,14 @@ class UnifiedMangaRepository(
     @Volatile private var sourceSnapshot = SourceSnapshot(builtinAdapters, listOf(copyInfo) + bodySources.map { it.info }, emptyMap())
     private val adapters: Map<String, BodySource> get() = sourceSnapshot.adapters
     val sources: List<BodySourceInfo> get() = sourceSnapshot.infos
-    private data class SourceEligibility(val ids: Set<String>, val generation: Long)
-    @Volatile private var sourceEligibility = SourceEligibility(sources.map { it.id }.toSet(), 0L)
+    private data class SourceEligibility(val ids: Set<String>, val profiles: Map<String, Boolean>, val generation: Long,
+        val registration: List<BodySourceRegistryEntry>? = null) {
+        fun sharesProfile(workSourceId: String, sourceId: String): Boolean =
+            profiles[workSourceId]?.let { it == profiles[sourceId] } == true
+    }
+    @Volatile private var sourceEligibility = SourceEligibility(sources.map { it.id }.toSet(),
+        sources.associate { it.id to it.adult }, 0L)
+    @Volatile private var sourceRegistry: BodySourceRegistry? = null
     private val rawCatalogs = LinkedHashMap<String, MangaDetail>()
     // Restored projections may be displayed, but only adapter-loaded directories can prove numbering.
     private val nativeCatalogIds = mutableSetOf<String>()
@@ -138,11 +146,55 @@ class UnifiedMangaRepository(
     }
 
     /** Installed sources remain readable; this eligibility controls search and automatic matching. */
-    fun enabledSources(): Set<String> = sourceEligibility.ids.toSet()
+    fun enabledSources(adult: Boolean = false): Set<String> {
+        val eligibility = sourceEligibility
+        return eligibility.ids.filterTo(mutableSetOf()) { eligibility.profiles[it] == adult }
+    }
 
-    fun sourceConfigurationKey(): String {
+    internal fun isAdultSource(sourceId: String): Boolean =
+        sourceRegistry?.entries?.value?.firstOrNull { it.source.id == sourceId }?.adult
+            ?: (sourceEligibility.profiles[sourceId] == true)
+
+    internal fun sharesSourceProfile(workSourceId: String, sourceId: String): Boolean =
+        sourceEligibility.let { registrationCurrent(it) && it.sharesProfile(workSourceId, sourceId) }
+
+    internal fun canAssociateWorkSource(work: Manga, sourceId: String): Boolean {
+        val eligibility = sourceEligibility
+        return registrationCurrent(eligibility) && validWorkIdentity(work) && sourceId in eligibility.ids &&
+            eligibility.sharesProfile(work.sourceId, sourceId)
+    }
+
+    internal fun canScheduleSourceCheck(work: Manga): Boolean =
+        validWorkIdentity(work) && work.title.isNotBlank() && sources.any { it.id == work.sourceId } &&
+            enabledSources(isAdultSource(work.sourceId)).isNotEmpty()
+
+    internal fun confirmedLinkedWorks(work: Manga): List<Manga> = if (!validWorkIdentity(work)) emptyList()
+        else profileLinks(work.id).filter { it.confirmedAt > 0L }.map { it.manga }
+
+    private fun profileLinks(workId: String,
+        eligibility: SourceEligibility = sourceEligibility): List<dev.mangaflow.storage.LinkedMangaSource> {
+        if (!registrationCurrent(eligibility)) return emptyList()
+        val primaryId = runCatching { SourceKeys.decodeManga(workId).sourceId }.getOrNull() ?: return emptyList()
+        return unified.linkedSources(workId).filter { link ->
+            validWorkIdentity(link.manga) && eligibility.sharesProfile(primaryId, link.manga.sourceId)
+        }
+    }
+
+    private fun validWorkIdentity(work: Manga): Boolean =
+        work.id.isNotBlank() && work.sourceUrl != dev.mangaflow.storage.DownloadStore.LOCAL_SOURCE_URL &&
+            runCatching { SourceKeys.decodeManga(work.id) }.getOrNull()?.let {
+                it.sourceId == work.sourceId && (work.sourceMangaId.isBlank() || work.sourceMangaId == it.mangaId)
+            } == true
+
+    fun sourceConfigurationKey(adult: Boolean? = null): String {
         val snapshot = sourceSnapshot
-        val value = sourceEligibility.ids.sorted().joinToString("|") { "$it:${snapshot.importedDigests[it].orEmpty()}:${DownloadRoutingStore.sourceRevision(it)}" }
+        val eligibility = sourceEligibility
+        val value = if (adult == null) eligibility.profiles.entries.sortedBy { it.key }.joinToString("|") { (id, restricted) ->
+            "$id:$restricted:${id in eligibility.ids}:${snapshot.importedDigests[id].orEmpty()}:" +
+                (if (id in eligibility.ids) DownloadRoutingStore.sourceRevision(id) else "")
+        } else eligibility.ids.filter { eligibility.profiles[it] == adult }.sorted().joinToString("|") { id ->
+            "$id:${snapshot.importedDigests[id].orEmpty()}:${DownloadRoutingStore.sourceRevision(id)}"
+        }
         return sha256(value.encodeToByteArray())
             .joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
     }
@@ -177,7 +229,8 @@ class UnifiedMangaRepository(
                     obsolete.values.forEach { it.result.cancel() }
                 }
             }
-            applyEnabledSources(sourceEligibility.ids, forceConfiguration = true)
+            applyEnabledSources(sourceEligibility.ids, sourceEligibility.profiles, sourceEligibility.registration,
+                forceConfiguration = true)
             changed
         }
         synchronized(unifiedMangaRepositoryStateLock) { sourceSearchCache.keys.removeAll { it.source in changed } }
@@ -192,14 +245,28 @@ class UnifiedMangaRepository(
         _catalogRevision.update { it + 1L }
     }
 
-    fun setEnabledSources(ids: Set<String>) = applyEnabledSources(ids, false)
+    internal fun bindSourceRegistry(registry: BodySourceRegistry) {
+        sourceRegistry = registry
+        setSourceAvailability(registry.entries.value)
+    }
 
-    private fun applyEnabledSources(ids: Set<String>, forceConfiguration: Boolean) {
-        val registered = sources.map { it.id }.toSet()
-        val next = ids.intersect(registered)
+    internal fun setSourceAvailability(entries: List<BodySourceRegistryEntry>) = applyEnabledSources(
+        entries.filter { it.enabled && !it.removed && it.isInstalled }.mapTo(mutableSetOf()) { it.source.id },
+        entries.associate { it.source.id to it.adult }, entries,
+        forceConfiguration = false,
+    )
+
+    private fun applyEnabledSources(ids: Set<String>, profiles: Map<String, Boolean>,
+        registration: List<BodySourceRegistryEntry>?, forceConfiguration: Boolean) {
         synchronized(unifiedMangaRepositoryStateLock) {
-            if (!forceConfiguration && sourceEligibility.ids == next) return
-            sourceEligibility = SourceEligibility(next, sourceEligibility.generation + 1L)
+            val registered = sources
+            val next = ids.intersect(registered.mapTo(mutableSetOf()) { it.id })
+            val nextProfiles = profiles + registered.associate { it.id to (it.adult || profiles[it.id] == true) }
+            if (!forceConfiguration && sourceEligibility.ids == next && sourceEligibility.profiles == nextProfiles) {
+                sourceEligibility = sourceEligibility.copy(registration = registration)
+                return
+            }
+            sourceEligibility = SourceEligibility(next, nextProfiles, sourceEligibility.generation + 1L, registration)
             val obsolete = discoveries.values.toList()
             discoveries.keys.forEach { workId ->
                 discoveryGenerations[workId] = (discoveryGenerations[workId] ?: 0L) + 1L
@@ -221,10 +288,16 @@ class UnifiedMangaRepository(
             refreshedAt.clear()
             _sourceErrors.value = emptyMap()
         }
+        _catalogRevision.update { it + 1L }
     }
 
+    private fun registrationCurrent(eligibility: SourceEligibility): Boolean =
+        sourceRegistry?.let { it.entries.value === eligibility.registration } ?: true
+
     private fun ensureEligibility(expected: SourceEligibility, sourceId: String? = null) {
-        if (sourceEligibility.generation != expected.generation || sourceId != null && sourceId !in expected.ids)
+        val current = sourceEligibility
+        if (!registrationCurrent(current) || current.generation != expected.generation ||
+            sourceId != null && sourceId !in expected.ids)
             throw CancellationException("来源搜索配置已更改。")
     }
 
@@ -285,7 +358,7 @@ class UnifiedMangaRepository(
     private fun genreSources(eligibility: SourceEligibility): List<GenreSource> = adapters.values.mapNotNull { source ->
         if (!source.supportsNativeGenres) return@mapNotNull null
         val info = source.info
-        if (info.adult || info.id !in eligibility.ids) null
+        if (eligibility.profiles[info.id] != false || info.id !in eligibility.ids) null
         else GenreSource(source, info, DownloadRoutingStore.sourceRevision(info.id))
     }.sortedBy { it.info.id }
 
@@ -378,16 +451,25 @@ class UnifiedMangaRepository(
     suspend fun sourceFavorites(id: String, folder: String, page: Int): MangaPage = diagnostics.track(id, SourceStage.FAVORITES) {
         adapter(id).favorites(folder, page)
     }
-    suspend fun sourceSetFavorite(id: String, mangaId: String, folder: String, favorite: Boolean) = diagnostics.track(id, SourceStage.FAVORITES) {
+    suspend fun sourceSetFavorite(id: String, mangaId: String, folder: String, favorite: Boolean,
+        expectedAccount: String? = null) = diagnostics.track(id, SourceStage.FAVORITES) {
         val ref = SourceKeys.decodeManga(mangaId)
         require(ref.sourceId == id) { "作品和站点收藏来源不一致。" }
-        adapter(id).setFavorite(ref.mangaId, folder, favorite)
+        val source = adapter(id)
+        if (expectedAccount == null) source.setFavorite(ref.mangaId, folder, favorite)
+        else source.setFavoriteForAccount(ref.mangaId, folder, favorite, expectedAccount)
     }
     suspend fun sourceComments(id: String, mangaId: String, page: Int): SourceCommentPage = diagnostics.track(id, SourceStage.COMMENTS) {
         val ref = SourceKeys.decodeManga(mangaId)
         require(ref.sourceId == id) { "作品和评论来源不一致。" }
         adapter(id).comments(ref.mangaId, page)
     }
+    suspend fun sourceCommentReplies(id: String, mangaId: String, parentId: String, page: Int): SourceCommentPage =
+        diagnostics.track(id, SourceStage.COMMENTS) {
+            val ref = SourceKeys.decodeManga(mangaId)
+            require(ref.sourceId == id) { "作品和评论来源不一致。" }
+            adapter(id).commentReplies(ref.mangaId, parentId, page)
+        }
     /** Explicit user action; no scheduler, automatic availability probe or account retry. */
     internal fun sourceProbeIdentity(id: String): String = if (id == "copy") "anonymous-catalogue"
         else (adapter(id) as? dev.mangaflow.data.sources.BodySourceProbeIdentity)?.connectionProbeIdentity().orEmpty()
@@ -434,7 +516,7 @@ class UnifiedMangaRepository(
         val eligibility = sourceEligibility
         // This is a *query boundary*, not a UI-only hide rule. Adult sources cannot
         // receive ordinary queries even when the user enabled both source groups.
-        val ordinary = sources.filter { !it.adult }.associateBy(BodySourceInfo::id)
+        val ordinary = sources.filter { eligibility.profiles[it.id] == false }.associateBy(BodySourceInfo::id)
         val allowed = eligibility.ids.intersect(ordinary.keys)
         if (allowed.isEmpty()) throw SourceException("普通漫画区没有已启用的来源")
         val requested = (pages?.toMap() ?: ordinary.keys.associateWith { 0 }).filterKeys { it in allowed }
@@ -639,13 +721,13 @@ class UnifiedMangaRepository(
         includePrimary: Boolean = false, onlySourceId: String? = null,
         preserveIdentity: Boolean = false, failedSourceIds: Set<String> = emptySet(),
         onlySourceIds: Set<String>? = null): Deferred<Unit>? {
-        if (work.sourceUrl == dev.mangaflow.storage.DownloadStore.LOCAL_SOURCE_URL || work.title.isBlank()) return null
+        if (!validWorkIdentity(work) || work.title.isBlank()) return null
         reconcileSourceDiscovery(work.id)
         var identity = DiscoveryIdentity(work, (work.alternativeTitles + aliases).distinct(), conflictingIds)
         var signature = discoverySignature(identity)
         synchronized(unifiedMangaRepositoryStateLock) {
             val eligibility = sourceEligibility
-            if (eligibility.ids.isEmpty()) return null
+            if (!registrationCurrent(eligibility) || eligibility.ids.isEmpty()) return null
             if (preserveIdentity) discoveryIdentities[work.id]?.let { known ->
                 identity = known
                 signature = discoverySignature(known)
@@ -664,7 +746,7 @@ class UnifiedMangaRepository(
             val previous = _sourceDiscovery.value[work.id].orEmpty()
             val now = wallTimeMillis()
             val targets = sources.filter { info ->
-                info.id in eligibility.ids && (!info.adult || info.id == work.sourceId) &&
+                info.id in eligibility.ids && eligibility.sharesProfile(work.sourceId, info.id) &&
                     (previous[info.id]?.nextRetryAt ?: 0L) <= now &&
                     (includePrimary || info.id != work.sourceId) &&
                     (onlySourceId == null || info.id == onlySourceId) &&
@@ -752,7 +834,8 @@ class UnifiedMangaRepository(
         eligibility: SourceEligibility) {
         val work = identity.work
         val pending = _sourceDiscovery.value[work.id].orEmpty().values.filter {
-            it.status == SourceDiscoveryStatus.NEEDS_CONFIRMATION && it.sourceId in eligibility.ids
+            it.status == SourceDiscoveryStatus.NEEDS_CONFIRMATION && it.sourceId in eligibility.ids &&
+                eligibility.sharesProfile(work.sourceId, it.sourceId)
         }
         pending.forEach { result ->
             currentCoroutineContext().ensureActive()
@@ -767,7 +850,7 @@ class UnifiedMangaRepository(
             }
             val info = sources.firstOrNull { it.id == result.sourceId } ?: return@forEach
             if (result.candidates.size !in 1..4 || identity.conflictingIds.isNotEmpty()) return@forEach
-            val exact = result.candidates.filter { SourceDiscoveryIdentity.titleMatches(work, it, identity.aliases) }
+            val exact = result.candidates.filter { discoveryTitleMatches(work, it, identity.aliases) }
             if (exact.isEmpty()) return@forEach
             if (exact.size == 1 && loadedSourceDetail(exact.single().id) == null &&
                 SourceDiscoveryIdentity.authorEvidence(work, exact.single()) != SourceDiscoveryIdentity.AuthorEvidence.CONFLICT) {
@@ -837,7 +920,7 @@ class UnifiedMangaRepository(
     private fun retainedSourceCount(workId: String, sourceId: String): Int =
         if (SourceKeys.decodeManga(workId).sourceId == sourceId)
             (cachedSourceDetail(workId) ?: if (sourceId == "copy") copy.cachedDetail(workId) else null)?.chapters?.size ?: 0
-        else unified.linkedSources(workId).filter { it.manga.sourceId == sourceId }.sumOf {
+        else profileLinks(workId).filter { it.manga.sourceId == sourceId }.sumOf {
             cachedSourceDetail(it.manga.id)?.chapters?.size ?: 0
         }
 
@@ -897,6 +980,33 @@ class UnifiedMangaRepository(
         }
     }
 
+    private fun discoveryTitleMatches(work: Manga, candidate: Manga, aliases: List<String>): Boolean =
+        if (isAdultSource(work.sourceId)) SourceDiscoveryIdentity.adultTitleMatches(work, candidate, aliases)
+        else SourceDiscoveryIdentity.titleMatches(work, candidate, aliases)
+
+    private fun chapterSystemMatches(base: MangaDetail?, candidate: MangaDetail, adult: Boolean): Boolean =
+        if (adult) SourceDiscoveryIdentity.adultChapterSystemMatches(base, candidate)
+        else SourceDiscoveryIdentity.chapterSystemMatches(base, candidate)
+
+    internal fun attachWorkSource(work: Manga, catalogue: MangaDetail, configuration: String, isCurrent: () -> Boolean) {
+        synchronized(unifiedMangaRepositoryStateLock) {
+            val candidate = catalogue.manga
+            require(isCurrent() && sourceConfigurationKey() == configuration &&
+                canAssociateWorkSource(work, candidate.sourceId) && validWorkIdentity(candidate) &&
+                loadedSourceDetail(candidate.id) === catalogue) { "来源设置已变化，请重新选择版本。" }
+            require(catalogue.chapters.isNotEmpty()) { "这个版本暂时没有可读章节。" }
+            val baseline = loadedSourceDetail(work.id)
+            val variants = catalogue.chapters.flatMap { it.variants }
+            val nativeEdition = variants.map { it.edition }.filter(String::isNotBlank).distinct().singleOrNull()
+            val nativeLanguage = variants.map { it.language }.filter(String::isNotBlank).distinct().singleOrNull()
+            val volume = catalogue.chapters.all { ChapterSemantics.parse(it)?.system?.startsWith("volume") == true }
+            unified.attach(work.id, candidate,
+                language = nativeLanguage ?: sources.firstOrNull { it.id == candidate.sourceId }?.language.orEmpty(),
+                edition = nativeEdition ?: if (volume) "单行本" else "连载版",
+                sameChapterSystem = chapterSystemMatches(baseline, catalogue, isAdultSource(work.sourceId)))
+        }
+    }
+
     private suspend fun discoverOneSource(work: Manga, aliases: List<String>,
         info: BodySourceInfo, generation: Long, force: Boolean, eligibility: SourceEligibility) {
         ensureEligibility(eligibility, info.id)
@@ -928,7 +1038,7 @@ class UnifiedMangaRepository(
                 ensureEligibility(eligibility, info.id)
                 // Only upgrade automatically created links; a user's independent numbering stays theirs.
                 if (isCurrentDiscovery(work.id, generation) && link.association == "automatic" && !link.sameChapterSystem &&
-                    SourceDiscoveryIdentity.chapterSystemMatches(loadedSourceDetail(work.id), loaded))
+                    chapterSystemMatches(loadedSourceDetail(work.id), loaded, eligibility.profiles[work.sourceId] == true))
                     unified.confirmChapterSystem(work.id, link)
                 count += loaded.chapters.size
                 _sourceErrors.update { errors ->
@@ -941,22 +1051,27 @@ class UnifiedMangaRepository(
             return
         }
 
+        if (eligibility.profiles[work.sourceId] == true && !sourceCapabilities(info.id).supports(SourceFeature.SEARCH)) {
+            report(SourceDiscoveryStatus.DISABLED, "此来源未提供标题检索。")
+            return
+        }
         var results: List<Manga> = emptyList()
         for (query in bodySourceSearchTerms(work.title, aliases)) {
             currentCoroutineContext().ensureActive()
             ensureEligibility(eligibility, info.id)
             val found = searchSource(info.id, query, forceRefresh = force).items
+            require(found.all { it.sourceId == info.id && validWorkIdentity(it) }) { "来源返回了不一致的作品编号。" }
             results = (results + found).distinctBy(Manga::id)
             ensureEligibility(eligibility, info.id)
             // A broad upstream search may return unrelated hits for the first spelling.
             // Continue the existing bounded alias list until a full-title match is present.
-            if (results.any { SourceDiscoveryIdentity.titleMatches(work, it, aliases) }) break
+            if (results.any { discoveryTitleMatches(work, it, aliases) }) break
         }
         if (results.isEmpty()) {
             report(SourceDiscoveryStatus.NO_MATCH, "该来源暂未找到这部作品。")
             return
         }
-        val exact = results.filter { SourceDiscoveryIdentity.titleMatches(work, it, aliases) }
+        val exact = results.filter { discoveryTitleMatches(work, it, aliases) }
         if (exact.isEmpty()) {
             report(SourceDiscoveryStatus.NEEDS_CONFIRMATION, "搜索到相近作品，完整标题尚未对应。", results.take(6))
             return
@@ -980,8 +1095,10 @@ class UnifiedMangaRepository(
         info: BodySourceInfo, generation: Long, eligibility: SourceEligibility) {
         val work = identity.work
         ensureEligibility(eligibility, info.id)
+        if (!eligibility.sharesProfile(work.sourceId, info.id)) return
+        val adult = eligibility.profiles[work.sourceId] == true
         val baseline = loadedSourceDetail(work.id) ?: if (work.sourceId == "copy") copy.cachedDetail(work.id) else null
-        val chapterMatches = candidates.associate { it.manga.id to SourceDiscoveryIdentity.chapterSystemMatches(baseline, it) }
+        val chapterMatches = candidates.associate { it.manga.id to chapterSystemMatches(baseline, it, adult) }
         // Recheck the latest identity while committing. Manual exclusion/link changes and source
         // generations use these same guards; stale metadata cannot overwrite a user's choice.
         val outcome = synchronized(unifiedMangaRepositoryStateLock) {
@@ -989,13 +1106,21 @@ class UnifiedMangaRepository(
             ensureEligibility(eligibility, info.id)
             val current = discoveryIdentities[work.id] ?: identity
             val verified = candidates.filter {
-                current.conflictingIds.isEmpty() && SourceDiscoveryIdentity.workMatches(
+                current.conflictingIds.isEmpty() && if (adult) {
+                    baseline != null && baseline.chapters.isNotEmpty() && it.chapters.isNotEmpty() &&
+                        SourceDiscoveryIdentity.adultWorkMatches(baseline.manga, it.manga, current.aliases)
+                } else SourceDiscoveryIdentity.workMatches(
                     current.work, it.manga, current.aliases, chapterMatches[it.manga.id] == true)
             }
-            if (verified.size != 1) {
+            val plausible = if (adult) candidates.count {
+                SourceDiscoveryIdentity.authorEvidence(baseline?.manga ?: current.work, it.manga) !=
+                    SourceDiscoveryIdentity.AuthorEvidence.CONFLICT
+            } else verified.size
+            if (verified.size != 1 || plausible > 1) {
                 publishDiscovery(work.id, generation, SourceDiscoveryResult(info.id, info.name,
                     SourceDiscoveryStatus.NEEDS_CONFIRMATION,
-                    message = if (verified.size > 1) "同一作品存在多个可读版本，请确认来源版本。"
+                    message = if (plausible > 1) "同名候选存在多个版本，请确认作品、分册及语言。"
+                        else if (adult && baseline == null) "主来源目录暂未核对，请在目录可用后重试，或手动确认版本。"
                         else "已找到相近条目，作品身份仍需确认。",
                     candidates = candidates.map { it.manga }.distinctBy(Manga::id).take(6)))
                 return
@@ -1004,8 +1129,10 @@ class UnifiedMangaRepository(
             val numbered = chapterMatches[selected.manga.id] == true
             val variant = selected.chapters.firstNotNullOfOrNull { it.variants.firstOrNull() }
             val added = unified.attachAutomatically(work.id, selected.manga,
-                language = variant?.language ?: info.language, edition = "连载版", sameChapterSystem = numbered,
-                evidence = if (numbered) "完整上游书名别名及独立身份/正常话号证据对应。"
+                language = variant?.language ?: info.language, edition = variant?.edition ?: "连载版", sameChapterSystem = numbered,
+                evidence = if (adult && numbered) "完整标题、创作者、语言及原生章节目录对应。"
+                    else if (adult) "完整标题及创作者对应；各站目录独立保留。"
+                    else if (numbered) "完整上游书名别名及独立身份/正常话号证据对应。"
                     else "完整上游书名与作者或已确认关系ID对应；章节体系独立保留。")
             Triple(selected, numbered, added)
         }
@@ -1068,7 +1195,8 @@ class UnifiedMangaRepository(
                 discoveries[workId]?.eligibilityGeneration != sourceEligibility.generation ||
                 discoveries[workId]?.configuration != sourceConfigurationKey() ||
                 discoveries[workId]?.cacheEpoch != discoveryCacheEpoch ||
-                result.sourceId !in sourceEligibility.ids) return
+                !registrationCurrent(sourceEligibility) || result.sourceId !in sourceEligibility.ids ||
+                !sourceEligibility.sharesProfile(SourceKeys.decodeManga(workId).sourceId, result.sourceId)) return
             val old = _sourceDiscovery.value[workId]?.get(result.sourceId)
             val pending = result.status in setOf(SourceDiscoveryStatus.QUEUED, SourceDiscoveryStatus.SEARCHING,
                 SourceDiscoveryStatus.RETRYING)
@@ -1174,6 +1302,14 @@ class UnifiedMangaRepository(
     }
 
     internal data class CatalogSnapshot(val detail: MangaDetail, val fresh: Boolean)
+
+    /** A visible detail/reader can consume live associations even with reusable caching disabled. */
+    internal fun activeCatalog(mangaId: String): CatalogSnapshot? {
+        if (!registrationCurrent(sourceEligibility)) return null
+        return cachedCatalog(mangaId)
+            ?: cachedSourceDetail(mangaId)?.takeIf { isAdultSource(it.manga.sourceId) }
+                ?.let { CatalogSnapshot(project(it), fresh = false) }
+    }
 
     fun cachedDetail(mangaId: String): MangaDetail? = cachedCatalog(mangaId)?.detail
 
@@ -1415,18 +1551,19 @@ class UnifiedMangaRepository(
     }
 
     private fun project(base: MangaDetail): MangaDetail {
-        val links = unified.linkedSources(base.manga.id)
+        val links = profileLinks(base.manga.id)
+        val adult = isAdultSource(base.manga.sourceId)
         val baseline = loadedSourceDetail(base.manga.id)
             ?: if (base.manga.sourceId == "copy") copy.cachedDetail(base.manga.id) else null
         if (baseline != null) links.filter { it.association == "automatic" && !it.sameChapterSystem && it.confirmedAt > 0L }.forEach { link ->
             val candidate = loadedSourceDetail(link.manga.id) ?: return@forEach
-            if (SourceDiscoveryIdentity.chapterSystemMatches(baseline, candidate))
+            if (chapterSystemMatches(baseline, candidate, adult))
                 unified.confirmChapterSystem(base.manga.id, link)
         }
         val linked = links.mapNotNull { link ->
             synchronized(unifiedMangaRepositoryStateLock) { rawCatalogs[link.manga.id] }
         }
-        return base.copy(chapters = unified.build(base.manga, base.chapters, linked))
+        return base.copy(chapters = unified.build(base.manga, base.chapters, linked, adultProfile = adult))
     }
 
     private fun startRefresh(workId: String, force: Boolean): Deferred<Unit>? = synchronized(unifiedMangaRepositoryStateLock) {
@@ -1439,7 +1576,9 @@ class UnifiedMangaRepository(
         refreshes[workId]?.job?.cancel()
         if (!force && wallTimeMillis() - (refreshedAt[workId] ?: 0L) in 0L until
                 copy.contentCachePolicy().freshMillis(ContentCacheKind.DETAILS)) return@synchronized null
-        val links = unified.linkedSources(workId).filter { it.manga.sourceId in eligibility.ids }
+        val links = profileLinks(workId, eligibility).filter {
+            it.confirmedAt > 0L && it.manga.sourceId in eligibility.ids
+        }
         if (links.isEmpty()) {
             if (eligibility.generation == sourceEligibility.generation) _sourceErrors.update { it - workId }
             return@synchronized null

@@ -16,9 +16,14 @@ data class SourceCapabilities(
     val websiteLoginDeclared: Boolean = false,
     val registrationFields: List<SourceRegistrationField> = emptyList(),
     val browserAccount: SourceBrowserAccount? = null,
+    val authorSearch: SourceSearchCoverage = SourceSearchCoverage.KEYWORD_METADATA,
+    val tagSearch: SourceSearchCoverage = SourceSearchCoverage.KEYWORD_METADATA,
+    val commentReplies: Boolean = false,
 ) {
     fun supports(feature: SourceFeature): Boolean = feature in features
 }
+
+enum class SourceSearchCoverage { NATIVE_INDEX, CATEGORY_OR_KEYWORD, KEYWORD_METADATA }
 
 /** Reviewed destinations. Opening these pages does not transfer a website session. */
 data class SourceBrowserAccount(
@@ -65,7 +70,8 @@ data class SourceAccountState(val signedIn: Boolean = false, val displayName: St
     val hasCredentials: Boolean = signedIn)
 data class SourceFavoriteFolder(val id: String, val title: String)
 data class SourceComment(val id: String, val author: String, val content: String,
-    val avatar: String = "", val time: String = "", val likes: Int = 0)
+    val avatar: String = "", val time: String = "", val likes: Int = 0,
+    val replyCount: Int? = null, val inlineReplies: List<SourceComment> = emptyList())
 data class SourceCommentPage(val items: List<SourceComment>, val hasMore: Boolean = false)
 
 internal fun unsupportedSourceFeature(): Nothing = throw SourceException("此来源未提供这项能力。")

@@ -50,7 +50,10 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.SourceManagementState
+import dev.mangaflow.data.Chapter
+import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Manga
+import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.data.SourceCheckPreferences
 import dev.mangaflow.data.SourceCheckScheduleState
@@ -78,6 +81,8 @@ internal fun UnifiedSourceManager(
     onAttach: (Manga) -> Unit,
     onRetryAll: () -> Unit = {},
     onChooseDomain: (String) -> Unit = {},
+    onDetach: ((Manga) -> Unit)? = null,
+    onAlignChapter: ((Chapter, ChapterVariant, Chapter?) -> Unit)? = null,
     onChooseSource: (String) -> Unit = {},
     checkPreferences: SourceCheckPreferences = SourceCheckPreferences(),
     checkSchedule: SourceCheckScheduleState = SourceCheckScheduleState(),
@@ -93,6 +98,8 @@ internal fun UnifiedSourceManager(
     var requestedSearch by remember(state.work.id) { mutableStateOf<Pair<String, String>?>(null) }
     var domainChanged by remember(state.work.id) { mutableStateOf(false) }
     var attaching by remember(state.work.id) { mutableStateOf<Manga?>(null) }
+    var detachCandidate by remember(state.work.id) { mutableStateOf<String?>(null) }
+    var aligningChapter by remember(state.work.id) { mutableStateOf<String?>(null) }
     val editor = remember { ExperienceEditor() }
     val now by produceState(wallTimeMillis()) {
         while (true) { delay(1_000L); value = wallTimeMillis() }
@@ -149,7 +156,7 @@ internal fun UnifiedSourceManager(
         if (!state.connecting) {
             keyboard?.hide(); focus.clearFocus()
             sourcePage = null; manual = false; attaching = null
-            sourcePickerOpen = false; errorDetailsSource = null
+            sourcePickerOpen = false; errorDetailsSource = null; detachCandidate = null; aligningChapter = null
             editor.field = null
         }
     }
@@ -191,8 +198,14 @@ internal fun UnifiedSourceManager(
                             .motionPress(sourceInteraction, pressedScale = .985f) else Modifier),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Text(if (sourcePage == null) "来源" else if (sourcePage == "@checks") "来源检查" else state.sources.firstOrNull { it.first == source }?.second
-                            ?: selectedOverview?.name ?: sourceDisplayName(source),
+                        val heading = when {
+                            sourcePage == null -> "来源"
+                            sourcePage == "@checks" -> "来源检查"
+                            sourcePage?.startsWith("@align:") == true -> "章节对应"
+                            else -> state.sources.firstOrNull { it.first == source }?.second
+                                ?: selectedOverview?.name ?: sourceDisplayName(source)
+                        }
+                        Text(heading,
                             fontSize = 16.sp, fontWeight = FontWeight.Medium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                         if (canSwitchSource) Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp),
@@ -219,10 +232,50 @@ internal fun UnifiedSourceManager(
                 fillContent = false, soft = true,
                 modifier = Modifier.weight(1f, fill = false).fillMaxWidth()) { page ->
                 val pageActive = page == (sourcePage ?: "overview")
+                val alignmentWork = state.linked.firstOrNull { page == "@align:${it.id}" }
                 LazyColumn(Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    if (page == "@checks") {
+                    if (page.startsWith("@align:")) {
+                        if (alignmentWork == null) item(key = "alignment-unavailable") {
+                            Text("此版本已解除关联。", fontSize = 12.sp, color = colors.onSurfaceVariant)
+                        } else {
+                            val variants = state.chapters.flatMap { chapter ->
+                                chapter.variants.filter { SourceKeys.manga(it.sourceId, it.mangaId) == alignmentWork.id }
+                                    .map { chapter to it }
+                            }.distinctBy { it.second.storageId }
+                            val selection = variants.firstOrNull { it.second.storageId == aligningChapter }
+                            item(key = "alignment-prompt") {
+                                Text(if (selection == null) "选择《${alignmentWork.title}》中的章节"
+                                    else "选择主来源中与「${selection.second.title}」对应的章节",
+                                    fontSize = 12.sp, color = colors.onSurfaceVariant, modifier = Modifier.padding(vertical = 6.dp))
+                            }
+                            if (selection == null) {
+                                items(variants, key = { it.second.storageId }) { (_, variant) ->
+                                    AlignmentChapterButton(variant, pageActive && !busy) { aligningChapter = variant.storageId }
+                                }
+                            } else {
+                                val (selectedChapter, selectedVariant) = selection
+                                val primary = state.chapters.mapNotNull { chapter ->
+                                    chapter.variants.firstOrNull { SourceKeys.manga(it.sourceId, it.mangaId) == state.work.id }
+                                        ?.let { chapter to it }
+                                }
+                                val existing = primary.any { (chapter, _) -> chapter.id == selectedChapter.id }
+                                if (existing) item(key = "remove-alignment") {
+                                    MotionTextButton(enabled = pageActive && !busy, onClick = {
+                                        onAlignChapter?.invoke(selectedChapter, selectedVariant, null)
+                                        showOverview()
+                                    }) { Text("保留为独立章节", fontSize = 12.sp) }
+                                }
+                                items(primary.filterNot { it.first.id == selectedChapter.id }, key = { it.second.storageId }) { (chapter, variant) ->
+                                    AlignmentChapterButton(variant, pageActive && !busy) {
+                                        onAlignChapter?.invoke(selectedChapter, selectedVariant, chapter)
+                                        showOverview()
+                                    }
+                                }
+                            }
+                        }
+                    } else if (page == "@checks") {
                         item(key = "check-settings") {
                             SourceCheckSettings(checkPreferences, checkSchedule, editor, pageActive,
                                 now, onCheckPreferences)
@@ -251,15 +304,18 @@ internal fun UnifiedSourceManager(
                                     if (row.alignedChapters > 0) "已对齐 ${row.alignedChapters}" else "暂无重合"
                                 else -> sourceStatusLabel(row.status)
                             }
-                            val canChoose = row.status !in runningStates && row.status != "DISABLED" &&
+                            val removable = if (onDetach != null) state.linked.filter { it.sourceId == row.id } else emptyList()
+                            val canChoose = row.status !in runningStates && (row.status != "DISABLED" || removable.isNotEmpty()) &&
                                 !state.connecting && pageActive
                             val interaction = remember(row.id) { MutableInteractionSource() }
                             Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
                                 .clickable(interactionSource = interaction, indication = null, enabled = canChoose,
                                     role = Role.Button, onClickLabel = if (row.status == "NEEDS_CONFIRMATION")
                                         "查看${row.name}的待确认版本" else "查找${row.name}的版本") {
-                                    if (row.status == "LINKED") errorDetailsSource =
-                                        if (errorDetailsSource == row.id) null else row.id
+                                    if (row.status == "LINKED" || removable.isNotEmpty()) {
+                                        errorDetailsSource = if (errorDetailsSource == row.id) null else row.id
+                                        detachCandidate = null
+                                    }
                                     else if (row.id == state.work.sourceId) onRetrySource(row.id)
                                     else {
                                         feedback.perform(FeelEvent.Selection)
@@ -331,6 +387,31 @@ internal fun UnifiedSourceManager(
                                         Text(if (row.nextRetryAt > now) "来源冷却中" else "只重试此来源", fontSize = 11.sp)
                                     }
                                 }
+                                removable.forEach { work ->
+                                    if (onAlignChapter != null && state.chapters.any { chapter ->
+                                            chapter.variants.any { SourceKeys.manga(it.sourceId, it.mangaId) == work.id }
+                                        } && state.chapters.any { chapter ->
+                                            chapter.variants.any { SourceKeys.manga(it.sourceId, it.mangaId) == state.work.id }
+                                        }) MotionTextButton(enabled = pageActive && !busy && row.status != "DISABLED", onClick = {
+                                            manual = false
+                                            aligningChapter = null
+                                            detachCandidate = null
+                                            sourcePage = "@align:${work.id}"
+                                        }) {
+                                            Text("对应《${work.title}》的章节", fontSize = 11.sp,
+                                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                        }
+                                    MotionTextButton(enabled = pageActive && !busy, onClick = {
+                                        if (detachCandidate == work.id) {
+                                            onDetach?.invoke(work)
+                                            detachCandidate = null
+                                        } else detachCandidate = work.id
+                                    }) {
+                                        Text(if (detachCandidate == work.id) "确认解除关联，保留阅读记录"
+                                            else "解除《${work.title}》的来源关联", fontSize = 11.sp,
+                                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
                             }
                         }
                         item(key = "manual-entry") {
@@ -345,6 +426,11 @@ internal fun UnifiedSourceManager(
                             }
                         }
                     } else {
+                        if (!manual && selectedOverview?.status == "NEEDS_CONFIRMATION" &&
+                            selectedOverview.message.isNotBlank()) item(key = "association-evidence") {
+                            Text(selectedOverview.message, modifier = Modifier.padding(vertical = 6.dp), fontSize = 12.sp,
+                                color = colors.onSurfaceVariant)
+                        }
                         if (manual) item(key = "search") {
                             if (sourcePickerOpen && state.sources.size > 1) {
                                 state.sources.forEach { (id, name) ->
@@ -471,6 +557,19 @@ internal fun UnifiedSourceManager(
                 }
             }
             }
+        }
+    }
+}
+
+@Composable
+private fun AlignmentChapterButton(variant: ChapterVariant, enabled: Boolean, onClick: () -> Unit) {
+    MotionTextButton(modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp), enabled = enabled, onClick = onClick) {
+        ChapterSourceLogo(variant.sourceId, variant.sourceName, Modifier.size(18.dp))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(variant.title, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            val edition = listOf(variant.language, variant.edition).filter(String::isNotBlank).joinToString(" · ")
+            if (edition.isNotBlank()) Text(edition, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

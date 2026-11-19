@@ -1,9 +1,6 @@
 package dev.mangaflow.ui
 
-import coil3.compose.AsyncImage
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.ui.layout.ContentScale
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import androidx.compose.foundation.background
@@ -51,6 +48,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.DiscoveryMode
 import dev.mangaflow.data.RankPeriod
+import dev.mangaflow.data.SearchTarget
 import dev.mangaflow.data.SourceFailureKind
 import dev.mangaflow.data.SourceHealth
 import dev.mangaflow.data.UnifiedMangaRepository
@@ -77,6 +75,7 @@ internal fun SourceCapabilityBrowseControls(
     onPresenceChange: (Boolean) -> Unit = {},
     inSearch: Boolean = false,
     onOpenSourceAccount: ((String) -> Unit)? = null,
+    onOpenSearch: ((SearchTarget) -> Unit)? = null,
 ) {
     val current by controller.controls.collectAsStateWithLifecycle()
     val browse by controller.state.collectAsStateWithLifecycle()
@@ -106,25 +105,29 @@ internal fun SourceCapabilityBrowseControls(
         else -> emptyList()
     }
     val visibleFilters = filters.withIndex().filterNot {
-        !searching && browse.mode == DiscoveryMode.RANKING && it.value.id == "period" && nativePeriods.isNotEmpty()
+        (!searching && browse.mode == DiscoveryMode.RANKING && it.value.id == "period" && nativePeriods.isNotEmpty()) ||
+            (searching && it.value.id == "target")
     }
     val modifiedFilters = visibleFilters.count { (index, filter) ->
         filter.normalize(current.options.getOrNull(index)) != filter.normalize()
     }
     val sourceName = current.sources.firstOrNull { it.id == current.selectedSource }?.name ?: "全部来源"
     val hasFeeds = !searching && current.feeds.size > 1
-    val hasHotTags = !searching && current.selectedSource == "jmcomic"
+    val tagProvider = current.sources.firstOrNull {
+        it.id == "jmcomic" && (current.selectedSource == "*" || current.selectedSource == it.id)
+    }
+    val hasHotTags = searching && browse.searchTarget == SearchTarget.TAG && tagProvider != null
     val hasFilters = visibleFilters.isNotEmpty()
     val selectionSummary = visibleFilters.filter { (index, filter) ->
         filter.normalize(current.options.getOrNull(index)) != filter.normalize()
     }.joinToString(" · ") { (index, filter) ->
         "${filter.title}：${sourceFilterSummary(filter, current.options.getOrNull(index))}"
     }
-    var hotTags by remember(current.selectedSource, revision) { mutableStateOf<List<String>>(emptyList()) }
-    var hotTagsLoaded by remember(current.selectedSource, revision) { mutableStateOf(false) }
-    var hotTagsLoading by remember(current.selectedSource, revision) { mutableStateOf(false) }
-    var hotTagsError by remember(current.selectedSource, revision) { mutableStateOf<String?>(null) }
-    var hotTagsRevision by remember(current.selectedSource, revision) { mutableIntStateOf(0) }
+    var hotTags by remember(tagProvider) { mutableStateOf<List<String>>(emptyList()) }
+    var hotTagsLoaded by remember(tagProvider) { mutableStateOf(false) }
+    var hotTagsLoading by remember(tagProvider) { mutableStateOf(false) }
+    var hotTagsError by remember(tagProvider) { mutableStateOf<String?>(null) }
+    var hotTagsRevision by remember(tagProvider) { mutableIntStateOf(0) }
     val present = feedPicker || filtersVisible || pendingFilter != null ||
         filterIndex != null || failuresOpen || hotTagsOpen
     val reportPresence by rememberUpdatedState(onPresenceChange)
@@ -151,11 +154,12 @@ internal fun SourceCapabilityBrowseControls(
             }
         }
     }
-    LaunchedEffect(hotTagsOpen, current.selectedSource, revision, hotTagsRevision, active) {
-        if (!active || !hotTagsOpen || hotTagsLoaded || current.selectedSource != "jmcomic") return@LaunchedEffect
+    LaunchedEffect(hotTagsOpen, tagProvider, hotTagsRevision, active) {
+        val provider = tagProvider ?: return@LaunchedEffect
+        if (!active || !hotTagsOpen || hotTagsLoaded) return@LaunchedEffect
         hotTagsLoading = true; hotTagsError = null
         try {
-            hotTags = repository.sourceHotTags(current.selectedSource).filter(String::isNotBlank).distinct()
+            hotTags = repository.sourceHotTags(provider.id).filter(String::isNotBlank).distinct()
             hotTagsLoaded = true
         } catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { hotTagsError = "热门标签暂未读取" }
@@ -178,7 +182,11 @@ internal fun SourceCapabilityBrowseControls(
                     Text(sourceName, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                     val context = if (searching) "搜索范围" else selectedFeed?.title?.takeIf { it != sourceName }
-                        ?: "各来源内容"
+                        ?: when (browse.mode) {
+                            DiscoveryMode.RECOMMENDED -> "站点选编与更新"
+                            DiscoveryMode.LATEST -> "站点更新"
+                            DiscoveryMode.RANKING -> "各站独立榜单"
+                        }
                     Text(context, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -189,10 +197,21 @@ internal fun SourceCapabilityBrowseControls(
                 tooltip = "${sourceName}分类与栏目") {
                 Icon(Icons.Outlined.ViewModule, "${sourceName}分类与栏目", Modifier.size(19.dp))
             }
+            if (!searching && onOpenSearch != null) {
+                MotionTextButton(onClick = { onOpenSearch(SearchTarget.TAG) }, enabled = active && !present,
+                    modifier = Modifier.heightIn(min = 44.dp), colors = controlColors,
+                    contentPadding = PaddingValues(horizontal = 7.dp)) {
+                    Text("标签", style = MaterialTheme.typography.labelLarge, maxLines = 1)
+                }
+                MotionTextButton(onClick = { onOpenSearch(SearchTarget.AUTHOR) }, enabled = active && !present,
+                    modifier = Modifier.heightIn(min = 44.dp), colors = controlColors,
+                    contentPadding = PaddingValues(horizontal = 7.dp)) {
+                    Text("作者", style = MaterialTheme.typography.labelLarge, maxLines = 1)
+                }
+            }
             if (hasHotTags) MotionIconButton(onClick = { hotTagsOpen = true },
-                enabled = active && !current.loading && !present, modifier = Modifier.size(44.dp),
-                tooltip = "${sourceName}热门标签") {
-                Icon(Icons.Outlined.Tag, "${sourceName}热门标签", Modifier.size(19.dp))
+                enabled = active && !present, modifier = Modifier.size(44.dp), tooltip = "禁漫热门标签") {
+                Icon(Icons.Outlined.Tag, "禁漫热门标签", Modifier.size(19.dp))
             }
             if (hasFilters) Box {
                 MotionIconButton(onClick = { filtersVisible = true },
@@ -204,6 +223,19 @@ internal fun SourceCapabilityBrowseControls(
                 }
                 if (modifiedFilters > 0) Box(Modifier.align(Alignment.TopEnd).padding(7.dp).size(5.dp)
                     .background(MaterialTheme.colorScheme.onSurface, CircleShape))
+            }
+        }
+        if (searching && browse.searchTarget in listOf(SearchTarget.AUTHOR, SearchTarget.TAG)) {
+            browse.searchSources.values.filter { it.coverage != null }.groupBy { it.coverage }.forEach { (coverage, lanes) ->
+                val description = when (coverage) {
+                    SourceSearchCoverage.NATIVE_INDEX -> if (browse.searchTarget == SearchTarget.AUTHOR) "站内作者索引" else "站内标签索引"
+                    SourceSearchCoverage.CATEGORY_OR_KEYWORD -> "匹配站内分类时直达，其余筛选关键词结果"
+                    SourceSearchCoverage.KEYWORD_METADATA -> "筛选关键词结果中的已知信息"
+                    null -> return@forEach
+                }
+                Text(lanes.joinToString("、") { it.sourceName } + " · " + description,
+                    Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, bottom = 4.dp),
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             }
         }
         if (selectionSummary.isNotBlank()) Text(selectionSummary,
@@ -423,7 +455,7 @@ internal fun SourceCapabilityBrowseControls(
     }) { dismiss ->
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = (LocalMangaWindow.current.height - 96.dp).coerceAtLeast(120.dp)),
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 20.dp)) {
-            item(key = "hot-tags-header") { SourceBrowseSheetHeading("热门标签", dismiss, sourceName) }
+            item(key = "hot-tags-header") { SourceBrowseSheetHeading("热门标签", dismiss, tagProvider?.name) }
             if (hotTagsLoading) item(key = "hot-tags-loading") {
                 Box(Modifier.fillMaxWidth().height(64.dp), contentAlignment = Alignment.Center) {
                     MotionBusyIndicator(Modifier.size(18.dp), strokeWidth = 1.5.dp)
@@ -511,93 +543,10 @@ internal fun StarterSourcePreparation(installer: StarterSourceInstaller) {
 }
 
 @Composable
-internal fun SourceCapabilityComments(
-    repository: UnifiedMangaRepository, manga: Manga, modifier: Modifier,
-    bottomPadding: Dp, openRevision: Int, active: Boolean,
-) {
-    val scope = rememberCoroutineScope()
-    var rows by remember(manga.id) { mutableStateOf<List<SourceComment>>(emptyList()) }
-    var page by remember(manga.id) { mutableIntStateOf(0) }
-    var more by remember(manga.id) { mutableStateOf(false) }
-    var loading by remember(manga.id) { mutableStateOf(false) }
-    var error by remember(manga.id) { mutableStateOf<String?>(null) }
-    var failedPage by remember(manga.id) { mutableIntStateOf(0) }
-    var job by remember(manga.id) { mutableStateOf<Job?>(null) }
-    var generation by remember(manga.id) { mutableLongStateOf(0L) }
-    fun load(next: Int) {
-        if (loading) return
-        loading = true; error = null
-        generation++; val expected = generation
-        job = scope.launch {
-            try {
-                val result = repository.sourceComments(manga.sourceId, manga.id, next)
-                if (expected != generation) return@launch
-                rows = (if (next == 0) result.items else rows + result.items).distinctBy { it.id }
-                page = next; more = result.hasMore
-            } catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { if (expected == generation) { failedPage = next; error = repository.sourceHealth.value[manga.sourceId]?.message ?: "评论读取失败" } }
-            finally { if (expected == generation) loading = false }
-        }
-    }
-    LaunchedEffect(manga.id, openRevision, active) {
-        generation++; job?.cancel(); loading = false
-        if (active) load(0)
-    }
-    LazyColumn(modifier, contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = bottomPadding + 16.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp)) {
-        if (rows.isEmpty() && loading) item { QuietLoading("正在读取评论…") }
-        if (rows.isEmpty() && !loading && error == null) item { Text("暂无评论", style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        items(rows, key = { it.id }) { row ->
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(11.dp)) {
-                Box(Modifier.size(32.dp).clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .045f)), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.PersonOutline, null, Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (row.avatar.isNotBlank()) AsyncImage(model = row.avatar, contentDescription = null,
-                        modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                }
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(row.author.ifBlank { "未署名" }, style = MaterialTheme.typography.labelLarge)
-                    Text(row.content, style = MaterialTheme.typography.bodyMedium)
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(listOf(manga.sourceName, row.time).filter { it.isNotBlank() }.joinToString(" · "),
-                            Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (row.likes > 0) Row(verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.semantics(mergeDescendants = true) { stateDescription = "${row.likes} 次赞" }) {
-                            Icon(Icons.Outlined.FavoriteBorder, null, Modifier.size(13.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(row.likes.toString(), style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
-            }
-        }
-        error?.let { message -> item {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(message, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                MotionTextButton(onClick = { load(failedPage) }, enabled = !loading,
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) { Text("重试") }
-            }
-        } }
-        if (more && error == null) item {
-            MotionTextButton(onClick = { load(page + 1) }, enabled = !loading, modifier = Modifier.fillMaxWidth()) {
-                Text(if (loading) "正在读取…" else "更多评论", fontSize = 12.sp)
-            }
-        }
-    }
-}
-
-@Composable
 internal fun SourceCapabilityDetailsSheet(
     source: BodySourceInfo, repository: UnifiedMangaRepository, plugins: SourcePluginStore?,
     backdrop: HazeState?, manga: Manga? = null, onDismiss: () -> Unit, onSourceChanged: () -> Unit = {},
+    initiallyShowLogin: Boolean = false,
 ) {
     val scope = rememberCoroutineScope()
     val health by repository.sourceHealth.collectAsStateWithLifecycle()
@@ -675,7 +624,7 @@ internal fun SourceCapabilityDetailsSheet(
                 else SourceAccountControls(source, repository, offered, accountReceipt, enabled = !busy,
                     onBusy = { busy = it }, onAccountChanged = {
                         account = it; folders = emptyList(); accountRevision++; onSourceChanged()
-                    }, initiallyShowLogin = accountFailure != null || offered.loginRequired)
+                    }, initiallyShowLogin = initiallyShowLogin || accountFailure != null || offered.loginRequired)
                 HorizontalDivider()
             } else if (offered.websiteLoginDeclared) {
                 Text("此来源的网页登录暂未接入。", style = MaterialTheme.typography.bodySmall,

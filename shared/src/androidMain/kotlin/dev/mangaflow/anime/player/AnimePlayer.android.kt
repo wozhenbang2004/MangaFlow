@@ -74,6 +74,7 @@ import dev.mangaflow.net.applyDownloadRoute
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -142,6 +143,9 @@ internal class AndroidAnimePlayer(
     private var localLease: AnimeLocalMediaLease? = null
     override val reportsFirstFrame = true
 
+    override suspend fun cacheStartup(asset: AnimePlaybackAsset, byteLimit: Long, validUntil: Long): Long =
+        cacheAndroidAnimeStartup(context, asset, byteLimit)
+
     init {
         mutableState.value = mutableState.value.copy(capabilities = setOf(
             AnimePlayerCapability.AUDIO_TRACKS, AnimePlayerCapability.SUBTITLE_TRACKS,
@@ -175,35 +179,8 @@ internal class AndroidAnimePlayer(
             // delivering its result to Main.
             pendingLease?.invoke()
         }
-        val cache = cacheOwner.cache
 
-        val client = OkHttpClient.Builder()
-            .applyDownloadRoute(asset.route)
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .addInterceptor { chain ->
-                var original = chain.request()
-                val headerOrigin = original.url.toString()
-                var redirects = 0
-                while (true) {
-                    val requestedUrl = checkedMediaUrl(original.url.toString())
-                    val supplied = headersFor(asset, requestedUrl, headerOrigin)
-                    val builder = original.newBuilder()
-                    supplied.forEach { (name, value) -> builder.header(name, value) }
-                    builder.header("Accept-Encoding", "identity")
-                    val response = chain.proceed(builder.build())
-                    if (response.code !in setOf(301, 302, 303, 307, 308)) return@addInterceptor response
-                    val location = response.header("Location")
-                    val next = location?.let(requestedUrl::resolve)
-                    response.close()
-                    if (next == null || ++redirects > 8) throw IOException("来源重定向无效或次数过多")
-                    checkedMediaUrl(next.toString())
-                    // Rebuild per hop: scoped credentials never survive a cross-origin redirect.
-                    original = original.newBuilder().url(next).build()
-                }
-                @Suppress("UNREACHABLE_CODE")
-                error("Unreachable redirect state")
-            }.build()
+        val client = animeMediaHttpClient(asset)
         http = client
 
         val mediaBytes = AtomicLong(0L)
@@ -219,18 +196,7 @@ internal class AndroidAnimePlayer(
         lastSampleBytes = 0L
         lastSampleAt = SystemClock.elapsedRealtime()
         fun upstream(): DataSource.Factory = OkHttpDataSource.Factory(client).setTransferListener(transferObserver)
-        val cacheDataSourceFactory = CacheDataSource.Factory()
-            .setCache(cache)
-            .setUpstreamDataSourceFactory(upstream())
-            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
-            .setCacheKeyFactory { spec ->
-                val identity = asset.playbackIdentity() + "\n" + spec.uri + "\n" +
-                    headersFor(asset, checkedMediaUrl(spec.uri.toString())).entries
-                        .sortedBy { it.key.lowercase() }.joinToString("\n") { "${it.key.lowercase()}:${it.value}" }
-                sha256(identity.encodeToByteArray()).joinToString("") {
-                    (it.toInt() and 255).toString(16).padStart(2, '0')
-                }
-            }
+        val cacheDataSourceFactory = animeCacheDataSource(asset, cacheOwner, upstream())
         val cacheFactory = DataSource.Factory {
             if (!request.bypassMediaCache && cacheOwner.targetBytes > 0L) cacheDataSourceFactory.createDataSource()
             else upstream().createDataSource()
@@ -1022,6 +988,66 @@ internal class AndroidAnimePlayer(
             notice = "系统暂未允许后台播放服务，离开应用后可能暂停；可回到前台重试",
         )
     }
+}
+
+internal fun animeMediaHttpClient(asset: AnimePlaybackAsset, forPrefetch: Boolean = false): OkHttpClient =
+    OkHttpClient.Builder()
+        .apply {
+            if (forPrefetch) {
+                connectTimeout(3L, TimeUnit.SECONDS)
+                readTimeout(3L, TimeUnit.SECONDS)
+                callTimeout(6L, TimeUnit.SECONDS)
+            }
+        }
+        .applyDownloadRoute(asset.route)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .addInterceptor { chain ->
+            var original = chain.request()
+            val headerOrigin = original.url.toString()
+            var redirects = 0
+            while (true) {
+                val requestedUrl = checkedMediaUrl(original.url.toString())
+                val supplied = headersFor(asset, requestedUrl, headerOrigin)
+                val builder = original.newBuilder()
+                supplied.forEach { (name, value) -> builder.header(name, value) }
+                builder.header("Accept-Encoding", "identity")
+                val response = chain.proceed(builder.build())
+                if (response.code !in setOf(301, 302, 303, 307, 308)) {
+                    val start = original.header("Range")?.substringAfter("bytes=")?.substringBefore('-')?.toLongOrNull()
+                    if (forPrefetch && start != null && start > 0L &&
+                        (response.code != 206 || response.header("Content-Range")?.startsWith("bytes $start-") != true)) {
+                        response.close()
+                        throw IOException("来源未按请求提供分段范围")
+                    }
+                    return@addInterceptor response
+                }
+                val location = response.header("Location")
+                val next = location?.let(requestedUrl::resolve)
+                response.close()
+                if (next == null || ++redirects > 8) throw IOException("来源重定向无效或次数过多")
+                checkedMediaUrl(next.toString())
+                // Rebuild per hop: scoped credentials never survive a cross-origin redirect.
+                original = original.newBuilder().url(next).build()
+            }
+            @Suppress("UNREACHABLE_CODE")
+            error("Unreachable redirect state")
+        }.build()
+
+internal fun animeCacheDataSource(asset: AnimePlaybackAsset, cacheOwner: AndroidAnimeCache,
+    upstream: DataSource.Factory): CacheDataSource.Factory = CacheDataSource.Factory()
+        .setCache(cacheOwner.cache)
+        .setUpstreamDataSourceFactory(upstream)
+        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        .setCacheKeyFactory { spec ->
+            animeCacheKey(asset, spec.uri)
+        }
+
+internal fun animeCacheKey(asset: AnimePlaybackAsset, uri: Uri): String {
+    val identity = asset.playbackIdentity() + "\n" + uri + "\n" +
+        headersFor(asset, checkedMediaUrl(uri.toString())).entries
+            .sortedBy { it.key.lowercase() }.joinToString("\n") { "${it.key.lowercase()}:${it.value}" }
+    return sha256(identity.encodeToByteArray()).joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
 }
 
 private fun checkedMediaUrl(value: String): HttpUrl {

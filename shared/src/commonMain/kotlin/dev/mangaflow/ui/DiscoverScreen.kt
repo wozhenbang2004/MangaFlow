@@ -364,11 +364,16 @@ internal fun DiscoverySearchResults(
     LaunchedEffect(active, expanded, searchKey) {
         if (!active || !expanded) sourceChoices = null
     }
-    // Open the exact displayed work; provider choice belongs to an explicit source-mark tap.
     val openResult: (Manga) -> Unit = { manga ->
         if (contentActive) {
-            sourceChoices = null
-            onOpen(manga)
+            val matches = search.sourceMatches[manga.id].orEmpty()
+            if (adultProfile && manga.id in search.sourceChoiceIds && matches.size > 1) {
+                transition?.select?.invoke(null)
+                sourceChoices = matches
+            } else {
+                sourceChoices = null
+                onOpen(manga)
+            }
         }
     }
     val openSource: (List<Manga>) -> Unit = { matches ->

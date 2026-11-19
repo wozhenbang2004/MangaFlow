@@ -1,6 +1,7 @@
 package dev.mangaflow.anime.sources
 
 import dev.mangaflow.anime.AnimeSubject
+import dev.mangaflow.anime.canonicalBangumiId
 import dev.mangaflow.data.MangaReview
 import dev.mangaflow.data.ReviewPage
 import dev.mangaflow.data.bangumiCommentsPublicUrl
@@ -65,12 +66,10 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
         scope.launch { routing.state.collect { updateRoute() } }
     }
 
-    fun open(subject: AnimeSubject?) {
+    fun open(subject: AnimeSubject?, confirmedNativeMetadata: AnimeSubject? = null) {
         val chosen = subject?.let { current ->
-            val id = current.externalIds["bangumi"]?.toIntOrNull()?.takeIf {
-                it > 0 && current.id == "bangumi:$it" && current.externalIds["bangumi"] == it.toString() &&
-                    "native-source" !in current.externalIds
-            }
+            val id = if (current.id.startsWith("native:") && "native-source" in current.externalIds)
+                confirmedNativeMetadata?.canonicalBangumiId() else current.canonicalBangumiId()
             Selection(current.id, id)
         }
         if (chosen == selection) return

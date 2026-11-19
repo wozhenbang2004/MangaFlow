@@ -17,7 +17,12 @@ import kotlinx.coroutines.ensureActive
 import okio.IOException
 import okio.Buffer
 
-internal data class AnimeResourcePlan(val name: String, val url: String, val mimeType: String? = null)
+internal data class AnimeResourcePlan(
+    val name: String,
+    val url: String,
+    val mimeType: String? = null,
+    val audioRendition: Boolean = false,
+)
 internal data class AnimeSavedResource(val name: String, val mimeType: String, val bytes: Long)
 internal class AnimeHlsDetected : IOException("该线路返回 HLS 清单")
 private class InvalidAnimeRange(message: String) : IOException(message)
@@ -215,7 +220,8 @@ internal suspend fun downloadAnimeResource(
         check(partial.length() > 0) { "来源返回了空媒体文件" }
         if (total != null && partial.length() < total!! && resume != null) continue
         check(total == null || partial.length() == total) { "媒体大小不匹配，请继续下载或重新解析同一来源" }
-        val actualMime = sniffAnimeVideo(partial, fragment = !validateVideo)
+        val detectedMime = sniffAnimeVideo(partial, fragment = !validateVideo)
+        val actualMime = if (plan.audioRendition && detectedMime == "video/mp4") "audio/mp4" else detectedMime
         guard()
         check(partial.renameTo(complete)) { "无法完成离线文件，请检查存储空间" }
         val result = AnimeSavedResource(plan.name, actualMime, complete.length())
@@ -226,8 +232,9 @@ internal suspend fun downloadAnimeResource(
     }
 }
 
-internal suspend fun fetchAnimePlaylist(asset: AnimePlaybackAsset, client: NetworkClient): Pair<HttpUrl, String> {
-    var target = checkedAnimeDownloadUrl(asset.url)
+internal suspend fun fetchAnimePlaylist(asset: AnimePlaybackAsset, client: NetworkClient,
+    initialUrl: HttpUrl = checkedAnimeDownloadUrl(asset.url)): Pair<HttpUrl, String> {
+    var target = initialUrl
     repeat(9) {
         currentCoroutineContext().ensureActive()
         val request = Request.Builder().url(target).apply {

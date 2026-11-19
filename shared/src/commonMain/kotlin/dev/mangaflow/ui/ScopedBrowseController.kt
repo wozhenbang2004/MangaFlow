@@ -12,6 +12,7 @@ import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceStage
 import dev.mangaflow.data.sourceFailureSummary
 import dev.mangaflow.data.UnifiedMangaRepository
+import dev.mangaflow.data.groupAdultSearch
 import dev.mangaflow.data.sources.*
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.normalizedBodySourceTitle
@@ -103,6 +104,17 @@ internal fun SourceFeed.nativeRankPeriods(): List<RankPeriod> {
     return RankPeriod.entries.filter { period -> filter.choices.any { it.id in period.rankChoiceAliases() } }
 }
 
+private fun SourceFeed.discoveryMode(): DiscoveryMode = when (kind) {
+    SourceFeedKind.RANKING -> DiscoveryMode.RANKING
+    SourceFeedKind.LATEST -> DiscoveryMode.LATEST
+    else -> DiscoveryMode.RECOMMENDED
+}
+
+private fun List<SourceFeed>.defaultFeed(mode: DiscoveryMode): SourceFeed? = when (mode) {
+    DiscoveryMode.RECOMMENDED -> firstOrNull { it.kind == SourceFeedKind.EXPLORE }
+    else -> firstOrNull { it.discoveryMode() == mode }
+}
+
 /** One shared browse journey; every source retains its own cursor and failure. */
 internal class ScopedBrowseController(private val repository: UnifiedMangaRepository, private val scope: CoroutineScope) : BrowseUiActions {
     private val mutableState = MutableStateFlow(emptyState())
@@ -128,6 +140,7 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
     private val selections = mutableMapOf<String, BrowseState>()
     private val sourceControls = mutableMapOf<String, ScopedSourceControls>()
     private val optionSelections = mutableMapOf<String, List<String>>()
+    private val feedSelections = mutableMapOf<Pair<String, DiscoveryMode>, String>()
     private val suspendedSearches = mutableMapOf<String, BrowseState>()
     private val backgrounds = mutableMapOf<String, BrowseState>()
     private val requestSlots = Semaphore(3)
@@ -159,6 +172,7 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
             sourceScope = scopeKey())
         selections[sourceId] = restored
         sourceControls[sourceId] = controls.value
+        if (controls.value.feedId.isNotBlank()) feedSelections[sourceId to restored.mode] = controls.value.feedId
         mutableState.value = restored
     }
 
@@ -176,7 +190,10 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
             invalid.forEach { id ->
                 readyMetadata.removeAll { it.startsWith("$id:") }
                 feedFilterCache.keys.filter { it.startsWith("$id:") }.forEach(feedFilterCache::remove)
-                if (next.none { it.id == id }) { selections.remove(id); sourceControls.remove(id) }
+                if (next.none { it.id == id }) {
+                    selections.remove(id); sourceControls.remove(id)
+                    feedSelections.keys.filter { it.first == id }.forEach(feedSelections::remove)
+                }
             }
         }
         if (sourceId != ALL && next.none { it.id == sourceId }) sourceId = ALL
@@ -225,11 +242,8 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         if (id == current.feedId) return
         retainCurrent(); cancelControls()
         mutableControls.value = current.copy(feedId = id, options = normalizeOptions(feed.filters, optionSelections["$sourceId:$id:false"].orEmpty()))
-        val mode = when (feed.kind) {
-            SourceFeedKind.RANKING -> DiscoveryMode.RANKING
-            SourceFeedKind.LATEST -> DiscoveryMode.LATEST
-            else -> DiscoveryMode.RECOMMENDED
-        }
+        val mode = feed.discoveryMode()
+        feedSelections[sourceId to mode] = id
         show(homeSelection(state.value).copy(mode = mode), retain = false)
     }
 
@@ -284,14 +298,9 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                 val searchFilters = if (metadataReady) old.searchFilters else if (capabilities.supports(SourceFeature.SEARCH))
                     repository.sourceSearchFilters(id) else emptyList()
                 if (!current()) return@launch
-                val desired = when (state.value.mode) {
-                    DiscoveryMode.RANKING -> SourceFeedKind.RANKING
-                    DiscoveryMode.LATEST -> SourceFeedKind.LATEST
-                    else -> null
-                }
-                val feed = feeds.firstOrNull { it.id == requestedFeed && (desired == null || it.kind == desired) }
-                    ?: feeds.firstOrNull { it.kind == desired }?.takeIf { desired != null }
-                    ?: feeds.firstOrNull()
+                val mode = state.value.mode
+                val remembered = feedSelections[id to mode] ?: requestedFeed
+                val feed = feeds.firstOrNull { it.id == remembered && it.discoveryMode() == mode } ?: feeds.defaultFeed(mode)
                 val feedKey = feed?.let { filterKey(id, it.id) }
                 val selectedFilters = if (searching || feed == null) emptyList() else
                     feedFilterCache[filterKey(id, feed.id)] ?: if (feed.filters.isNotEmpty()) feed.filters else repository.sourceFeedFilters(id, feed.id)
@@ -311,6 +320,7 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                 mutableControls.value = old.copy(capabilities = capabilities, feeds = resolvedFeeds, searchFilters = searchFilters,
                     feedId = feed?.id.orEmpty(), options = options, loading = false, error = null)
                 sourceControls[id] = controls.value
+                if (feed != null) feedSelections[id to mode] = feed.id
                 optionSelections["$id:${feed?.id.orEmpty()}:$searching"] = options
                 readyMetadata.add(revision)
                 val pending = pendingLoad ?: PendingLoad(false, false)
@@ -361,7 +371,27 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
             mutableState.value = state.value.copy(error = "汉化组搜索仅在普通漫画区的拷贝来源可用。")
             return
         }
-        if (target != state.value.searchTarget) show(selection(state.value).copy(searchTarget = target), retain = false)
+        val current = state.value
+        if (target != current.searchTarget) {
+            val tags = current.selectedTags.takeIf { target == SearchTarget.TAG }.orEmpty()
+            openSearch(target, current.query, tags)
+        }
+    }
+
+    fun openSearch(target: SearchTarget, query: String = "", tags: List<MangaTag> = emptyList()) {
+        if (disposed) return
+        suspendedSearches.remove(sourceId)
+        val current = state.value
+        val next = selection(current).copy(searchTarget = target, query = query, selectedTags = tags)
+        if (current.isSearch != next.isSearch) {
+            retainCurrent(); cancelControls()
+            val control = controls.value
+            optionSelections["$sourceId:${control.feedId}:${current.isSearch}"] = control.options
+            val filters = if (next.isSearch) control.searchFilters else control.feeds.firstOrNull { it.id == control.feedId }?.filters.orEmpty()
+            mutableControls.value = control.copy(options = normalizeOptions(filters,
+                optionSelections["$sourceId:${control.feedId}:${next.isSearch}"].orEmpty()))
+        }
+        show(next, retain = current.isSearch == next.isSearch)
     }
     override fun toggleSearchTag(tag: MangaTag) {
         if (tag.name.isBlank() || tag.name.length > 120) return
@@ -369,42 +399,44 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         val chosen = if (current.selectedTags.any { it.path == tag.path })
             current.selectedTags.filterNot { it.path == tag.path }
         else (current.selectedTags + tag).take(12)
-        show(selection(current).copy(query = "", searchTarget = SearchTarget.TAG, selectedTags = chosen), retain = false)
+        openSearch(SearchTarget.TAG, tags = chosen)
     }
     override fun retrySearchTags() = Unit
     override fun clearSearch() {
-        suspendedSearches.remove(sourceId)
-        show(homeSelection(state.value).copy(searchTarget = SearchTarget.TITLE, selectedTags = emptyList()), retain = false)
+        openSearch(SearchTarget.TITLE)
     }
     override fun suspendBrowseSearch() {
         if (state.value.isSearch) {
-            suspendedSearches[sourceId] = selection(state.value)
-            show(homeSelection(state.value).copy(searchTarget = SearchTarget.TITLE,
-                selectedTags = emptyList()), retain = false)
+            val saved = selection(state.value)
+            openSearch(SearchTarget.TITLE)
+            suspendedSearches[sourceId] = saved
         }
     }
-    override fun resumeBrowseSearch() { suspendedSearches.remove(sourceId)?.let { show(it, retain = false) } }
+    override fun resumeBrowseSearch() {
+        suspendedSearches.remove(sourceId)?.let { openSearch(it.searchTarget, it.query, it.selectedTags) }
+    }
     override fun selectDiscovery(mode: DiscoveryMode, period: RankPeriod?, audience: RankAudience?, clearQuery: Boolean) {
         if (disposed || !active) return
         val before = state.value
-        val next = before.copy(query = if (clearQuery) "" else before.query,
-            mode = mode, period = period ?: before.period, audience = audience ?: before.audience)
-        if (before.mode == next.mode && before.period == next.period && before.audience == next.audience &&
-            before.query == next.query) return
-        retainCurrent()
+        if (clearQuery && before.isSearch) openSearch(SearchTarget.TITLE)
+        val currentSelection = state.value
         if (clearQuery) suspendedSearches.remove(sourceId)
+        val next = currentSelection.copy(
+            mode = mode, period = period ?: before.period, audience = audience ?: before.audience)
+        if (currentSelection.mode == next.mode && currentSelection.period == next.period &&
+            currentSelection.audience == next.audience) return
+        retainCurrent()
         if (sourceId != ALL && !next.isSearch) {
-            val wanted = when (mode) {
-                DiscoveryMode.RANKING -> SourceFeedKind.RANKING
-                DiscoveryMode.LATEST -> SourceFeedKind.LATEST
-                else -> null
-            }
             val current = controls.value
-            val chosen = current.feeds.firstOrNull { it.kind == wanted && it.id == current.feedId }
-                ?: current.feeds.firstOrNull { it.kind == wanted }
-            if (chosen != null && chosen.id != current.feedId) mutableControls.value = current.copy(
-                feedId = chosen.id, options = normalizeOptions(chosen.filters,
-                    optionSelections["$sourceId:${chosen.id}:false"].orEmpty()))
+            val remembered = feedSelections[sourceId to mode]
+            val chosen = current.feeds.firstOrNull { it.id == remembered && it.discoveryMode() == mode }
+                ?: current.feeds.defaultFeed(mode)
+            if (chosen?.id.orEmpty() != current.feedId) {
+                cancelControls()
+                mutableControls.value = controls.value.copy(feedId = chosen?.id.orEmpty(),
+                    options = normalizeOptions(chosen?.filters.orEmpty(),
+                        optionSelections["$sourceId:${chosen?.id.orEmpty()}:false"].orEmpty()))
+            }
         }
         show(selection(next), retain = false)
     }
@@ -470,8 +502,12 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         val configured = selection(supportedRankingSelection(value))
         if (sources.isEmpty()) { mutableState.value = configured.copy(error = unavailableReason ?: "本分区暂无已启用的来源。"); return }
         val cached = snapshots[key(configured)]
-        mutableState.value = cached?.copy(loading = false, loadingMore = false, refreshing = false, sourceScope = scopeKey()) ?: configured
+        mutableState.value = cached?.copy(query = configured.query, searchTarget = configured.searchTarget,
+            selectedTags = configured.selectedTags, loading = false, loadingMore = false, refreshing = false,
+            sourceScope = scopeKey()) ?: configured
         if (!active) return
+        if (configured.isSearch && configured.selectedTags.isEmpty() &&
+            (configured.query.isBlank() || configured.searchTarget == SearchTarget.TAG)) return
         if (!controlsReady(configured.isSearch)) {
             pendingLoad = PendingLoad(force, debounce)
             mutableState.value = state.value.copy(loading = state.value.items.isEmpty(), refreshing = state.value.items.isNotEmpty())
@@ -493,7 +529,10 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         val infos = selectedSources().associateBy { it.id }
         val requested = pages.filterKeys { it in infos }
         if (requested.isEmpty()) return
-        val rows = (if (reset) emptyList() else value.items).toMutableList()
+        val existingRows = if (value.isSearch) value.items.flatMap { manga ->
+            value.sourceMatches[manga.id].orEmpty().ifEmpty { listOf(manga) }
+        } else value.items
+        val rows = existingRows.toMutableList()
         val lanes = (if (reset) emptyMap() else value.searchSources).toMutableMap()
         requested.forEach { (id, _) -> lanes[id] = (lanes[id] ?: FederatedSearchSource(id, infos.getValue(id).name)).copy(loading = true, error = null) }
         fun publish() {
@@ -501,7 +540,8 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
             val loading = lanes.values.any { it.loading }
             val successes = lanes.values.any { !it.loading && it.error == null }
             val distinct = rows.distinctBy { it.id }
-            val visible = if (!value.isSearch && value.mode == DiscoveryMode.RANKING)
+            val groups = if (value.isSearch) groupAdultSearch(distinct, state.value.sourceMatches) else emptyList()
+            val visible = if (value.isSearch) groups.map { it.manga } else if (value.mode == DiscoveryMode.RANKING)
                 distinct.sortedWith(compareBy { item -> sources.indexOfFirst { it.id == item.sourceId }.let {
                     index -> if (index < 0) Int.MAX_VALUE else index
                 } }) else distinct
@@ -521,10 +561,10 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                 failedPage = if (!loading && lanes.values.any { it.error != null }) 0 else null,
                 updatedAt = wallTimeMillis(), searchSources = lanes.toMap(),
                 sourceNextPages = lanes.mapNotNull { (id, lane) -> lane.nextPage?.let { id to it } }.toMap(),
-                sourceMatches = if (value.isSearch) rows.associate { it.id to listOf(it) } else emptyMap())
+                sourceMatches = groups.associate { it.manga.id to it.matches },
+                sourceChoiceIds = groups.filter { it.needsChoice }.map { it.manga.id }.toSet())
         }
         // Keep visible content while an explicit refresh replaces source lanes independently.
-        if (reset) rows.addAll(value.items)
         publish()
         requestJob = scope.launch {
             try {
@@ -532,14 +572,22 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                 supervisorScope {
                     requested.map { (id, page) -> async {
                         requestSlots.withPermit {
+                            var coverage = lanes[id]?.coverage
                             try {
                                 val result = withTimeout(25_000L) {
                                     val required = when {
                                         value.isSearch -> SourceFeature.SEARCH
                                         value.mode == DiscoveryMode.RANKING -> SourceFeature.RANKING
+                                        selectedControls.feeds.any { it.id == selectedControls.feedId && it.kind == SourceFeedKind.CATEGORY } -> SourceFeature.CATEGORIES
                                         else -> SourceFeature.DISCOVERY
                                     }
-                                    if (!repository.sourceCapabilities(id).supports(required)) return@withTimeout null
+                                    val capabilities = repository.sourceCapabilities(id)
+                                    if (!capabilities.supports(required)) return@withTimeout null
+                                    coverage = when (value.searchTarget) {
+                                        SearchTarget.AUTHOR -> capabilities.authorSearch
+                                        SearchTarget.TAG -> capabilities.tagSearch
+                                        else -> null
+                                    }
                                     if (value.isSearch) {
                                         val phrase = if (value.searchTarget == SearchTarget.TAG)
                                             value.selectedTags.firstOrNull()?.name.orEmpty().ifBlank { value.query.trim() }
@@ -549,12 +597,12 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                                             value.selectedTags.isEmpty())
                                             repository.sourceFilteredSearch(id, phrase, page,
                                                 if (selectedSource == ALL) emptyList() else selectedControls.searchFilters.mapIndexed { index, filter ->
-                                                    filter.normalize(selectedControls.options.getOrNull(index)) },
+                                                    filter.normalize(selectedControls.options.getOrNull(index).takeUnless { filter.id == "target" }) },
                                                 forceRefresh = force)
                                         else repository.sourceTargetSearch(id, phrase, value.searchTarget, page)
-                                        if (value.selectedTags.isEmpty()) found
+                                        if (value.selectedTags.size <= 1) found
                                         else {
-                                            val names = value.selectedTags.map { normalizedBodySourceTitle(it.name) }.toSet()
+                                            val names = value.selectedTags.drop(1).map { normalizedBodySourceTitle(it.name) }.toSet()
                                             found.copy(items = found.items.filter { manga ->
                                                 val actual = (manga.tags + manga.tagPaths.keys)
                                                     .map(::normalizedBodySourceTitle).toSet()
@@ -563,9 +611,13 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                                         }
                                     } else {
                                         val request = when (value.mode) {
-                                            DiscoveryMode.RECOMMENDED ->
-                                                selectedControls.feedId.takeIf { selectedSource != ALL && it.isNotEmpty() }
+                                            DiscoveryMode.RECOMMENDED -> if (selectedSource != ALL) {
+                                                selectedControls.feedId.takeIf(String::isNotEmpty)
                                                     ?.let { SourceBrowseRequest(it, page, selectedControls.options) }
+                                            } else {
+                                                repository.sourceFeeds(id).firstOrNull { it.kind == SourceFeedKind.EXPLORE }
+                                                    ?.let { SourceBrowseRequest(it.id, page, it.filters.map { filter -> filter.normalize() }) }
+                                            }
                                             DiscoveryMode.RANKING, DiscoveryMode.LATEST -> {
                                                 val kind = if (value.mode == DiscoveryMode.RANKING)
                                                     SourceFeedKind.RANKING else SourceFeedKind.LATEST
@@ -598,13 +650,15 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                                 require(!result.hasMore || next > page) { "来源返回的下一页无效。" }
                                 if (reset || page == 0) rows.removeAll { it.sourceId == id }
                                 rows.addAll(result.items)
-                                lanes[id] = FederatedSearchSource(id, infos.getValue(id).name, hasMore = result.hasMore, nextPage = next.takeIf { result.hasMore })
+                                lanes[id] = FederatedSearchSource(id, infos.getValue(id).name, hasMore = result.hasMore,
+                                    nextPage = next.takeIf { result.hasMore }, coverage = coverage)
                             } catch (failure: Exception) {
                                 if (failure is CancellationException && failure !is TimeoutCancellationException) throw failure
                                 if (expected != generation || !active || owner != scopeKey()) return@withPermit
                                 val stage = if (value.isSearch) SourceStage.SEARCH else SourceStage.CATALOGUE
                                 val message = sourceFailureSummary(stage, failure).message
-                                lanes[id] = FederatedSearchSource(id, infos.getValue(id).name, error = message, failedPage = page)
+                                lanes[id] = FederatedSearchSource(id, infos.getValue(id).name, error = message, failedPage = page,
+                                    coverage = coverage)
                             }
                             publish()
                         }

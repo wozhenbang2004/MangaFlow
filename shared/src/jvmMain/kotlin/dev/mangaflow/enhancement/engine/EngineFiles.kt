@@ -170,7 +170,8 @@ internal class ImportedEngineModels(private val root: File, private val engineId
         require(source.isFile && source.extension.equals("onnx", true)) { "请选择 ONNX 模型文件" }
         require(source.length() in 1..(2L * 1024 * 1024 * 1024)) { "模型文件为空或超过 2 GiB" }
         require(scale in setOf(1, 2, 4)) { "当前导入支持 1×、2×、4× 模型" }
-        require(content != EngineContent.VIDEO || engineId == EnhancementEngineIds.VIDEOJANAI) { "当前引擎尚未适配视频模型导入" }
+        require(content != EngineContent.VIDEO || engineId in setOf(EnhancementEngineIds.VIDEOJANAI,
+            EnhancementEngineIds.ANDROID_VIDEO_ONNX)) { "当前引擎尚未适配视频模型导入" }
         check(root.isDirectory || root.mkdirs())
         val hash = engineSha256(source)
         val target = File(root, "$hash.onnx")

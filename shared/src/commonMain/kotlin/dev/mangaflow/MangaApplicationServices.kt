@@ -4,7 +4,8 @@ import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.account.CopyAccountRepository
 import dev.mangaflow.account.CopyReadingOutbox
 import dev.mangaflow.account.CopyShelfSyncController
-import dev.mangaflow.account.JmShelfSyncController
+import dev.mangaflow.account.AdultShelfProvider
+import dev.mangaflow.account.AdultShelfSyncController
 import dev.mangaflow.background.ApplicationOperations
 import dev.mangaflow.data.CopyAnonymousIdentityStore
 import dev.mangaflow.data.CopyCommunityRepository
@@ -66,9 +67,13 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     private val application = applicationContext(context)
     val operations = ApplicationOperations.get(application)
     val scope = operations.scope
-    private var animeForeground = true
+    private var animeForeground = false
+    private val animeDownloadsOwner = lazy {
+        dev.mangaflow.anime.downloads.AnimeDownloadStore(application, scope).also { it.setForeground(animeForeground) }
+    }
+    val animeDownloads get() = animeDownloadsOwner.value
     private val animeOwner = lazy {
-        AnimeController(application, scope).also { controller ->
+        AnimeController(application, scope, downloadStore = { animeDownloads }).also { controller ->
             controller.setForeground(animeForeground)
             relayLink.updateSources(bodySources.entries.value.filter { it.enabled && !it.removed && it.isInstalled }
                 .associate { it.source.id to it.source.homeUrl } + controller.sourceHomes)
@@ -88,6 +93,7 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     fun flushAnimePlayback() { if (animeOwner.isInitialized()) animeOwner.value.flushPlayback() }
     fun setAnimeForeground(value: Boolean) {
         animeForeground = value
+        if (animeDownloadsOwner.isInitialized()) animeDownloadsOwner.value.setForeground(value)
         if (animeOwner.isInitialized()) animeOwner.value.setForeground(value)
     }
     val relayLink = RelayLinkController.get(application)
@@ -124,7 +130,9 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val metricsRepository = MangaMetricsRepository(application, reviews, community)
     val accountRepository = CopyAccountRepository(application)
     val copyShelfSync = CopyShelfSyncController(application, accountRepository, library, repository, scope)
-    val jmShelfSync = JmShelfSyncController(repository, library, scope)
+    val adultShelfSync = AdultShelfProvider.entries.associate { provider ->
+        provider.sourceId to AdultShelfSyncController(repository, library, scope, provider)
+    }
     val readingOutbox = CopyReadingOutbox(application, accountRepository, scope)
 
     private val sourceSync = Mutex()
@@ -157,7 +165,7 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
             registerAuxiliaryOwner(siteRankingsRepository.cacheOwner)
         }
         relayLink.start(scope)
-        repository.setEnabledSources(bodySources.enabledSourceIds)
+        repository.bindSourceRegistry(bodySources)
         scope.launch {
             try {
                 sourcePlugins.ready.await()
@@ -176,7 +184,7 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
                     if (animeOwner.isInitialized()) animeOwner.value.sourceHomes else emptyMap())
                 withContext(Dispatchers.Default) {
                     sourceSync.withLock {
-                        repository.setEnabledSources(bodySources.enabledSourceIds)
+                        repository.setSourceAvailability(bodySources.entries.value)
                         mutableSourceConfiguration.value = repository.sourceConfigurationKey()
                     }
                 }
@@ -228,7 +236,7 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
                 bodySources.updateInstalledSources(repository.sources)
                 installedSourceKey = key
             }
-            repository.setEnabledSources(bodySources.enabledSourceIds)
+            repository.setSourceAvailability(bodySources.entries.value)
             mutableSourceConfiguration.value = repository.sourceConfigurationKey()
             mutableSourceError.value = null
         }

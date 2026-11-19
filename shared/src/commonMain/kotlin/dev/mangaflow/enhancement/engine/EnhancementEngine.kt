@@ -6,6 +6,9 @@ import dev.mangaflow.platform.PlatformContext
 enum class EngineReadiness { BUILT_IN, NOT_INSTALLED, NEEDS_MODELS, READY_FOR_TRIAL, UNSUPPORTED, FAILED }
 enum class EngineContent { BLACK_WHITE, COLOR, WEBTOON, VIDEO }
 enum class EngineStage { DOWNLOAD, VERIFY, INSTALL, MODEL_LOAD, PROCESS, ENCODE, VALIDATE, COMPLETE }
+enum class EngineVideoContainer(val extension: String, val mimeType: String) {
+    MATROSKA("mkv", "video/x-matroska"), MP4("mp4", "video/mp4"),
+}
 
 data class EngineDescriptor(
     val id: String,
@@ -21,6 +24,7 @@ data class EngineDescriptor(
     val supportsInterpolation: Boolean = false,
     val realtime: Boolean = false,
     val downloadBytes: Long? = null,
+    val videoOutput: EngineVideoContainer? = null,
 )
 
 /** sha256 is measured from these installed weights, never inferred from a model's name. */
@@ -118,6 +122,7 @@ object EnhancementEngineIds {
     /** Algorithm identity, not a claim that this non-neural filter has trained weights. */
     const val LOCAL_DETAIL_DIGEST = "a9241c52aac7eecfb6b4ced9fdd587004da45864954d528047406ce3aa09b620"
     const val ANDROID_ONNX = "android-onnx"
+    const val ANDROID_VIDEO_ONNX = "android-video-onnx"
     const val MANGAJANAI = "mangajanai-cli"
     const val VIDEOJANAI = "videojanai-cli"
     const val ANDROID_RIFE = "android-rife"

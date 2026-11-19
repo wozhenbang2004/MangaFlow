@@ -77,7 +77,10 @@ interface BodySource : MangaRepository {
     suspend fun favoriteFolders(): List<SourceFavoriteFolder> = unsupportedSourceFeature()
     suspend fun favorites(folderId: String, page: Int): dev.mangaflow.data.MangaPage = unsupportedSourceFeature()
     suspend fun setFavorite(mangaId: String, folderId: String, favorite: Boolean): Unit = unsupportedSourceFeature()
+    suspend fun setFavoriteForAccount(mangaId: String, folderId: String, favorite: Boolean, expectedAccount: String): Unit =
+        unsupportedSourceFeature()
     suspend fun comments(mangaId: String, page: Int): SourceCommentPage = unsupportedSourceFeature()
+    suspend fun commentReplies(mangaId: String, parentId: String, page: Int): SourceCommentPage = unsupportedSourceFeature()
 }
 
 internal const val BODY_USER_AGENT = "MangaFlow/1.0 (+https://github.com/wozhenbang2004/MangaFlow)"

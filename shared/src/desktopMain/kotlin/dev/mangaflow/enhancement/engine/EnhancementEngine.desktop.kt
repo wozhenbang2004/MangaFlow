@@ -46,7 +46,8 @@ private class DesktopEnhancementEngine(context: PlatformContext) : EnhancementEn
                     else -> "已找到校验后的组件与模型；需在真实内容上试用，尚未证明设备长期稳定"
                 }, setOf(1, 2, 4), if (video) setOf(EngineContent.VIDEO) else setOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON),
                 canInstall = windows && ready != EngineReadiness.READY_FOR_TRIAL, supportsInterpolation = video,
-                downloadBytes = pack.bytes + if (video) DesktopEnginePackages.ffmpeg.bytes else 0)
+                downloadBytes = pack.bytes + if (video) DesktopEnginePackages.ffmpeg.bytes else 0,
+                videoOutput = EngineVideoContainer.MATROSKA.takeIf { video })
         }
         EngineInventory(listOf(
             EngineDescriptor(EnhancementEngineIds.LOCAL_DETAIL, "轻量线条处理", EnhancementEngineIds.LOCAL_DETAIL_VERSION,

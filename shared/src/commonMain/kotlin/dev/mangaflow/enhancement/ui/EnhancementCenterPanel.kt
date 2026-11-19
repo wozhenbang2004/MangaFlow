@@ -288,7 +288,8 @@ private fun EnhancementModels(inventory: EngineInventory, progress: Map<String, 
                 Icon(Icons.Outlined.Download, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
                 Text("安装" + (engine.downloadBytes?.let { " · ${enhancementBytes(it)}" } ?: ""))
             }
-            val models = inventory.models.filter { it.engineId == engine.id }
+            val models = inventory.models.filter { it.engineId == engine.id &&
+                (EngineContent.VIDEO in it.contents) == (content == EnhancementContent.ANIME) }
             models.forEach { model ->
                 MotionTextButton(onClick = { onSelectModel(model.id) }, modifier = Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(horizontal = 0.dp, vertical = 8.dp)) {
@@ -309,10 +310,13 @@ private fun EnhancementModels(inventory: EngineInventory, progress: Map<String, 
         Text("恢复自动选模型")
     }
     if (content != EnhancementContent.ANIME) EnhancementModelImport(center, onSelectModel)
+    else if (engines.any { it.id == EnhancementEngineIds.ANDROID_VIDEO_ONNX }) {
+        EnhancementModelImport(center, onSelectModel, video = true)
+    }
 }
 
 @Composable
-private fun EnhancementModelImport(center: EnhancementCenter, onSelectModel: (String?) -> Unit) {
+private fun EnhancementModelImport(center: EnhancementCenter, onSelectModel: (String?) -> Unit, video: Boolean = false) {
     var expanded by remember { mutableStateOf(false) }
     var scale by remember { mutableIntStateOf(2) }
     var style by remember { mutableStateOf(EngineContent.BLACK_WHITE) }
@@ -325,7 +329,7 @@ private fun EnhancementModelImport(center: EnhancementCenter, onSelectModel: (St
     val picker = rememberOpenDocumentPicker { uri ->
         if (uri != null && !importing) {
             importing = true; notice = null
-            val receipt = center.importModel(uri, scale, style)
+            val receipt = center.importModel(uri, scale, if (video) EngineContent.VIDEO else style)
             scope.launch {
                 // A granted picker document stays valid until the application-owned copy settles.
                 withContext(NonCancellable) {
@@ -339,12 +343,13 @@ private fun EnhancementModelImport(center: EnhancementCenter, onSelectModel: (St
             }
         }
     }
-    EnhancementSection("导入模型", Icons.Outlined.UploadFile, "ONNX 权重文件",
+    EnhancementSection("导入模型", Icons.Outlined.UploadFile, if (video) "FP32 NCHW RGB 视频模型" else "ONNX 权重文件",
         action = { EnhancementDetailToggle(expanded, { expanded = !expanded }) }) {
         if (expanded) {
-            EnhancementQuiet("按模型说明选择原生倍率和适用内容。文件摘要会实际计算，导入不代表已通过设备验证。")
+            EnhancementQuiet(if (video) "请选用输入、输出均为 RGB 的单帧视频模型，选择其原生倍率。支持已下载的单文件 SDR MP4。"
+                else "按模型说明选择原生倍率和适用内容。文件摘要会实际计算，导入不代表已通过设备验证。")
             EnhancementChoices(listOf(1, 2, 4), scale, { "$it×" }, { scale = it }, "模型声明倍率")
-            EnhancementChoices(listOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON), style,
+            if (!video) EnhancementChoices(listOf(EngineContent.BLACK_WHITE, EngineContent.COLOR, EngineContent.WEBTOON), style,
                 { when (it) { EngineContent.BLACK_WHITE -> "黑白"; EngineContent.COLOR -> "彩色";
                     EngineContent.WEBTOON -> "条漫"; EngineContent.VIDEO -> "番剧" } },
                 { style = it }, "模型适用内容")
@@ -352,7 +357,8 @@ private fun EnhancementModelImport(center: EnhancementCenter, onSelectModel: (St
                 enabled = !importing, contentPadding = PaddingValues(horizontal = 0.dp)) {
                 Text(if (importing) "正在导入模型" else "选择 .onnx 文件")
             }
-            EnhancementQuiet("请遵循模型的原始许可；普通与成人漫画共享模型文件，各自的增强结果仍独立保存。")
+            EnhancementQuiet(if (video) "请遵循模型原始许可。完整处理前会检查模型输出尺寸；原视频随时可播放。"
+                else "请遵循模型的原始许可；普通与成人漫画共享模型文件，各自的增强结果仍独立保存。")
             notice?.let { EnhancementQuiet(it) }
         }
     }
