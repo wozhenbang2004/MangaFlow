@@ -196,6 +196,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private val playbackFailures = mutableMapOf<PlaybackHistoryKey, PlaybackFailureReceipt>()
     private val playbackMeasurements = mutableMapOf<PlaybackHistoryKey, PlaybackMeasurementReceipt>()
     private var sourceMeasurementsJob: Job? = null
+    private var sourceMeasurementsRescan = false
     private var sourceMeasurementsGeneration = 0L
     private val playbackAttemptOrder = mutableMapOf<PlaybackHistoryKey, Long>()
     private val playbackSourceAttemptOrder = mutableMapOf<PlaybackHistoryKey, Long>()
@@ -1242,7 +1243,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     val explicit = if (intrinsic) inGroup.singleOrNull { nativeEpisodeId(detail.subject, it) == canonical.id }
                         else binding.episodeMappings[canonical.id]?.let { id -> inGroup.singleOrNull { it.id == id } }
                     val matches = explicit?.let(::listOf) ?: if ((intrinsic && groups.size == 1) || !canonical.number.isFinite()) emptyList() else inGroup.filter {
-                        it.kind == canonical.kind && it.number != null && it.number == canonical.number
+                        it.kind == canonical.kind && it.number != null &&
+                            it.number == autoPlayEpisodeNumber(detail, canonical, catalog)
                     }
                     matches.map { episode -> AnimeEpisodeOption(binding.catalog.sourceId,
                         sources.provider(binding.catalog.sourceId)?.name ?: binding.catalog.sourceId,
@@ -1522,7 +1524,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                     return@mapNotNull null
                                 }
                                 if (catalog.title.sourceId != sourceId || catalog.title.id != title.id ||
-                                    catalog.title.url != title.url || !autoPlaySubjectMatches(detail.subject, catalog.title)) {
+                                    catalog.title.url != title.url || !autoPlayCatalogSubjectMatches(detail, catalog)) {
                                     candidateChecks += AnimeAssociationCandidateCheck(title, AnimeAssociationPhase.NEEDS_SELECTION,
                                         "目录返回的作品身份或年份未能确认。")
                                     return@mapNotNull null
@@ -1550,7 +1552,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             val lines = focus?.let { canonical ->
                                 autoPlayGroups(detail, canonical, catalog).mapNotNull { group ->
                                     catalog.episodes.singleOrNull { episode ->
-                                        episode.group == group && episode.kind == canonical.kind && episode.number == canonical.number
+                                        episode.group == group && episode.kind == canonical.kind &&
+                                            episode.number == autoPlayEpisodeNumber(detail, canonical, catalog)
                                     }
                                 }
                             }.orEmpty()
@@ -1590,7 +1593,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                     storePlaybackProbe(key, option, probe)
                                 }
                             }
-                            if (!verifiedMedia && !resolvedWithoutVerdict && !authoritativeIdentity) {
+                            if ((!verifiedMedia && !resolvedWithoutVerdict && !authoritativeIdentity) ||
+                                (!autoPlaySubjectMatches(detail.subject, catalog.title) && !verifiedMedia)) {
                                 val checks = probes.map { (option, probe) ->
                                     AnimeAssociationLineCheck(option.episode.group,
                                         probe.media.failure ?: "媒体尚未验证", probe.media.observedAt)
@@ -1661,7 +1665,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             } ?: return@flatMap emptyList()
             if (base.episode !in catalog.episodes) return@flatMap emptyList()
             if (base.sourceId != "anime-age" || base.episode.kind != episode.kind ||
-                base.episode.number != episode.number) return@flatMap listOf(base)
+                base.episode.number != autoPlayEpisodeNumber(detail, episode, catalog)) return@flatMap listOf(base)
             val groups = autoPlayGroups(detail, episode, catalog, base.episode.group)
             if (groups.size < 2 || base.episode.group !in groups) return@flatMap listOf(base)
             listOf(base) + groups.filterNot { it == base.episode.group }.mapNotNull { group ->
@@ -1884,7 +1888,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     internal fun measureEpisodeSources(episodeId: String, force: Boolean = false, onlyLine: AnimeEpisodeOption? = null) {
         val detail = mutableState.value.detail ?: return
         if (sourceMeasurementsJob?.isActive == true) {
-            if (mutableState.value.measuringEpisodeSourcesId == episodeId && onlyLine == null) return
+            if (mutableState.value.measuringEpisodeSourcesId == episodeId && onlyLine == null) {
+                // A newly linked source may appear while an older probe batch runs.
+                sourceMeasurementsRescan = true
+                return
+            }
             cancelEpisodeSourceMeasurements()
         }
         if (playbackBusy()) {
@@ -1934,7 +1942,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             } finally {
                 if (current()) {
                     sourceMeasurementsJob = null
+                    val rescan = sourceMeasurementsRescan
+                    sourceMeasurementsRescan = false
                     mutableState.update { it.copy(measuringEpisodeSourcesId = null) }
+                    if (rescan) measureEpisodeSources(episodeId)
                 }
             }
         }
@@ -1944,6 +1955,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     internal fun cancelEpisodeSourceMeasurements() {
         val job = sourceMeasurementsJob ?: return
         ++sourceMeasurementsGeneration
+        sourceMeasurementsRescan = false
         sourceMeasurementsJob = null
         job.cancel()
         mutableState.update { it.copy(measuringEpisodeSourcesId = null) }

@@ -231,7 +231,13 @@ internal fun AnimeSourcesPanel(
                     if (!previewing && probeEpisode != null) {
                         if (measuring) Box(Modifier.size(44.dp).semantics { contentDescription = "正在预探测来源画质与媒体网络" },
                             contentAlignment = Alignment.Center) { MotionBusyIndicator(Modifier.size(17.dp), strokeWidth = 1.5.dp) }
-                        else MotionIconButton(onClick = { controller.measureEpisodeSources(probeEpisode.id, force = true) },
+                        else MotionIconButton(onClick = {
+                            // First refresh incomplete associations; only validated per-episode lines are probed.
+                            if (state.sourceAggregation.values.any { it.phase != AnimeAssociationPhase.LINKED &&
+                                    it.phase != AnimeAssociationPhase.EXCLUDED })
+                                controller.verifyEpisodeSources(probeEpisode.id, retry = true)
+                            controller.measureEpisodeSources(probeEpisode.id, force = true)
+                        },
                             enabled = visible && state.measuringEpisodeSourcesId == null && !state.resolving && !state.autoMatching,
                             modifier = Modifier.size(44.dp), tooltip = "重新探测画质与网络") {
                             Icon(Icons.Outlined.Speed, "重新探测画质与网络", Modifier.size(20.dp),
@@ -326,6 +332,21 @@ internal fun AnimeSourcesPanel(
                     LazyColumn(Modifier.weight(1f, fill = false), state = sourceScroll,
                         contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 5.dp, bottom = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (focusEpisode != null) item(key = "probe-coverage") {
+                            val sources = episodeLines.map { it.sourceId }.distinct()
+                            val checked = sources.count { id -> episodeLines.any { option ->
+                                option.sourceId == id &&
+                                    controller.playbackMeasurements(focusEpisode.id, option)?.mediaObservedAt != null
+                            } }
+                            val waiting = state.sourceAggregation.values.count {
+                                it.phase == AnimeAssociationPhase.NEEDS_SELECTION ||
+                                    it.phase == AnimeAssociationPhase.EPISODE_UNMATCHED ||
+                                    it.phase == AnimeAssociationPhase.MEDIA_RETRY
+                            }
+                            AnimeQuietLabel("媒体预探测 $checked/${sources.size} 个已对应来源" +
+                                if (waiting > 0) " · $waiting 个来源待核对，未计入测速" else "",
+                                Modifier.padding(start = 8.dp, bottom = 2.dp))
+                        }
                         if (focusEpisode != null) item(key = "automatic-play") {
                             val availability = controller.episodeAvailability(focusEpisode.id, state)
                             val finding = state.autoMatching || (!canAutoPlay && availability == AnimeEpisodeAvailability.CHECKING)

@@ -12,7 +12,7 @@ private fun autoSeasonSignature(value: String): Pair<String, Int>? {
     val base = named?.groupValues?.get(1) ?: numbered?.groupValues?.get(1) ?: return null
     val label = named?.groupValues?.get(2) ?: numbered?.groupValues?.get(2) ?: return null
     val number = label.toIntOrNull() ?: "一二三四五六七八九十".indexOf(label).takeIf { it >= 0 }?.plus(1) ?: return null
-    return autoTitleKey(base).takeIf { it.length >= 6 }?.let { it to number }
+    return autoTitleKey(base).takeIf { it.length >= 2 }?.let { it to number }
 }
 
 /** Presentation-only title hint. A conflicting year is a review candidate, not an automatic identity. */
@@ -90,20 +90,73 @@ private fun autoPlaySubjectEvidence(subject: AnimeSubject, title: AnimeSourceTit
         (!requireEvidence || (subject.year != null && title.year == subject.year)))
 }
 
-/** Do not select between seasons/editions, or infer episode identity from list position. */
+
+/**
+ * Only an explicitly named season with a complete, unambiguous regular-episode
+ * sequence can bridge global series numbers (25..47) and season-local numbers
+ * (1..23). This is not a list-position guess and never applies to an unnamed
+ * base title, a partial catalog, mixed editions, specials or a conflicting year.
+ */
+private fun autoSeasonCatalogOffset(detail: AnimeDetail, catalog: AnimeSourceCatalog): Double? {
+    if (catalog.notice != null || catalog.episodes.isEmpty() ||
+        !autoPlaySubjectCandidate(detail.subject, catalog.title)) return null
+    val namedSeason = autoSeasonSignature(catalog.title.title) ?: return null
+    if (listOf(detail.subject.title, detail.subject.originalTitle).none {
+            it.isNotBlank() && autoSeasonSignature(it) == namedSeason
+        }) return null
+    val canonical = detail.episodes.filter {
+        it.kind == AnimeEpisodeKind.MAIN && it.number.isFinite() && it.number > 0.0
+    }.sortedBy { it.number }
+    if (canonical.size !in 3..100 ||
+        detail.subject.episodeCount?.let { it != canonical.size } == true ||
+        catalog.title.episodeCount?.let { it != canonical.size } == true) return null
+    val start = canonical.first().number
+    if (canonical.map { it.number } != canonical.indices.map { start + it }) return null
+    val groups = catalog.episodes.groupBy { it.group }.values
+    if (groups.isEmpty()) return null
+    val starts = mutableSetOf<Double>()
+    val editions = mutableSetOf<String>()
+    for (rows in groups) {
+        if (rows.size != canonical.size || rows.any {
+                it.kind != AnimeEpisodeKind.MAIN || it.number == null ||
+                    !it.number.isFinite() || it.number <= 0.0
+            }) return null
+        val ordered = rows.map { requireNotNull(it.number) }.sorted()
+        val first = ordered.first()
+        if (first != 1.0 && first != start ||
+            ordered != ordered.indices.map { first + it }) return null
+        starts += first
+        editions += rows.map { it.edition }
+    }
+    if (starts.size != 1 || editions.size != 1) return null
+    return start - starts.single()
+}
+
+/** Exact year or shared-ID evidence remains authoritative; complete explicit
+ * season structure is an additional, narrower path for yearless provider data. */
+internal fun autoPlayCatalogSubjectMatches(detail: AnimeDetail, catalog: AnimeSourceCatalog): Boolean =
+    autoPlaySubjectMatches(detail.subject, catalog.title) || autoSeasonCatalogOffset(detail, catalog) != null
+
+/** A canonical episode maps to a source-local number only with whole-season evidence. */
+internal fun autoPlayEpisodeNumber(detail: AnimeDetail, requested: AnimeEpisode,
+    catalog: AnimeSourceCatalog): Double = if (requested.kind == AnimeEpisodeKind.MAIN)
+    requested.number - (autoSeasonCatalogOffset(detail, catalog) ?: 0.0) else requested.number
+
+/** Group selection still requires the source's audited line contracts. */
 internal fun autoPlayGroup(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog): String? =
     autoPlayGroups(detail, requested, catalog).firstOrNull()
 
 internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog,
     selectedGroup: String? = null): List<String> {
     if (catalog.notice != null || catalog.episodes.isEmpty()) return emptyList()
+    val episodeNumber = autoPlayEpisodeNumber(detail, requested, catalog)
     val groups = catalog.episodes.groupBy { it.group }
     // An existing confirmed AGE line anchors this episode. An unrelated line's
     // missing episodes must not reject another line's exact matching current episode.
     if (selectedGroup != null && catalog.title.sourceId == "anime-age" &&
         catalog.title.externalIds["age"] == catalog.title.id &&
         catalog.title.id.toLongOrNull()?.let { it > 0L } == true) {
-        ageEquivalentEpisodeGroups(requested, groups, selectedGroup)?.let { return it }
+        ageEquivalentEpisodeGroups(requested, groups, selectedGroup, episodeNumber)?.let { return it }
     }
     // TvTFun's typed automatic group owns a season's real episode feed. Explicit
     // stations may cover only aired episodes, so their unequal coverage must not
@@ -116,19 +169,19 @@ internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalo
             val (name, rows) = automatic.entries.single()
             if (rows.first().edition.isBlank() || rows.any { it.number == null || !it.number.isFinite() } ||
                 rows.map { it.kind to it.number }.distinct().size != rows.size ||
-                rows.count { it.number == requested.number && it.kind == requested.kind } != 1)
+                rows.count { it.number == episodeNumber && it.kind == requested.kind } != 1)
                 return emptyList()
             return listOf(name)
         }
     }
     if (groups.size == 1) {
         val (name, rows) = groups.entries.single()
-        if (rows.count { it.number == requested.number && it.kind == requested.kind } == 1 &&
-            requested.number.isFinite()) return listOf(name)
+        if (rows.count { it.number == episodeNumber && it.kind == requested.kind } == 1 &&
+            episodeNumber.isFinite()) return listOf(name)
         return emptyList()
     }
     val eligible = groups.filterValues { rows ->
-        rows.count { it.number == requested.number && it.kind == requested.kind } == 1 &&
+        rows.count { it.number == episodeNumber && it.kind == requested.kind } == 1 &&
             rows.all { it.number != null && it.number.isFinite() } &&
             rows.map { it.kind to it.number }.distinct().size == rows.size
     }
@@ -189,8 +242,9 @@ private fun ageEquivalentEpisodeGroups(
     requested: AnimeEpisode,
     groups: Map<String, List<AnimeSourceEpisode>>,
     selectedGroup: String,
+    episodeNumber: Double,
 ): List<String>? {
-    if (!requested.number.isFinite()) return null
+    if (!episodeNumber.isFinite()) return null
     val knownRoutes = setOf("xigua", "ffm3u8", "bfzym3u8", "wjm3u8", "lzm3u8")
     fun route(group: String): String? {
         val start = group.lastIndexOf(" [")
@@ -202,7 +256,7 @@ private fun ageEquivalentEpisodeGroups(
     if (routeCounts[selectedRoute] != 1) return null
     val anchorRows = groups[selectedGroup] ?: return null
     val anchor = anchorRows.singleOrNull {
-        it.kind == requested.kind && it.number == requested.number
+        it.kind == requested.kind && it.number == episodeNumber
     } ?: return null
     if (anchorRows.any { it.edition != anchor.edition }) return null
     val label = ageEpisodeLabelKey(anchor.title).takeIf { it.isNotBlank() } ?: return null
@@ -211,7 +265,7 @@ private fun ageEquivalentEpisodeGroups(
         if (candidateRoute == null || routeCounts[candidateRoute] != 1 ||
             rows.any { it.edition != anchor.edition }) return@filter false
         val candidate = rows.singleOrNull {
-            it.kind == requested.kind && it.number == requested.number
+            it.kind == requested.kind && it.number == episodeNumber
         } ?: return@filter false
         ageEpisodeLabelKey(candidate.title) == label
     }.map { it.key }.sortedBy { if (route(it) == "xigua") 1 else 0 }
