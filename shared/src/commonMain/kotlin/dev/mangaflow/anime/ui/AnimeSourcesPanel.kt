@@ -31,6 +31,7 @@ internal fun AnimeSourcesPanel(
     controller: AnimeController,
     backdrop: HazeState,
     focusEpisode: AnimeEpisode?,
+    recovering: Boolean,
     onDismiss: () -> Unit,
     onPlay: (String, AnimeEpisodeOption) -> Unit,
     onAutomaticPlay: (AnimeEpisode) -> Unit,
@@ -162,27 +163,41 @@ internal fun AnimeSourcesPanel(
                     LazyColumn(Modifier.weight(1f, fill = false), state = sourceScroll, contentPadding = PaddingValues(16.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         if (focusEpisode != null) {
-                            val currentOption = state.selectedPlaybackOption.takeIf { state.selectedEpisodeId == focusEpisode.id }
-                            val choices = state.episodeOptions[focusEpisode.id].orEmpty().filter { it.confirmed }
-                                .sortedBy { it != currentOption }
-                            item(key = "episode-sources") { AnimeSectionTitle("本集线路", focusEpisode.title) }
-                            item(key = "automatic-play") {
-                                MotionButton(onClick = { onAutomaticPlay(focusEpisode) },
-                                    enabled = !state.autoMatching, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
-                                    Text(if (state.autoMatching) "正在自动匹配" else "自动选择线路并播放")
-                                }
+                            val currentOption = state.playbackTarget?.takeIf { it.episode.id == focusEpisode.id }?.manualOption
+                                ?: state.selectedPlaybackOption.takeIf { state.selectedEpisodeId == focusEpisode.id }
+                            val choices = controller.confirmedPlaybackLines(focusEpisode.id, state)
+                                .sortedBy { if (recovering) it == currentOption else it != currentOption }
+                            if (choices.isEmpty()) item(key = "no-matched-line") {
+                                AnimeQuietLabel(if (state.autoMatching) "正在查找本集线路"
+                                    else "本集暂无已匹配的线路")
                             }
                             items(choices, key = { "choice:" + it.sourceId + ":" + it.episode.group + ":" + it.episode.id }) { option ->
                                 val current = option == currentOption
+                                val lineState = when {
+                                    current && recovering -> "上次使用"
+                                    current -> "当前线路"
+                                    else -> ""
+                                }
                                 AnimeSelection(option.sourceName,
-                                    listOf(option.episode.group, option.episode.edition, if (current) "当前线路" else "")
+                                    listOf(option.episode.group, option.episode.edition, lineState)
                                         .filter { it.isNotBlank() }.distinct().joinToString(" · "),
-                                    selected = current,
+                                    selected = current && !recovering,
                                     onClick = { onPlay(focusEpisode.id, option) })
                             }
-                            if (choices.isEmpty()) item { AnimeQuietLabel(if (state.autoMatching)
-                                "正在自动核对本集线路，已匹配的结果会在这里出现。"
-                                else "本集暂无已确认线路。") }
+                            item(key = "automatic-play") {
+                                val autoLabel = when {
+                                    state.autoMatching -> "正在查找本集线路"
+                                    choices.isEmpty() -> "重新查找本集线路"
+                                    else -> "自动选线并播放"
+                                }
+                                if (choices.isEmpty()) MotionButton(onClick = { onAutomaticPlay(focusEpisode) },
+                                    enabled = !state.autoMatching, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+                                    Text(autoLabel)
+                                } else MotionTextButton(onClick = { onAutomaticPlay(focusEpisode) },
+                                    enabled = !state.autoMatching, modifier = Modifier.heightIn(min = 44.dp)) {
+                                    Text(autoLabel)
+                                }
+                            }
                         } else item(key = "source-overview") {
                             val matchedSources = state.episodeOptions.values.flatten().filter { it.confirmed }
                                 .map { it.sourceId }.distinct().size

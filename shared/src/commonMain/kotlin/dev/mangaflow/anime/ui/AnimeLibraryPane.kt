@@ -4,6 +4,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -11,6 +12,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -22,6 +24,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -186,7 +189,7 @@ internal fun AnimeLibrary(
 
 /** Adapted from DetailReadingDock's material, press, progress and compact geometry. */
 @Composable
-internal fun AnimeResumeDock(entry: AnimeLibraryEntry, backdrop: HazeState, onResume: () -> Unit,
+internal fun AnimeContinueWatching(entry: AnimeLibraryEntry, onResume: () -> Unit,
     onDismiss: () -> Unit, modifier: Modifier = Modifier) {
     val resume = entry.resume ?: return
     val interaction = remember(entry.subject.id) { MutableInteractionSource() }
@@ -195,21 +198,22 @@ internal fun AnimeResumeDock(entry: AnimeLibraryEntry, backdrop: HazeState, onRe
     val progress by animateFloatAsState(fraction,
         if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(), label = "anime-resume-progress")
     val color = MaterialTheme.colorScheme.onSurface
-    LiquidGlassSurface(backdrop, modifier.widthIn(max = 560.dp).fillMaxWidth(), cornerRadius = 26.dp,
-        role = GlassSurfaceRole.READING_DOCK, interactionSource = interaction, trackPointer = true, softCard = true) {
-        Column {
+    val colors = MaterialTheme.colorScheme
+    Column(modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
+        .background(colors.surfaceContainerLow)
+        .padding(bottom = 6.dp)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 64.dp)
                 .motionPress(interaction, pressedScale = .99f)
                 .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onResume)
-                .padding(start = 10.dp, end = 4.dp, top = 7.dp, bottom = 7.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                AnimePoster(entry.subject, Modifier.width(34.dp).height(46.dp))
+                .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
+                AnimePoster(entry.subject, Modifier.width(33.dp).height(46.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text(entry.subject.title, style = MaterialTheme.typography.labelLarge,
+                    Text(entry.subject.title, style = MaterialTheme.typography.titleSmall,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                     AnimeQuietLabel("继续观看 · " + animeTime(resume.positionMs))
                 }
-                Icon(Icons.Outlined.PlayArrow, null, Modifier.size(24.dp))
+                Icon(Icons.Outlined.PlayArrow, null, Modifier.size(24.dp), tint = colors.primary)
                 MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "隐藏这条续看") {
                     Icon(Icons.Outlined.Close, "隐藏这条续看", Modifier.size(17.dp))
                 }
@@ -222,7 +226,6 @@ internal fun AnimeResumeDock(entry: AnimeLibraryEntry, backdrop: HazeState, onRe
                     end = androidx.compose.ui.geometry.Offset(size.width * progress, 0f),
                     strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round)
             }
-        }
     }
 }
 

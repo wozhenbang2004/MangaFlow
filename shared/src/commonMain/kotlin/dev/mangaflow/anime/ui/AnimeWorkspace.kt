@@ -103,8 +103,6 @@ internal fun AnimeWorkspace(
             AnimeRoute("detail:" + (state.detail?.subject?.id ?: openingSubject?.id.orEmpty()), 1, state.detail)
         else -> AnimeRoute("home", 0, null)
     }
-    val resumeDockVisible = !playing && route.depth == 0 && !directoryOpen && !searchPresent && state.resumeEntry?.resume != null
-    val contentBottomPadding = if (resumeDockVisible) 108.dp else 24.dp
     val overlayVisible = downloadsVisible || sourcesVisible || trackingVisible || reviewsVisible
     val rootActive = active && route.depth == 0 && !searchPresent && !toolsPresent && !layoutPresent && !overlayVisible
     LaunchedEffect(active, route.key, page, directoryOpen) {
@@ -313,7 +311,8 @@ internal fun AnimeWorkspace(
                 if (shown.depth == 2) {
                     val playback by controller.player.state.collectAsStateWithLifecycle()
                     AnimePlayerPane(controller, state, playback, backdrop,
-                        active = active, fullscreen = playerFullscreen, onFullscreenChange = { playerFullscreen = it },
+                        active = active && shown.key == route.key, fullscreen = playerFullscreen,
+                        onFullscreenChange = { playerFullscreen = it },
                         obscured = sourcesVisible || downloadsVisible || trackingVisible || reviewsVisible || state.pendingPlayback != null,
                         onBack = ::closePlayback,
                         onRetry = controller::retryPlayback,
@@ -321,7 +320,8 @@ internal fun AnimeWorkspace(
                         onRestorePlayback = controller::restorePreviousPlayback,
                         onPlayDownload = ::playDownload,
                         onSources = {
-                            val current = state.detail?.episodes?.firstOrNull { it.id == state.selectedEpisodeId }
+                            val currentId = state.selectedEpisodeId ?: playback.episodeId
+                            val current = state.detail?.episodes?.firstOrNull { it.id == currentId }
                             showSources(state.playbackTarget?.episode ?: current)
                         },
                         onEpisode = ::play, modifier = Modifier.fillMaxSize())
@@ -390,15 +390,15 @@ internal fun AnimeWorkspace(
                                 when (shownPane) {
                                     AnimeWorkspacePane.DISCOVERY -> AnimeDiscovery(state, controller, backdrop, discoveryScrolls,
                                         onOpen = ::open, onChooseReference = ::chooseReference, onBrowseSource = ::openDirectory,
-                                        active = paneActive, contentBottomPadding = contentBottomPadding)
+                                        onResume = ::resume, active = paneActive)
                                     AnimeWorkspacePane.DIRECTORY -> AnimeSourceBrowsePane(controller, backdrop, discoveryScrolls,
                                         columns = state.discoveryColumns, active = paneActive,
-                                        onChooseTitle = ::chooseReference, contentBottomPadding = contentBottomPadding)
+                                        onChooseTitle = ::chooseReference, contentBottomPadding = 24.dp)
                                     AnimeWorkspacePane.LIBRARY -> AnimeLibrary(state, libraryScroll, controller, backdrop,
                                         onOpen = ::open, onResume = ::resume,
                                         onDiscover = { tab = 0; controller.selectDiscoveryTab(AnimeDiscoveryTab.HOME) },
                                         onReview = { reviewsVisible = true }, viewState = libraryViewState,
-                                        active = paneActive, contentBottomPadding = contentBottomPadding)
+                                        active = paneActive, contentBottomPadding = 24.dp)
                                 }
                             }
                         } else if (shown.detail != null) {
@@ -476,12 +476,6 @@ internal fun AnimeWorkspace(
                     }
                 }
             }
-            if (resumeDockVisible) state.resumeEntry?.let { entry ->
-                AnimeResumeDock(entry, backdrop, onResume = { resume(entry) },
-                    onDismiss = { controller.dismissResume(entry.subject.id) },
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = 12.dp)
-                        .motionInputGate(rootActive))
-            }
         }
         if (!playing && (state.notice != null || state.canUndo)) AnimeNotice(state.notice, state.canUndo,
             onUndo = controller::undo, onDismiss = controller::dismissNotice)
@@ -490,6 +484,7 @@ internal fun AnimeWorkspace(
     AnimeDownloadsPanel(downloadsVisible, controller, state, backdrop,
         onDismiss = { downloadsVisible = false }, onPlay = ::playDownload)
     AnimeSourcesPanel(sourcesVisible, state, controller, backdrop, sourceEpisode,
+        recovering = playbackPhase == AnimePlayerPhase.ERROR || state.playbackTarget?.error != null,
         onDismiss = ::dismissSources, onAutomaticPlay = { episode ->
             sourcesVisible = false
             requestPlayback(episode, null)

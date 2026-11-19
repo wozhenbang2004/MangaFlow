@@ -148,6 +148,7 @@ import coil3.request.crossfade
 import dev.mangaflow.BrowseState
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
+import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.data.DiscoveryMode
 import dev.mangaflow.data.RankPeriod
 import dev.mangaflow.data.RankAudience
@@ -210,8 +211,7 @@ fun DiscoverScreen(
     onManageSources: (() -> Unit)? = null,
     onExplore: (() -> Unit)? = null,
     sourceControls: (@Composable (onPresenceChange: (Boolean) -> Unit) -> Unit)? = null,
-    sectionTitle: String? = null,
-    showFeatured: Boolean = true,
+    adultProfile: Boolean = false,
     active: Boolean = true,
 ) {
     val browse = if (!state.isSearch) state else backgroundState
@@ -234,7 +234,7 @@ fun DiscoverScreen(
                 onOpen(manga)
             },
             DesktopMenuAction(if (isFavorite(manga)) "移出书架" else "加入书架") { onToggleFavorite(manga) },
-            if (state.sourceScope.startsWith("scoped:")) null else DesktopMenuAction("各站评分") { ratingsManga = manga },
+            if (adultProfile) null else DesktopMenuAction("各站评分") { ratingsManga = manga },
         )
     }
     CompositionLocalProvider(LocalMetricSourceFan provides sourceFan,
@@ -266,12 +266,8 @@ fun DiscoverScreen(
                 val selectedPane = paneKey == browseKey
                 val paneTopPadding = if (sourceControls != null) 8.dp else contentTopPadding
                 var exitTopPadding by remember(paneKey) { mutableStateOf(paneTopPadding) }
-                var retainedTitle by remember(paneKey) { mutableStateOf(sectionTitle) }
-                var retainedFeatured by remember(paneKey) { mutableStateOf(showFeatured) }
                 SideEffect { if (selectedPane) {
                     exitTopPadding = paneTopPadding
-                    retainedTitle = sectionTitle
-                    retainedFeatured = showFeatured
                 } }
                 // The outgoing ranking keeps its last clearance while its subbar
                 // returns; a new selection cannot jerk that leaving list upward.
@@ -285,7 +281,7 @@ fun DiscoverScreen(
                     canAutoAdvance = canAutoAdvance,
                     onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
                     onManageSources = onManageSources, onExplore = onExplore,
-                    sectionTitle = retainedTitle, showFeatured = retainedFeatured,
+                    adultProfile = adultProfile,
                     onManage = { actionsManga = it }, onRatings = { ratingsManga = it },
                     desktopActions = desktopActions,
                     topPadding = if (selectedPane) paneTopPadding else exitTopPadding)
@@ -311,7 +307,7 @@ fun DiscoverScreen(
                 MangaQuickAction(Icons.Outlined.BookmarkBorder, if (isFavorite(manga)) "移出书架" else "加入书架") {
                     onToggleFavorite(manga); dismiss()
                 }
-                if (!state.sourceScope.startsWith("scoped:")) MangaQuickAction(Icons.Outlined.StarOutline, "各站评分") {
+                if (!adultProfile) MangaQuickAction(Icons.Outlined.StarOutline, "各站评分") {
                     actionsManga = null
                     ratingsManga = manga
                 }
@@ -356,6 +352,7 @@ internal fun DiscoverySearchResults(
     sourceControls: (@Composable (onPresenceChange: (Boolean) -> Unit) -> Unit)? = null,
     translationGroupAvailable: Boolean = true,
 ) {
+    val adultProfile = sourceControls != null
     var retainedSearch by remember { mutableStateOf(state) }
     SideEffect { if (expanded) retainedSearch = state }
     val search = if (expanded) state else retainedSearch
@@ -407,11 +404,11 @@ internal fun DiscoverySearchResults(
     }
     val selectingTags = search.searchTarget == SearchTarget.TAG && search.selectedTags.isEmpty()
     val awaitingKeyword = search.query.isBlank() && search.selectedTags.isEmpty()
-    // Empty title/author search is only the 44dp input row; no padded, invisible result panel.
-    if (awaitingKeyword && !selectingTags) return
+    // A restricted search can narrow its sources before the first query.
+    if (awaitingKeyword && !selectingTags && !adultProfile) return
     val showResults = search.isSearch && !selectingTags && !awaitingKeyword
-    val showCacheStatus = showResults && backdrop != null
-    val showSummary = (federated && search.searchSources.isNotEmpty()) ||
+    val showCacheStatus = showResults && backdrop != null && !adultProfile
+    val showSummary = (!adultProfile && federated && search.searchSources.isNotEmpty()) ||
         (showResults && search.items.isNotEmpty()) || showCacheStatus
     BrowseCoverWarmup(search.items, repository,
         contentActive && showResults, retainedResults)
@@ -455,7 +452,7 @@ internal fun DiscoverySearchResults(
                             .padding(horizontal = if (tagsOnly) 0.dp else 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        if (federated) SearchSourceSummary(search.searchSources, onRetry, Modifier.weight(1f))
+                        if (federated && !adultProfile) SearchSourceSummary(search.searchSources, onRetry, Modifier.weight(1f))
                         else Spacer(Modifier.weight(1f))
                         if (showResults && search.items.isNotEmpty()) Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -472,13 +469,14 @@ internal fun DiscoverySearchResults(
                             if (search.loading && !federated)
                                 CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
                         }
-                        if (showResults && backdrop != null) BrowseCacheStatus(search, backdrop,
+                        if (showCacheStatus && backdrop != null) BrowseCacheStatus(search, backdrop,
                             active = contentActive)
                     }
                 }
             }
             when {
                 selectingTags || awaitingKeyword || !search.isSearch -> Unit
+                search.loading && search.items.isEmpty() && adultProfile -> QuietLoading("正在查找作品…")
                 search.loading && search.items.isEmpty() -> Box(
                     Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center,
                 ) { CircularProgressIndicator(Modifier.size(20.dp).semantics { contentDescription = "正在查找漫画" },
@@ -487,7 +485,9 @@ internal fun DiscoverySearchResults(
                     Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 16.dp).motionInputGate(contentActive),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Text(if (search.error != null) "暂不可用" else "没有匹配",
+                    Text(if (search.error != null) {
+                        if (adultProfile) "暂时无法搜索" else "暂不可用"
+                    } else "没有匹配",
                         style = MaterialTheme.typography.bodyMedium)
                     if (search.error != null) {
                         Text(search.error, modifier = Modifier.padding(top = 6.dp),
@@ -495,6 +495,11 @@ internal fun DiscoverySearchResults(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 3, overflow = TextOverflow.Ellipsis)
                         TextButton(onClick = onRetry, enabled = contentActive) { Text("重试") }
+                    } else if (adultProfile) {
+                        Text(if (search.searchSources.values.any { it.error != null }) "可用来源没有匹配结果"
+                            else "试试缩短关键词，或调整搜索范围。",
+                            modifier = Modifier.padding(top = 6.dp), style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                     }
                     if (search.error == null && search.hasMore) {
                         if (search.loadingMore) CircularProgressIndicator(Modifier.padding(8.dp).size(18.dp), strokeWidth = 2.dp)
@@ -513,6 +518,7 @@ internal fun DiscoverySearchResults(
                             DesktopBrowseActions(desktopActions?.invoke(manga).orEmpty(), contentActive) {
                                 SearchResultRow(manga, repository, "search-$searchKey",
                                     horizontalInset = if (tagsOnly) 0.dp else 6.dp,
+                                    adultProfile = adultProfile,
                                     bodySources = if (federated) search.sourceMatches[manga.id].orEmpty() else emptyList(),
                                     onSource = if (federated) openSource else null) { openResult(manga) }
                             }
@@ -687,8 +693,7 @@ private fun DiscoveryPane(
     onMore: () -> Unit,
     onManageSources: (() -> Unit)?,
     onExplore: (() -> Unit)?,
-    sectionTitle: String?,
-    showFeatured: Boolean,
+    adultProfile: Boolean,
     onOpen: (Manga) -> Unit,
     onManage: (Manga) -> Unit,
     onRatings: (Manga) -> Unit,
@@ -711,6 +716,7 @@ private fun DiscoveryPane(
         derivedStateOf { grid.layoutInfo.visibleItemsInfo.any { it.key == "hero" } }
     }
     val ranking = state.mode == DiscoveryMode.RANKING
+    val showFeatured = !adultProfile && state.mode == DiscoveryMode.RECOMMENDED
     val motion = LocalMotionEnabled.current
     val firstEntranceIndex = remember(paneKey) { retainedGrid.firstVisibleItemIndex }
     // The Copy recommendation endpoint is an editorial list, not a daily update feed.
@@ -760,25 +766,30 @@ private fun DiscoveryPane(
     if (desktop) DesktopBrowsePagination(state, enabled = active,
         nearEnd = { count ->
             val info = grid.layoutInfo
-            val chromeItems = 1 + (if (ranking) 0 else 1) +
-                (if (showFeatured && state.mode == DiscoveryMode.RECOMMENDED) 1 else 0)
+            val chromeItems = 1 + (if (ranking) 0 else 1) + (if (showFeatured) 1 else 0) +
+                (if (ranking && adultProfile) state.items.asSequence().map(Manga::sourceId).distinct().count() else 0)
             info.totalItemsCount == count + chromeItems &&
                 (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >=
                     info.totalItemsCount - visibleColumns * 2 - 1
         }, onMore = onMore)
     val sectionControls: @Composable () -> Unit = {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(sectionTitle ?: if (state.mode == DiscoveryMode.LATEST) "最近更新" else "为你发现",
+            Text(when {
+                state.mode == DiscoveryMode.LATEST -> "最近更新"
+                adultProfile -> "成人漫画"
+                else -> "为你发现"
+            },
                 modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
+                style = if (adultProfile) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleSmall,
+                fontWeight = if (adultProfile) FontWeight.SemiBold else FontWeight.Medium)
             if (onExplore != null) MotionIconButton(onClick = onExplore, enabled = active,
                 modifier = Modifier.size(36.dp), tooltip = "分类与专题") {
                 Icon(Icons.Outlined.Explore, "分类与专题", Modifier.size(19.dp))
             }
             DiscoveryLayoutControl(columns, visibleColumns, backdrop, active, onColumnsChange,
                 onPresenceChange = { layoutPresent = it })
-            BrowseCacheStatus(state, backdrop, active)
-            DiscoveryRefresh(state, onRefresh, active)
+            if (!adultProfile || state.fromCache) BrowseCacheStatus(state, backdrop, active)
+            if (!adultProfile || state.items.isNotEmpty()) DiscoveryRefresh(state, onRefresh, active)
         }
     }
     LazyVerticalGrid(
@@ -790,7 +801,7 @@ private fun DiscoveryPane(
         modifier = Modifier.fillMaxSize().then(if (desktop) Modifier else Modifier.bottomPullLoad(pull))
             .motionInputGate(active),
     ) {
-        if (showFeatured && state.mode == DiscoveryMode.RECOMMENDED && (state.loading || state.items.isNotEmpty())) {
+        if (showFeatured && (state.loading || state.items.isNotEmpty())) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "hero", contentType = "featured") {
                 // The gallery owns only its artwork. The following section can remain
                 // visible without keeping an offscreen gallery active.
@@ -805,15 +816,17 @@ private fun DiscoveryPane(
                 sectionControls()
             }
         if (state.loading && state.items.isEmpty()) {
-            if (!showFeatured || state.mode != DiscoveryMode.RECOMMENDED)
-                item(span = { GridItemSpan(maxLineSpan) }, key = "loading") { QuietLoading("正在翻开书页…") }
+            if (!showFeatured) item(span = { GridItemSpan(maxLineSpan) }, key = "loading") {
+                QuietLoading(if (adultProfile) "正在读取漫画目录…" else "正在翻开书页…")
+            }
         } else if (state.items.isEmpty() && state.error != null) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "error") {
-                if (state.sourceScope.startsWith("scoped:") && state.failedPage == null) {
+                if (adultProfile && state.searchSources.isEmpty() && state.failedPage == null) {
                     EmptyMessage("来源尚未就绪", state.error,
                         action = onManageSources?.let { "选择来源" },
                         onAction = { onManageSources?.invoke() })
-                } else EmptyMessage("暂时没能加载", state.error, "重试", onRetry)
+                } else EmptyMessage("暂时没能加载", if (adultProfile) "请重试，或从上方切换来源。" else state.error,
+                    "重试", onRetry)
             }
         } else if (state.items.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "empty") {
@@ -825,7 +838,7 @@ private fun DiscoveryPane(
             }
         } else {
             if (ranking) {
-                if (state.sourceScope.startsWith("scoped:")) {
+                if (adultProfile) {
                     // Each native provider owns its own ordering. Never merge JM/Pica rank
                     // values or draw Copy heat metrics over either provider's list.
                     state.items.groupBy { it.sourceId }.forEach { (source, sourceItems) ->
@@ -870,9 +883,10 @@ private fun DiscoveryPane(
                                 val placement = "discovery-grid-$paneKey-" + if (list) "list" else "tile"
                                 if (list) BrowseListRow(manga, repository,
                                     showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
+                                    showSource = adultProfile,
                                     onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
                                 else CoverTile(manga, repository, dense = true, narrow = visibleColumns >= 4,
-                                    showSource = state.sourceScope.startsWith("scoped:"),
+                                    showSource = adultProfile,
                                     showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
                                     onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }) { onOpen(manga) }
                             }
@@ -974,7 +988,7 @@ internal fun DesktopBrowseActions(
 @Composable
 private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement: String,
     horizontalInset: Dp = 6.dp, bodySources: List<Manga> = emptyList(),
-    onSource: ((List<Manga>) -> Unit)? = null, onOpen: () -> Unit) {
+    adultProfile: Boolean = false, onSource: ((List<Manga>) -> Unit)? = null, onOpen: () -> Unit) {
     val transition = LocalMangaCoverTransition.current
     val interaction = remember { MutableInteractionSource() }
     Row(
@@ -994,12 +1008,13 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement
             end = if (platformKind == PlatformKind.DESKTOP) 44.dp else 0.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleSmall,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                maxLines = if (adultProfile) 2 else 1, overflow = TextOverflow.Ellipsis)
             if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            SearchSourceMarks(bodySources, Modifier.fillMaxWidth(), onSource)
-            MangaMetricBadges(manga, showMore = false)
+            if (adultProfile && bodySources.size <= 1) MangaBrowseSource(manga)
+            else SearchSourceMarks(bodySources, Modifier.fillMaxWidth(), onSource)
+            if (!adultProfile) MangaMetricBadges(manga, showMore = false)
         }
     }
 }
@@ -1011,6 +1026,7 @@ private fun BrowseListRow(
     repository: MangaRepository,
     showChapter: Boolean,
     placement: String,
+    showSource: Boolean = false,
     onLongClick: () -> Unit,
     onRatings: () -> Unit,
     onClick: () -> Unit,
@@ -1037,7 +1053,8 @@ private fun BrowseListRow(
             if (showChapter && manga.latestChapter.isNotBlank()) Text(manga.latestChapter,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            MangaMetricBadges(manga, Modifier.fillMaxWidth(), showMore = true, plain = true, onExpand = onRatings)
+            if (showSource) MangaBrowseSource(manga)
+            else MangaMetricBadges(manga, Modifier.fillMaxWidth(), showMore = true, plain = true, onExpand = onRatings)
         }
     }
 }
@@ -1280,6 +1297,7 @@ internal fun ContinueRow(
     progress: ReadingProgress, repository: MangaRepository, onContinue: (ReadingProgress) -> Unit,
     onManage: (() -> Unit)? = null,
     onHistory: (() -> Unit)? = null,
+    namedHistory: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth()
@@ -1304,9 +1322,12 @@ internal fun ContinueRow(
                 }
             }
         }
-        if (onHistory != null) MotionIconButton(onClick = onHistory, modifier = Modifier.size(44.dp)) {
+        if (onHistory == null) Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        else if (namedHistory) TextButton(onClick = onHistory, contentPadding = PaddingValues(horizontal = 8.dp)) {
+            Text("章节记录", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+        } else MotionIconButton(onClick = onHistory, modifier = Modifier.size(44.dp)) {
             Icon(Icons.Outlined.History, "章节阅读记录", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        } else Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
@@ -1409,16 +1430,23 @@ internal fun CoverTile(
                 else if (dense) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Medium, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
         SearchSourceMarks(bodySources, Modifier.fillMaxWidth().padding(start = 2.dp, end = 2.dp))
-        if (showSource) Row(Modifier.fillMaxWidth().padding(top = 3.dp, start = 2.dp, end = 2.dp).heightIn(min = 20.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            ChapterSourceLogo(manga.sourceId, manga.sourceName.ifBlank { manga.sourceId }, Modifier.size(13.dp), muted = true)
-            Text(manga.sourceName.ifBlank { manga.sourceId }, style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        } else MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 4.dp, start = 2.dp, end = 2.dp),
+        if (showSource) MangaBrowseSource(manga, Modifier.padding(top = 3.dp, start = 2.dp, end = 2.dp))
+        else MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 4.dp, start = 2.dp, end = 2.dp),
             compact = true, showMore = false, plain = true, onExpand = onRatings)
         if (showChapter && manga.latestChapter.isNotBlank()) Text(manga.latestChapter, modifier = Modifier.padding(top = 3.dp, start = 2.dp, end = 2.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             minLines = 1, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+internal fun MangaBrowseSource(manga: Manga, modifier: Modifier = Modifier) {
+    val name = manga.sourceName.ifBlank { sourceDisplayName(manga.sourceId) }
+    Row(modifier.heightIn(min = 18.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        ChapterSourceLogo(manga.sourceId, name, Modifier.size(13.dp), muted = true)
+        Text(name, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

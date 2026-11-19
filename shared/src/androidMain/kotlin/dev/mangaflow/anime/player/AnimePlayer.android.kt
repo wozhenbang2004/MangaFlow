@@ -109,6 +109,11 @@ internal class AndroidAnimePlayer(
     private var recoveryNotice: String? = null
     private var lastPlaybackError: PlaybackException? = null
     private var preparedMedia: MediaSource? = null
+    private data class RemoteMediaPlan(
+        val type: Int, val cacheWasEnabled: Boolean, val createSource: (Int, Boolean) -> MediaSource,
+    )
+    private var remoteMediaPlan: RemoteMediaPlan? = null
+    private var inspectedAfterParserError = false
     private var enhancementRevision = 0L
     private var enhancementRecoveryUsed = false
     private var nativeVideoRecoveryPending = false
@@ -227,46 +232,54 @@ internal class AndroidAnimePlayer(
         val cacheFactory = DataSource.Factory {
             if (cacheOwner.targetBytes > 0L) cacheDataSourceFactory.createDataSource() else upstream().createDataSource()
         }
-        val item = MediaItem.Builder()
-            .setMediaId(asset.playbackIdentity())
-            .setUri(asset.url)
-            .setMimeType(asset.mimeType)
-            .setMediaMetadata(MediaMetadata.Builder().setTitle(asset.title.ifBlank { "动漫播放" }).build())
-            .build()
-        val contentType = Util.inferContentTypeForUriAndMimeType(Uri.parse(asset.url), asset.mimeType)
-        val media: MediaSource = when (contentType) {
-            C.CONTENT_TYPE_HLS -> HlsMediaSource.Factory(HlsDataSourceFactory { dataType ->
-                // Mutable playlists and key material never enter the disposable media cache.
-                if (dataType == C.DATA_TYPE_MEDIA || dataType == C.DATA_TYPE_MEDIA_INITIALIZATION)
-                    cacheFactory.createDataSource() else upstream().createDataSource()
-            }).setExtractorFactory(AnimeHlsExtractorFactory()).createMediaSource(item)
-            C.CONTENT_TYPE_DASH -> DashMediaSource.Factory(
-                DefaultDashChunkSource.Factory(cacheFactory), upstream(),
-            ).createMediaSource(item)
-            C.CONTENT_TYPE_OTHER -> ProgressiveMediaSource.Factory(cacheFactory).createMediaSource(item)
-            else -> throw IOException("这条线路的媒体协议暂不支持，请选择 HLS、DASH 或视频文件线路")
-        }
         val subtitleParser = DefaultSubtitleParserFactory()
-        val sources = mutableListOf(media)
+        val subtitles = mutableListOf<() -> MediaSource>()
         var unsupportedSubtitle = false
         asset.subtitles.forEach { subtitle ->
             checkedMediaUrl(subtitle.url)
             val mime = subtitle.mimeType ?: subtitleMime(subtitle.url)
             val format = Format.Builder().setId(subtitle.id).setLabel(subtitle.label)
                 .setLanguage(subtitle.language).setSampleMimeType(mime)
-                .setSelectionFlags(if (sources.size == 1) C.SELECTION_FLAG_DEFAULT else 0).build()
+                .setSelectionFlags(if (subtitles.isEmpty()) C.SELECTION_FLAG_DEFAULT else 0).build()
             if (mime == null || !subtitleParser.supportsFormat(format)) {
                 unsupportedSubtitle = true
                 return@forEach
             }
-            val extractors = ExtractorsFactory { arrayOf(SubtitleExtractor(subtitleParser.create(format), format)) }
             // Media3's enableLazyLoadingWithSingleTrack is package-private; subtitle
             // extraction is supported through its public progressive factory.
-            sources += ProgressiveMediaSource.Factory(upstream(), extractors)
-                .setLoadOnlySelectedTracks(true)
-                .createMediaSource(MediaItem.fromUri(subtitle.url))
+            subtitles += {
+                val extractors = ExtractorsFactory { arrayOf(SubtitleExtractor(subtitleParser.create(format), format)) }
+                ProgressiveMediaSource.Factory(upstream(), extractors).setLoadOnlySelectedTracks(true)
+                    .createMediaSource(MediaItem.fromUri(subtitle.url))
+            }
         }
-        prepareMedia(generation, if (sources.size == 1) media else MergingMediaSource(*sources.toTypedArray()), unsupportedSubtitle)
+        val contentType = Util.inferContentTypeForUriAndMimeType(Uri.parse(asset.url), asset.mimeType)
+        val plan = RemoteMediaPlan(contentType, cacheOwner.targetBytes > 0L) { type, bypassProgressiveCache ->
+            val mime = when (type) {
+                C.CONTENT_TYPE_HLS -> MimeTypes.APPLICATION_M3U8
+                C.CONTENT_TYPE_DASH -> MimeTypes.APPLICATION_MPD
+                else -> asset.mimeType.takeIf { type == contentType }
+            }
+            val item = MediaItem.Builder().setMediaId(asset.playbackIdentity()).setUri(asset.url).setMimeType(mime)
+                .setMediaMetadata(MediaMetadata.Builder().setTitle(asset.title.ifBlank { "动漫播放" }).build())
+                .build()
+            val media = when (type) {
+                C.CONTENT_TYPE_HLS -> HlsMediaSource.Factory(HlsDataSourceFactory { dataType ->
+                    // Mutable playlists and key material never enter the disposable media cache.
+                    if (dataType == C.DATA_TYPE_MEDIA || dataType == C.DATA_TYPE_MEDIA_INITIALIZATION)
+                        cacheFactory.createDataSource() else upstream().createDataSource()
+                }).setExtractorFactory(AnimeHlsExtractorFactory()).createMediaSource(item)
+                C.CONTENT_TYPE_DASH -> DashMediaSource.Factory(
+                    DefaultDashChunkSource.Factory(cacheFactory), upstream(),
+                ).createMediaSource(item)
+                C.CONTENT_TYPE_OTHER -> ProgressiveMediaSource.Factory(
+                    if (bypassProgressiveCache) upstream() else cacheFactory).createMediaSource(item)
+                else -> throw IOException("这条线路的媒体协议暂不支持，请选择 HLS、DASH 或视频文件线路")
+            }
+            if (subtitles.isEmpty()) media else MergingMediaSource(*(listOf(media) + subtitles.map { it() }).toTypedArray())
+        }
+        remoteMediaPlan = plan
+        prepareMedia(generation, plan.createSource(contentType, false), unsupportedSubtitle)
     }
 
     private suspend fun openLocal(request: AnimePlayerRequest, generation: Long) {
@@ -679,6 +692,7 @@ internal class AndroidAnimePlayer(
         if (error.errorCode in setOf(PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSOR_INIT_FAILED,
                 PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSING_FAILED) &&
             recoverNativeVideo(generation, exo)) return
+        if (inspectAfterParserFailure(generation, exo, error)) return
         val responseCode = (error.cause as? HttpDataSource.InvalidResponseCodeException)?.responseCode
         val retryableNetwork = error.errorCode in setOf(
             PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
@@ -690,7 +704,7 @@ internal class AndroidAnimePlayer(
         if (!retryableNetwork || state.value.recoveryAttempt >= options.automaticRecoveryAttempts) {
             publish(generation) { it.copy(notice = it.notice.takeUnless { value -> value == recoveryNotice }) }
             recoveryNotice = null
-            fail(generation, playbackFailure(error))
+            fail(generation, playbackFailure(error, remoteMediaPlan?.type))
             return
         }
         val attempt = state.value.recoveryAttempt + 1
@@ -715,6 +729,53 @@ internal class AndroidAnimePlayer(
                 fail(generation, failure)
             }
         }
+    }
+
+    private fun inspectAfterParserFailure(generation: Long, exo: ExoPlayer, error: PlaybackException): Boolean {
+        if (inspectedAfterParserError || state.value.firstFrameRendered != false ||
+            error.errorCode !in setOf(
+                PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+                PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+                PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
+                PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+            )) return false
+        val plan = remoteMediaPlan ?: return false
+        val client = http ?: return false
+        val url = request?.asset?.url ?: return false
+        inspectedAfterParserError = true
+        recovery?.cancel()
+        recoveryNotice = "正在确认线路实际返回的媒体格式"
+        publish(generation) { it.copy(phase = AnimePlayerPhase.OPENING, isBuffering = true, error = null, notice = recoveryNotice) }
+        recovery = playerScope.launch(Dispatchers.Main) {
+            try {
+                val result = inspectAnimeRemoteMedia(client, url)
+                if (!isCurrent(generation) || engine.value !== exo) return@launch
+                val detected = result?.mediaType
+                val retryUncachedFile = detected == C.CONTENT_TYPE_OTHER && plan.cacheWasEnabled
+                publish(generation) { state -> state.copy(notice = state.notice.takeUnless { it == recoveryNotice }) }
+                recoveryNotice = null
+                if (detected != null && (detected != plan.type || retryUncachedFile)) {
+                    val media = plan.createSource(detected, retryUncachedFile)
+                    remoteMediaPlan = plan.copy(type = detected)
+                    preparedMedia = media
+                    resetBufferingObservation()
+                    nativeFrameWaitSince = null
+                    publish(generation) { it.copy(hasVideoTracks = null, tracks = emptyList()) }
+                    prepareOnEngine(generation, exo, media)
+                } else {
+                    val failure = result?.failure?.let { IOException(it, error) } ?: playbackFailure(error, plan.type)
+                    fail(generation, failure)
+                }
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) {
+                if (isCurrent(generation) && engine.value === exo) {
+                    publish(generation) { state -> state.copy(notice = state.notice.takeUnless { it == recoveryNotice }) }
+                    recoveryNotice = null
+                    fail(generation, playbackFailure(error, plan.type))
+                }
+            }
+        }
+        return true
     }
 
     private fun publishTracks(generation: Long, tracks: Tracks) {
@@ -859,6 +920,8 @@ internal class AndroidAnimePlayer(
         recoveryNotice = null
         lastPlaybackError = null
         preparedMedia = null
+        remoteMediaPlan = null
+        inspectedAfterParserError = false
         enhancementRevision++
         enhancementRecoveryUsed = false
         nativeVideoRecoveryPending = false
@@ -919,7 +982,7 @@ private fun headersFor(asset: AnimePlaybackAsset, target: HttpUrl, origin: Strin
     }
 }
 
-private fun playbackFailure(error: PlaybackException): Throwable = IOException(when (error.errorCode) {
+private fun playbackFailure(error: PlaybackException, mediaType: Int? = null): Throwable = IOException(when (error.errorCode) {
     PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> {
         val code = (error.cause as? HttpDataSource.InvalidResponseCodeException)?.responseCode
         if (code == 401 || code == 403) "播放地址已失效或来源拒绝访问，请刷新线路或更换来源"
@@ -928,7 +991,10 @@ private fun playbackFailure(error: PlaybackException): Throwable = IOException(w
     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "当前播放路由未能连接来源，请重试或检查该来源的网络设置"
     PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
-    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED -> "这条线路返回的内容无法作为视频文件读取，请重试或换个来源"
+    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ->
+        if (mediaType == C.CONTENT_TYPE_HLS || mediaType == C.CONTENT_TYPE_DASH)
+            "已读取播放清单，但这条线路的媒体分片无法读取，请重试或换个来源"
+        else "这条线路返回的内容无法作为视频文件读取，请重试或换个来源"
     PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
     PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> "这条线路的播放清单无法读取，请重试或换个来源"
     PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED -> "当前设备不支持这条线路的媒体格式，请换个来源"

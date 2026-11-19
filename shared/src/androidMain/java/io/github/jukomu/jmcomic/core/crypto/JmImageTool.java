@@ -72,8 +72,10 @@ public final class JmImageTool {
         Bitmap originalBitmap = null;
         Bitmap decryptedBitmap = null;
         try {
-            // Keep the upstream software decode, without scaling or changing the source pixels.
-            originalBitmap = BitmapFactory.decodeByteArray(imageData, 0, imageData.length);
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            options.inScaled = false;
+            originalBitmap = BitmapFactory.decodeByteArray(imageData, 0, imageData.length, options);
             if (originalBitmap == null) {
                 throw new JmComicException("禁漫图片还原失败：无法解码下载的图片。");
             }
@@ -84,11 +86,8 @@ public final class JmImageTool {
                 return imageData;
             }
 
-            // getConfig() can be null for an internal format, but a mutable destination
-            // requires a concrete config. BitmapFactory's default decode is software-backed.
-            Bitmap.Config config = originalBitmap.getConfig();
-            decryptedBitmap = Bitmap.createBitmap(width, height,
-                    config != null ? config : Bitmap.Config.ARGB_8888);
+            // The Canvas always receives a mutable software bitmap with a known pixel format.
+            decryptedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
             Canvas canvas = new Canvas(decryptedBitmap);
             int segmentHeight = height / numSegments;
             int remainder = height % numSegments;
@@ -111,7 +110,9 @@ public final class JmImageTool {
 
             checkInterrupted();
             try (ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-                Bitmap.CompressFormat format = getCompressFormat(getFormatName(image.filename()));
+                String formatName = options.outMimeType != null && options.outMimeType.startsWith("image/")
+                        ? options.outMimeType.substring("image/".length()) : getFormatName(image.getFilename());
+                Bitmap.CompressFormat format = getCompressFormat(formatName);
                 if (!decryptedBitmap.compress(format, 100, output)) {
                     throw new JmComicException("禁漫图片还原失败：图片编码器未生成有效数据。");
                 }

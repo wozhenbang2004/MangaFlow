@@ -71,12 +71,14 @@ internal fun SourceCapabilityBrowseControls(
     active: Boolean = true,
     onSearchTag: (String) -> Unit,
     onPresenceChange: (Boolean) -> Unit = {},
+    inSearch: Boolean = false,
 ) {
     val current by controller.controls.collectAsStateWithLifecycle()
     val browse by controller.state.collectAsStateWithLifecycle()
     val preparation = starters?.state?.collectAsStateWithLifecycle()?.value
     val revision = current.sources.firstOrNull { it.id == current.selectedSource }?.revision
-    val owner = listOf(current.selectedSource, revision, current.feedId, browse.isSearch, browse.searchTarget)
+    val searching = inSearch || browse.isSearch
+    val owner = listOf(current.selectedSource, revision, current.feedId, searching, browse.searchTarget)
     var feedPicker by remember(owner) { mutableStateOf(false) }
     var pendingFeed by remember(owner) { mutableStateOf<String?>(null) }
     var pendingOption by remember(owner) { mutableStateOf<Pair<Int, String>?>(null) }
@@ -88,16 +90,17 @@ internal fun SourceCapabilityBrowseControls(
     var pendingFilter by remember(owner) { mutableStateOf<Int?>(null) }
     var hotTagsOpen by remember(owner) { mutableStateOf(false) }
     var pendingTag by remember(owner) { mutableStateOf<String?>(null) }
-    val failed = browse.searchSources.values.filter { it.error != null }
+    val failed = if (inSearch && !browse.isSearch) emptyList()
+        else browse.searchSources.values.filter { it.error != null }
     val selectedFeed = current.feeds.firstOrNull { it.id == current.feedId }
     // Author/tag requests have their own source protocol and do not consume these options.
     val filters = when {
-        !browse.isSearch -> selectedFeed?.filters.orEmpty()
-        browse.searchTarget == dev.mangaflow.data.SearchTarget.TITLE -> current.searchFilters
+        !searching -> selectedFeed?.filters.orEmpty()
+        browse.isSearch && browse.searchTarget == dev.mangaflow.data.SearchTarget.TITLE -> current.searchFilters
         else -> emptyList()
     }
     val visibleFilters = filters.withIndex().filterNot {
-        !browse.isSearch && browse.mode == DiscoveryMode.RANKING && it.value.id == "period"
+        !searching && browse.mode == DiscoveryMode.RANKING && it.value.id == "period"
     }
     val modifiedFilters = visibleFilters.count { (index, filter) ->
         filter.normalize(current.options.getOrNull(index)) != filter.normalize()
@@ -116,7 +119,7 @@ internal fun SourceCapabilityBrowseControls(
     fun currentOwner(): Boolean = active && controller.sourceId == current.selectedSource &&
         controller.controls.value.feedId == current.feedId &&
         controller.controls.value.sources.firstOrNull { it.id == current.selectedSource }?.revision == revision &&
-        controller.state.value.isSearch == browse.isSearch && controller.state.value.searchTarget == browse.searchTarget
+        (inSearch || controller.state.value.isSearch) == searching && controller.state.value.searchTarget == browse.searchTarget
     LaunchedEffect(active) {
         if (!active) {
             pendingFeed = null; pendingOption = null; pendingFilter = null
@@ -142,8 +145,10 @@ internal fun SourceCapabilityBrowseControls(
         catch (_: Exception) { hotTagsError = "热门标签暂未读取" }
         finally { hotTagsLoading = false }
     }
-    Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+    val colors = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).background(
+            colors.surfaceContainerLow, RoundedCornerShape(14.dp)), verticalAlignment = Alignment.CenterVertically) {
             MotionTextButton(onClick = onSources, enabled = active && !present,
                 modifier = Modifier.weight(1f).heightIn(min = 44.dp),
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)) {
@@ -153,7 +158,7 @@ internal fun SourceCapabilityBrowseControls(
                     style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Icon(Icons.Outlined.ExpandMore, "选择来源", Modifier.padding(start = 3.dp).size(15.dp))
             }
-            if (!browse.isSearch && current.feeds.size > 1) {
+            if (!searching && current.feeds.size > 1) {
                 MotionTextButton(onClick = { feedPicker = true }, enabled = active && !present && !current.loading,
                     modifier = Modifier.weight(1f).heightIn(min = 44.dp),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)) {
@@ -162,7 +167,7 @@ internal fun SourceCapabilityBrowseControls(
                     Icon(Icons.Outlined.ExpandMore, "分类与栏目", Modifier.padding(start = 3.dp).size(15.dp))
                 }
             }
-            if (!browse.isSearch && current.selectedSource == "jmcomic") {
+            if (!searching && current.selectedSource == "jmcomic") {
                 MotionIconButton(onClick = { hotTagsOpen = true }, enabled = active && !present,
                     modifier = Modifier.size(44.dp), tooltip = "热门标签") {
                     Icon(Icons.Outlined.Tag, "热门标签", Modifier.size(18.dp))
@@ -201,24 +206,25 @@ internal fun SourceCapabilityBrowseControls(
                     }
                 }
             }
-            if (current.loading || current.error != null || failed.isNotEmpty() ||
-                preparation?.running == true || preparation?.error != null) {
-                val status = when {
-                    current.error != null -> "筛选读取失败，查看详情"
-                    failed.isNotEmpty() -> "${failed.size}个来源暂未读取，查看详情"
-                    preparation?.error != null -> "来源准备未完成，查看详情"
-                    preparation?.running == true -> "正在准备来源，查看进度"
-                    else -> "正在读取来源选项"
-                }
-                MotionIconButton(onClick = { failuresOpen = true }, enabled = active && !present,
-                    modifier = Modifier.size(44.dp), tooltip = status) {
-                    if (current.loading || preparation?.running == true) MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
-                    else Icon(Icons.Outlined.Info, status, Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
         }
-        if (!browse.isSearch && browse.mode == DiscoveryMode.RANKING) {
+        val status = when {
+            failed.size == 1 -> failed.single().let { lane ->
+                lane.sourceName + if (lane.error.orEmpty().contains("需要登录")) "需要登录" else "暂不可用"
+            }
+            failed.size > 1 -> "${failed.size} 个来源暂不可用"
+            current.error != null -> "筛选暂未读取"
+            preparation?.error != null -> "来源准备未完成"
+            preparation?.running == true && current.sources.isEmpty() -> "正在准备来源"
+            else -> null
+        }
+        if (status != null) MotionTextButton(onClick = { failuresOpen = true }, enabled = active && !present,
+            modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)) {
+            Icon(Icons.Outlined.Info, null, Modifier.size(15.dp))
+            Text(status, Modifier.weight(1f).padding(start = 7.dp), style = MaterialTheme.typography.labelMedium,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("查看", style = MaterialTheme.typography.labelMedium)
+        }
+        if (!searching && browse.mode == DiscoveryMode.RANKING) {
             MotionTabs(selected = browse.period.ordinal, labels = RankPeriod.entries.map { it.label },
                 onSelect = { if (active && !present) controller.selectDiscovery(DiscoveryMode.RANKING, period = RankPeriod.entries[it]) },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp).motionInputGate(active && !present),
@@ -256,14 +262,17 @@ internal fun SourceCapabilityBrowseControls(
             }
             items(failed, key = { it.sourceId }) { lane ->
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    val needsLogin = lane.error.orEmpty().contains("需要登录")
                     MotionTextButton(onClick = { pendingInspect = lane.sourceId; dismiss() },
                         enabled = active && pendingInspect == null,
                         modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 0.dp, vertical = 10.dp)) {
-                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(lane.sourceName, style = MaterialTheme.typography.labelLarge)
                             Text(lane.error.orEmpty(), style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
+                        Text(if (needsLogin) "登录" else "设置", Modifier.padding(start = 8.dp),
+                            style = MaterialTheme.typography.labelMedium)
                     }
                     MotionIconButton(onClick = { controller.retrySource(lane.sourceId) },
                         enabled = active && !browse.loading && !browse.loadingMore && !browse.refreshing,

@@ -19,6 +19,7 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -185,7 +186,7 @@ internal fun rememberReaderPageTransfer(attempt: ReaderLoadAttempt, page: Page,
 /** Do not present transport URLs, request keys or raw exception chains as reading UI. */
 internal fun readerPageErrorLabel(raw: String): String = when {
     raw == "已停止等待" -> raw
-    raw.contains("准备等待超时") || raw.contains("准备资源等待超时") -> "准备资源等待超时"
+    raw.contains("准备等待超时") || raw.contains("资源等待超时") -> "准备资源等待超时"
     raw.contains("等待下载资源") || raw.contains("资源保护暂缓") || raw.contains("内存保护暂缓") -> "资源暂缓"
     raw.contains("timeout", true) || raw.contains("timed out", true) || raw.contains("超时") -> "连接超时"
     raw.contains("UnknownHost", true) || raw.contains("resolve host", true) || raw.contains("DNS", true) -> "暂时无法连接来源"
@@ -193,7 +194,9 @@ internal fun readerPageErrorLabel(raw: String): String = when {
     raw.contains("401") || raw.contains("403") || raw.contains("拒绝") || raw.contains("forbidden", true) -> "来源拒绝了请求"
     raw.contains("404") || raw.contains("not found", true) -> "图片地址可能已失效"
     raw.contains("SSL", true) || raw.contains("certificate", true) || raw.contains("TLS", true) -> "安全连接未能建立"
+    raw.contains("禁漫图片线路") -> "图片线路暂不可用，重试本页"
     raw.contains("图片还原") -> "图片还原失败"
+    raw.contains("图片清单已变化") -> "图片清单已更新，请重新打开本章"
     raw.contains("decode", true) || raw.contains("解码") -> "图片解码失败"
     raw.contains("本机存储") || raw.contains("本地") -> "本机文件暂时无法读取"
     raw.contains("来源版本已变化") -> "来源版本已变化，请重新读取"
@@ -256,12 +259,6 @@ internal fun ReaderImageRecovery(
         .animateContentSize(tween(if (LocalMotionEnabled.current) MangaMotion.Quick else 0))
         .padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            if (pending) MotionBusyIndicator(Modifier.size(15.dp), color = foreground.copy(alpha = .65f), strokeWidth = 1.5.dp)
-            Text(if (index == null) "打开章节" else "第 ${index + 1}" +
-                (if (pageCount > 0) " / $pageCount" else "") + " 页",
-                fontSize = 13.sp, fontWeight = FontWeight.Medium, color = foreground, maxLines = 1)
-        }
         val liveTransfer = transferProgress?.takeIf { pending && attempt.acceptsResult }
         val transferStage = liveTransfer?.let { transfer ->
             val expected = transfer.expectedBytes?.takeIf { it > 0L && it >= transfer.receivedBytes }
@@ -269,15 +266,22 @@ internal fun ReaderImageRecovery(
                 " · " + readerTransferBytes(transfer.receivedBytes) + (expected?.let { " / ${readerTransferBytes(it)}" } ?: "")
             else ""
         } ?: stage
-        Text(if (pending) transferStage + if (slow) " · 等待较久" else "" else readerPageErrorLabel(failure),
-            fontSize = 11.sp, color = foreground.copy(alpha = .66f), maxLines = 2)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (sourceName.isNotBlank()) Text(sourceName, fontSize = 11.sp, color = foreground.copy(alpha = .55f),
-                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 160.dp))
-            ReaderWaitCaption(startedAt, pending, foreground.copy(alpha = .55f))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            if (pending) MotionBusyIndicator(Modifier.size(14.dp), color = foreground.copy(alpha = .65f), strokeWidth = 1.5.dp)
+            Text(if (pending) transferStage else readerPageErrorLabel(failure),
+                fontSize = 14.sp, fontWeight = FontWeight.Medium, color = foreground, maxLines = 2)
         }
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-            if (expanded) MotionTextButton(onClick = onRetry) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            val location = if (index == null) "当前章节" else if (pageCount > 0) "第 ${index + 1} / $pageCount 页"
+                else "第 ${index + 1} 页"
+            Text(listOf(location, sourceName).filter { it.isNotBlank() }.joinToString(" · "),
+                fontSize = 11.sp, color = foreground.copy(alpha = .64f), maxLines = 1,
+                overflow = TextOverflow.Ellipsis)
+            if (pending) ReaderWaitCaption(startedAt, true, foreground.copy(alpha = .64f))
+        }
+        FlowRow(horizontalArrangement = Arrangement.Center, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            if (expanded) MotionTextButton(onClick = onRetry,
+                colors = ButtonDefaults.textButtonColors(containerColor = foreground.copy(alpha = .08f))) {
                 Icon(Icons.Outlined.Refresh, null, Modifier.size(16.dp), tint = foreground)
                 Spacer(Modifier.width(5.dp))
                 Text(if (index == null) "重新读取" else "重试本页", fontSize = 12.sp, color = foreground)
@@ -289,7 +293,7 @@ internal fun ReaderImageRecovery(
                     Text("补此页", fontSize = 12.sp, color = foreground)
                 }
             MotionTextButton(onClick = onControls) {
-                Icon(Icons.Outlined.Tune, "打开阅读控制台", Modifier.size(16.dp), tint = foreground)
+                Icon(Icons.Outlined.Tune, "显示阅读工具", Modifier.size(16.dp), tint = foreground)
             }
             if (pending) MotionTextButton(onClick = onStop) {
                 Icon(Icons.Outlined.Close, "停止等待", Modifier.size(16.dp), tint = foreground.copy(alpha = .65f))

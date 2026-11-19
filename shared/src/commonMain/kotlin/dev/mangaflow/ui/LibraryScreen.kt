@@ -354,6 +354,18 @@ fun LibraryScreen(
     chapterHistoryManga?.takeIf { sourceIncluded(it.sourceId) }?.let { manga ->
         ChapterHistorySheet(manga, libraryStore, onDismiss = { chapterHistoryManga = null }, onContinue = onContinue)
     }
+    val adultShelfTabs: @Composable (Modifier) -> Unit = { modifier ->
+        MotionTabs(if (showHistory) 1 else 0, listOf("本地书架", historyTitle),
+            onSelect = { index ->
+                val historySelected = index == 1
+                if (active && showHistory != historySelected) {
+                    onCancelOpen()
+                    managedId = null
+                    showHistory = historySelected
+                }
+            }, modifier = modifier, treatment = MotionTabTreatment.Underline, controlHeight = 44.dp,
+            compact = true)
+    }
     BoxWithConstraints(Modifier.fillMaxSize()) {
     val shelfWidth = (maxWidth - 140.dp).coerceAtMost(196.dp).coerceAtLeast(112.dp)
     val historyInset = 16.dp + ((maxWidth - if (desktop) 1040.dp else MangaLayout.ListWidth) / 2f).coerceAtLeast(0.dp)
@@ -393,7 +405,8 @@ fun LibraryScreen(
                                 Box(Modifier.padding(end = if (desktop) 40.dp else 0.dp)) {
                                 ContinueRow(progress, repository, onContinue,
                                     onManage = { onCancelOpen(); managedId = progress.manga.id },
-                                    onHistory = { onCancelOpen(); managedId = null; chapterHistoryManga = progress.manga })
+                                    onHistory = { onCancelOpen(); managedId = null; chapterHistoryManga = progress.manga },
+                                    namedHistory = adultProfile)
                                 }
                                 RecordActionsMenu(managedId == progress.manga.id,
                                     onDismiss = { managedId = null },
@@ -429,9 +442,11 @@ fun LibraryScreen(
                             if (adultResume != null) item(key = "adult-continue", span = {
                                 androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                             }) {
-                                Column(Modifier.widthIn(max = 460.dp).fillMaxWidth()) {
+                                Column(Modifier.widthIn(max = 520.dp).fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(14.dp))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)) {
                                     Text("继续阅读", style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        color = MaterialTheme.colorScheme.primary)
                                     ContinueRow(adultResume, repository, onContinue = { progress ->
                                         if (active) {
                                             onCancelOpen()
@@ -470,6 +485,8 @@ fun LibraryScreen(
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                                 }) {
                                 when {
+                                    adultProfile -> EmptyMessage("成人书架还是空的", "收藏的成人漫画会出现在这里。",
+                                        "去发现", onDiscover)
                                     shelfScope == UnifiedShelfScope.LOCAL -> EmptyBookshelf(onDiscover)
                                     onAddCloudFavorite == null && onOpenAccount != null ->
                                         EmptyMessage("登录拷贝账号", "登录后，这里显示拷贝收藏。", "去登录", onOpenAccount)
@@ -583,10 +600,10 @@ fun LibraryScreen(
                                                     if (it.pageCount > 0) " · ${it.pageIndex + 1}/${it.pageCount}" else ""
                                             } ?: cloudMetadata[manga.id]?.chapterTitle
                                                 ?.takeIf { fromCopy && it.isNotBlank() }?.let { "拷贝 · $it" } ?: "未读"
-                                            Text(mangaNumberText(progressText), modifier = Modifier.padding(top = 2.dp),
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                fontSize = 11.sp, lineHeight = 15.sp,
-                                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            if (adultProfile && !hasContinuation) MangaBrowseSource(manga, Modifier.padding(top = 2.dp))
+                                            else Text(mangaNumberText(progressText), modifier = Modifier.padding(top = 2.dp),
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
+                                                lineHeight = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
                                         RecordActionsMenu(managedId == manga.id,
                                             onDismiss = { managedId = null },
@@ -619,10 +636,11 @@ fun LibraryScreen(
         }
         if (desktop) {
             val stackedTools = maxWidth < 680.dp * density.fontScale.coerceAtLeast(1f)
-            DesktopManagementToolbar(if (showHistory) historyTitle else shelfTitle, Modifier.align(Alignment.TopCenter)
+            DesktopManagementToolbar(if (showHistory && !adultProfile) historyTitle else shelfTitle, Modifier.align(Alignment.TopCenter)
                 .onSizeChanged { headerHeightPx = it.height },
                 navigation = navigation, minimumToolsWidth = 680.dp) {
-                if (showHistory) MotionIconButton(onClick = { showHistory = false },
+                if (adultProfile) adultShelfTabs(Modifier.width(176.dp * density.fontScale.coerceIn(1f, 1.5f)))
+                else if (showHistory) MotionIconButton(onClick = { showHistory = false },
                     modifier = Modifier.size(36.dp), tooltip = "返回书架") {
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回书架", Modifier.size(19.dp))
                 } else if (copyShelfAvailable) MotionTabs(if (shelfScope == UnifiedShelfScope.LOCAL) 0 else 1, shelfLabels, selectShelf,
@@ -630,12 +648,8 @@ fun LibraryScreen(
                         else Modifier.widthIn(max = 280.dp).weight(1f, fill = false),
                     treatment = MotionTabTreatment.Soft, controlHeight = 36.dp)
                 if (!stackedTools) Spacer(Modifier.weight(1f))
-                if (!showHistory) {
-                    if (adultProfile) LibraryRecentReadingButton(
-                        active = active, label = historyTitle, onOpen = { onCancelOpen(); showHistory = true },
-                        modifier = Modifier.heightIn(min = 36.dp),
-                    )
-                    else MotionIconButton(onClick = { onCancelOpen(); showHistory = true },
+                if (!showHistory && !adultProfile) {
+                    MotionIconButton(onClick = { onCancelOpen(); showHistory = true },
                         modifier = Modifier.size(36.dp), tooltip = historyTitle) {
                         Icon(Icons.Outlined.History, historyTitle, Modifier.size(19.dp))
                     }
@@ -662,8 +676,8 @@ fun LibraryScreen(
         } else Column(Modifier.align(Alignment.TopCenter).onSizeChanged { headerHeightPx = it.height }
             .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
             .padding(horizontal = 8.dp, vertical = 2.dp)) {
-            val hasLeading = showHistory || copyShelfAvailable
-            PageTitleHeader(if (showHistory) historyTitle else shelfTitle, backdrop, navigation,
+            val hasLeading = !adultProfile && (showHistory || copyShelfAvailable)
+            PageTitleHeader(if (showHistory && !adultProfile) historyTitle else shelfTitle, backdrop, navigation,
                 leadingWidth = if (hasLeading) shelfWidth else 0.dp,
                 leading = if (hasLeading) ({
                     if (showHistory) Row(Modifier.width(shelfWidth),
@@ -685,10 +699,6 @@ fun LibraryScreen(
                 }),
                 actions = {
                     toolbar {
-                        if (adultProfile && !showHistory) LibraryRecentReadingButton(
-                            active = active, label = historyTitle, onOpen = { onCancelOpen(); showHistory = true },
-                            modifier = Modifier.heightIn(min = 44.dp),
-                        )
                         Box {
                             MotionIconButton(onClick = {
                                 pendingLibraryTool = null
@@ -746,6 +756,8 @@ fun LibraryScreen(
                         }
                     }
                 })
+            if (adultProfile) adultShelfTabs(Modifier.padding(horizontal = 8.dp)
+                .widthIn(max = 284.dp).fillMaxWidth())
         }
         AnimatedVisibility(
             visible = draggedFavorite != null,
@@ -775,16 +787,6 @@ fun LibraryScreen(
         }
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
             .padding(horizontal = 20.dp, vertical = 12.dp))
-    }
-}
-
-@Composable
-private fun LibraryRecentReadingButton(active: Boolean, label: String, onOpen: () -> Unit, modifier: Modifier = Modifier) {
-    TextButton(onClick = onOpen, modifier = modifier, enabled = active,
-        contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp)) {
-        Icon(Icons.Outlined.History, null, Modifier.size(17.dp))
-        Spacer(Modifier.width(5.dp))
-        Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

@@ -111,6 +111,7 @@ internal fun ExpandingSearchBar(
     scopeCopyOnly: Boolean = false,
     onSearchTarget: (SearchTarget) -> Unit = {},
     translationGroupAvailable: Boolean = true,
+    showEmptyResults: Boolean = false,
     results: @Composable (maxHeight: Dp, active: Boolean) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
@@ -189,7 +190,7 @@ internal fun ExpandingSearchBar(
         val panelWidth = (maxWidth - 64.dp).coerceIn(44.dp, 448.dp)
         val resultsRoom = (maxHeight - 64.dp).coerceIn(0.dp, 360.dp)
         // An empty title/author query is exactly the toolbar height, without an empty result gutter.
-        val inputOnly = expanded && query.isBlank() && searchTarget != SearchTarget.TAG && !scopeCopyOnly
+        val inputOnly = expanded && query.isBlank() && searchTarget != SearchTarget.TAG && !scopeCopyOnly && !showEmptyResults
         val panelHeight = if (inputOnly) 44.dp else foregroundHeight.coerceIn(44.dp, 44.dp + resultsRoom)
         val width = shell.animateDp(
             transitionSpec = {

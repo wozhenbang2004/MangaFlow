@@ -269,15 +269,9 @@ internal fun AnimeDetailPane(
                     repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
-            if (state.sourceError != null || state.sourceAggregationRunning) item(key = "source-status") {
-                if (state.sourceError != null) {
-                    AnimeDetailStatus("部分来源不可用", Icons.Outlined.CloudOff, detail = state.sourceError)
-                } else {
-                    AnimeDetailStatus(
-                        "正在补全来源 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal}",
-                        Icons.Outlined.Info, loading = true,
-                    )
-                }
+            if (state.sourceError != null) item(key = "source-status") {
+                AnimeDetailStatus("部分线路暂不可用", Icons.Outlined.CloudOff,
+                    actionLabel = "查看线路", onAction = { onSources(null) })
             }
             state.sourceCatalogs.filter {
                 (!it.notice.isNullOrBlank() || state.sourceCatalogErrors[it.title.sourceId] != null) &&
@@ -328,12 +322,10 @@ private fun AnimeDetailHero(
 ) {
     val colors = MaterialTheme.colorScheme
     val atmosphere = FeaturedCoverColors.get(subject.coverUrl) ?: colors.primary
-    val shape = RoundedCornerShape(22.dp)
     val metadata = listOfNotNull(
         subject.year?.toString(),
         subject.episodeCount?.takeIf { it > 0 }?.let { "$it 集" },
-        subject.rating?.takeIf { it > 0 }?.let { "$it 分" },
-        subject.rank?.takeIf { it > 0 }?.let { "#$it" },
+        subject.rating?.takeIf { it > 0 && !native }?.let { "Bangumi $it 分" },
     ).joinToString(" · ")
     val actions: @Composable () -> Unit = {
         AnimeDetailActions(
@@ -342,19 +334,19 @@ private fun AnimeDetailHero(
         )
     }
     Column(
-        Modifier.fillMaxWidth().clip(shape)
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
             .background(
-                Brush.horizontalGradient(listOf(atmosphere.copy(alpha = .17f), colors.surfaceContainerLow)),
+                Brush.linearGradient(listOf(atmosphere.copy(alpha = .19f), colors.surfaceContainerLow, colors.background)),
             )
-            .padding(if (wide) 23.dp else 14.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(if (wide) 24.dp else 12.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Row(
             Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(if (wide) 25.dp else 14.dp),
         ) {
-            AnimePoster(subject, Modifier.width(if (wide) 142.dp else 96.dp).aspectRatio(2f / 3f))
+            AnimePoster(subject, Modifier.width(if (wide) 146.dp else 88.dp).aspectRatio(2f / 3f))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(if (wide) 8.dp else 5.dp)) {
                 Text(subject.title, Modifier.semantics { heading() },
                     style = if (wide) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.titleLarge,
@@ -394,21 +386,20 @@ private fun AnimeDetailActions(
 ) {
     val colors = MaterialTheme.colorScheme
     val play: @Composable (Modifier) -> Unit = { modifier ->
-        MotionButton(
-            onClick = { episode?.let(onPlay) },
-            enabled = episode != null && active,
+        if (episode != null) MotionButton(
+            onClick = { onPlay(episode) },
+            enabled = active,
             modifier = modifier.heightIn(min = 48.dp),
-            shape = RoundedCornerShape(18.dp),
+            shape = RoundedCornerShape(14.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = colors.onSurface, contentColor = colors.surface,
+                containerColor = colors.primary, contentColor = colors.onPrimary,
             ),
             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
         ) {
             Icon(Icons.Outlined.PlayArrow, null, Modifier.size(21.dp))
             Spacer(Modifier.width(6.dp))
             Text(
-                if (episode == null) "播放" else
-                    (if (progress != null) "继续 · " else "播放 · ") + animeEpisodeLabel(episode),
+                (if (progress != null) "继续观看　" else "播放　") + animeEpisodeLabel(episode),
                 maxLines = 2, overflow = TextOverflow.Ellipsis,
             )
         }

@@ -172,15 +172,27 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         show(selections[sourceId] ?: emptyState(), retain = false)
     }
 
-    fun selectSource(id: String) {
+    fun selectSource(id: String, keepSearch: Boolean = false) {
         if (disposed || id == sourceId || id != ALL && sources.none { it.id == id }) return
+        val previous = state.value
         retainCurrent(); cancelRequest(); cancelControls()
         sourceControls[sourceId] = controls.value
         sourceId = id
         mutableControls.value = (sourceControls[id] ?: ScopedSourceControls(selectedSource = id)).copy(sources = sources)
-        val previous = state.value
-        show(selections[id] ?: emptyState().copy(mode = previous.mode, period = previous.period,
-            audience = previous.audience), retain = false)
+        val destination = selections[id] ?: emptyState().copy(mode = previous.mode, period = previous.period,
+            audience = previous.audience)
+        // A source change from search narrows the current request. Native feed/filters
+        // and results still belong to the destination source and its revision.
+        val request = if (keepSearch) destination.copy(query = previous.query,
+            searchTarget = previous.searchTarget, selectedTags = previous.selectedTags) else destination
+        if (request.isSearch != destination.isSearch) {
+            val current = controls.value
+            val filters = if (request.isSearch) current.searchFilters
+                else current.feeds.firstOrNull { it.id == current.feedId }?.filters.orEmpty()
+            val options = optionSelections["$id:${current.feedId}:${request.isSearch}"].orEmpty()
+            mutableControls.value = current.copy(options = normalizeOptions(filters, options))
+        }
+        show(request, retain = false)
     }
 
     fun invalidateSource(id: String) {

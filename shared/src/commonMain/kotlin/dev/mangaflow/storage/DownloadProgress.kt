@@ -4,6 +4,7 @@ import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.NetworkFailureKind
 import dev.mangaflow.net.networkFailureKind
 import dev.mangaflow.data.SourceException
+import dev.mangaflow.data.sources.JmImageRefreshRequired
 import okio.IOException
 
 /** Live transfer facts never count as a saved page until validation and atomic publication finish. */
@@ -73,12 +74,14 @@ internal fun Exception.downloadRetryDelayMillis(): Long = when (this) {
 }
 
 internal fun Exception.downloadNeedsSourceRefresh(): Boolean =
-    (this as? PermanentDownloadException)?.needsSourceRefresh == true || downloadHttpStatus() in setOf(404, 410)
+    this is JmImageRefreshRequired || (this as? PermanentDownloadException)?.needsSourceRefresh == true ||
+        downloadHttpStatus() in setOf(404, 410)
 
 internal fun Exception.downloadFailureReason(): DownloadFailureReason = when {
     this is DownloadRouteException -> DownloadFailureReason.ROUTE
     this is DownloadStorageException -> DownloadFailureReason.STORAGE
     this is DownloadValidationException -> DownloadFailureReason.IMAGE
+    this is JmImageRefreshRequired -> DownloadFailureReason.SOURCE_EXPIRED
     this is PermanentDownloadException -> if (needsSourceRefresh) DownloadFailureReason.SOURCE_EXPIRED else DownloadFailureReason.IMAGE
     downloadHttpStatus() != null -> when (downloadHttpStatus()) {
         401, 403 -> DownloadFailureReason.AUTH
@@ -94,7 +97,8 @@ internal fun Exception.downloadFailureReason(): DownloadFailureReason = when {
 }
 
 internal fun Exception.canRetryDownload(): Boolean = when {
-    this is DownloadRouteException || this is DownloadStorageException || this is PermanentDownloadException -> false
+    this is DownloadRouteException || this is DownloadStorageException || this is PermanentDownloadException ||
+        this is JmImageRefreshRequired -> false
     this is DownloadValidationException -> true
     downloadHttpStatus() != null -> downloadHttpStatus()?.let { it == 408 || it == 429 || it in 500..599 } == true
     networkFailureKind(this) == NetworkFailureKind.TLS -> false

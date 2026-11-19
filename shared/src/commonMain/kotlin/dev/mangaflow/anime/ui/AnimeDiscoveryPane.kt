@@ -36,7 +36,8 @@ import dev.mangaflow.ui.platform.localToday
 @Composable
 internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController, backdrop: HazeState,
     scrolls: AnimeDiscoveryScrolls, onOpen: (AnimeSubject) -> Unit,
-    onChooseReference: (AnimeSourceTitle, Boolean) -> Unit, onBrowseSource: (String?) -> Unit, active: Boolean,
+    onChooseReference: (AnimeSourceTitle, Boolean) -> Unit, onBrowseSource: (String?) -> Unit,
+    onResume: (AnimeLibraryEntry) -> Unit, active: Boolean,
     contentBottomPadding: Dp = 24.dp) {
     fun open(item: AnimeDiscoveryItem) {
         item.subject?.let(onOpen) ?: item.reference?.let { onChooseReference(it, false) }
@@ -45,7 +46,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
         when (tab) {
             AnimeDiscoveryTab.HOME -> AnimeDiscoveryHome(state, controller, backdrop, scrolls, contentBottomPadding,
                 onOpen = ::open, onChooseReference = onChooseReference,
-                onBrowseSource = onBrowseSource,
+                onBrowseSource = onBrowseSource, onResume = onResume,
                 active = active && state.discoveryTab == tab)
             AnimeDiscoveryTab.SOURCES -> Unit
             else -> {
@@ -78,7 +79,8 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
 @Composable
 private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeController, backdrop: HazeState,
     scrolls: AnimeDiscoveryScrolls, contentBottomPadding: Dp, onOpen: (AnimeDiscoveryItem) -> Unit,
-    onChooseReference: (AnimeSourceTitle, Boolean) -> Unit, onBrowseSource: (String?) -> Unit, active: Boolean) {
+    onChooseReference: (AnimeSourceTitle, Boolean) -> Unit, onBrowseSource: (String?) -> Unit,
+    onResume: (AnimeLibraryEntry) -> Unit, active: Boolean) {
     val homeFeeds by controller.sourceBrowse.homeFeeds.collectAsStateWithLifecycle()
     val homeScroll = scrolls.grid("home")
     val availableFeeds = remember(homeFeeds) { homeFeeds.values.toList() }
@@ -140,10 +142,11 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
     LaunchedEffect(featured.isNotEmpty(), contentActive) {
         if (featured.isNotEmpty() && contentActive && !scrolls.placedHomeFeature) {
             scrolls.placedHomeFeature = true
-            // Lazy grids retain the leading key when a hero appears above the first tag.
+            // Lazy grids retain the leading key when a hero appears above the first section.
             // Expose the hero when the reader is still at the start; a scroll owns its anchor.
-            if (!homeScroll.isScrollInProgress && homeScroll.firstVisibleItemScrollOffset == 0 &&
-                homeScroll.layoutInfo.visibleItemsInfo.firstOrNull()?.key == "genre-shortcuts")
+            if (state.resumeEntry == null && !homeScroll.isScrollInProgress && homeScroll.firstVisibleItemScrollOffset == 0 &&
+                homeScroll.layoutInfo.visibleItemsInfo.firstOrNull()?.key in
+                setOf("latest-heading", "section:home:today", "section:home:season", "genre-shortcuts"))
                 homeScroll.requestScrollToItem(0)
         }
     }
@@ -154,8 +157,16 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
         val updatePreviewCount = if (columns == 1) 3 else columns
         LazyVerticalGrid(GridCells.Fixed(columns), state = homeScroll, modifier = Modifier.fillMaxSize(),
             userScrollEnabled = contentActive,
-            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = contentBottomPadding),
-            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 8.dp, bottom = contentBottomPadding),
+            horizontalArrangement = Arrangement.spacedBy(9.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            state.resumeEntry?.let { entry ->
+                item(key = "continue-watching", span = { GridItemSpan(maxLineSpan) }) {
+                    AnimeContinueWatching(entry,
+                        onResume = { if (contentActive) onResume(entry) },
+                        onDismiss = { if (contentActive) controller.dismissResume(entry.subject.id) },
+                        modifier = Modifier.motionInputGate(contentActive))
+                }
+            }
             if (featured.isNotEmpty()) item(key = "featured", span = { GridItemSpan(maxLineSpan) }) {
                 AnimeFeaturedCarousel(featured, active = contentActive, visible = contentActive && galleryInView,
                     selectedKey = scrolls.featuredKey, onSelected = { scrolls.featuredKey = it },
@@ -166,14 +177,10 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
                         }
                     })
             }
-            item(key = "genre-shortcuts", span = { GridItemSpan(maxLineSpan) }) {
-                AnimeGenreShortcuts(genres.provider, selected = null, active = contentActive, home = true,
-                    onSelect = { controller.configureDiscovery(AnimeDiscoveryTab.GENRES, genres.copy(tag = it)) })
-            }
             if (updateFeeds.isNotEmpty()) {
                 item(key = "latest-heading", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeDiscoverySectionHeading("片源更新",
-                        if (updateSourceCount > 1) "$updateSourceCount 个来源" else "",
+                    AnimeDiscoverySectionHeading("片源最近更新",
+                        if (updateSourceCount > 1) "$updateSourceCount 个来源" else "来源目录",
                         refreshing = updateFeeds.any { it.loading } && updates.isNotEmpty(),
                         expanded = scrolls.expandedUpdates,
                         moreLabel = if (scrolls.expandedUpdates) "收起片源更新" else "展开片源更新",
@@ -208,6 +215,10 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
                 animeHomeMetadataSection(section, state.discoveryFeeds[section.key], columns, contentActive, onOpen,
                     onMore = { controller.openDiscoverySection(section.key) },
                     onRetry = { controller.retryDiscovery(section.key) })
+            }
+            item(key = "genre-shortcuts", span = { GridItemSpan(maxLineSpan) }) {
+                AnimeGenreShortcuts(genres.provider, selected = null, active = contentActive, home = true,
+                    onSelect = { controller.configureDiscovery(AnimeDiscoveryTab.GENRES, genres.copy(tag = it)) })
             }
             if (selectedFeed != null) {
                 item(key = "home-source-selector", span = { GridItemSpan(maxLineSpan) }) {

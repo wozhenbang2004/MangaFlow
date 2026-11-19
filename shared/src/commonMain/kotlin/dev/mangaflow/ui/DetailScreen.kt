@@ -35,6 +35,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -74,8 +75,10 @@ import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -110,6 +113,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -166,12 +170,14 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
+import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.MotionTabContent
+import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionPress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -239,6 +245,7 @@ fun DetailScreen(
     preferredResumeChapter: Chapter? = null,
     onContinuePreferred: (() -> Unit)? = null,
     onOriginal: (MangaTag) -> Unit = {},
+    adultProfile: Boolean = false,
 ) {
     val current = detail?.manga ?: manga
     var pendingDownload by remember(current.id) { mutableStateOf<Chapter?>(null) }
@@ -327,7 +334,7 @@ fun DetailScreen(
             .memoryCacheKey("detail-cover:" + current.coverUrl + ":" + coverRetry).build()
     }
     // The sharp poster and blurred atmosphere share one request and one decoded image.
-    val coverPainter = rememberAsyncImagePainter(coverRequest, contentScale = ContentScale.Fit,
+    val coverPainter = if (adultProfile) ColorPainter(DetailSurface) else rememberAsyncImagePainter(coverRequest, contentScale = ContentScale.Fit,
         onError = { if (current.coverUrl.isNotBlank()) coverFailed = true }, onSuccess = { result ->
             coverFailed = false
             coverBitmap = result.result.image
@@ -446,6 +453,49 @@ fun DetailScreen(
         }
     }
 
+    if (adultProfile) {
+        val first = chapters.firstOrNull()
+        BoxWithConstraints(Modifier.fillMaxSize().background(DetailBackground).screenFitViewport().imePadding()
+            .mangaHazeSource(readingBackdrop)) {
+            val bottom = screenFitContentInsets().asPaddingValues().calculateBottomPadding()
+            val wide = maxWidth >= 840.dp && maxHeight >= 400.dp
+            val compact = !wide && maxHeight < 530.dp
+            val summary: @Composable () -> Unit = {
+                AdultBookOpening(current, repository, resume, first, active, compact,
+                    onContinue = onContinue, onRead = onRead, onRestart = onRestart)
+            }
+            Column(Modifier.align(Alignment.TopCenter).widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
+                .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    MotionIconButton(onClick = onBack, enabled = active, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(21.dp))
+                    }
+                    Text("作品详情", Modifier.weight(1f).padding(start = 6.dp),
+                        style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    MotionIconButton(onClick = { fullIntroduction = true }, enabled = active, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Outlined.Info, "作品简介与标签", Modifier.size(20.dp))
+                    }
+                    MotionIconButton(onClick = {
+                        feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm)
+                        onToggleFavorite()
+                    }, enabled = active, modifier = Modifier.size(44.dp)) {
+                        Icon(if (isFavorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
+                            if (isFavorite) "移出成人书架" else "加入成人书架", Modifier.size(21.dp),
+                            tint = if (isFavorite) MaterialTheme.colorScheme.primary else DetailForeground)
+                    }
+                }
+                HorizontalDivider(color = DetailLine)
+                if (wide) Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Column(Modifier.width(320.dp).verticalScroll(rememberScrollState())) { summary() }
+                    sectionPane(Modifier.weight(1f).fillMaxHeight(), 12.dp + bottom)
+                } else {
+                    summary()
+                    HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = DetailLine)
+                    sectionPane(Modifier.weight(1f).fillMaxWidth(), 12.dp + bottom)
+                }
+            }
+        }
+    } else {
     Box(Modifier.fillMaxSize().background(informationTone)) {
     BoxWithConstraints(
         Modifier.fillMaxSize().align(Alignment.TopCenter)
@@ -764,6 +814,7 @@ fun DetailScreen(
             onRetryCloudProgress = onRetryCloudProgress)
     }
     }
+    }
     if (fullIntroduction) DetailIntroduction(current, backdrop = readingBackdrop,
         onAuthor = onAuthor?.let { action -> { name -> fullIntroduction = false; action(current, name) } },
         onTag = onTag?.let { action -> { tag -> fullIntroduction = false; action(current, tag) } },
@@ -782,6 +833,55 @@ fun DetailScreen(
                 },
                 onDismiss = { if (pendingDownload == pending) { pendingDownload = null; pendingDownloadAnchor = null } },
                 anchor = pendingDownloadAnchor, repository = repository)
+        }
+    }
+}
+
+@Composable
+private fun AdultBookOpening(
+    manga: Manga, repository: MangaRepository?, resume: ReadingProgress?, first: Chapter?,
+    active: Boolean, compact: Boolean, onContinue: (ReadingProgress) -> Unit,
+    onRead: (Chapter) -> Unit, onRestart: (Chapter) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = if (compact) 8.dp else 14.dp),
+        verticalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 10.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(13.dp)) {
+            if (!compact && repository != null) MangaCover(manga, repository,
+                Modifier.width(66.dp).height(96.dp).mangaCoverCard(9.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(manga.title, style = if (compact) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
+                    fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontWeight = FontWeight.SemiBold,
+                    maxLines = if (compact) 1 else 3, overflow = TextOverflow.Ellipsis)
+                if (!compact && manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
+                    style = MaterialTheme.typography.bodySmall, color = DetailSecondary,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                MangaBrowseSource(manga)
+            }
+        }
+        if (resume != null || first != null) {
+            val location = resume?.let { progress ->
+                listOfNotNull(progress.chapterTitle.takeIf(String::isNotBlank),
+                    "第 ${progress.pageIndex + 1} 页".takeIf { progress.pageCount > 0 }).joinToString(" · ")
+            }.orEmpty()
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MotionButton(onClick = { if (resume != null) onContinue(resume) else first?.let(onRead) },
+                    enabled = active, modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp)) {
+                    Icon(Icons.Outlined.PlayArrow, null, Modifier.size(18.dp))
+                    Column(Modifier.weight(1f).padding(start = 5.dp)) {
+                        Text(if (resume != null) "继续阅读" else "开始阅读",
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (!compact && location.isNotBlank()) Text(mangaNumberText(location),
+                            style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                if (resume != null && first != null) MotionTextButton(onClick = { onRestart(first) }, enabled = active,
+                    contentPadding = PaddingValues(horizontal = 8.dp)) {
+                    Text("从头读", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                }
+            }
         }
     }
 }

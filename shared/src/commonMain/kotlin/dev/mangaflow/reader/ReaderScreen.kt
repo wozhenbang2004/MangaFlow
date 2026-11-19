@@ -106,6 +106,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
+import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Source
@@ -122,6 +123,7 @@ import androidx.compose.material.icons.automirrored.rounded.MenuBook
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Tune
+import dev.mangaflow.experience.ReaderStatusPlacement
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -320,6 +322,7 @@ fun ReaderScreen(
     onUndoSourceSwitch: () -> Unit = {},
     onPrefetchPageFailed: (Chapter, Page) -> Unit = { _, _ -> },
     onCancelSourceStandbys: () -> Unit = {},
+    compactChrome: Boolean = false,
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     val adultImageContext = LocalContext.current
@@ -414,6 +417,9 @@ fun ReaderScreen(
     var topControlsHeightPx by remember { mutableIntStateOf(0) }
     var bottomControlsHeightPx by remember { mutableIntStateOf(0) }
     var readerStatusInspecting by remember(chapterId) { mutableStateOf(false) }
+    var statusRequest by remember(chapterId) { mutableIntStateOf(0) }
+    val statusPlacement = if (compactChrome) experience.overrides.collectAsStateWithLifecycle().value.readerStatusPlacement
+        else ReaderStatusPlacement.HIDDEN
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showPanelModels by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) { if (!PanelReadingAvailable) showPanelModels = false }
@@ -1286,7 +1292,9 @@ fun ReaderScreen(
                 state = readerBackdrop,
                 role = GlassSurfaceRole.NAVIGATION,
                 trackPointer = true,
-                softCard = true,
+                softCard = !compactChrome,
+                cornerRadius = if (compactChrome) 16.dp else 22.dp,
+                elevation = if (compactChrome) 0.dp else null,
                 modifier = Modifier.widthIn(max = MangaLayout.ListWidth).fillMaxWidth()
                     .hoverable(topChromeInteraction, enabled = desktop)
                     .then(if (desktop) Modifier.onFocusChanged { topChromeFocused = it.hasFocus }.focusGroup() else Modifier)
@@ -1295,18 +1303,23 @@ fun ReaderScreen(
                     .padding(horizontal = 12.dp, vertical = 4.dp),
             ) {
                 // Retain Surface's input shield on blank chrome without consuming child gestures.
-                Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).pointerInput(Unit) {}.padding(horizontal = 4.dp),
+                Row(Modifier.fillMaxWidth().heightIn(min = if (compactChrome) 48.dp else 52.dp)
+                    .pointerInput(Unit) {}.padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回漫画详情", interactive = controlsVisible, onClick = leaveReader)
+                    ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回漫画详情", interactive = controlsVisible,
+                        buttonSize = if (compactChrome) 44.dp else 48.dp, onClick = leaveReader)
                     Column(Modifier.weight(1f).padding(start = 2.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)) {
                         Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(listOfNotNull(chapter.group.takeIf { hasMultipleGroups }, chapter.title,
+                        val subtitle = listOfNotNull(chapter.group.takeIf { hasMultipleGroups }, chapter.title.takeUnless {
+                            compactChrome && (it == manga.title || chapters.size == 1)
+                        },
                             repairState.replacements[pageIndex]?.let {
                                 "补页 · ${it.variant.sourceName} ${it.page.index + 1}"
                             },
-                            currentSourceName.takeIf { chapter.variants.size > 1 }).joinToString(" · "),
-                            color = colors.onSurface.copy(alpha = .86f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            currentSourceName.takeIf { chapter.variants.size > 1 }).joinToString(" · ")
+                        if (subtitle.isNotBlank()) Text(subtitle, color = colors.onSurface.copy(alpha = .76f),
+                            fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     if (preferences.panelEngine == PanelEngine.OFF &&
                         (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT)) {
@@ -1327,8 +1340,12 @@ fun ReaderScreen(
                     if (desktop) ReaderIcon(Icons.AutoMirrored.Outlined.MenuBook,
                         if (showChapters) "收起章节目录" else "章节目录", interactive = controlsVisible,
                         emphasis = if (showChapters) 1f else .82f, onClick = ::toggleReaderChapters)
+                    if (compactChrome && statusPlacement == ReaderStatusPlacement.TOP) ReaderIcon(
+                        Icons.Outlined.AccountTree, "阅读状态", interactive = controlsVisible && !showReaderActions,
+                        buttonSize = 44.dp, onClick = { statusRequest++ })
                     ReaderIcon(Icons.Rounded.Tune, if (desktop) "阅读设置与快捷键" else "阅读设置",
                         interactive = controlsVisible, emphasis = if (showSettings) 1f else .82f,
+                        buttonSize = if (compactChrome) 44.dp else 48.dp,
                         onClick = ::toggleReaderSettings)
                 }
             }
@@ -1351,9 +1368,10 @@ fun ReaderScreen(
                     state = readerBackdrop,
                     role = GlassSurfaceRole.READING_DOCK,
                     trackPointer = true,
-                    softCard = true,
+                    softCard = !compactChrome,
                     modifier = Modifier.fillMaxWidth(),
-                    cornerRadius = 22.dp,
+                    cornerRadius = if (compactChrome) 16.dp else 22.dp,
+                    elevation = if (compactChrome) 0.dp else null,
                 ) {
                     Column(Modifier.fillMaxWidth().pointerInput(Unit) {}
                         .padding(horizontal = 10.dp, vertical = 4.dp)) {
@@ -1398,17 +1416,18 @@ fun ReaderScreen(
                             val canCorrectSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage &&
                                 preferences.mode in setOf(ReadingMode.RIGHT_TO_LEFT, ReadingMode.LEFT_TO_RIGHT)
                             // Keep download in the final slot; disclose only actions that need overflow.
-                            val reserveSecondarySlot = maxWidth < 264.dp || canCorrectSpread ||
+                            val reserveSecondarySlot = compactChrome || maxWidth < 264.dp || canCorrectSpread ||
                                 returnLocation != null || (canChooseSource && pages.isEmpty())
-                            val finalSlots = if (reserveSecondarySlot) 2 else 1
+                            val statusInDock = compactChrome && statusPlacement == ReaderStatusPlacement.BOTTOM
+                            val finalSlots = (if (reserveSecondarySlot) 2 else 1) + if (statusInDock) 1 else 0
                             val inlineChapterNavigation = maxWidth >= (((if (desktop) 2 else 3) + finalSlots) * 44).dp
                             val inlineCatalog = !desktop && maxWidth >= ((1 + finalSlots) * 44).dp
                             val chapterSlots = if (inlineChapterNavigation) (if (desktop) 2 else 3)
                                 else if (inlineCatalog) 1 else 0
                             val extraSlots = ((maxWidth.value - (chapterSlots + finalSlots) * 44f) / 44f)
                                 .toInt().coerceIn(0, 2)
-                            val inlinePicture = extraSlots >= 1
-                            val inlineComments = extraSlots >= 2
+                            val inlinePicture = !compactChrome && extraSlots >= 1
+                            val inlineComments = !compactChrome && extraSlots >= 2
                             val pictureLabel = if (currentPictureCollected) "取消画面收藏"
                                 else if (currentPicture?.spread == true) "收藏当前跨页" else "收藏当前画面"
                             val pictureIcon = if (currentPictureCollected) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder
@@ -1472,14 +1491,14 @@ fun ReaderScreen(
                                 }
                             }
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                if (inlineChapterNavigation) ReaderIcon(
+                                if (inlineChapterNavigation && (!compactChrome || openPreviousChapter != null)) ReaderIcon(
                                     Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "上一章",
                                     enabled = chapterIndex > 0, interactive = controlsVisible,
                                     buttonSize = 44.dp, onClick = openPrevious)
                                 if (inlineCatalog) ReaderIcon(
                                     Icons.AutoMirrored.Outlined.MenuBook, "章节目录", interactive = controlsVisible,
                                     buttonSize = 44.dp, onClick = ::toggleReaderChapters)
-                                if (inlineChapterNavigation) ReaderIcon(
+                                if (inlineChapterNavigation && (!compactChrome || openNextChapter != null)) ReaderIcon(
                                     Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
                                     enabled = openNextChapter != null && !chapterChangeRequested,
                                     interactive = controlsVisible, buttonSize = 44.dp,
@@ -1491,6 +1510,9 @@ fun ReaderScreen(
                                 if (inlineComments) ReaderIcon(
                                     Icons.Outlined.Forum, commentsLabel, enabled = pages.isNotEmpty() && !localImport,
                                     interactive = controlsVisible, buttonSize = 44.dp, onClick = { showComments = true })
+                                if (statusInDock) ReaderIcon(Icons.Outlined.AccountTree, "阅读状态",
+                                    interactive = controlsVisible && !showReaderActions, buttonSize = 44.dp,
+                                    onClick = { statusRequest++ })
                                 key(chapterId) {
                                     Box {
                                         if (secondaryActions) ReaderIcon(Icons.Outlined.MoreHoriz, "其他阅读操作", interactive = controlsVisible,
@@ -1574,8 +1596,10 @@ fun ReaderScreen(
         ReaderExperienceStatus(
             visible = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
                 !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking &&
-                !chapterChangeRequested && !showReaderActions && !readerActionsPresent && repairState.selection == null,
+                !chapterChangeRequested && !showReaderActions && !readerActionsPresent && repairState.selection == null &&
+                (!compactChrome || controlsVisible && !showSettings && !showChapters),
             sessionKey = sourceIdentity, store = experience, budget = experienceBudget,
+            inspectRequest = statusRequest.takeIf { compactChrome },
             standbys = currentSourceStandbys, alternativeCount = alternativeSources.size, backdrop = readerBackdrop,
             preparation = preparation,
             repairedPages = repairState.replacements.size, repairBusy = repairState.busy, repairReason = repairState.reason,
