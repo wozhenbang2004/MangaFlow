@@ -22,6 +22,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.mangaflow.anime.player.Anime4KOptionalModels
 import dev.mangaflow.enhancement.EnhancementCenter
 import dev.mangaflow.enhancement.EnhancementContent
 import dev.mangaflow.enhancement.engine.*
@@ -38,10 +39,31 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private data class ModelChoice(val key: String, val model: EngineModel?, val offer: EnhancementModelOffer?) {
-    val title: String get() = offer?.title ?: checkNotNull(model).title
-    val engineId: String get() = model?.engineId ?: checkNotNull(offer).engineId
-    val scale: Int get() = model?.nativeScale ?: checkNotNull(offer).scale
+private data class ModelChoice(
+    val key: String,
+    val model: EngineModel?,
+    val offer: EnhancementModelOffer?,
+    val profile: EngineDescriptor? = null,
+) {
+    val title: String get() = offer?.title ?: model?.title ?: checkNotNull(profile).title
+    val engineId: String get() = model?.engineId ?: offer?.engineId ?: checkNotNull(profile).id
+    val builtIn: Boolean get() = profile?.readiness == EngineReadiness.BUILT_IN
+    val selectionId: String? get() = model?.id ?: profile?.id?.takeIf { builtIn }
+    val scales: Set<Int> get() = profile?.supportedScales ?: setOf(model?.nativeScale ?: checkNotNull(offer).scale)
+    val scaleLabel: String get() = scales.sorted().joinToString(" / ") { "$it×" }
+    val sizeLabel: String? get() = model?.let { enhancementBytes(it.bytes) } ?: offer?.sizeLabel
+        ?: profile?.downloadBytes?.let(::enhancementBytes)
+    val progressKey: String? get() = offer?.let { "model:${it.id}" } ?: profile?.id
+
+    fun stateLabel(selectedModel: String?, pending: EngineProgress?): String = when {
+        selectionId != null && selectionId == selectedModel -> if (builtIn) "内置 · 已选用" else "已选用"
+        builtIn -> "内置 · 可直接选用"
+        model != null -> "已安装"
+        pending?.failed == true -> "下载失败 · 可重试"
+        pending?.installing() == true -> pending.shortProgress()
+        profile != null && !profile.canInstall -> "模型待检查"
+        else -> "可下载"
+    }
 }
 
 private fun EngineDescriptor.matches(content: EnhancementContent): Boolean =
@@ -49,7 +71,13 @@ private fun EngineDescriptor.matches(content: EnhancementContent): Boolean =
     else contents.any { it != EngineContent.VIDEO }
 
 private fun modelChoices(inventory: EngineInventory, content: EnhancementContent): List<ModelChoice> {
-    val engines = inventory.engines.filter { it.matches(content) }.map { it.id }.toSet()
+    val compatibleEngines = inventory.engines.filter { it.matches(content) }
+    val engines = compatibleEngines.map { it.id }.toSet()
+    val profiles = compatibleEngines.filter {
+        it.id in setOf(EnhancementEngineIds.ANIME4K_SMALL, EnhancementEngineIds.ANIME4K_MEDIUM) ||
+            Anime4KOptionalModels.supports(it.id)
+    }
+    val profileIds = profiles.map { it.id }.toSet()
     val models = inventory.models.filter {
         it.engineId in engines && (EngineContent.VIDEO in it.contents) == (content == EnhancementContent.ANIME)
     }.distinctBy { it.engineId to it.sha256 }
@@ -57,13 +85,18 @@ private fun modelChoices(inventory: EngineInventory, content: EnhancementContent
         it.engineId in engines && (EngineContent.VIDEO in it.contents) == (content == EnhancementContent.ANIME)
     }.distinctBy { it.engineId to it.sha256 }
     val published = offers.map { it.engineId to it.sha256 }.toSet()
-    return (offers.map { offer ->
+    val files = (offers.map { offer ->
         ModelChoice("offer:${offer.id}", models.firstOrNull {
             it.engineId == offer.engineId && it.sha256 == offer.sha256
         }, offer)
-    } + models.filter { (it.engineId to it.sha256) !in published }.map {
+    } + models.filter { it.engineId !in profileIds && (it.engineId to it.sha256) !in published }.map {
         ModelChoice("model:${it.id}", it, null)
     }).sortedWith(compareByDescending<ModelChoice> { it.model != null }.thenBy { it.title })
+    // Built-in profiles have no separate model file. Optional profiles keep the same page key
+    // while their verified installation appears, so the download action can become selection.
+    return profiles.map { profile ->
+        ModelChoice("engine:${profile.id}", models.firstOrNull { it.engineId == profile.id }, null, profile)
+    } + files
 }
 
 private fun EngineProgress.installing(): Boolean = !failed && stage in setOf(
@@ -93,22 +126,16 @@ internal fun EnhancementModelList(
     ModelListTools("可选模型", onImport, onRefresh)
     if (choices.isEmpty()) EnhancementQuiet("还没有可选模型，可先准备运行组件或导入模型。")
     choices.forEach { choice ->
-        val pending = choice.offer?.let { progress["model:${it.id}"] }
-        val selected = choice.model?.id == selectedModel && selectedModel != null
-        val state = when {
-            selected -> "已选用"
-            choice.model != null -> "已安装"
-            pending?.failed == true -> "下载失败 · 可重试"
-            pending?.installing() == true -> pending.shortProgress()
-            else -> "可下载"
-        }
-        val bytes = choice.model?.let { enhancementBytes(it.bytes) } ?: choice.offer?.sizeLabel
-        val summary = listOfNotNull("${choice.scale}×", bytes, state).joinToString(" · ")
+        val pending = choice.progressKey?.let { progress[it] }
+        val selectionId = choice.selectionId
+        val selected = selectionId != null && selectionId == selectedModel
+        val summary = listOfNotNull(choice.scaleLabel, choice.sizeLabel,
+            choice.stateLabel(selectedModel, pending)).joinToString(" · ")
         key(choice.key) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                ModelChoiceRow(choice.title, summary, selected, choice.model != null,
-                    onClick = { choice.model?.let { onSelectModel(it.id) } ?: onOpenModel(choice.key) },
-                    modifier = Modifier.weight(1f), failed = pending?.failed == true && choice.model == null)
+                ModelChoiceRow(choice.title, summary, selected, selectionId != null,
+                    onClick = { if (selectionId != null) onSelectModel(selectionId) else onOpenModel(choice.key) },
+                    modifier = Modifier.weight(1f), failed = pending?.failed == true && selectionId == null)
                 MotionIconButton(onClick = { onOpenModel(choice.key) }, modifier = Modifier.size(44.dp),
                     tooltip = "${choice.title} · 详情") {
                     Icon(Icons.Outlined.Info, "${choice.title} · 详情", Modifier.size(19.dp),
@@ -117,8 +144,8 @@ internal fun EnhancementModelList(
             }
         }
     }
-    if (selectedModel != null && choices.none { it.model?.id == selectedModel })
-        EnhancementQuiet("所选模型当前不在已安装列表中，可重新检查或选择其他模型。")
+    if (selectedModel != null && choices.none { it.selectionId == selectedModel })
+        EnhancementQuiet("所选模型当前不可用，可重新检查或选择其他模型。")
     progress["inventory"]?.takeIf { it.failed }?.detail?.let { EnhancementQuiet(it, error = true) }
     EnhancementDivider()
     AnimeEnhancementNavigation(Icons.Outlined.Memory, "运行组件", onClick = onOpenEngines)
@@ -196,8 +223,9 @@ internal fun EnhancementModelDetail(
     }
     val model = choice.model
     val offer = choice.offer
-    val engine = inventory.engines.firstOrNull { it.id == choice.engineId }
-    val pending = offer?.let { progress["model:${it.id}"] }
+    val engine = choice.profile ?: inventory.engines.firstOrNull { it.id == choice.engineId }
+    val pending = choice.progressKey?.let { progress[it] }
+    val selectionId = choice.selectionId
     val scope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
     var downloading by remember(modelKey) { mutableStateOf(false) }
@@ -205,12 +233,12 @@ internal fun EnhancementModelDetail(
     var noticeFailed by remember(modelKey) { mutableStateOf(false) }
     val busy = downloading || pending?.installing() == true
     Text(choice.title, style = MaterialTheme.typography.titleMedium)
-    EnhancementQuiet(listOfNotNull("${choice.scale}×", model?.let { enhancementBytes(it.bytes) } ?: offer?.sizeLabel,
-        if (model == null) "尚未安装" else if (model.id == selectedModel) "已选用" else "已安装").joinToString(" · "))
-    if (model != null) {
-        MotionButton({ onSelectModel(model.id) }, modifier = Modifier.fillMaxWidth(), enabled = selectedModel != model.id) {
-            Icon(if (selectedModel == model.id) Icons.Outlined.Check else Icons.Outlined.RadioButtonUnchecked, null, Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp)); Text(if (selectedModel == model.id) "已选用此模型" else "使用此模型")
+    EnhancementQuiet(listOfNotNull(choice.scaleLabel, choice.sizeLabel,
+        choice.stateLabel(selectedModel, pending)).joinToString(" · "))
+    if (selectionId != null) {
+        MotionButton({ onSelectModel(selectionId) }, modifier = Modifier.fillMaxWidth(), enabled = selectedModel != selectionId) {
+            Icon(if (selectedModel == selectionId) Icons.Outlined.Check else Icons.Outlined.RadioButtonUnchecked, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp)); Text(if (selectedModel == selectionId) "已选用此模型" else "使用此模型")
         }
     } else if (offer != null) {
         MotionButton(onClick = {
@@ -228,27 +256,42 @@ internal fun EnhancementModelDetail(
             Icon(Icons.Outlined.Download, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
             Text(if (busy) pending?.shortProgress() ?: "准备下载" else if (pending?.failed == true || noticeFailed) "重试下载" else "下载并安装")
         }
+    } else if (engine != null && (engine.canInstall || busy)) {
+        MotionButton({ center.installEngine(engine.id) }, modifier = Modifier.fillMaxWidth(),
+            enabled = engine.canInstall && !busy) {
+            Icon(Icons.Outlined.Download, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
+            Text(if (busy) pending?.shortProgress() ?: "准备下载"
+                else if (pending?.failed == true) "重试下载" else "下载并安装")
+        }
+    } else if (choice.profile != null) {
+        MotionButton({ center.refreshInventory() }, modifier = Modifier.fillMaxWidth()) { Text("重新检查安装") }
     }
     val feedback = pending?.takeIf { it.failed }?.detail ?: notice
+        ?: "已安装，可点击使用此模型。".takeIf {
+            choice.profile != null && model != null && pending?.stage == EngineStage.COMPLETE && selectionId != selectedModel
+        }
     feedback?.let { EnhancementQuiet(it, error = pending?.failed == true || noticeFailed) }
     if (busy && pending?.detail != null && !pending.failed) EnhancementQuiet(pending.detail)
-    if (scale != choice.scale) EnhancementQuiet("当前输出为 ${scale}×，模型原生倍率为 ${choice.scale}×；选用不会改变输出设置。")
+    if (scale !in choice.scales) EnhancementQuiet("当前输出为 ${scale}×，此模型支持 ${choice.scaleLabel}；选用不会改变输出设置。")
     if (engine != null) AnimeEnhancementNavigation(Icons.Outlined.Memory, "运行组件",
         "${engine.title} · ${engineReadinessLabel(engine.readiness)}", onClick = { onOpenEngine(engine.id) })
     EnhancementDivider()
-    offer?.detail?.let { EnhancementQuiet(it) }
-    EnhancementValue("适用内容", (model?.contents ?: offer?.contents.orEmpty()).joinToString(" · ", transform = ::modelContentLabel))
-    model?.let { EnhancementValue("版本", it.version) }
-    EnhancementValue("许可", model?.license ?: offer?.license.orEmpty())
+    (offer?.detail ?: choice.profile?.detail)?.let { EnhancementQuiet(it) }
+    if (choice.profile != null) EnhancementQuiet("用于即时播放增强，不生成完整离线增强视频。")
+    EnhancementValue("适用内容", (model?.contents ?: offer?.contents ?: choice.profile?.contents.orEmpty())
+        .joinToString(" · ", transform = ::modelContentLabel))
+    (model?.version ?: choice.profile?.version)?.let { EnhancementValue("版本", it) }
+    EnhancementValue("许可", model?.license ?: offer?.license ?: choice.profile?.license.orEmpty())
     val source = offer?.sourceUrl ?: engine?.sourceUrl
     if (!source.isNullOrBlank()) MotionTextButton({ uriHandler.openUri(source) }, contentPadding = PaddingValues(horizontal = 0.dp)) {
         Icon(Icons.Outlined.Link, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
         Text(if (offer != null) "模型来源" else "组件来源")
     }
-    Text("SHA-256", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    SelectionContainer {
-        Text(model?.sha256 ?: offer?.sha256.orEmpty(), style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    (model?.sha256 ?: offer?.sha256)?.let { digest ->
+        Text("SHA-256", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SelectionContainer {
+            Text(digest, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 

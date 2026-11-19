@@ -176,10 +176,14 @@ object EnhancementEngineIds {
     const val DESKTOP_REALTIME = "animejanai-realtime"
     const val DESKTOP_REALTIME_RIFE = "animejanai-realtime-rife"
     const val DESKTOP_ARTCNN = "artcnn-glsl"
+    const val ANIME4K_SMALL = "anime4k-small"
+    const val ANIME4K_MEDIUM = "anime4k-medium"
 }
 
-internal fun anime4kEngineDescriptors(): List<EngineDescriptor> = listOf("small" to "S/S", "medium" to "M/M").map { (size, profile) ->
-    EngineDescriptor("anime4k-$size", "Anime4K $profile", "7684e9586f8d", "MIT",
+internal fun anime4kEngineDescriptors(): List<EngineDescriptor> = listOf(
+    EnhancementEngineIds.ANIME4K_SMALL to "S/S", EnhancementEngineIds.ANIME4K_MEDIUM to "M/M",
+).map { (id, profile) ->
+    EngineDescriptor(id, "Anime4K $profile", "7684e9586f8d", "MIT",
         "https://github.com/bloc97/Anime4K/tree/7684e9586f8dcc738af08a1cdceb024cc184f426",
         EngineReadiness.BUILT_IN, "1× 修复 / 2× 修复与放大；运行效果和长期负载需以此设备的真实观测为准",
         setOf(1, 2), setOf(EngineContent.VIDEO), realtime = true)

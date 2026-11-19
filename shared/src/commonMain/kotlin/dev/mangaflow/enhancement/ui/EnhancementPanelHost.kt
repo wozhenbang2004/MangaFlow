@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -114,7 +115,11 @@ internal fun EnhancementPanelHost(
                             backdrop ?: fallbackBackdrop, panelModifier,
                             cornerRadius = 24.dp,
                             role = GlassSurfaceRole.PANEL,
-                        ) { content() }
+                        ) {
+                            // Keep the existing frosted shell while isolating dense text from comic ink.
+                            Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface.copy(alpha = .94f)),
+                                propagateMinConstraints = true) { content() }
+                        }
                     }
                 }
             }

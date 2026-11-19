@@ -699,37 +699,45 @@ internal class AndroidAnimePlayer(
                 applyRealtimeMotion(generation, exo, revision)
                 return
             }
+            val preparedModel = options.preparedVideoModel
+            val preparedFrames: (() -> AndroidPreparedWindow?)? = preparedModel?.let { model ->
+                { preparedVideo?.takeIf { it.request.model == model } }
+            }
+            var lastPreparedReport = 0L
+            var preparedFramesUsed = 0L
+            var lastPreparedWindow: AndroidPreparedWindow? = null
+            val reportPrepared: (AndroidPreparedWindow, () -> Boolean) -> Unit = preparedFrame@{ window, programIsCurrent ->
+                if (!programIsCurrent()) return@preparedFrame
+                val time = SystemClock.elapsedRealtime()
+                if (lastPreparedWindow !== window) {
+                    lastPreparedWindow = window
+                    preparedFramesUsed = 0L
+                    lastPreparedReport = 0L
+                }
+                preparedFramesUsed++
+                if (lastPreparedReport == 0L || time - lastPreparedReport >= 250L) {
+                    lastPreparedReport = time
+                    val completed = preparedFramesUsed
+                    playerScope.launch(Dispatchers.Main.immediate) {
+                        if (isCurrent(generation) && engine.value === exo && enhancementRevision == revision &&
+                            !nativeVideoOnly && programIsCurrent() && options.preparedVideoModel == preparedModel &&
+                            preparedVideo === window) {
+                            publish(generation) { it.copy(preparedVideoWindow =
+                                window.receipt.copy(framesUsed = completed, lastUsedAt = time)) }
+                        }
+                    }
+                }
+            }
             val effects: List<Effect> = if (mode == AnimeVideoEnhancementMode.OFF) {
-                options.preparedVideoModel?.nativeScale?.let { scale ->
+                preparedModel?.nativeScale?.let { scale ->
                     listOf(GlEffect { _, hdr ->
                         if (hdr) androidx.media3.effect.PassthroughShaderProgram()
-                        else {
-                            var lastReport = 0L
-                            var framesUsed = 0L
-                            var lastWindow: AndroidPreparedWindow? = null
-                            AndroidPreparedFrameProgram(scale, { preparedVideo }) { window ->
-                                val time = SystemClock.elapsedRealtime()
-                                if (lastWindow !== window) {
-                                    lastWindow = window
-                                    framesUsed = 0L
-                                    lastReport = 0L
-                                }
-                                framesUsed++
-                                if (lastReport == 0L || time - lastReport >= 250L) {
-                                    lastReport = time
-                                    val completed = framesUsed
-                                    playerScope.launch(Dispatchers.Main.immediate) {
-                                        if (isCurrent(generation) && enhancementRevision == revision && preparedVideo === window)
-                                            publish(generation) { it.copy(preparedVideoWindow =
-                                                window.receipt.copy(framesUsed = completed, lastUsedAt = time)) }
-                                    }
-                                }
-                            }
-                        }
+                        else AndroidPreparedFrameProgram(scale, checkNotNull(preparedFrames), reportPrepared)
                     })
                 }.orEmpty()
             } else listOf(
-                AndroidAnime4KEffect(mode, options.enhancementScale, shaderProfile) { observation, programIsCurrent ->
+                AndroidAnime4KEffect(mode, options.enhancementScale, shaderProfile,
+                    prepared = preparedFrames, onPreparedFrame = reportPrepared) { observation, programIsCurrent ->
                     val observedAt = SystemClock.elapsedRealtime()
                     // The callback originates on Media3's GL thread. Both backend and mode
                     // revision must still own this observation when Main finally consumes it.

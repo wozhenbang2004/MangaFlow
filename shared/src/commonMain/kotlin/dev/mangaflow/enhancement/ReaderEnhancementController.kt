@@ -48,6 +48,8 @@ data class ReaderEnhancementState(
     val cacheHits: Long = 0L,
     val cacheLookups: Long = 0L,
     val assets: Map<Int, ReaderEnhancedPage> = emptyMap(),
+    val currentTask: EnhancementTask? = null,
+    val manuallyStoppedTaskIds: Set<String> = emptySet(),
 )
 
 /**
@@ -70,12 +72,16 @@ internal class ReaderEnhancementController(
     private val lock = StorageLock()
     private val originals = mutableMapOf<Int, Original>()
     private val pending = mutableMapOf<Int, Pending>()
+    private val lastAttempts = mutableMapOf<Int, Attempt>()
+    private val manuallyStopped = mutableMapOf<Int, Attempt>()
     private val failed = mutableMapOf<Int, String>()
     private val cacheMisses = mutableMapOf<Int, String>()
+    private val details = mutableMapOf<Int, String>()
     private val held = mutableMapOf<Int, EnhancedAssetLease>()
     private val assets = mutableMapOf<Int, ReaderEnhancedPage>()
     private val durations = ArrayDeque<Long>()
     private var generation = 0L
+    private var nextAttempt = 0L
     private var policy = EnhancementPolicy()
     private var wanted = emptySet<Int>()
     private var current = 0
@@ -85,7 +91,6 @@ internal class ReaderEnhancementController(
     private var pagesPerSecond = 0.0
     private var cacheHits = 0L
     private var cacheLookups = 0L
-    private var detail: String? = null
     private val mutableState = MutableStateFlow(ReaderEnhancementState())
     val state: StateFlow<ReaderEnhancementState> = mutableState.asStateFlow()
 
@@ -93,6 +98,7 @@ internal class ReaderEnhancementController(
         val diskKey: String, val identity: String)
     private data class Pending(val id: String, val original: Original, val generation: Long,
         val policy: EnhancementPolicy, val job: Job)
+    private data class Attempt(val id: String, val originalIdentity: String, val generation: Long)
     private data class Validity(val closed: Boolean = false, val generation: Long = 0L,
         val wanted: Set<Int> = emptySet(), val originalIds: Map<Int, String> = emptyMap(),
         val pendingIds: Map<Int, String> = emptyMap())
@@ -103,7 +109,10 @@ internal class ReaderEnhancementController(
 
     init {
         scope.launch { center.scheduler.state.collect { synchronized(lock) { if (!closed) publishLocked() } } }
-        scope.launch { center.inventory.collect { synchronized(lock) { if (!closed) { detail = null; failed.clear() } }; retryUseful() } }
+        scope.launch { center.inventory.collect {
+            synchronized(lock) { if (!closed) clearFailuresLocked() }
+            retryUseful()
+        } }
         scope.launch { cache.revision.map { it[content.directory] }.distinctUntilChanged().collect {
             synchronized(lock) { cacheMisses.clear() }
             retryUseful()
@@ -111,6 +120,21 @@ internal class ReaderEnhancementController(
     }
 
     private fun retryUseful() = synchronized(lock) { wanted.toList() }.forEach(::queueIfUseful)
+
+    private fun cancelPendingLocked(index: Int, reason: String) {
+        val previous = pending.remove(index) ?: return
+        // Invalidate the worker before cancellation can resume either coroutine.
+        validity = validity.copy(pendingIds = validity.pendingIds - index)
+        center.scheduler.cancel(previous.id, reason)
+        previous.job.cancel(CancellationException(reason))
+    }
+
+    private fun clearFailuresLocked() {
+        failed.keys.forEach { details.remove(it) }
+        failed.clear()
+    }
+
+    private fun cacheBudgetBytes(): Long = synchronized(lock) { policy.cacheMiB.toLong() * 1024 * 1024 }
 
     /** Changing direction or jumping retires work; it never deletes a completed derivative. */
     fun updateWindow(page: Int, readDirection: Int, totalPages: Int, active: Boolean,
@@ -124,14 +148,27 @@ internal class ReaderEnhancementController(
                 pagesPerSecond = if (elapsed > 10_000) observed else pagesPerSecond * .6 + observed * .4
             }
             if (page != current) currentPageAt = now
-            if (page != current) failed.remove(page)
+            if (page != current && failed.remove(page) != null) details.remove(page)
             current = page; direction = if (readDirection < 0) -1 else 1
-            if (selected != policy) {
+            val pixelsChanged = selected.tier != policy.tier || selected.scale != policy.scale ||
+                selected.style != policy.style || selected.modelId != policy.modelId
+            val processingChanged = selected.allowsReaderProcessing() != policy.allowsReaderProcessing()
+            val cacheBudgetChanged = selected.cacheMiB != policy.cacheMiB
+            // Scheduling, cache and unrelated video options are still saved, without discarding pixels.
+            policy = selected
+            if (pixelsChanged) {
                 generation++
-                pending.values.forEach { center.scheduler.cancel(it.id); it.job.cancel() }
-                pending.clear()
+                pending.keys.toList().forEach { cancelPendingLocked(it, "画质设置已变更") }
                 held.values.forEach(EnhancedAssetLease::close); held.clear(); assets.clear()
-                detail = null; policy = selected; failed.clear(); cacheMisses.clear()
+                details.clear(); failed.clear(); cacheMisses.clear(); lastAttempts.clear(); manuallyStopped.clear()
+            } else if (processingChanged) {
+                pending.keys.toList().forEach { cancelPendingLocked(it, "即时处理模式已变更") }
+                // Completed assets have the same pixel identity and remain usable in cache-only mode.
+                details.keys.filter { it !in manuallyStopped }.forEach(details::remove)
+                failed.clear(); cacheMisses.clear()
+            } else if (cacheBudgetChanged) {
+                // A larger budget can make a failed output possible; running work keeps its attempt.
+                clearFailuresLocked()
             }
             // Completed assets remain useful even when every live processing mode is off.
             val enabled = active && selected.tier != QualityTier.ORIGINAL
@@ -149,14 +186,21 @@ internal class ReaderEnhancementController(
                     (page - direction).takeIf { it in 0 until totalPages }?.let(::add)
                 }
             }
+            manuallyStopped.keys.filter { it !in wanted }.forEach { index ->
+                manuallyStopped.remove(index); details.remove(index)
+            }
             pending.keys.filter { it !in wanted }.forEach { index ->
-                pending.remove(index)?.let { center.scheduler.cancel(it.id); it.job.cancel() }
+                cancelPendingLocked(index, if (!active) "阅读暂不活跃" else "页面已离开处理范围")
             }
             held.keys.filter { it !in wanted }.forEach { index -> held.remove(index)?.close(); assets.remove(index) }
             // Keep only nearby identity observations. The original prefetcher remains responsible for fetching.
-            originals.keys.filter { abs(it - page) > 16 }.forEach(originals::remove)
+            originals.keys.filter { abs(it - page) > 16 }.forEach { index ->
+                originals.remove(index); lastAttempts.remove(index); failed.remove(index)
+                cacheMisses.remove(index); details.remove(index); manuallyStopped.remove(index)
+            }
             val relevant = wanted.sortedBy { if (it == page) -1 else abs(it - page) }
             publishLocked()
+            pending[page]?.let { center.scheduler.promote(it.id, EnhancementPriority.P0) }
             relevant
         }
         restart.forEach(::queueIfUseful)
@@ -172,10 +216,10 @@ internal class ReaderEnhancementController(
         synchronized(lock) {
             if (closed) return
             if (originals[index]?.identity != original.identity) {
-                pending.remove(index)?.let { center.scheduler.cancel(it.id); it.job.cancel() }
+                cancelPendingLocked(index, "原图身份已更新")
                 held.remove(index)?.close(); assets.remove(index)
-                failed.remove(index)
-                cacheMisses.remove(index)
+                failed.remove(index); cacheMisses.remove(index)
+                lastAttempts.remove(index); details.remove(index); manuallyStopped.remove(index)
             }
             originals[index] = original
             publishLocked()
@@ -184,27 +228,80 @@ internal class ReaderEnhancementController(
     }
 
     fun invalidate(index: Int) = synchronized(lock) {
-        pending.remove(index)?.let { center.scheduler.cancel(it.id); it.job.cancel() }
+        cancelPendingLocked(index, "本页正在重新加载")
         originals.remove(index); held.remove(index)?.close(); assets.remove(index)
-        failed.remove(index)
-        cacheMisses.remove(index)
+        failed.remove(index); cacheMisses.remove(index)
+        lastAttempts.remove(index); details.remove(index); manuallyStopped.remove(index)
         publishLocked()
     }
 
-    private fun queueIfUseful(index: Int) {
-        val job = synchronized(lock) {
-            if (closed || index !in wanted || index in pending || index in assets) return
-            val original = originals[index] ?: return
-            if (failed[index] == original.identity || cacheMisses[index] == original.identity) return
-            val selected = policy
-            val epoch = generation
-            val id = "$sessionKey:$index:$epoch:${original.identity}"
-            val scheduledJob = scope.launch(start = CoroutineStart.LAZY) { prepare(index, id, epoch, selected, original) }
-            pending[index] = Pending(id, original, epoch, selected, scheduledJob)
+    /** A user stop survives cache/inventory observations for this exact page request. */
+    fun cancelTask(taskId: String): Boolean = synchronized(lock) {
+        if (closed) return@synchronized false
+        val (index, previous) = pending.entries.firstOrNull { it.value.id == taskId } ?: return@synchronized false
+        val attempt = lastAttempts[index]?.takeIf { it.id == taskId } ?: return@synchronized false
+        if (!attemptMatchesLocked(index, attempt) || previous.original.identity != attempt.originalIdentity ||
+            previous.generation != generation) return@synchronized false
+        val task = center.scheduler.state.value.firstOrNull { it.id == taskId && it.sessionKey == sessionKey }
+        if (task == null || task.phase !in setOf(EnhancementTaskPhase.QUEUED, EnhancementTaskPhase.WAITING,
+                EnhancementTaskPhase.RUNNING, EnhancementTaskPhase.PAUSED)) return@synchronized false
+        manuallyStopped[index] = attempt
+        center.scheduler.cancel(taskId)
+        if (center.scheduler.state.value.firstOrNull { it.id == taskId }?.phase != EnhancementTaskPhase.CANCELLED) {
+            // Completion may win the race; keep its original waiter and report that cancellation expired.
+            manuallyStopped.remove(index)
             publishLocked()
-            scheduledJob
+            return@synchronized false
+        }
+        cancelPendingLocked(index, "用户取消")
+        details[index] = "本页增强已取消，可在任务中重试"
+        publishLocked()
+        true
+    }
+
+    private fun attemptMatchesLocked(index: Int, attempt: Attempt): Boolean =
+        index in wanted && attempt.generation == generation &&
+            attempt.originalIdentity == originals[index]?.identity
+
+    /** A retry creates a new reader-owned waiter, not an expired scheduler work closure. */
+    fun retryTask(taskId: String): Boolean {
+        val job = synchronized(lock) {
+            if (closed) return false
+            val (index, attempt) = lastAttempts.entries.firstOrNull { it.value.id == taskId } ?: return false
+            if (!attemptMatchesLocked(index, attempt) || index in assets) return false
+            val task = center.scheduler.state.value.firstOrNull { it.id == taskId && it.sessionKey == sessionKey }
+            val stopped = task?.phase == EnhancementTaskPhase.CANCELLED && manuallyStopped[index]?.id == taskId
+            if (task?.phase != EnhancementTaskPhase.FAILED && !stopped) return false
+            val previous = pending[index]
+            if (previous != null && previous.id != taskId) return false
+            // Failure publication can reach the UI just before the previous waiter's finally block.
+            cancelPendingLocked(index, "重新尝试当前页")
+            failed.remove(index); cacheMisses.remove(index); details.remove(index); manuallyStopped.remove(index)
+            createPendingLocked(index) ?: return false
         }
         job.start()
+        return true
+    }
+
+    private fun queueIfUseful(index: Int) {
+        val job = synchronized(lock) { createPendingLocked(index) } ?: return
+        job.start()
+    }
+
+    private fun createPendingLocked(index: Int): Job? {
+        if (closed || index !in wanted || index in pending || index in assets) return null
+        val original = originals[index] ?: return null
+        if (manuallyStopped[index]?.let { attemptMatchesLocked(index, it) } == true) return null
+        if (failed[index] == original.identity || cacheMisses[index] == original.identity) return null
+        val selected = policy
+        val epoch = generation
+        val id = "$sessionKey:$index:$epoch:${original.identity}:${++nextAttempt}"
+        val job = scope.launch(start = CoroutineStart.LAZY) { prepare(index, id, epoch, selected, original) }
+        pending[index] = Pending(id, original, epoch, selected, job)
+        lastAttempts[index] = Attempt(id, original.identity, epoch)
+        details.remove(index)
+        publishLocked()
+        return job
     }
 
     private fun valid(index: Int, id: String, epoch: Long, original: Original): Boolean = validity.let {
@@ -213,6 +310,7 @@ internal class ReaderEnhancementController(
     }
 
     private suspend fun prepare(index: Int, id: String, epoch: Long, selected: EnhancementPolicy, original: Original) {
+        val owner = currentCoroutineContext()[Job]
         var completedLease: EnhancedAssetLease? = null
         var cacheHit = false
         try {
@@ -259,14 +357,14 @@ internal class ReaderEnhancementController(
                             parameters.engineVersion,
                             identity.modelDigest, elapsedMillis = 0L)
                     }
-                    if (selected.preparation.none { it == PreparationMode.IMMEDIATE || it == PreparationMode.SMART }) {
+                    if (!selected.allowsReaderProcessing()) {
                         synchronized(lock) { if (valid(index, id, epoch, original)) {
                             cacheMisses[index] = original.identity
-                            detail = "尚无已完成的增强结果；原图可直接阅读"; publishLocked()
+                            details[index] = "尚无已完成的增强结果；原图可直接阅读"; publishLocked()
                         } }
                         // End a cache lookup normally from the queue's perspective: there is
                         // no EngineOutput to fabricate, and this is not a recoverable GPU wait.
-                        center.scheduler.cancel(id)
+                        center.scheduler.cancel(id, "当前页没有已完成的增强结果")
                         throw CacheOnlyMiss()
                     }
                     val currentWork = cache.prepare(identity).also { work = it }
@@ -281,7 +379,7 @@ internal class ReaderEnhancementController(
                         engineId = selection.engine, content = imageContent, scale = selected.scale, model = selection.model,
                         tileSize = parameters.tileSize, overlap = parameters.overlap,
                         maximumOutputBytes = minOf(center.resources.state.value.runtime.maxImageBytes,
-                            selected.cacheMiB.toLong() * 1024 * 1024).coerceAtLeast(1L)), task.progress)
+                            cacheBudgetBytes()).coerceAtLeast(1L)), task.progress)
                     task.checkpoint()
                     check(output.engineId == parameters.engineId &&
                         output.modelSha256 == identity.modelDigest && StorageFile(output.path) == currentWork.output) {
@@ -307,22 +405,23 @@ internal class ReaderEnhancementController(
                 assets[index] = ReaderEnhancedPage(lease.identity, lease.file.toURI(), lease.width, lease.height,
                     original.diskKey, result.elapsedMillis, cacheHit)
                 if (!cacheHit) { durations.addLast(result.elapsedMillis); while (durations.size > 128) durations.removeFirst() }
-                detail = null; publishLocked()
+                details.remove(index); publishLocked()
             }
             center.telemetry.recordImage(sessionKey, content, result, cacheHit)
-            cache.trimToBytes(selected.cacheMiB.toLong() * 1024 * 1024, content.directory)
+            cache.trimToBytes(cacheBudgetBytes(), content.directory)
         } catch (cancelled: CancellationException) {
             if (synchronized(lock) { cacheMisses[index] != original.identity }) throw cancelled
         }
         catch (failure: Exception) {
             synchronized(lock) { if (valid(index, id, epoch, original)) {
                 failed[index] = original.identity
-                detail = failure.message ?: "增强失败，原画仍可阅读"; publishLocked()
+                details[index] = failure.message ?: "增强失败，原画仍可阅读"; publishLocked()
             } }
         } finally {
             completedLease?.close()
             synchronized(lock) {
-                if (pending[index]?.id == id) pending.remove(index)
+                // A cancelled attempt may finish after a new attempt for the same original started.
+                if (pending[index]?.let { it.id == id && it.job === owner } == true) pending.remove(index)
                 publishLocked()
             }
         }
@@ -346,10 +445,21 @@ internal class ReaderEnhancementController(
         val currentEnhanced = assets[current] != null
         val nextReady = assets[current + direction] != null
         val tasks = center.scheduler.state.value.filter { it.sessionKey == sessionKey }
+        val pendingTask = pending[current]?.id?.let { id -> tasks.firstOrNull { it.id == id } }
+        val failure = lastAttempts[current]?.takeIf { it.generation == generation &&
+            it.originalIdentity == originals[current]?.identity && failed[current] == it.originalIdentity
+        }?.let { attempt -> tasks.firstOrNull { it.id == attempt.id && it.phase == EnhancementTaskPhase.FAILED } }
+        val stopped = manuallyStopped.filter { (index, attempt) -> attemptMatchesLocked(index, attempt) }
+        val stoppedTask = stopped[current]?.let { attempt ->
+            tasks.firstOrNull { it.id == attempt.id && it.phase == EnhancementTaskPhase.CANCELLED }
+        }
+        val currentTask = pendingTask ?: failure ?: stoppedTask
+        val detail = details[current]
         mutableState.value = ReaderEnhancementState(current, currentEnhanced, nextReady,
             tasks.count { it.phase in setOf(EnhancementTaskPhase.QUEUED, EnhancementTaskPhase.WAITING, EnhancementTaskPhase.PAUSED) },
             tasks.count { it.phase == EnhancementTaskPhase.RUNNING }, detail,
-            percentile(.5), percentile(.95), cacheHits, cacheLookups, assets.toMap())
+            percentile(.5), percentile(.95), cacheHits, cacheLookups, assets.toMap(), currentTask,
+            stopped.values.map { it.id }.toSet())
         if (!closed) {
             val visible = assets[current]
             val model = visible?.identity?.modelId?.let { id ->
@@ -367,15 +477,19 @@ internal class ReaderEnhancementController(
             if (closed) return
             closed = true; generation++
             validity = validity.copy(closed = true, generation = generation)
-            center.scheduler.cancelSession(sessionKey)
+            center.scheduler.cancelSession(sessionKey, "阅读已结束")
             held.values.forEach(EnhancedAssetLease::close); held.clear(); assets.clear(); originals.clear()
             pending.values.forEach { it.job.cancel() }; pending.clear()
+            lastAttempts.clear(); failed.clear(); cacheMisses.clear(); details.clear(); manuallyStopped.clear()
             scope.cancel()
             center.settings.setSessionOverride(sessionKey, content, null)
             center.telemetry.endSession(sessionKey)
         }
     }
 }
+
+private fun EnhancementPolicy.allowsReaderProcessing(): Boolean =
+    PreparationMode.IMMEDIATE in preparation || PreparationMode.SMART in preparation
 
 internal val LocalReaderEnhancement = staticCompositionLocalOf<ReaderEnhancementController?> { null }
 
@@ -414,14 +528,35 @@ internal fun selectReaderEnhancementModel(center: EnhancementCenter, selected: E
     val inventory = center.inventory.value
     val explicit = selected.modelId?.let { id -> inventory.models.firstOrNull { it.id == id }
         ?: error("所选模型尚未安装，请打开画质与性能安装模型") }
-    val model = explicit ?: if (selected.tier in setOf(QualityTier.AUTO, QualityTier.BALANCED) && selected.scale > 1)
-        inventory.models.firstOrNull { it.nativeScale == selected.scale && image in it.contents } else null
+    val automaticModel = selected.tier in setOf(QualityTier.FINE, QualityTier.ULTRA) ||
+        selected.tier in setOf(QualityTier.AUTO, QualityTier.BALANCED) && selected.scale > 1
+    val compatible = if (explicit == null && automaticModel)
+        inventory.models.filter { it.nativeScale == selected.scale && image in it.contents } else emptyList()
+    // Inventory order is only a deterministic compatible choice, not a measured quality ranking.
+    val model = explicit ?: compatible.firstOrNull { candidate ->
+        inventory.engines.any { it.id == candidate.engineId && image in it.contents &&
+            it.readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.READY_FOR_TRIAL) &&
+            selected.scale in it.supportedScales }
+    }
     if (model != null) {
         require(image in model.contents && model.nativeScale == selected.scale) { "模型不支持当前图片类型或倍率" }
         val engine = inventory.engines.firstOrNull { it.id == model.engineId } ?: error("增强引擎尚未安装")
         check(engine.readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.READY_FOR_TRIAL) &&
             selected.scale in engine.supportedScales) { engine.detail }
         return ReaderEnhancementModel(model.engineId, model)
+    }
+    if (automaticModel) {
+        if (compatible.isNotEmpty()) {
+            val engine = inventory.engines.firstOrNull { it.id == compatible.first().engineId }
+            val reason = when {
+                engine == null -> "请先准备对应的增强引擎"
+                selected.scale !in engine.supportedScales -> "引擎不支持 ${selected.scale}× 倍率"
+                image !in engine.contents -> "引擎不支持当前图片类型"
+                else -> engine.detail
+            }
+            error("兼容模型已安装，但当前增强引擎不可用：$reason")
+        }
+        error("尚无支持当前图片类型与 ${selected.scale}× 倍率的可用模型，请打开画质与性能准备兼容模型")
     }
     check(selected.tier in setOf(QualityTier.LIGHT, QualityTier.AUTO, QualityTier.BALANCED)) {
         "请先选择并安装兼容的${selected.tier.label}模型"

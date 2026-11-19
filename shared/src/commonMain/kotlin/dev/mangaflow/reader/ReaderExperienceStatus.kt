@@ -333,50 +333,43 @@ internal fun ReaderExperienceStatus(
                             }
                         }
                     }
-                    if (enhancementReadings.isNotEmpty()) LiquidGlassSurface(backdrop,
-                        Modifier.fillMaxWidth(), cornerRadius = 12.dp, role = GlassSurfaceRole.READING_DOCK,
-                        elevation = 0.dp, softCard = false, trackPointer = false) {
-                        EnhancementReadouts(enhancementReadings, quiet = true,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp))
-                    }
                     val dockSlot = if (selected == ReaderStatusSection.CACHE) ReaderStatusSlot.MEMORY else selectedSlot
                     val dockRetained = if (retainedSlot == ReaderStatusSlot.DISK) ReaderStatusSlot.MEMORY else retainedSlot
-                    val dockHeight = maxOf(34.dp, with(LocalDensity.current) {
-                        MaterialTheme.typography.labelSmall.fontSize.toDp() * 1.3f + 20.dp
-                    })
-                    Box(Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
-                        LiquidGlassSurface(backdrop, Modifier.align(Alignment.Center).fillMaxWidth().height(dockHeight),
-                            cornerRadius = dockHeight / 2,
-                            role = GlassSurfaceRole.READING_DOCK, elevation = 0.dp,
-                            softCard = false, trackPointer = false) { }
-                        ReaderStatusStrip(dockSlot, dockRetained, shown, { slot ->
-                            if (selected == slot.section) selected = null
-                            else {
-                                if (slot.section == ReaderStatusSection.CACHE &&
-                                    expandedWorks[ReaderStatusSection.CACHE] !in listOf(ReaderWork.MEMORY, ReaderWork.DISK)) {
-                                    expandedWorks[ReaderStatusSection.CACHE] = ReaderWork.MEMORY
+                    LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 16.dp,
+                        role = GlassSurfaceRole.READING_DOCK, elevation = 0.dp,
+                        softCard = false, trackPointer = false) {
+                        Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface.copy(alpha = .86f))) {
+                            if (enhancementReadings.isNotEmpty()) EnhancementReadouts(enhancementReadings, quiet = false,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp))
+                            ReaderStatusStrip(dockSlot, dockRetained, shown, { slot ->
+                                if (selected == slot.section) selected = null
+                                else {
+                                    if (slot.section == ReaderStatusSection.CACHE &&
+                                        expandedWorks[ReaderStatusSection.CACHE] !in listOf(ReaderWork.MEMORY, ReaderWork.DISK)) {
+                                        expandedWorks[ReaderStatusSection.CACHE] = ReaderWork.MEMORY
+                                    }
+                                    inspect(slot.section)
                                 }
-                                inspect(slot.section)
-                            }
-                        }, entries = listOf(ReaderStatusSlot.PREPARATION, ReaderStatusSlot.WORK,
-                            ReaderStatusSlot.SOURCES, ReaderStatusSlot.MEMORY), labelsVisible = false) { slot, isSelected ->
-                            when (slot) {
-                                ReaderStatusSlot.PREPARATION -> StatusMicro(Icons.AutoMirrored.Outlined.MenuBook,
-                                    aheadValue, "前方已备原图", aheadMark, aheadDetail,
-                                    progress = if (preparation.aheadTarget > 0 && aheadPages.none { it.originalPresent == null })
-                                        preparation.aheadReady.toFloat() / preparation.aheadTarget else null,
-                                    selected = isSelected)
-                                ReaderStatusSlot.WORK -> StatusMicro(Icons.Outlined.AccountTree,
-                                    if (!workKnown) "—" else stripCount(active), "当前窗口任务与画质处理", activityMark,
-                                    workDetail,
-                                    progress = null, selected = isSelected, stages = stageMarks)
-                                ReaderStatusSlot.SOURCES -> StatusMicro(Icons.Outlined.Layers,
-                                    if (sourceStatus.hasTargets) stripCount(standbys.count { it.requestedPages > 0 && it.targetOriginalPresent }) else "—",
-                                    "备用来源与补页", if (sourceStatus.mark == ReaderStatusMark.ERROR) ReaderStatusMark.ERROR
-                                        else if (repairBusy) ReaderStatusMark.ACTIVE else sourceStatus.mark,
-                                    sourceStatus.detail + "；已补 $repairedPages 页",
-                                    progress = sourceStatus.progress, selected = isSelected, busy = repairBusy)
-                                ReaderStatusSlot.MEMORY, ReaderStatusSlot.DISK -> ReaderCacheDock(store, isSelected)
+                            }, entries = listOf(ReaderStatusSlot.PREPARATION, ReaderStatusSlot.WORK,
+                                ReaderStatusSlot.SOURCES, ReaderStatusSlot.MEMORY), labelsVisible = false) { slot, isSelected ->
+                                when (slot) {
+                                    ReaderStatusSlot.PREPARATION -> StatusMicro(Icons.AutoMirrored.Outlined.MenuBook,
+                                        aheadValue, "前方已备原图", aheadMark, aheadDetail,
+                                        progress = if (preparation.aheadTarget > 0 && aheadPages.none { it.originalPresent == null })
+                                            preparation.aheadReady.toFloat() / preparation.aheadTarget else null,
+                                        selected = isSelected)
+                                    ReaderStatusSlot.WORK -> StatusMicro(Icons.Outlined.AccountTree,
+                                        if (!workKnown) "—" else stripCount(active), "当前窗口任务与画质处理", activityMark,
+                                        workDetail,
+                                        progress = null, selected = isSelected, stages = stageMarks)
+                                    ReaderStatusSlot.SOURCES -> StatusMicro(Icons.Outlined.Layers,
+                                        if (sourceStatus.hasTargets) stripCount(standbys.count { it.requestedPages > 0 && it.targetOriginalPresent }) else "—",
+                                        "备用来源与补页", if (sourceStatus.mark == ReaderStatusMark.ERROR) ReaderStatusMark.ERROR
+                                            else if (repairBusy) ReaderStatusMark.ACTIVE else sourceStatus.mark,
+                                        sourceStatus.detail + "；已补 $repairedPages 页",
+                                        progress = sourceStatus.progress, selected = isSelected, busy = repairBusy)
+                                    ReaderStatusSlot.MEMORY, ReaderStatusSlot.DISK -> ReaderCacheDock(store, isSelected)
+                                }
                             }
                         }
                     }

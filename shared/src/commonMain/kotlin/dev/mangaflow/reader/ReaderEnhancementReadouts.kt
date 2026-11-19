@@ -2,8 +2,10 @@ package dev.mangaflow.reader
 
 import dev.mangaflow.enhancement.EnhancementMetric
 import dev.mangaflow.enhancement.EnhancementPolicy
+import dev.mangaflow.enhancement.EnhancementTaskPhase
 import dev.mangaflow.enhancement.QualityTier
 import dev.mangaflow.enhancement.ReaderEnhancementState
+import dev.mangaflow.enhancement.engine.EngineStage
 import dev.mangaflow.enhancement.ui.EnhancementReadout
 import dev.mangaflow.platform.formatDecimal
 
@@ -13,20 +15,28 @@ internal fun readerEnhancementReadouts(
 ): List<EnhancementReadout> = buildList {
     val pageMatches = currentPage != null && state.currentPage == currentPage
     val enabled = policy.tier != QualityTier.ORIGINAL
+    val task = state.currentTask.takeIf { pageMatches && enabled }
     if (EnhancementMetric.QUALITY in metrics) {
         val value = when {
             !enabled -> "原图"
             !pageMatches -> "本页增强 —"
             state.currentEnhanced -> "本页已备"
+            task?.phase == EnhancementTaskPhase.RUNNING ->
+                if (task.progress?.stage == EngineStage.MODEL_LOAD) "模型加载中" else "本页增强中"
+            task?.phase == EnhancementTaskPhase.FAILED -> "本页增强失败"
+            task?.phase == EnhancementTaskPhase.PAUSED -> "本页增强暂停"
+            task?.phase == EnhancementTaskPhase.CANCELLED -> "本页增强取消"
+            task != null -> "本页增强等待"
             else -> "本页未备"
         }
         add(EnhancementReadout(EnhancementMetric.QUALITY, value,
-            if (enabled) "本页增强文件，$value；文件就绪不代表已经呈现" else "当前选择原图"))
+            if (enabled) listOfNotNull("本页增强文件，$value；文件就绪不代表已经呈现",
+                task?.reason ?: task?.progress?.detail).joinToString("，") else "当前选择原图"))
     }
     if (EnhancementMetric.DIMENSIONS in metrics) {
         val asset = currentPage?.let(state.assets::get).takeIf { enabled && pageMatches && state.currentEnhanced }
         val size = asset?.takeIf { it.width > 0 && it.height > 0 }?.let { "${it.width}×${it.height}" }
-        add(EnhancementReadout(EnhancementMetric.DIMENSIONS, "已备 ${size ?: "—"}",
+        add(EnhancementReadout(EnhancementMetric.DIMENSIONS, size?.let { "已备 $it" } ?: "增强输出 —",
             "本页已备增强文件尺寸 ${size ?: "无观测"}"))
     }
     if (EnhancementMetric.PREPARED in metrics) {

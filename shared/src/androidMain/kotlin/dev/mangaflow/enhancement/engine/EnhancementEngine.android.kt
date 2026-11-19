@@ -292,7 +292,10 @@ private class AndroidEnhancementEngine(context: Context) : EnhancementEngine {
                         check(engineSha256(File(model.path)) == model.sha256) { "模型已改变，请重新选择" }
                         runtimes.ensureLoaded(PanelRuntimeId.ONNX)
                         progress(EngineProgress(EngineStage.MODEL_LOAD, detail = "准备真实 ONNX CPU 模型"))
-                        renderOnnx(decoder, output, request, modelSession(model), progress)
+                        val readySession = modelSession(model)
+                        currentCoroutineContext().ensureActive()
+                        progress(EngineProgress(EngineStage.PROCESS, detail = "正在处理首个分块 · CPU ONNX"))
+                        renderOnnx(decoder, output, request, readySession, progress)
                         check(engineSha256(File(model.path)) == model.sha256) { "处理期间模型发生变化，结果已丢弃" }
                         "1.31.1"
                     }

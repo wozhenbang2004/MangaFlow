@@ -46,6 +46,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
+import java.util.zip.DataFormatException
 import java.util.zip.Deflater
 import java.util.zip.Inflater
 import kotlinx.coroutines.CompletableDeferred
@@ -224,13 +225,62 @@ private suspend fun exportWindow(context: Context, window: AnimePreparedVideoReq
 /** Switch only a matching decoded frame on the current GL stream. The original audio/clock never move. */
 internal class AndroidPreparedFrameProgram(
     private val scale: Int,
-    private val prepared: () -> AndroidPreparedWindow?,
-    private val onUsed: (AndroidPreparedWindow) -> Unit,
+    prepared: () -> AndroidPreparedWindow?,
+    private val onUsed: (AndroidPreparedWindow, () -> Boolean) -> Unit,
 ) : BaseGlShaderProgram(false, 1) {
     private var program: GlProgram? = null
+    private val frames = AndroidPreparedFrameRenderer(prepared)
+    private val revision = AtomicLong(0L)
+
+    override fun configure(inputWidth: Int, inputHeight: Int): Size {
+        revision.incrementAndGet()
+        val scaledWidth = inputWidth.toLong() * scale
+        val scaledHeight = inputHeight.toLong() * scale
+        val withinBudget = scaledWidth * scaledHeight in 1L..MAX_OUTPUT_PIXELS
+        val width = if (withinBudget) scaledWidth.toInt() else inputWidth
+        val height = if (withinBudget) scaledHeight.toInt() else inputHeight
+        frames.configure(inputWidth, inputHeight, width, height)
+        if (program == null) program = GlProgram(POSITION_SHADER, COPY_SHADER).also {
+            it.setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), 4)
+        }
+        return Size(width, height)
+    }
+
+    override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
+        val current = revision.get()
+        val window = frames.draw(inputTexId, presentationTimeUs, ::copyTexture)
+        if (window == null) copyTexture(inputTexId)
+        else onUsed(window) { revision.get() == current }
+    }
+
+    private fun copyTexture(texture: Int) {
+        val copy = checkNotNull(program)
+        copy.use()
+        copy.setSamplerTexIdUniform("uTexture", texture, 0)
+        copy.bindAttributesAndUniforms()
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GlUtil.checkGlError()
+    }
+
+    override fun flush() {
+        revision.incrementAndGet()
+        super.flush()
+    }
+
+    override fun release() {
+        revision.incrementAndGet()
+        try { super.release() } finally {
+            try { program?.delete() } finally { frames.release() }
+        }
+    }
+}
+
+/** Reuses a cached result only against the original decoded frame, before any realtime filter. */
+internal class AndroidPreparedFrameRenderer(private val prepared: () -> AndroidPreparedWindow?) {
     private var texture = 0
     private val fbo = IntArray(1)
-    private val previous = IntArray(1)
+    private val previousFramebuffer = IntArray(1)
+    private val previousViewport = IntArray(4)
     private var inputWidth = 0
     private var inputHeight = 0
     private var width = 0
@@ -239,40 +289,36 @@ internal class AndroidPreparedFrameProgram(
     private var rgba: ByteBuffer? = null
     private val sample = ByteBuffer.allocateDirect(SAMPLE_SIDE * SAMPLE_SIDE * 4)
 
-    override fun configure(inputWidth: Int, inputHeight: Int): Size {
+    fun configure(inputWidth: Int, inputHeight: Int, outputWidth: Int, outputHeight: Int) {
+        release()
         this.inputWidth = inputWidth
         this.inputHeight = inputHeight
-        if (texture != 0) { GlUtil.deleteTexture(texture); texture = 0 }
-        width = inputWidth * scale
-        height = inputHeight * scale
-        if (width.toLong() * height > MAX_OUTPUT_PIXELS) { width = inputWidth; height = inputHeight }
-        if (program == null) program = GlProgram(POSITION_SHADER, COPY_SHADER).also {
-            it.setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), 4)
-        }
-        if (fbo[0] == 0) GLES20.glGenFramebuffers(1, fbo, 0)
-        decoded = ByteArray(0)
-        rgba = null
-        return Size(width, height)
+        width = outputWidth
+        height = outputHeight
     }
 
-    override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
+    /** Returns only after the matched texture has actually been submitted to the caller's output. */
+    fun draw(inputTexId: Int, presentationTimeUs: Long, drawTexture: (Int) -> Unit): AndroidPreparedWindow? {
+        if (inputWidth < SAMPLE_SIDE || inputHeight < SAMPLE_SIDE || width.toLong() * height !in 1L..MAX_OUTPUT_PIXELS)
+            return null
         val window = prepared()?.takeIf {
             it.request.width == inputWidth && it.request.height == inputHeight &&
                 it.receipt.outputWidth == width && it.receipt.outputHeight == height
-        }
-        val frame = window?.frames?.get(presentationTimeUs)
-        val used = window != null && frame != null && matchingSource(inputTexId, frame.signature) && load(frame)
-        val copy = checkNotNull(program)
-        copy.use()
-        copy.setSamplerTexIdUniform("uTexture", if (used) texture else inputTexId, 0)
-        copy.bindAttributesAndUniforms()
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        } ?: return null
+        val frame = window.frames[presentationTimeUs] ?: return null
+        if (!matchingSource(inputTexId, frame.signature) || !load(frame)) return null
+        drawTexture(texture)
         GlUtil.checkGlError()
-        if (used && window != null) onUsed(window)
+        return window
     }
 
     private fun matchingSource(inputTexId: Int, signature: Long): Boolean {
-        GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, previous, 0)
+        if (fbo[0] == 0) {
+            GLES20.glGenFramebuffers(1, fbo, 0)
+            GlUtil.checkGlError()
+        }
+        GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, previousFramebuffer, 0)
+        GLES20.glGetIntegerv(GLES20.GL_VIEWPORT, previousViewport, 0)
         try {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fbo[0])
             GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, inputTexId, 0)
@@ -280,15 +326,16 @@ internal class AndroidPreparedFrameProgram(
             sample.rewind()
             GLES20.glReadPixels((inputWidth - SAMPLE_SIDE) / 2, (inputHeight - SAMPLE_SIDE) / 2, SAMPLE_SIDE, SAMPLE_SIDE,
                 GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, sample)
+            GlUtil.checkGlError()
             return frameSignature(sample, SAMPLE_SIDE, SAMPLE_SIDE) == signature
         } finally {
-            GlUtil.focusFramebufferUsingCurrentContext(previous[0], width, height)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, previousFramebuffer[0])
+            GLES20.glViewport(previousViewport[0], previousViewport[1], previousViewport[2], previousViewport[3])
         }
     }
 
     private fun load(frame: AndroidPreparedFrame): Boolean {
-        if (texture == 0) {
-            texture = GlUtil.createTexture(width, height, false)
+        if (decoded.isEmpty()) {
             decoded = ByteArray(width * height * 4)
             rgba = ByteBuffer.allocateDirect(decoded.size)
         }
@@ -302,23 +349,31 @@ internal class AndroidPreparedFrameProgram(
                 position += count
             }
             if (position != decoded.size || !inflater.finished()) return false
+        } catch (_: DataFormatException) {
+            return false
         } finally { inflater.end() }
         val output = checkNotNull(rgba)
         output.clear()
         output.put(decoded)
         output.rewind()
+        if (texture == 0) texture = GlUtil.createTexture(width, height, false)
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
         GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, output)
         return true
     }
 
-    override fun release() {
-        try { super.release() } finally {
-            program?.delete()
+    fun release() {
+        try {
             if (texture != 0) GlUtil.deleteTexture(texture)
-            if (fbo[0] != 0) GLES20.glDeleteFramebuffers(1, fbo, 0)
-            decoded = ByteArray(0)
-            rgba = null
+        } finally {
+            texture = 0
+            try {
+                if (fbo[0] != 0) GLES20.glDeleteFramebuffers(1, fbo, 0)
+            } finally {
+                fbo[0] = 0
+                decoded = ByteArray(0)
+                rgba = null
+            }
         }
     }
 }

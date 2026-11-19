@@ -11,6 +11,11 @@ import dev.mangaflow.anime.player.AnimeVideoEnhancementPhase
 import dev.mangaflow.enhancement.EnhancementCenter
 import dev.mangaflow.enhancement.EnhancementContent
 import dev.mangaflow.enhancement.EnhancementMetric
+import dev.mangaflow.enhancement.EnhancementPolicy
+import dev.mangaflow.enhancement.PreparationMode
+import dev.mangaflow.enhancement.QualityTier
+import dev.mangaflow.enhancement.animeEnhancementSessionKey
+import dev.mangaflow.experience.ExperienceResources
 import dev.mangaflow.enhancement.ui.EnhancementReadout
 import dev.mangaflow.enhancement.ui.EnhancementReadouts
 import dev.mangaflow.enhancement.ui.enhancementResourceReadouts
@@ -29,15 +34,24 @@ internal fun AnimePlaybackStatus(
     val context = LocalMangaContext.current
     val center = remember(context) { EnhancementCenter.get(context) }
     val preferences by center.settings.visibleMetrics.collectAsStateWithLifecycle()
+    val defaults by center.settings.state.collectAsStateWithLifecycle()
+    val sessions by center.settings.sessions.collectAsStateWithLifecycle()
+    val telemetry by center.telemetry.state.collectAsStateWithLifecycle()
+    val usage by center.resources.usage.collectAsStateWithLifecycle()
     val metrics = preferences.getValue(EnhancementContent.ANIME)
     val current = playback?.takeIf { it.assetKey != null &&
         it.phase !in setOf(AnimePlayerPhase.IDLE, AnimePlayerPhase.RELEASED) }
-    val readouts = animeEnhancementReadouts(current, metrics) +
+    val key = current?.let(::animeEnhancementSessionKey)
+    val policy = key?.let { sessions[it]?.takeIf { value -> value.content == EnhancementContent.ANIME }?.policy }
+        ?: defaults.getValue(EnhancementContent.ANIME)
+    val reason = key?.let { telemetry.sessions[it]?.takeIf { value -> value.content == EnhancementContent.ANIME }?.reason }
+    val readouts = animeEnhancementReadouts(current, metrics, policy, usage.resources, reason) +
         enhancementResourceReadouts(metrics, center.resources, observing)
     EnhancementReadouts(readouts, quiet, modifier)
 }
 
-private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<EnhancementMetric>): List<EnhancementReadout> = buildList {
+private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<EnhancementMetric>,
+    policy: EnhancementPolicy, resources: ExperienceResources, reason: String?): List<EnhancementReadout> = buildList {
     val flowing = playback?.let { it.isPlaying && !it.playbackSuppressed &&
         it.hasVideoTracks != false && it.firstFrameRendered != false } == true
     val effect = playback?.videoEnhancement
@@ -53,7 +67,12 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
             playback.preEnhanced -> "预增强片源"
             usingPrepared -> "预处理帧复用"
             else -> when (effect?.phase) {
-                AnimeVideoEnhancementPhase.OFF -> "原画"
+                AnimeVideoEnhancementPhase.OFF -> when {
+                    policy.tier == QualityTier.ORIGINAL -> "原画"
+                    PreparationMode.IMMEDIATE !in policy.preparation -> "原画 · 即时关闭"
+                    resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2 -> "原画 · 设备保护"
+                    else -> "原画 · 增强未运行"
+                }
                 AnimeVideoEnhancementPhase.WAITING, AnimeVideoEnhancementPhase.CONFIGURED -> "增强待运行"
                 AnimeVideoEnhancementPhase.ACTIVE -> if (flowing && observation?.recentlySubmitting == true)
                     "增强处理中" else "增强已配置"
@@ -63,7 +82,7 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
             }
         }
         add(EnhancementReadout(EnhancementMetric.QUALITY, quality,
-            listOfNotNull(quality, effect?.detail).joinToString("，")))
+            listOfNotNull(quality, effect?.detail ?: reason).joinToString("，")))
     }
     if (EnhancementMetric.DIMENSIONS in metrics) {
         fun dimensions(width: Int?, height: Int?) = if (width != null && width > 0 && height != null && height > 0)

@@ -2,6 +2,7 @@ package dev.mangaflow.enhancement
 
 import dev.mangaflow.anime.player.AnimePlayerState
 import dev.mangaflow.anime.player.AnimeVideoEnhancementMode
+import dev.mangaflow.enhancement.engine.EnhancementEngineIds
 import dev.mangaflow.enhancement.engine.EngineModel
 import dev.mangaflow.experience.ExperienceResources
 
@@ -24,10 +25,21 @@ fun selectRealtimeEnhancement(policy: EnhancementPolicy, resources: ExperienceRe
     })
     if (resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2)
         return original("设备保护已暂缓增强，目标档位保留；当前显示原画")
-    if (policy.tier in setOf(QualityTier.FINE, QualityTier.ULTRA) || realtimeModel != null && policy.modelId != null) {
+    val builtInMode = when (policy.modelId) {
+        EnhancementEngineIds.ANIME4K_SMALL -> AnimeVideoEnhancementMode.FAST
+        EnhancementEngineIds.ANIME4K_MEDIUM -> AnimeVideoEnhancementMode.QUALITY
+        else -> null
+    }
+    if (builtInMode != null) {
+        if (policy.scale !in 1..2) return original("所选 Anime4K 支持 1× 修复与 2× 输出，请调整输出倍率")
+        return RealtimeEnhancementSelection(builtInMode, scale)
+    }
+    if (policy.tier in setOf(QualityTier.FINE, QualityTier.ULTRA) || policy.modelId != null) {
         if (realtimeModel != null) return RealtimeEnhancementSelection(AnimeVideoEnhancementMode.MODEL, realtimeModel.nativeScale,
             model = realtimeModel)
-        return original("所选高质量模型用于离线预处理；当前实时内核尚未适配，原画继续播放")
+        return original(if (policy.modelId != null)
+            "所选模型当前无法用于实时播放，请检查模型与倍率，或在画质模型中选择自动；暂时保留原画"
+        else "所选高质量模型用于离线预处理；当前实时内核尚未适配，原画继续播放")
     }
     if (policy.scale !in 1..2) return original("当前实时引擎支持 1× 修复与 2× 输出；更高倍率可离线处理")
     val mode = when (policy.tier) {

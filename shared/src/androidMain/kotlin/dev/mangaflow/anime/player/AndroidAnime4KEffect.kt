@@ -31,6 +31,8 @@ internal class AndroidAnime4KEffect(
     private val mode: AnimeVideoEnhancementMode,
     private val scale: Int = 2,
     private val model: EngineModel? = null,
+    private val prepared: (() -> AndroidPreparedWindow?)? = null,
+    private val onPreparedFrame: (AndroidPreparedWindow, () -> Boolean) -> Unit = { _, _ -> },
     private val report: (AnimeVideoEnhancementState, () -> Boolean) -> Unit,
 ) : GlEffect {
     private val programRevision = AtomicLong(0L)
@@ -81,7 +83,12 @@ internal class AndroidAnime4KEffect(
                 compiled += program
                 program.setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), 4)
             }
-            return Anime4KGlProgram(mode, scale, plan, programs, copy, streamRevision::get, currentReport)
+            return Anime4KGlProgram(mode, scale, plan, programs, copy, prepared,
+                { window, frameIsCurrent ->
+                    if (programRevision.get() == revision && frameIsCurrent()) onPreparedFrame(window) {
+                        programRevision.get() == revision && frameIsCurrent()
+                    }
+                }, streamRevision::get, currentReport)
         } catch (failure: Exception) {
             // A failed constructor must not strand programs in Media3's shared GL context.
             compiled.forEach { runCatching { it.delete() } }
@@ -104,6 +111,8 @@ private class Anime4KGlProgram(
     private val plan: Anime4KGlPlan,
     private val programs: List<GlProgram>,
     private val copy: GlProgram,
+    prepared: (() -> AndroidPreparedWindow?)?,
+    private val onPreparedFrame: (AndroidPreparedWindow, () -> Boolean) -> Unit,
     private val streamRevision: () -> Long,
     private val report: (AnimeVideoEnhancementState, () -> Boolean) -> Unit,
 ) : BaseGlShaderProgram(false, 1) {
@@ -124,10 +133,13 @@ private class Anime4KGlProgram(
     private val savedFramebuffer = IntArray(1)
     private val savedViewport = IntArray(4)
     private val gpuTimer = AndroidAnimeGpuTimer()
+    private val preparedFrames = prepared?.let { AndroidPreparedFrameRenderer(it) }
+    private var reusingPrepared = false
 
     override fun configure(inputWidth: Int, inputHeight: Int): Size {
         resetObservations()
         releaseScratch()
+        preparedFrames?.release()
         this.inputWidth = inputWidth
         this.inputHeight = inputHeight
         dimensions[0] = inputWidth.toFloat()
@@ -145,6 +157,7 @@ private class Anime4KGlProgram(
                 inputHeight.toLong() * scale > viewport[1]) {
                 throw Anime4KUnavailable("所选倍率超出当前 GPU 的纹理尺寸，已保留原画")
             }
+            preparedFrames?.configure(inputWidth, inputHeight, inputWidth * scale, inputHeight * scale)
             repeat(plan.scratchCount) {
                 // Signed CNN activations MUST survive. RGBA8 would clamp negative features and
                 // silently turn the upstream neural network into a different, broken algorithm.
@@ -191,9 +204,7 @@ private class Anime4KGlProgram(
             lastSubmissionAt?.let { last -> startedAt - last >= ANIME4K_ACTIVITY_TIMEOUT_MS } == true
         }
         val sampleSubmission = enhancing && (sampleStart == null || startedAt - sampleStart >= ANIME4K_SAMPLE_MS)
-        val cpuStartedAt = if (sampleSubmission) Debug.threadCpuTimeNanos() else -1L
-        gpuTimer.poll()
-        if (sampleSubmission) gpuTimer.begin()
+        var cpuStartedAt = -1L
         GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, savedFramebuffer, 0)
         GLES20.glGetIntegerv(GLES20.GL_VIEWPORT, savedViewport, 0)
         val blend = GLES20.glIsEnabled(GLES20.GL_BLEND)
@@ -202,12 +213,30 @@ private class Anime4KGlProgram(
             GLES20.glDisable(GLES20.GL_BLEND)
             GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
             if (!enhancing) {
-                copy.use()
-                copy.setSamplerTexIdUniform("uTexture", inputTexId, 0)
-                copy.bindAttributesAndUniforms()
-                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-                GlUtil.checkGlError()
+                copyTexture(inputTexId)
                 return
+            }
+            val preparedWindow = preparedFrames?.draw(inputTexId, presentationTimeUs, ::copyTexture)
+            if (preparedWindow != null) {
+                // Cached frames are already enhanced. Keep the original frame identity check
+                // before the CNN, and do not count the copy as a CNN submission or GPU sample.
+                if (!reusingPrepared) {
+                    clearCnnSample()
+                    reusingPrepared = true
+                    publishObservation(AnimeVideoEnhancementPhase.CONFIGURED, "正在复用已完成的增强帧")
+                }
+                val generation = observationGeneration.get()
+                val stream = observedStreamRevision
+                onPreparedFrame(preparedWindow) {
+                    observationGeneration.get() == generation && streamRevision() == stream
+                }
+                return
+            }
+            reusingPrepared = false
+            gpuTimer.poll()
+            if (sampleSubmission) {
+                cpuStartedAt = Debug.threadCpuTimeNanos()
+                gpuTimer.begin()
             }
             plan.passes.forEachIndexed { index, pass ->
                 val destination = pass.outputSlot
@@ -237,7 +266,7 @@ private class Anime4KGlProgram(
             if (blend) GLES20.glEnable(GLES20.GL_BLEND) else GLES20.glDisable(GLES20.GL_BLEND)
             if (scissor) GLES20.glEnable(GLES20.GL_SCISSOR_TEST) else GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
         }
-        // Count successful submissions of the complete CNN chain. This does not
+        // Count successful submissions of the complete CNN chain. Counting does not
         // wait for the GPU or read back pixels, and it is not a display signal.
         submittedFrames++
         lastSubmissionAt = startedAt
@@ -251,6 +280,14 @@ private class Anime4KGlProgram(
             sampleStartedAt = startedAt
             sampleStartFrames = submittedFrames
         }
+    }
+
+    private fun copyTexture(texture: Int) {
+        copy.use()
+        copy.setSamplerTexIdUniform("uTexture", texture, 0)
+        copy.bindAttributesAndUniforms()
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GlUtil.checkGlError()
     }
 
     override fun flush() {
@@ -271,6 +308,7 @@ private class Anime4KGlProgram(
             try { action() } catch (error: Exception) { if (failure == null) failure = error }
         }
         releasePart { releaseScratch() }
+        releasePart { preparedFrames?.release() }
         programs.forEach { program -> releasePart { program.delete() } }
         releasePart { copy.delete() }
         releasePart { super.release() }
@@ -294,13 +332,18 @@ private class Anime4KGlProgram(
     }
 
     private fun resetObservations() {
-        gpuTimer.reset()
         observedStreamRevision = streamRevision()
-        observationGeneration.incrementAndGet()
         submittedFrames = 0L
+        clearCnnSample()
+        reusingPrepared = false
+    }
+
+    private fun clearCnnSample() {
+        gpuTimer.reset()
+        observationGeneration.incrementAndGet()
         lastSubmissionAt = null
         sampleStartedAt = null
-        sampleStartFrames = 0L
+        sampleStartFrames = submittedFrames
     }
 
     private fun publishObservation(

@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.player.AnimePlayerState
+import dev.mangaflow.anime.player.AnimeVideoEnhancementPhase
 import dev.mangaflow.anime.ui.AnimeTextField
 import dev.mangaflow.enhancement.*
 import dev.mangaflow.enhancement.engine.*
@@ -25,6 +26,7 @@ import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.platform.formatInstantMillis
+import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.SettingsToggle
 import dev.mangaflow.ui.motion.*
@@ -44,6 +46,9 @@ internal fun EnhancementCenterPanel(
     onDismiss: () -> Unit,
     onClosed: (() -> Unit)? = null,
     onCompare: (() -> Unit)? = null,
+    readerState: ReaderEnhancementState? = null,
+    onRetryTask: ((String) -> Boolean)? = null,
+    onCancelTask: ((String) -> Boolean)? = null,
 ) {
     val canSwitchMedia = allowMediaSwitch && sessionKey == null
     val mediaCategories = listOf(EnhancementContent.MANGA, EnhancementContent.ANIME)
@@ -110,6 +115,7 @@ internal fun EnhancementCenterPanel(
                 editorState.SaveableStateProvider(editorKey) {
                     EnhancementSettingsContent(content, sessionKey, page = navigation.page, onPageChange = ::navigate,
                         showContentRecords = !canSwitchMedia,
+                        readerState = readerState, onRetryTask = onRetryTask, onCancelTask = onCancelTask,
                         onCompare = onCompare?.let { { compareAfterClose = true; onDismiss() } })
                 }
             }
@@ -128,6 +134,9 @@ internal fun EnhancementSettingsContent(
     onPageChange: (EnhancementPage) -> Unit,
     qualityFooter: (@Composable () -> Unit)? = null,
     showContentRecords: Boolean = true,
+    readerState: ReaderEnhancementState? = null,
+    onRetryTask: ((String) -> Boolean)? = null,
+    onCancelTask: ((String) -> Boolean)? = null,
 ) {
     val context = LocalMangaContext.current
     val center = remember(context) { EnhancementCenter.get(context) }
@@ -200,6 +209,11 @@ internal fun EnhancementSettingsContent(
     fun openModel(key: String) { modelKey = key; onPageChange(EnhancementPage.MODEL_DETAIL) }
     fun openEngine(id: String) { engineId = id; onPageChange(EnhancementPage.ENGINE_DETAIL) }
     val anime = content == EnhancementContent.ANIME
+    fun selectModel(id: String?) {
+        change(draft.copy(modelId = id, preparation =
+            if (anime && draft.tier != QualityTier.ORIGINAL) draft.preparation + PreparationMode.IMMEDIATE
+            else draft.preparation))
+    }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (sessionKey != null && page in setOf(EnhancementPage.QUALITY, EnhancementPage.FRAME, EnhancementPage.PREPARATION))
             EnhancementScope(content, editSession) { editSession = it; notice = null }
@@ -207,11 +221,36 @@ internal fun EnhancementSettingsContent(
                 EnhancementPage.MODELS, EnhancementPage.MODEL_DETAIL))
             EnhancementQuiet(if (activeKey != null) if (anime) "应用于本次播放" else "应用于本次阅读"
                 else "应用于${content.settingsLabel}默认设置")
+        if (anime && draft.tier == QualityTier.ORIGINAL &&
+            page in setOf(EnhancementPage.MODELS, EnhancementPage.MODEL_DETAIL))
+            EnhancementQuiet("当前使用原画；模型选择会保存，返回画质页选择增强档位后启用。")
         when (page) {
             EnhancementPage.QUALITY -> {
                 EnhancementQuality(content, draft, inventory, ::change,
                     onOpenModels = { onPageChange(EnhancementPage.MODELS) },
                     onOpenOptions = { onPageChange(EnhancementPage.QUALITY_OPTIONS) })
+                if (anime && animePlayback != null && sessionKey != null && sessionKey == animeEnhancementSessionKey(animePlayback)) {
+                    val currentPolicy = sessions[sessionKey]?.takeIf { it.content == content }?.policy
+                        ?: saved.getValue(content)
+                    val effect = animePlayback.videoEnhancement
+                    val usingPrepared = animePlayback.isPlaying && !animePlayback.playbackSuppressed &&
+                        animePlayback.preparedVideoWindow?.let { it.framesUsed > 0L &&
+                            monotonicTimeMillis() - it.lastUsedAt in 0L..1_000L } == true
+                    val actualReason = when {
+                        animePlayback.preEnhanced || usingPrepared -> null
+                        effect.phase in setOf(AnimeVideoEnhancementPhase.UNAVAILABLE, AnimeVideoEnhancementPhase.FAILED) -> effect.detail
+                        currentPolicy.tier == QualityTier.ORIGINAL -> null
+                        effect.phase == AnimeVideoEnhancementPhase.OFF -> when {
+                            PreparationMode.IMMEDIATE !in currentPolicy.preparation -> "即时增强已关闭，尚未匹配到提前处理的画面。"
+                            usage.resources.memoryPressure == true || (usage.resources.thermalPressure ?: 0) >= 2 ->
+                                "设备保护暂缓了增强，所选档位保留。"
+                            else -> observed?.reason ?: "所选增强尚未运行，正在等待播放器应用。"
+                        }
+                        else -> null
+                    }
+                    if (actualReason != null) EnhancementQuiet("当前播放：$actualReason",
+                        error = effect.phase == AnimeVideoEnhancementPhase.FAILED)
+                }
                 qualityFooter?.invoke()
                 if (editSession && sessionKey != null && sessions[sessionKey]?.content == content)
                     AnimeEnhancementNavigation(Icons.Outlined.RestartAlt, "恢复跟随默认设置", onClick = {
@@ -272,18 +311,20 @@ internal fun EnhancementSettingsContent(
                     EnhancementDivider()
                     EnhancementLiveStatus(content, observed, animePlayback, usage.resources, activeTasks.size,
                         onOpenTasks = { onPageChange(EnhancementPage.TASKS) }, showHeading = false,
-                        animeScope = animeStatusScope, onAnimeScopeChange = { animeStatusScope = it })
+                        animeScope = animeStatusScope, onAnimeScopeChange = { animeStatusScope = it },
+                        readerState = readerState, inventory = inventory,
+                        policy = sessions[sessionKey]?.takeIf { it.content == content }?.policy ?: saved.getValue(content))
                     if (showContentRecords) AnimeEnhancementNavigation(Icons.Outlined.QueryStats, "性能记录", "记录当前档位的实际表现",
                         onClick = { onPageChange(EnhancementPage.TRIALS) })
                 }
             }
             EnhancementPage.DISPLAY -> EnhancementDisplayControls(content)
             EnhancementPage.MODELS -> EnhancementModelList(inventory, progress, content, draft.modelId,
-                onSelectModel = { id -> change(draft.copy(modelId = id)) }, onOpenModel = ::openModel,
+                onSelectModel = ::selectModel, onOpenModel = ::openModel,
                 onOpenEngines = { onPageChange(EnhancementPage.ENGINES) },
                 onImport = { onPageChange(EnhancementPage.IMPORT) }, onRefresh = { center.refreshInventory() })
             EnhancementPage.MODEL_DETAIL -> EnhancementModelDetail(inventory, progress, content, modelKey,
-                draft.modelId, draft.scale, onSelectModel = { id -> change(draft.copy(modelId = id)) },
+                draft.modelId, draft.scale, onSelectModel = ::selectModel,
                 center = center, onOpenEngine = ::openEngine)
             EnhancementPage.ENGINES, EnhancementPage.FRAME_ENGINES -> EnhancementEngineList(inventory, progress, content,
                 frames = page == EnhancementPage.FRAME_ENGINES, onOpenEngine = ::openEngine,
@@ -343,7 +384,8 @@ internal fun EnhancementSettingsContent(
             }
             EnhancementPage.TASKS -> {
                 if (anime) EnhancementQuiet("全部番剧的增强任务，包含下载后的离线处理。")
-                EnhancementTasks(scopedTasks, center)
+                EnhancementTasks(scopedTasks, center, onRetryTask, onCancelTask,
+                    readerState?.manuallyStoppedTaskIds.orEmpty())
             }
             EnhancementPage.TRIALS -> {
                 val recording = telemetry.activeTrial?.sessionKey == sessionKey && sessionKey != null
@@ -371,25 +413,62 @@ internal fun EnhancementSettingsContent(
 }
 
 @Composable
-private fun EnhancementTasks(tasks: List<EnhancementTask>, center: EnhancementCenter) {
+private fun EnhancementTasks(
+    tasks: List<EnhancementTask>,
+    center: EnhancementCenter,
+    onRetryTask: ((String) -> Boolean)?,
+    onCancelTask: ((String) -> Boolean)?,
+    manuallyStoppedTaskIds: Set<String>,
+) {
     if (tasks.isEmpty()) { EnhancementQuiet("当前范围没有增强任务。"); return }
-    tasks.sortedByDescending { it.createdAtMillis }.take(30).forEach { task ->
-        EnhancementSection(task.title ?: task.content.label, Icons.Outlined.Layers,
-            task.phase.label + " · " + (task.progress?.readableProgress() ?: task.reason ?: "等待处理")) {
-            task.output?.let { output -> EnhancementValue("已验证结果", "${output.width} × ${output.height} · ${enhancementBytes(output.bytes)}") }
-            task.reason?.let { EnhancementQuiet(it, task.phase == EnhancementTaskPhase.FAILED) }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (task.phase == EnhancementTaskPhase.FAILED) MotionTextButton({ center.scheduler.retry(task.id) }) { Text("重试") }
-                if (task.phase == EnhancementTaskPhase.PAUSED) MotionTextButton({ center.scheduler.resume(task.id) }) { Text("继续") }
-                if (task.phase in setOf(EnhancementTaskPhase.QUEUED, EnhancementTaskPhase.WAITING, EnhancementTaskPhase.RUNNING))
-                    MotionTextButton({ center.scheduler.pause(task.id) }) { Text("暂停") }
-                if (task.phase in setOf(EnhancementTaskPhase.QUEUED, EnhancementTaskPhase.WAITING,
-                    EnhancementTaskPhase.RUNNING, EnhancementTaskPhase.PAUSED))
-                    MotionTextButton({ center.scheduler.cancel(task.id) }) { Text("取消") }
+    var showFinished by remember { mutableStateOf(false) }
+    var actionError by remember { mutableStateOf<String?>(null) }
+    fun isFinished(task: EnhancementTask) = task.phase == EnhancementTaskPhase.COMPLETED ||
+        task.phase == EnhancementTaskPhase.CANCELLED && task.id !in manuallyStoppedTaskIds
+    val finished = tasks.filter(::isFinished)
+        .sortedByDescending { it.createdAtMillis }
+    val current = tasks.filterNot(::isFinished)
+        .sortedWith(compareBy<EnhancementTask> { it.phase in setOf(EnhancementTaskPhase.FAILED, EnhancementTaskPhase.CANCELLED) }
+            .thenByDescending { it.createdAtMillis })
+    actionError?.let { EnhancementQuiet(it, error = true) }
+    if (current.isEmpty()) EnhancementQuiet("当前没有正在处理或等待恢复的增强任务。")
+    val visibleTasks = current + if (showFinished) finished.take(30) else emptyList()
+    visibleTasks.forEachIndexed { index, task ->
+        if (showFinished && index == current.size) EnhancementDetailToggle(true, { showFinished = false },
+            "已结束记录 · ${finished.size} 项")
+        key(task.id) {
+            EnhancementSection(task.title ?: task.content.label,
+                if (task.phase == EnhancementTaskPhase.FAILED) Icons.Outlined.ErrorOutline else Icons.Outlined.Layers,
+                task.readableStatus()) {
+                task.output?.let { output -> EnhancementValue("已验证结果", "${output.width} × ${output.height} · ${enhancementBytes(output.bytes)}") }
+                if (task.phase == EnhancementTaskPhase.RUNNING) task.progress?.detail?.let { EnhancementQuiet(it) }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (task.phase == EnhancementTaskPhase.FAILED ||
+                        task.phase == EnhancementTaskPhase.CANCELLED && task.id in manuallyStoppedTaskIds) MotionTextButton({
+                        actionError = null
+                        if (onRetryTask != null) {
+                            if (!onRetryTask(task.id)) actionError = "原任务已过期，请回到需要增强的页面后重新处理。"
+                        } else if (center.scheduler.retry(task.id) == null)
+                            actionError = "原任务已过期，请从对应内容重新开始增强。"
+                    }) { Text("重试") }
+                    if (task.phase == EnhancementTaskPhase.PAUSED) MotionTextButton({ center.scheduler.resume(task.id) }) { Text("继续") }
+                    if (task.phase in setOf(EnhancementTaskPhase.QUEUED, EnhancementTaskPhase.WAITING, EnhancementTaskPhase.RUNNING))
+                        MotionTextButton({ center.scheduler.pause(task.id) }) { Text("暂停") }
+                    if (task.phase in setOf(EnhancementTaskPhase.QUEUED, EnhancementTaskPhase.WAITING,
+                        EnhancementTaskPhase.RUNNING, EnhancementTaskPhase.PAUSED))
+                        MotionTextButton({
+                            actionError = null
+                            if (onCancelTask != null) {
+                                if (!onCancelTask(task.id)) actionError = "任务状态已变化，请查看当前处理状态。"
+                            } else center.scheduler.cancel(task.id)
+                        }) { Text("取消") }
+                }
             }
+            EnhancementDivider()
         }
-        EnhancementDivider()
     }
+    if (!showFinished && finished.isNotEmpty()) EnhancementDetailToggle(false, { showFinished = true },
+        "已结束记录 · ${finished.size} 项")
 }
 
 @Composable

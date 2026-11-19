@@ -3089,12 +3089,16 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val selected = selectRealtimeEnhancement(policy, enhancementCenter.resources.usage.value.resources,
             snapshot?.sourceFps, if (key != null && reducedAutoEnhancementSession == key) Double.MAX_VALUE else p95,
             preferredRealtimeModel(policy, snapshot))
-        if (policy.tier == QualityTier.AUTO && selected.mode == dev.mangaflow.anime.player.AnimeVideoEnhancementMode.FAST &&
+        if (policy.tier == QualityTier.AUTO && policy.modelId == null &&
+            selected.mode == dev.mangaflow.anime.player.AnimeVideoEnhancementMode.FAST &&
             p95 != null) reducedAutoEnhancementSession = key
         val realtimeFrames = preferredRealtimeFrames(policy).takeIf { active?.localMedia?.enhancedVersion != true }
         val prepared = preferredOnlineModel(policy, selected.mode)
-            ?.takeIf { active?.localMedia == null && realtimeFrames == null }
-        val realtimeEnabled = active?.localMedia?.enhancedVersion != true && prepared == null
+            ?.takeIf { active?.localMedia == null && realtimeFrames == null &&
+                selected.mode != AnimeVideoEnhancementMode.MODEL }
+        // A candidate model is not a prepared frame. The Android shader chooses a matching
+        // cached frame before its CNN; all other frames retain the selected realtime path.
+        val realtimeEnabled = active?.localMedia?.enhancedVersion != true
         return AnimePlayerOptions(
         backgroundAudio = settings.backgroundAudio,
         bufferMinMs = settings.bufferMinMs,
@@ -3112,8 +3116,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     private fun preferredRealtimeModel(policy: EnhancementPolicy, snapshot: AnimePlayerState?): EngineModel? {
         val inventory = enhancementCenter.inventory.value.models
-        if (platformKind in setOf(PlatformKind.ANDROID, PlatformKind.DESKTOP) && policy.scale in 1..2 &&
-            policy.tier in setOf(QualityTier.AUTO, QualityTier.LIGHT, QualityTier.BALANCED)) {
+        if (platformKind in setOf(PlatformKind.ANDROID, PlatformKind.DESKTOP) && policy.scale in 1..2) {
             inventory.firstOrNull {
                 it.id == policy.modelId && dev.mangaflow.anime.player.Anime4KOptionalModels.supports(it.engineId)
             }?.let { return it.copy(nativeScale = policy.scale) }

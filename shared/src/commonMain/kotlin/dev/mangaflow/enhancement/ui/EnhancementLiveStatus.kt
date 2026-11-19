@@ -20,8 +20,13 @@ import dev.mangaflow.anime.player.AnimePlayerState
 import dev.mangaflow.anime.player.AnimeVideoEnhancementMode
 import dev.mangaflow.anime.player.AnimeVideoEnhancementPhase
 import dev.mangaflow.enhancement.EnhancementContent
+import dev.mangaflow.enhancement.EnhancementPolicy
 import dev.mangaflow.enhancement.EnhancementSessionMetrics
+import dev.mangaflow.enhancement.EnhancementTaskPhase
+import dev.mangaflow.enhancement.QualityTier
+import dev.mangaflow.enhancement.ReaderEnhancementState
 import dev.mangaflow.enhancement.animeEnhancementSessionKey
+import dev.mangaflow.enhancement.engine.EngineInventory
 import dev.mangaflow.experience.ExperienceResources
 import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.platform.monotonicTimeMillis
@@ -40,6 +45,9 @@ internal fun EnhancementLiveStatus(
     showHeading: Boolean = true,
     animeScope: Int? = null,
     onAnimeScopeChange: ((Int) -> Unit)? = null,
+    readerState: ReaderEnhancementState? = null,
+    policy: EnhancementPolicy? = null,
+    inventory: EngineInventory? = null,
 ) {
     if (content == EnhancementContent.ANIME) {
         AnimeEnhancementStatus(sample, playback, resources, queued, onOpenTasks, showHeading,
@@ -47,43 +55,70 @@ internal fun EnhancementLiveStatus(
         return
     }
     var expanded by remember(content, sample?.sessionKey) { mutableStateOf(false) }
-    val actual = when (sample?.currentEnhanced) {
-        true -> "本页增强文件已备"
-        false -> "本页增强文件未备"
-        null -> "本页增强准备待观测"
+    var deviceExpanded by remember(content, sample?.sessionKey) { mutableStateOf(false) }
+    val currentTask = readerState?.currentTask
+    val currentReady = readerState?.currentEnhanced ?: sample?.currentEnhanced
+    val actual = when {
+        policy?.tier == QualityTier.ORIGINAL -> "当前选择原图"
+        currentReady == true -> "本页增强文件已备"
+        currentTask?.phase == EnhancementTaskPhase.RUNNING -> "正在增强本页，原图可继续阅读"
+        currentTask?.phase == EnhancementTaskPhase.FAILED -> "本页增强未完成，可查看原因并重试"
+        currentTask?.phase == EnhancementTaskPhase.PAUSED -> "本页增强已暂停"
+        currentTask?.phase == EnhancementTaskPhase.CANCELLED -> "本页增强已取消"
+        currentTask?.phase == EnhancementTaskPhase.COMPLETED -> "增强已完成，正在准备本页显示"
+        currentTask != null -> "本页增强正在等待"
+        currentReady == false -> "本页尚无增强结果，原图可继续阅读"
+        else -> "等待本页增强状态"
     }
-    val summary = actual + " · " + when (sample?.nextReady) {
-        true -> "前方增强已备"
-        false -> "前方增强未备"
-        null -> "前方增强待观测"
-    }
+    val summary = actual + if (readerState?.nextReady ?: (sample?.nextReady == true)) " · 前方增强已备" else ""
+    val configuredModel = policy?.modelId?.let { id ->
+        inventory?.models?.firstOrNull { it.id == id }?.title ?: "所选模型未就绪"
+    } ?: "自动选择${policy?.tier?.let { " · ${it.label}" }.orEmpty()}"
     EnhancementSection("运行状态", Icons.Outlined.Speed, summary,
         action = { EnhancementDetailToggle(expanded, { expanded = !expanded }) }) {
+        EnhancementValue("所选模型", configuredModel)
+        currentTask?.let { task ->
+            EnhancementValue(task.title ?: "当前任务", task.readableStatus())
+            if (task.phase == EnhancementTaskPhase.RUNNING) task.progress?.detail?.let { EnhancementQuiet(it) }
+        }
         MotionTextButton(onOpenTasks, contentPadding = PaddingValues(horizontal = 0.dp)) {
             Icon(Icons.Outlined.Layers, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp))
             Text(if (queued > 0) "$queued 项任务" else "任务记录", style = MaterialTheme.typography.labelMedium)
         }
-        sample?.reason?.let { EnhancementQuiet(it) }
+        sample?.reason?.takeIf { it != currentTask?.reason }?.let { EnhancementQuiet(it) }
         if (expanded) {
-            EnhancementValue("整页增强 P50 / P95", millis(sample?.imageP50Millis) + " / " + millis(sample?.imageP95Millis),
-                "整页实际耗时，包含引擎处理与输出；与 GPU 执行耗时分开。")
-            EnhancementValue("处理页样本", sample?.imageSamples?.toString() ?: "不可用")
-            EnhancementValue("模型 / 输出尺寸", (sample?.model ?: "不可用") + " / " +
-                (dimensions(sample?.outputWidth, sample?.outputHeight) ?: "不可用"))
-            EnhancementValue("GPU P50 / P95", millis(sample?.gpuP50Millis) + " / " + millis(sample?.gpuP95Millis))
+            if ((sample?.imageSamples ?: 0) > 0) {
+                EnhancementValue("整页增强 P50 / P95", millis(sample?.imageP50Millis) + " / " + millis(sample?.imageP95Millis),
+                    "整页实际耗时，包含引擎处理与输出；与 GPU 执行耗时分开。")
+                EnhancementValue("处理页样本", sample?.imageSamples.toString())
+            } else EnhancementQuiet("尚未完成处理页，完成后才有整页耗时样本。")
+            EnhancementValue("本页增强结果", if (currentReady == true)
+                listOfNotNull(sample?.model, dimensions(sample?.outputWidth, sample?.outputHeight)).joinToString(" · ")
+                    .ifBlank { "文件已备，等待尺寸信息" }
+                else "尚未产出")
+            EnhancementValue("增强 GPU 计时", if (sample?.gpuP50Millis != null || sample?.gpuP95Millis != null)
+                millis(sample?.gpuP50Millis) + " / " + millis(sample?.gpuP95Millis) else "暂无计时观测")
             EnhancementValue("增强缓存命中", sample?.let { metric -> metric.cacheHitRatio?.let {
                 formatDecimal(it * 100, 1) + "% · ${metric.cacheHits}/${metric.cacheLookups}"
             } } ?: "尚无查询样本")
             EnhancementDivider()
-            EnhancementValue("进程 CPU / 系统 CPU", percent(resources.processCpuLoad) + " / " + percent(resources.cpuLoad))
-            EnhancementValue("GPU 负载 / 显存", "不可用 / 不可用")
-            EnhancementValue("进程驻留内存", enhancementBytes(resources.processResidentBytes))
-            EnhancementValue("进程堆 / 上限", enhancementBytes(resources.processHeapBytes) + " / " + enhancementBytes(resources.processHeapLimitBytes))
-            EnhancementValue("系统可用内存", enhancementBytes(resources.availableMemoryBytes))
-            EnhancementValue("热压力", thermalLabel(resources.thermalPressure))
-            resources.sampledAtMillis?.let { time ->
-                EnhancementQuiet("设备数据距今 ${formatDecimal((monotonicTimeMillis() - time).coerceAtLeast(0) / 1000.0, 1)} 秒")
-            } ?: EnhancementQuiet("设备尚未提供采样。")
+            EnhancementSection("设备读数", Icons.Outlined.Memory,
+                listOfNotNull(resources.processCpuLoad?.let { "CPU ${percent(it)}" },
+                    resources.processResidentBytes?.let { "内存 ${enhancementBytes(it)}" }).joinToString(" · ")
+                    .ifBlank { "等待设备采样" },
+                action = { EnhancementDetailToggle(deviceExpanded, { deviceExpanded = !deviceExpanded }) }) {
+                if (deviceExpanded) {
+                    EnhancementValue("进程 CPU / 系统 CPU", percent(resources.processCpuLoad) + " / " + percent(resources.cpuLoad))
+                    EnhancementValue("进程驻留内存", enhancementBytes(resources.processResidentBytes))
+                    EnhancementValue("进程堆 / 上限", enhancementBytes(resources.processHeapBytes) + " / " + enhancementBytes(resources.processHeapLimitBytes))
+                    EnhancementValue("系统可用内存", enhancementBytes(resources.availableMemoryBytes))
+                    EnhancementValue("热压力", thermalLabel(resources.thermalPressure))
+                    EnhancementQuiet("当前版本未提供 GPU 负载与显存读数；缺测不代表增强没有执行。")
+                    resources.sampledAtMillis?.let { time ->
+                        EnhancementQuiet("设备数据距今 ${formatDecimal((monotonicTimeMillis() - time).coerceAtLeast(0) / 1000.0, 1)} 秒")
+                    } ?: EnhancementQuiet("设备尚未提供采样。")
+                }
+            }
             sample?.adjustments?.takeLast(5)?.takeIf { it.isNotEmpty() }?.let { adjustments ->
                 EnhancementDivider()
                 Text("自动调整记录", style = MaterialTheme.typography.labelLarge)

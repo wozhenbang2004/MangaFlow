@@ -124,22 +124,34 @@ internal fun EnhancementQuality(content: EnhancementContent, policy: Enhancement
     onChange: (EnhancementPolicy) -> Unit, onOpenModels: () -> Unit, onOpenOptions: () -> Unit) {
     val anime = content == EnhancementContent.ANIME
     val model = inventory.models.firstOrNull { it.id == policy.modelId }
+    val builtIn = inventory.engines.firstOrNull { it.id == policy.modelId &&
+        it.id in setOf(EnhancementEngineIds.ANIME4K_SMALL, EnhancementEngineIds.ANIME4K_MEDIUM) &&
+        it.readiness == EngineReadiness.BUILT_IN }
+    val selectedTitle = model?.title ?: builtIn?.title
     Text("增强档位", style = MaterialTheme.typography.titleSmall)
     EnhancementChoices(QualityTier.entries, policy.tier,
         label = { if (!anime && it == QualityTier.ORIGINAL) "原图" else it.label },
-        onSelect = { onChange(policy.copy(tier = it)) }, description = "画质档位")
+        onSelect = { tier ->
+            onChange(policy.copy(tier = tier,
+                preparation = if (anime && tier != QualityTier.ORIGINAL)
+                    policy.preparation + PreparationMode.IMMEDIATE else policy.preparation))
+        }, description = if (anime) "画质档位，选择增强档位即启用即时增强" else "画质档位")
     EnhancementQuiet(when {
-        policy.tier == QualityTier.ORIGINAL -> if (anime) "保留片源画面。" else "保留原图。"
-        model == null && policy.modelId != null -> "所选模型不可用，可重新选择；你的档位会保留。"
-        anime && PreparationMode.IMMEDIATE !in policy.preparation -> "即时增强已关闭，可在预处理中开启。"
+        policy.tier == QualityTier.ORIGINAL -> if (anime) "保留片源画面，选择增强档位即可开启即时增强。" else "保留原图。"
+        selectedTitle == null && policy.modelId != null -> "所选模型不可用，可重新选择；你的档位会保留。"
+        anime && PreparationMode.IMMEDIATE !in policy.preparation -> "即时增强已关闭，当前只使用提前处理的结果。"
+        anime && selectedTitle != null -> "手动选用 $selectedTitle；输出倍率与补帧单独设置。"
         policy.tier == QualityTier.AUTO -> "依据已有测量和设备负载选择档位。"
         policy.tier == QualityTier.LIGHT -> "优先降低处理开销。"
         policy.tier == QualityTier.BALANCED -> "兼顾清晰度与处理开销。"
         else -> "需要兼容的高质量模型，运行效果以实际观测为准。"
     })
+    if (anime && policy.tier != QualityTier.ORIGINAL && PreparationMode.IMMEDIATE !in policy.preparation)
+        AnimeEnhancementNavigation(Icons.Outlined.PlayArrow, "开启即时增强", "使用当前${policy.tier.label}档位",
+            onClick = { onChange(policy.copy(preparation = policy.preparation + PreparationMode.IMMEDIATE)) })
     Spacer(Modifier.height(8.dp))
     AnimeEnhancementNavigation(Icons.Outlined.Memory, "画质模型",
-        model?.title ?: if (policy.modelId == null) "自动选择" else "所选模型不可用", onClick = onOpenModels)
+        selectedTitle ?: if (policy.modelId == null) "自动选择" else "所选模型不可用", onClick = onOpenModels)
     AnimeEnhancementNavigation(Icons.Outlined.Tune, "输出与策略",
         listOfNotNull(if (policy.scale == 1) "1× 修复" else "${policy.scale}×",
             policy.style.label.takeUnless { anime }, "锁定档位".takeIf { policy.locked }).joinToString(" · "),
@@ -154,6 +166,8 @@ internal fun EnhancementQualityOptions(content: EnhancementContent, policy: Enha
         else it.contents.any { kind -> kind != EngineContent.VIDEO } }
     val selectedEngine = inventory.models.firstOrNull { it.id == policy.modelId }
         ?.let { choice -> engines.firstOrNull { it.id == choice.engineId } }
+        ?: engines.firstOrNull { it.id == policy.modelId &&
+            it.id in setOf(EnhancementEngineIds.ANIME4K_SMALL, EnhancementEngineIds.ANIME4K_MEDIUM) }
     val supported = selectedEngine?.supportedScales ?: engines.flatMap { it.supportedScales }.toSet()
     Text("输出倍率", style = MaterialTheme.typography.titleSmall)
     EnhancementChoices(listOf(1, 2, 4), policy.scale, label = { if (it == 1) "1× 修复" else "$it×" },

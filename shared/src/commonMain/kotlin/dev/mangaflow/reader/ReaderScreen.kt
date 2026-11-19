@@ -1356,7 +1356,8 @@ fun ReaderScreen(
                     .padding(horizontal = 12.dp, vertical = 4.dp),
             ) {
                 // Retain Surface's input shield on blank chrome without consuming child gestures.
-                Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).pointerInput(Unit) {}.padding(horizontal = 4.dp),
+                Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).pointerInput(Unit) {}
+                    .background(colors.surface.copy(alpha = .82f)).padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回漫画详情", interactive = controlsVisible, onClick = leaveReader)
                     Column(Modifier.weight(1f).padding(start = 2.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)) {
@@ -1423,6 +1424,7 @@ fun ReaderScreen(
                     cornerRadius = 22.dp,
                 ) {
                     Column(Modifier.fillMaxWidth().pointerInput(Unit) {}
+                        .background(colors.surface.copy(alpha = .82f))
                         .padding(horizontal = 10.dp, vertical = 4.dp)) {
                         if (pages.isNotEmpty()) key(chapterId) {
                             ReaderProgressSlider(
@@ -1773,6 +1775,7 @@ fun ReaderScreen(
     EnhancementCenterPanel(
         visible = showEnhancement, backdrop = readerBackdrop, initialContent = enhancementContent,
         sessionKey = enhancement.sessionKey, onDismiss = { showEnhancement = false },
+        readerState = enhancementState, onRetryTask = enhancement::retryTask, onCancelTask = enhancement::cancelTask,
         onClosed = { keyboardFocusRestore++ },
         onCompare = if (enhancementState.assets[pageIndex] == null) null else ({
             compareEnhancement = true; enhancementDivider = .5f; controlsVisible = false

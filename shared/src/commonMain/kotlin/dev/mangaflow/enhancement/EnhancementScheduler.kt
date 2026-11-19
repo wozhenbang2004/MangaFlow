@@ -103,7 +103,7 @@ class EnhancementScheduler(
                 publish(); wake.trySend(Unit)
                 return@synchronized existing.result
             }
-            cancelEntry(existing)
+            cancelEntry(existing, "任务已被新的内容替代")
         }
         val entry = Entry(EnhancementTask(id, content, priority, sessionKey, generation, title = title?.take(240)),
             estimatedBytes.coerceAtLeast(0L), isCurrent, work)
@@ -113,6 +113,16 @@ class EnhancementScheduler(
             .forEach { it.run?.cancel(EnhancementYield("临近内容优先")) }
         trimHistory(); publish(); wake.trySend(Unit)
         entry.result
+    }
+
+    /** A prefetched page becoming visible keeps its attempt and receives foreground admission. */
+    fun promote(id: String, priority: EnhancementPriority): Unit = synchronized(lock) {
+        val entry = entries[id]?.takeIf { !it.result.isCompleted && it.isCurrent() } ?: return@synchronized
+        if (priority >= entry.task.priority) return@synchronized
+        entry.task = entry.task.copy(priority = priority)
+        if (!entry.pauseRequested) entries.values.filter { it !== entry && it.task.priority > priority && it.run != null }
+            .forEach { it.run?.cancel(EnhancementYield("当前页优先")) }
+        publish(); wake.trySend(Unit)
     }
 
     fun pause(id: String) = synchronized(lock) {
@@ -127,22 +137,30 @@ class EnhancementScheduler(
             publish(); wake.trySend(Unit)
         }
     }
-    fun cancel(id: String) = synchronized(lock) { entries[id]?.let(::cancelEntry); publish(); wake.trySend(Unit) }
-    fun cancelSession(sessionKey: String) = synchronized(lock) {
-        entries.values.filter { it.task.sessionKey == sessionKey && !it.result.isCompleted }.forEach(::cancelEntry)
+    fun cancel(id: String) = cancel(id, "用户取消")
+    fun cancel(id: String, reason: String) = synchronized(lock) {
+        entries[id]?.let { cancelEntry(it, reason) }; publish(); wake.trySend(Unit)
+    }
+    fun cancelSession(sessionKey: String) = cancelSession(sessionKey, "会话已结束")
+    fun cancelSession(sessionKey: String, reason: String) = synchronized(lock) {
+        entries.values.filter { it.task.sessionKey == sessionKey && !it.result.isCompleted }
+            .forEach { cancelEntry(it, reason) }
         publish(); wake.trySend(Unit)
     }
     fun retry(id: String): Deferred<EngineOutput>? {
-        val entry = synchronized(lock) { entries[id]?.takeIf { it.task.phase == EnhancementTaskPhase.FAILED } } ?: return null
+        // Reader-owned attempts must be recreated by their owner; an expired closure is not a retry.
+        val entry = synchronized(lock) { entries[id]?.takeIf {
+            it.task.phase == EnhancementTaskPhase.FAILED && it.isCurrent()
+        } } ?: return null
         return submit(id, entry.task.content, entry.task.priority, entry.task.sessionKey, entry.task.generation,
             entry.estimatedBytes, entry.isCurrent, title = entry.task.title, work = entry.work)
     }
-    private fun cancelEntry(entry: Entry) {
+    private fun cancelEntry(entry: Entry, reason: String) {
         if (entry.result.isCompleted) return
         entry.cancelRequested = true
-        entry.run?.cancel(CancellationException("用户取消"))
-        entry.result.cancel(CancellationException("用户取消"))
-        entry.task = entry.task.copy(phase = EnhancementTaskPhase.CANCELLED, reason = "用户取消")
+        entry.task = entry.task.copy(phase = EnhancementTaskPhase.CANCELLED, reason = reason)
+        entry.run?.cancel(CancellationException(reason))
+        entry.result.cancel(CancellationException(reason))
     }
 
     private suspend fun runQueue() {
@@ -153,8 +171,7 @@ class EnhancementScheduler(
                     .sortedWith(compareBy<Entry> { it.task.priority.ordinal }.thenBy { it.task.createdAtMillis })
                     .forEach { entry ->
                         if (!entry.isCurrent()) {
-                            cancelEntry(entry)
-                            entry.task = entry.task.copy(reason = "内容已切换")
+                            cancelEntry(entry, "内容已切换")
                         } else if (chosen == null) {
                             val reason = resources.enhancementWaitReason(entry.task.priority.ordinal, entry.estimatedBytes)
                             val release = if (reason == null) resources.tryAcquireEnhancement(entry.task.priority.ordinal, entry.estimatedBytes) else null
@@ -210,9 +227,10 @@ class EnhancementScheduler(
             } catch (cancel: CancellationException) {
                 synchronized(lock) {
                     when {
-                        entry.cancelRequested || !entry.isCurrent() -> cancelEntry(entry)
+                        entry.cancelRequested -> Unit // Keep the actual owner's cancellation reason.
+                        !entry.isCurrent() -> cancelEntry(entry, "内容已切换")
                         entry.pauseRequested -> entry.task = entry.task.copy(phase = EnhancementTaskPhase.PAUSED, reason = "用户暂停")
-                        !scope.isActive -> { entry.result.cancel(cancel); entry.task = entry.task.copy(phase = EnhancementTaskPhase.CANCELLED) }
+                        !scope.isActive -> cancelEntry(entry, "增强服务已结束")
                         else -> entry.task = entry.task.copy(phase = EnhancementTaskPhase.WAITING, reason = cancel.message ?: "等待资源")
                     }
                     publish()

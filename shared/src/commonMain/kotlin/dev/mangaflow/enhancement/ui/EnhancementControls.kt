@@ -21,6 +21,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.enhancement.engine.*
+import dev.mangaflow.enhancement.EnhancementTask
+import dev.mangaflow.enhancement.EnhancementTaskPhase
 import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.ui.motion.*
 
@@ -139,3 +141,7 @@ internal fun EngineProgress.readableProgress(): String {
     return listOfNotNull(if (failed) "失败" else engineStageLabel(stage), count.takeIf { it.isNotBlank() },
         processingFps?.let { formatDecimal(it, 1) + " 处理帧/秒" }).joinToString(" · ")
 }
+
+internal fun EnhancementTask.readableStatus(): String = listOfNotNull(phase.label,
+    if (phase == EnhancementTaskPhase.RUNNING) progress?.readableProgress() ?: reason else reason,
+).joinToString(" · ")

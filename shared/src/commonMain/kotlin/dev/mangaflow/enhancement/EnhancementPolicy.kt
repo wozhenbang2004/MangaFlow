@@ -142,7 +142,8 @@ class EnhancementSettingsStore(context: PlatformContext) {
     private fun readPolicies(): Map<EnhancementContent, EnhancementPolicy> {
         fun read(content: EnhancementContent) = policyKeys(content).firstNotNullOfOrNull {
             decode(disk.getString(it))
-        } ?: EnhancementPolicy()
+        } ?: EnhancementPolicy(preparation = if (content == EnhancementContent.ANIME)
+            setOf(PreparationMode.IMMEDIATE, PreparationMode.SMART) else setOf(PreparationMode.SMART))
         val manga = read(EnhancementContent.MANGA)
         return mapOf(EnhancementContent.MANGA to manga, EnhancementContent.ADULT_MANGA to manga,
             EnhancementContent.ANIME to read(EnhancementContent.ANIME))
