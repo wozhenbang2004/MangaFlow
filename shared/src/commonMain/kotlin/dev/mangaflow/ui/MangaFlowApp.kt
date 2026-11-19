@@ -1,6 +1,7 @@
 package dev.mangaflow.ui
 
 import dev.mangaflow.anime.ui.AnimeWorkspace
+import dev.mangaflow.anime.ui.AnimeWorkspaceDestination
 import androidx.compose.material.icons.outlined.Tv
 
 import dev.mangaflow.data.sources.SourceFeature
@@ -184,10 +185,15 @@ import kotlinx.coroutines.IO
 import kotlinx.coroutines.withContext
 
 private enum class Section(val title: String, val icon: ImageVector) {
-    DISCOVER("漫画", Icons.Outlined.Explore), ANIME("动漫", Icons.Outlined.Tv),
+    DISCOVER("漫画", Icons.Outlined.Explore), ANIME("番剧", Icons.Outlined.Tv),
     BOARDS("漫画榜单", Icons.Outlined.Leaderboard), LIBRARY("书架", Icons.Outlined.Bookmarks),
     DOWNLOADS("下载", Icons.Outlined.FileDownload), ACCOUNT("账号", Icons.Outlined.AccountCircle),
     SETTINGS("设置", Icons.Outlined.Settings),
+}
+private fun Section.availableIn(profile: ContentProfile): Boolean = when (profile) {
+    ContentProfile.ANIME -> this == Section.ANIME || this == Section.SETTINGS
+    ContentProfile.RESTRICTED -> this != Section.ANIME && this != Section.BOARDS
+    ContentProfile.ORDINARY -> this != Section.ANIME
 }
 private fun Section.navigationTitle(restricted: Boolean): String =
     when {
@@ -196,19 +202,28 @@ private fun Section.navigationTitle(restricted: Boolean): String =
         this == Section.LIBRARY && restricted -> "成人书架"
         else -> title
     }
+private data class SidebarDestination(
+    val section: Section,
+    val anime: AnimeWorkspaceDestination? = null,
+) {
+    val icon: ImageVector get() = anime?.icon ?: section.icon
+    fun title(profile: ContentProfile): String = anime?.label
+        ?: if (profile == ContentProfile.ANIME && section == Section.SETTINGS) "应用设置"
+        else section.navigationTitle(profile == ContentProfile.RESTRICTED)
+}
 /** A new reference owns the motion; cancellation cannot replay a stale destination. */
 private class DrawerAction(val target: DrawerValue, val destination: Section? = null,
-    val restricted: Boolean? = null) {
+    val profile: ContentProfile? = null, val animeDestination: AnimeWorkspaceDestination? = null) {
     var rootCommitted by mutableStateOf(false)
 }
 
 /** Observe before the native drawer can catch an animating surface and consume the first DOWN. */
 @Composable
 private fun Modifier.drawerSelectionTapInput(
-    targets: Map<Section, Rect>,
+    targets: Map<SidebarDestination, Rect>,
     canSelect: () -> Boolean,
     catchAnimatingTap: () -> Boolean,
-    onSelect: (Section) -> Unit,
+    onSelect: (SidebarDestination) -> Unit,
 ): Modifier {
     val latestCanSelect by rememberUpdatedState(canSelect)
     val latestCatchAnimatingTap by rememberUpdatedState(catchAnimatingTap)
@@ -343,7 +358,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     LaunchedEffect(account.profile?.username) { copySyncOpen = false; copySyncFocus = null }
     val update by model.updates.state.collectAsStateWithLifecycle()
-    var restrictedMode by remember { mutableStateOf(false) }
+    var profileName by rememberSaveable { mutableStateOf(ContentProfile.ORDINARY.name) }
+    val contentProfile = ContentProfile.entries.firstOrNull { it.name == profileName } ?: ContentProfile.ORDINARY
+    val restrictedMode = contentProfile == ContentProfile.RESTRICTED
+    val animeMode = contentProfile == ContentProfile.ANIME
     var copyExploreOpen by rememberSaveable { mutableStateOf(false) }
     var copyExploreReturnManga by remember { mutableStateOf<Manga?>(null) }
     val closeCopyExplore: () -> Unit = {
@@ -366,13 +384,25 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     var profileSiteRequest by remember { mutableStateOf<String?>(null) }
     var profileAccountRevision by remember { mutableIntStateOf(0) }
     var sourceSettingsOpen by remember { mutableStateOf(false) }
-    val profileKey = if (restrictedMode) "restricted" else "ordinary"
+    val profileKey = contentProfile.key
     val ordinarySection = rememberSaveable { mutableStateOf(Section.DISCOVER.name) }
     val restrictedSection = rememberSaveable { mutableStateOf(Section.DISCOVER.name) }
-    var sectionName by (if (restrictedMode) restrictedSection else ordinarySection)
+    val animeSection = rememberSaveable { mutableStateOf(Section.ANIME.name) }
+    var sectionName by when (contentProfile) {
+        ContentProfile.ORDINARY -> ordinarySection
+        ContentProfile.RESTRICTED -> restrictedSection
+        ContentProfile.ANIME -> animeSection
+    }
     val section = Section.entries.firstOrNull {
-        it.name == sectionName && (!restrictedMode || it != Section.BOARDS && it != Section.ANIME)
-    } ?: Section.DISCOVER
+        it.name == sectionName && it.availableIn(contentProfile)
+    } ?: if (animeMode) Section.ANIME else Section.DISCOVER
+    var animeDestinationName by rememberSaveable { mutableStateOf(AnimeWorkspaceDestination.HOME.name) }
+    val animeDestination = AnimeWorkspaceDestination.entries.firstOrNull { it.name == animeDestinationName }
+        ?: AnimeWorkspaceDestination.HOME
+    var animeRequestedDestinationName by rememberSaveable { mutableStateOf(AnimeWorkspaceDestination.HOME.name) }
+    val animeRequestedDestination = AnimeWorkspaceDestination.entries.firstOrNull { it.name == animeRequestedDestinationName }
+        ?: AnimeWorkspaceDestination.HOME
+    var animeNavigationRequest by rememberSaveable { mutableIntStateOf(0) }
     LaunchedEffect(restrictedMode, section) {
         if (restrictedMode && section == Section.LIBRARY && shelfSyncSource == null)
             model.services.adultShelfSync["jmcomic"]?.check()
@@ -414,15 +444,34 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     var drawerRootTransition by remember { mutableStateOf<Section?>(null) }
     val rootOpacity = remember { Animatable(1f) }
     val rootHandoff by remember {
-        derivedStateOf { drawerAction?.let { (it.destination != null || it.restricted != null) && !it.rootCommitted } == true }
+        derivedStateOf { drawerAction?.let { (it.destination != null || it.profile != null) && !it.rootCommitted } == true }
     }
     val changeSection: (Section) -> Unit = { destination ->
         copyExploreOpen = false
         copyExploreReturnManga = null
-        if (section == Section.ANIME && destination != Section.ANIME) model.services.anime.closePlayback()
+        val animeTarget = if (animeMode) when (destination) {
+            Section.DISCOVER -> AnimeWorkspaceDestination.HOME
+            Section.DOWNLOADS -> AnimeWorkspaceDestination.DOWNLOADS
+            else -> null
+        } else null
+        val target = if (animeTarget != null) Section.ANIME else destination
+        val targetProfile = when {
+            target == Section.ANIME -> ContentProfile.ANIME
+            target.availableIn(contentProfile) -> contentProfile
+            else -> ContentProfile.ORDINARY
+        }
+        if (section == Section.ANIME && target != Section.ANIME) model.services.anime.closePlayback()
         model.cancelLibraryReading()
         // Root pages share one shell, so every entry must use its interruptible handoff.
-        drawerAction = DrawerAction(DrawerValue.Closed, destination)
+        drawerAction = DrawerAction(DrawerValue.Closed, target, targetProfile, animeTarget)
+    }
+    val navigateAnime: (AnimeWorkspaceDestination) -> Unit = { destination ->
+        copyExploreOpen = false
+        copyExploreReturnManga = null
+        model.cancelLibraryReading()
+        model.closeReader()
+        model.closeDetail()
+        drawerAction = DrawerAction(DrawerValue.Closed, Section.ANIME, ContentProfile.ANIME, destination)
     }
     val openProfileAccount: (String?) -> Unit = { id ->
         profileAccountTarget = id
@@ -439,9 +488,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     var searchExpanded by (if (restrictedMode) restrictedSearch else ordinarySearch)
     var desktopNavigationMode by rememberSaveable { mutableIntStateOf(0) }
     var desktopSearchRequest by remember { mutableIntStateOf(0) }
-    var animeSearchRequest by remember { mutableIntStateOf(0) }
-    var animeBrowseRequest by remember { mutableIntStateOf(0) }
-    var animeBackRequest by remember { mutableIntStateOf(0) }
+    var animeSearchRequest by rememberSaveable { mutableIntStateOf(0) }
+    var animeBrowseRequest by rememberSaveable { mutableIntStateOf(0) }
+    var animeBackRequest by rememberSaveable { mutableIntStateOf(0) }
     var animeImmersive by remember { mutableStateOf(false) }
     var tagSearchVisible by rememberSaveable { mutableStateOf(false) }
     var recentReadingOpen by rememberSaveable { mutableStateOf(false) }
@@ -542,7 +591,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
     SideEffect {
-        ordinaryBrowse.setActive(!restrictedMode)
+        ordinaryBrowse.setActive(contentProfile == ContentProfile.ORDINARY)
         scopedBrowse.updateSources(usableScopedSources, unavailableReason = scopedUnavailableReason)
         scopedBrowse.setActive(restrictedMode && (section == Section.DISCOVER || tagSearchVisible) &&
             reading == null && (detail == null || tagSearchVisible))
@@ -570,11 +619,17 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
         try {
             val destination = action.destination
-            val changesProfile = action.restricted?.let { it != restrictedMode } == true
+            val destinationProfile = action.profile ?: contentProfile
+            val destinationState = when (destinationProfile) {
+                ContentProfile.ORDINARY -> ordinarySection
+                ContentProfile.RESTRICTED -> restrictedSection
+                ContentProfile.ANIME -> animeSection
+            }
             val destinationSection = (destination ?: Section.entries.firstOrNull {
-                it.name == if (action.restricted == true) restrictedSection.value else ordinarySection.value
-            })?.takeUnless { action.restricted == true && it == Section.BOARDS } ?: Section.DISCOVER
-            val changesRoot = (changesProfile || destination != null && sectionName != destination.name) &&
+                it.name == destinationState.value
+            })?.takeIf { it.availableIn(destinationProfile) }
+                ?: if (destinationProfile == ContentProfile.ANIME) Section.ANIME else Section.DISCOVER
+            val changesRoot = (destinationProfile != contentProfile || destinationSection != section) &&
                 reading == null && detail == null
             if (changesRoot) {
                 // Show the selection before moving its surface. Never wait for a whole spring.
@@ -584,12 +639,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 drawerRootTransition = destinationSection
                 if (motion) rootOpacity.snapTo(minOf(rootOpacity.value, MangaMotion.RootEntryAlpha))
                 // A click commits its content scope before the shared foreground settles.
-                if (action.restricted != null) {
-                    ordinaryBrowse.setActive(!action.restricted)
-                    scopedBrowse.setActive(action.restricted && destinationSection == Section.DISCOVER)
-                    restrictedMode = action.restricted
-                }
-                if (destination != null) sectionName = destination.name
+                ordinaryBrowse.setActive(destinationProfile == ContentProfile.ORDINARY)
+                scopedBrowse.setActive(destinationProfile == ContentProfile.RESTRICTED && destinationSection == Section.DISCOVER)
+                destinationState.value = destinationSection.name
+                profileName = destinationProfile.name
+            }
+            action.animeDestination?.let {
+                animeRequestedDestinationName = it.name
+                animeNavigationRequest++
             }
             coroutineScope {
                 launch {
@@ -620,7 +677,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     LaunchedEffect(openUpdatesRequest) {
         if (openUpdatesRequest > 0) {
             tagSearchVisible = false
-            browseActions.clearSearch()
+            if (!animeMode) browseActions.clearSearch()
             model.closeReader()
             model.closeDetail()
             changeSection(Section.SETTINGS)
@@ -629,7 +686,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     LaunchedEffect(openDownloadsRequest) {
         if (openDownloadsRequest > 0) {
             tagSearchVisible = false
-            browseActions.clearSearch()
+            if (!animeMode) browseActions.clearSearch()
             model.closeReader()
             model.closeDetail()
             changeSection(Section.DOWNLOADS)
@@ -652,15 +709,34 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         2 -> false
         else -> windowSize.width >= 1060.dp * windowSize.fontScale.coerceAtLeast(1f)
     }
-    val profileSections = remember(restrictedMode) {
-        Section.entries.filter { destination ->
-            if (restrictedMode) destination != Section.BOARDS && destination != Section.ANIME
-            else destination != Section.ACCOUNT
+    val profileSections = remember(contentProfile) {
+        if (contentProfile == ContentProfile.ANIME) {
+            listOf(AnimeWorkspaceDestination.HOME, AnimeWorkspaceDestination.LIBRARY,
+                AnimeWorkspaceDestination.HISTORY, AnimeWorkspaceDestination.SEASON,
+                AnimeWorkspaceDestination.CALENDAR, AnimeWorkspaceDestination.RANKING,
+                AnimeWorkspaceDestination.GENRES, AnimeWorkspaceDestination.DIRECTORY,
+                AnimeWorkspaceDestination.DOWNLOADS, AnimeWorkspaceDestination.TRACKING)
+                .map { SidebarDestination(Section.ANIME, it) } + SidebarDestination(Section.SETTINGS)
+        } else {
+            Section.entries.filter { it.availableIn(contentProfile) && (restrictedMode || it != Section.ACCOUNT) }
+                .map { SidebarDestination(it) }
         }
     }
-    val highlightedSection = if (!restrictedMode && section == Section.ACCOUNT) Section.LIBRARY else section
-    val desktopDestinations = remember(profileSections, restrictedMode) {
-        profileSections.map { DesktopDestination(it.navigationTitle(restrictedMode), it.icon) }
+    val highlightedSection = when {
+        animeMode && section == Section.ANIME -> SidebarDestination(Section.ANIME, animeDestination)
+        !restrictedMode && section == Section.ACCOUNT -> SidebarDestination(Section.LIBRARY)
+        else -> SidebarDestination(section)
+    }
+    val pendingSidebarDestination = drawerAction?.takeIf {
+        it.destination != null && (it.profile == null || it.profile == contentProfile)
+    }?.let { action ->
+        SidebarDestination(action.destination!!, if (action.destination == Section.ANIME)
+            action.animeDestination?.takeUnless { it == AnimeWorkspaceDestination.SOURCES }
+                ?: animeDestination
+            else null)
+    }
+    val desktopDestinations = remember(profileSections, contentProfile) {
+        profileSections.map { DesktopDestination(it.title(contentProfile), it.icon) }
     }
     CopyShelfSyncSheet(
         visible = copySyncOpen && account.profile != null && copyShelfSync.owner == account.profile?.username && !restrictedMode,
@@ -690,11 +766,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     val focus = LocalFocusManager.current
     LaunchedEffect(frame.key) { focus.clearFocus(force = true); keyboard?.hide() }
-    val commitProfile: (Boolean) -> Unit = { restricted ->
-        if (restricted != restrictedMode) {
+    val commitProfile: (ContentProfile) -> Unit = { profile ->
+        if (profile != contentProfile) {
             copyExploreOpen = false
             copyExploreReturnManga = null
-            if (section == Section.ANIME) model.services.anime.closePlayback()
+            if (animeMode) {
+                model.services.anime.closePlayback()
+                model.services.anime.closeDetail()
+            }
             model.cancelLibraryReading()
             model.closeReader()
             model.closeDetail()
@@ -721,12 +800,17 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             selectedCover = null
             keyboard?.hide()
             focus.clearFocus(force = true)
-            drawerAction = DrawerAction(DrawerValue.Closed, restricted = restricted)
+            drawerAction = DrawerAction(DrawerValue.Closed,
+                destination = if (profile == ContentProfile.ANIME) Section.ANIME else null, profile = profile)
         }
     }
-    val requestProfile: (Boolean) -> Unit = commitProfile
+    val requestProfile: (ContentProfile) -> Unit = commitProfile
     val manageProfileSources: () -> Unit = {
-        if (restrictedMode) profileSourcesOpen = true else sourceSettingsOpen = true
+        when (contentProfile) {
+            ContentProfile.ANIME -> navigateAnime(AnimeWorkspaceDestination.SOURCES)
+            ContentProfile.RESTRICTED -> profileSourcesOpen = true
+            ContentProfile.ORDINARY -> sourceSettingsOpen = true
+        }
     }
     val profileSourceChanged: (String) -> Unit = { id ->
         profileAccountRevision++
@@ -794,7 +878,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             onSourceChanged = { profileSourceChanged(id) }, initiallyShowLogin = sourceDetailsLogin)
     } }
     val openDesktopSearch: () -> Unit = {
-        if (section == Section.ANIME && reading == null && detail == null) {
+        if (animeMode) {
+            if (section != Section.ANIME) changeSection(Section.ANIME)
             animeSearchRequest++
         } else {
             // The regular reader/detail close paths retain their own positions and cancellation.
@@ -877,16 +962,17 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
     val drawerCanSelect = frame is Frame.Root && drawerExposed
-    val drawerTargets = remember { mutableMapOf<Section, Rect>() }
+    val drawerTargets = remember { mutableMapOf<SidebarDestination, Rect>() }
     SideEffect { drawerTargets.keys.retainAll(profileSections.toSet()) }
     val canSelectDrawer: () -> Boolean = {
         frame is Frame.Root && drawer.currentOffset.let { it.isFinite() && it > -drawerWidthPx + .5f }
     }
-    val selectDrawer: (Section) -> Unit = { destination ->
+    val selectDrawer: (SidebarDestination) -> Unit = { destination ->
         if (destination in profileSections && canSelectDrawer()) {
-            if ((drawerAction?.destination ?: section) != destination)
+            if ((pendingSidebarDestination ?: highlightedSection) != destination)
                 feedback.perform(FeelEvent.Selection)
-            changeSection(destination)
+            if (destination.anime != null) navigateAnime(destination.anime)
+            else changeSection(destination.section)
         }
     }
     BackHandler(drawerVisible || libraryOpening != null) {
@@ -900,7 +986,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     ) {
     DesktopNavigationWorkspace(
         visible = desktopNavigationVisible, expanded = desktopNavigationWide,
-        destinations = desktopDestinations, selectedIndex = profileSections.indexOf(highlightedSection).coerceAtLeast(0),
+        destinations = desktopDestinations,
+        selectedIndex = profileSections.indexOf(pendingSidebarDestination ?: highlightedSection).coerceAtLeast(0),
         version = "MangaFlow " + platformVersion(LocalContext.current), backdrop = drawerBackdrop,
         onToggle = { desktopNavigationMode = if (desktopNavigationWide) 2 else 1 },
         onNavigate = { index ->
@@ -908,12 +995,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             model.closeDetail()
             tagSearchVisible = false
             recentReadingOpen = false
-            searchExpanded = destination == Section.DISCOVER && browse.isSearch
-            changeSection(destination)
+            if (destination.anime != null) navigateAnime(destination.anime)
+            else {
+                if (!animeMode) searchExpanded = destination.section == Section.DISCOVER && browse.isSearch
+                changeSection(destination.section)
+            }
         },
         onSearch = openDesktopSearch,
         profileControl = { compact ->
-            ContentProfileSwitch(restrictedMode, requestProfile, manageProfileSources,
+            ContentProfileSwitch(contentProfile, requestProfile, manageProfileSources,
                 compact = compact, enabled = !rootHandoff)
         },
         modifier = Modifier.then(if (!experienceBudget.preferHighRefresh || experienceBudget.refreshHz != null) Modifier else
@@ -981,24 +1071,24 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         .focusProperties { canFocus = false })
                     .padding(horizontal = 14.dp, vertical = 12.dp)) {
                     Row(Modifier.padding(12.dp, 8.dp, 12.dp, if (windowSize.shortHeight) 8.dp else 28.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.AutoMirrored.Outlined.MenuBook, contentDescription = null, modifier = Modifier.size(28.dp))
+                        Icon(contentProfile.icon, contentDescription = null, modifier = Modifier.size(28.dp))
                         Spacer(Modifier.width(12.dp))
                         Column {
-                            Text("漫流", style = MaterialTheme.typography.titleLarge)
+                            Text(contentProfile.title, style = MaterialTheme.typography.titleLarge)
                             Text("MANGAFLOW", fontSize = 10.sp, letterSpacing = 2.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                    ContentProfileSwitch(restrictedMode, requestProfile, manageProfileSources,
+                    ContentProfileSwitch(contentProfile, requestProfile, manageProfileSources,
                         modifier = Modifier.padding(bottom = 10.dp), enabled = drawerCanSelect && !rootHandoff)
                     Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(drawerScroll)) {
                     CompositionLocalProvider(LocalRippleConfiguration provides null) {
                     MotionNavigationColumn(
-                        selected = profileSections.indexOf(drawerAction?.destination ?: highlightedSection).coerceAtLeast(0),
+                        selected = profileSections.indexOf(pendingSidebarDestination ?: highlightedSection).coerceAtLeast(0),
                         itemCount = profileSections.size,
                     ) { index, itemModifier ->
                         val destination = profileSections[index]
                         val interactions = remember(destination) { MutableInteractionSource() }
-                        val selected = (drawerAction?.destination ?: highlightedSection) == destination
+                        val selected = (pendingSidebarDestination ?: highlightedSection) == destination
                         NavigationDrawerItem(
                             label = {
                                 Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
@@ -1007,7 +1097,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     Icon(destination.icon, null, Modifier.size(21.dp),
                                         tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (selected) 1f else .82f))
                                     Spacer(Modifier.width(12.dp))
-                                    Text(destination.navigationTitle(restrictedMode), fontWeight = FontWeight.Medium)
+                                    Text(destination.title(contentProfile), fontWeight = FontWeight.Medium)
                                 }
                             },
                             selected = selected,
@@ -1088,7 +1178,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     val selection = pendingDrawerSelection ?: return@LaunchedEffect
                     if (current is Frame.Root && current.key == frame.key &&
                         (selection.destination == null || selection.destination == current.section) &&
-                        (selection.restricted == null || selection.restricted == (current.profile == "restricted"))) {
+                        (selection.profile == null || selection.profile.key == current.profile)) {
                         // Only the foreground reveal waits for a committed target frame.
                         // Native drawer travel has already started independently.
                         if (motion) withFrameNanos { }
@@ -1358,8 +1448,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             labelSlot * discoveryModes.size + 8.dp
                         }
                         var searchPresent by remember { mutableStateOf(searchExpanded) }
-                        val searchVisible = if (desktop) searchExpanded else searchExpanded || searchPresent
-                        val desktopSearchContent = desktop && searchExpanded && (restrictedMode || browse.query.isNotBlank() ||
+                        val searchVisible = !animeMode && (if (desktop) searchExpanded else searchExpanded || searchPresent)
+                        val desktopSearchContent = !animeMode && desktop && searchExpanded && (restrictedMode || browse.query.isNotBlank() ||
                             browse.selectedTags.isNotEmpty() || browse.searchTarget == SearchTarget.TAG)
                         var searchForeground by remember { mutableStateOf<State<Float>?>(null) }
                         val chromeReady by remember {
@@ -1420,7 +1510,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             val navigation: @Composable () -> Unit = {
                                 if (!desktopNavigationVisible) Box {
                                     MotionIconButton(modifier = Modifier.size(44.dp), onClick = {
-                                        closeSearch()
+                                        if (!animeMode) closeSearch()
                                         model.cancelLibraryReading()
                                         drawerAction = DrawerAction(DrawerValue.Open)
                                     }) {
@@ -1533,6 +1623,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         navigationVisible = !desktopNavigationVisible,
                                         searchRequest = animeSearchRequest, backRequest = animeBackRequest,
                                         browseRequest = animeBrowseRequest, onBrowseRequestConsumed = { animeBrowseRequest = 0 },
+                                        requestedDestination = animeRequestedDestination,
+                                        navigationRequest = animeNavigationRequest,
+                                        onDestinationChange = {
+                                            if (it != AnimeWorkspaceDestination.SOURCES) animeDestinationName = it.name
+                                        },
                                         onPlaybackVisibility = { animeImmersive = it },
                                     )
                                     Section.BOARDS -> {

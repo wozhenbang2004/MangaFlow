@@ -15,10 +15,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.Tv
 import androidx.compose.material.icons.outlined.ViewModule
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -32,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
@@ -48,45 +51,61 @@ import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionInputGate
 
-/** The existing tab motion selects a content scope, without creating a second navigation. */
+internal enum class ContentProfile(val key: String, val label: String, val title: String, val icon: ImageVector) {
+    ORDINARY("ordinary", "普通", "普通漫画", Icons.AutoMirrored.Outlined.MenuBook),
+    RESTRICTED("restricted", "成人", "成人漫画", Icons.Outlined.Lock),
+    ANIME("anime", "番剧", "番剧专区", Icons.Outlined.Tv),
+}
+
+/** Content areas own their navigation; this control selects the area above its destinations. */
 @Composable
 internal fun ContentProfileSwitch(
-    restricted: Boolean,
-    onSelect: (Boolean) -> Unit,
+    profile: ContentProfile,
+    onSelect: (ContentProfile) -> Unit,
     onManage: () -> Unit,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
     enabled: Boolean = true,
 ) {
-    val scopeName = if (restricted) "成人分区" else "普通分区"
+    val scopeName = profile.title
     if (compact) {
-        val description = "当前$scopeName，切换到" + if (restricted) "普通分区" else "成人分区"
-        MotionIconButton(
-            onClick = { onSelect(!restricted) },
-            modifier = modifier.size(44.dp).semantics { stateDescription = scopeName },
-            enabled = enabled, tooltip = description,
-        ) {
-            Icon(Icons.Outlined.Lock, description, Modifier.size(20.dp))
+        Column(modifier.fillMaxWidth().semantics { stateDescription = scopeName },
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            ContentProfile.entries.forEach { entry ->
+                val current = entry == profile
+                MotionIconButton(
+                    onClick = { if (!current) onSelect(entry) },
+                    modifier = Modifier.size(44.dp)
+                        .background(if (current) MaterialTheme.colorScheme.onSurface.copy(alpha = .08f)
+                            else Color.Transparent, RoundedCornerShape(14.dp))
+                        .semantics { selected = current },
+                    enabled = enabled, tooltip = entry.title,
+                ) {
+                    Icon(entry.icon, entry.title, Modifier.size(20.dp),
+                        tint = if (current) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
         }
     } else {
         Row(modifier.fillMaxWidth().semantics { stateDescription = scopeName },
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             MotionTabs(
-                selected = if (restricted) 1 else 0,
-                labels = listOf("普通", "成人"),
+                selected = profile.ordinal,
+                labels = ContentProfile.entries.map { it.label },
                 onSelect = { index ->
-                    val next = index == 1
-                    if (enabled && next != restricted) onSelect(next)
+                    val next = ContentProfile.entries[index]
+                    if (enabled && next != profile) onSelect(next)
                 },
                 modifier = Modifier.weight(1f).motionInputGate(enabled),
-                compact = true, controlHeight = 44.dp, fontSize = 13.sp,
+                controlHeight = 44.dp, fontSize = 13.sp,
             )
             MotionIconButton(
                 onClick = onManage, enabled = enabled,
-                modifier = Modifier.size(44.dp), tooltip = "当前分区来源",
+                modifier = Modifier.size(44.dp), tooltip = if (profile == ContentProfile.ANIME) "管理片源" else "当前分区来源",
             ) {
-                Icon(Icons.Outlined.Tune, "当前分区来源", Modifier.size(20.dp),
+                Icon(Icons.Outlined.Tune, if (profile == ContentProfile.ANIME) "管理片源" else "当前分区来源", Modifier.size(20.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }

@@ -89,7 +89,7 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
                 onSelect = { owner.selectCategory(sections[it].first) }, active = contentActive,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         }
-        if (source == null) AnimeMessage("还没有可浏览的来源", "可在设置中管理动漫来源。")
+        if (source == null) AnimeMessage("还没有可浏览的来源", "打开番剧菜单，选择管理片源。")
         else MotionTabContent(source to state,
             contentKey = { (selected, snapshot) -> selected.id + ":" + selected.revision + ":" + (snapshot.selectedTitle?.id ?: "catalog") },
             order = { (_, snapshot) -> if (snapshot.selectedTitle == null) 0 else 1 }, modifier = Modifier.weight(1f).motionInputGate(contentActive)) { (shownSource, snapshot) ->
