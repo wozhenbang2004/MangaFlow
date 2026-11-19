@@ -130,14 +130,15 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
         fun count(value: Long?) = value?.takeIf { it >= 0L }?.toString() ?: "—"
         val recent = playback?.frameMetrics?.takeIf { flowing }
         val duration = recent?.windowDurationMs?.let { if (it >= 4_500L) "近5秒" else "近${formatDecimal(it / 1000.0, 1)}秒" }
+        val durationLabel = duration ?: "近期"
         val percent = recent?.recentDropPercent?.let { " · ${formatDecimal(it, 1)}%" }.orEmpty()
         val value = when {
             playback == null -> "丢帧 —"
             !flowing -> "丢帧 · 待播放"
             recent == null -> "丢帧 · 采样中"
             playback.nativeVideoStatistics != null ->
-                "$duration丢帧 解码 ${count(recent.recentDecoderDroppedFrames)} · 输出 ${count(recent.recentOutputDroppedFrames)}"
-            else -> "$duration丢帧 ${count(recent.recentDroppedFrames)}$percent"
+                "${durationLabel}丢帧 解码 ${count(recent.recentDecoderDroppedFrames)} · 输出 ${count(recent.recentOutputDroppedFrames)}"
+            else -> "${durationLabel}丢帧 ${count(recent.recentDroppedFrames)}$percent"
         }
         add(EnhancementReadout(EnhancementMetric.DROPPED_FRAMES, value,
             "$value；滚动窗口最长5秒，暂停、定位与处理档位变化后重新采样。" +
