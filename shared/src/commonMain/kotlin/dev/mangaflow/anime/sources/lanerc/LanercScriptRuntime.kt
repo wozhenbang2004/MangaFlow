@@ -111,7 +111,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                             sdEvidence?.beforeRequest(request)
                             lanercBlocking(operationContext) {
                                 http(request, network, preferences, cleartextEndpoints, ::checkCurrent, sdEvidence).also {
-                                    responseStatus = JSONObject(it).optInt("statusCode").takeIf { code -> code in 400..599 }
+                                    responseStatus = lanercResponseFailure(responseStatus, JSONObject(it).optInt("statusCode"))
                                 }
                             }
                         } catch (failure: Exception) {
@@ -173,7 +173,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                     if (emptyResult(method, result) && (hostFailure != null || responseStatus != null)) {
                         val failure = hostFailure
                         if (failure is LanercCapabilityException) throw failure
-                        if (responseStatus in setOf(401, 403)) throw LanercCapabilityException("此来源需要验证或拒绝了访问，请检查来源账号与设置。")
+                        serviceFailure(responseStatus)?.let { throw it }
                         throw IllegalStateException("来源请求或解析未完成，请检查网络路由与来源版本。")
                     }
                     if (result is JSONArray && result.length() == 0 && sdEvidence?.twoUnresolvedMainAttempts() == true)
@@ -186,6 +186,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                     if (changed) throw LanercCapabilityException("来源或网络路由已改变，请刷新后重试。")
                     if (failure is LanercCapabilityException) throw failure
                     if (hostFailure is LanercCapabilityException) throw hostFailure as LanercCapabilityException
+                    serviceFailure(responseStatus)?.let { throw it }
                     // Never surface a JS exception, response body, signed URL or credential in UI/logs.
                     throw IllegalStateException(if (hostFailure != null)
                         "来源请求、会话或编解码未完成，请检查网络路由、来源版本及兼容能力。"
@@ -277,10 +278,29 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
         else -> false
     }
 
+    private fun serviceFailure(status: Int?): LanercCapabilityException? {
+        val code = status ?: return null
+        val message = when (code) {
+            401, 403 -> "来源要求验证或拒绝了访问，请检查来源账号与设置。"
+            429 -> "来源暂时限制了请求，请稍后再试。"
+            in 500..599 -> "来源服务暂时不可用（HTTP $code），请稍后再试。"
+            else -> return null
+        }
+        return LanercCapabilityException(message)
+    }
+
     private companion object {
         val METHODS = setOf("config", "search", "detail", "play", "homeSections", "categories", "searchFiltered", "related", "danmu")
         fun argument(values: Array<Any?>): String = (values.singleOrNull() as? String)
             ?.also { require(it.length <= 2 * 1024 * 1024) }
             ?: throw IllegalArgumentException("来源宿主参数无效。")
     }
+}
+
+/** A successful fallback can return data, but an empty reply should preserve a prior access or service error. */
+internal fun lanercResponseFailure(previous: Int?, status: Int): Int? {
+    fun isServiceFailure(code: Int) = code == 401 || code == 403 || code == 429 || code in 500..599
+    if (isServiceFailure(status)) return status
+    if (previous != null && isServiceFailure(previous)) return previous
+    return status.takeIf { it in 400..499 }
 }

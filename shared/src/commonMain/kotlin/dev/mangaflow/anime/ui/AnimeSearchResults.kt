@@ -54,16 +54,24 @@ internal fun LazyListScope.animeSearchResults(
     val index = search.index
     val failed = sources.filter { it.error != null }
     val failureCount = failed.size + if (index.error == null) 0 else 1
-    val pending = sources.count { it.page == 0 && it.error == null }
+    val pending = sources.filter { it.loading || it.page == 0 && it.error == null }
     val loadingIndex = index.page == 0 && index.error == null
+    val queued = pending.count { it.queued }
+    val searching = pending.size - queued
+    val searchProgress = listOfNotNull(
+        searching.takeIf { it > 0 }?.let { "$it 个来源正在搜索" },
+        queued.takeIf { it > 0 }?.let { "$it 个排队" },
+        "正在查作品资料".takeIf { loadingIndex },
+    ).joinToString(" · ")
     val paging = listOfNotNull("Bangumi".takeIf { index.loading && index.page > 0 }) +
-        sources.filter { it.loadingMore }.map { it.name }
+        sources.filter { it.loadingMore && !it.queued }.map { it.name }
+    val pagingQueued = sources.count { it.loadingMore && it.queued }
     val canLoadMore = index.canLoadMore || sources.any { it.canLoadMoreSearch }
     val sourceNames = sources.associate { it.providerId to it.name }
 
     if (groups.isEmpty()) item(key = "search-status") {
         when {
-            pending > 0 || loadingIndex -> AnimeMessage("正在搜索", search.query)
+            searchProgress.isNotEmpty() -> AnimeMessage("正在搜索", searchProgress)
             failureCount > 0 -> AnimeMessage("搜索未完成")
             else -> AnimeMessage(if (indexOnly) "未找到对应的作品资料" else "没有找到番剧",
                 if (indexOnly) "已保留所选来源。可以换用原名或别名。" else "试试原名、别名或更短的关键词。")
@@ -93,7 +101,7 @@ internal fun LazyListScope.animeSearchResults(
         }
     }
     if (groups.isNotEmpty()) item(key = "search-summary") {
-        AnimeSectionTitle("${groups.size} 部番剧", if (pending > 0 || loadingIndex) "来源结果仍在补全" else null)
+        AnimeSectionTitle("${groups.size} 部番剧", searchProgress.takeIf { it.isNotBlank() })
     }
     issues()
 
@@ -150,9 +158,13 @@ internal fun LazyListScope.animeSearchResults(
             Text("更多结果")
         }
     }
-    if (paging.isNotEmpty()) item(key = "search-more-pending") {
+    if (paging.isNotEmpty() || pagingQueued > 0) item(key = "search-more-pending") {
         val names = paging.take(2).joinToString("、")
         val remaining = (paging.size - 2).takeIf { it > 0 }?.let { "等 ${paging.size} 个来源" }.orEmpty()
-        AnimeQuietLabel("正在读取下一页 · $names$remaining", Modifier.padding(12.dp))
+        val status = listOfNotNull(
+            "正在读取下一页 · $names$remaining".takeIf { paging.isNotEmpty() },
+            "下一页 · $pagingQueued 个来源排队".takeIf { pagingQueued > 0 },
+        ).joinToString(" · ")
+        AnimeQuietLabel(status, Modifier.padding(12.dp))
     }
 }

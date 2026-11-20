@@ -175,7 +175,7 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                 ?: RankPeriod.WEEK,
             audience = values.getOrNull(5)?.let { runCatching { RankAudience.valueOf(it) }.getOrNull() }
                 ?: RankAudience.MALE,
-            sourceScope = scopeKey())
+        ).let { it.copy(sourceScope = scopeKey(it.isSearch)) }
         selections[sourceId] = restored
         sourceControls[sourceId] = controls.value
         if (controls.value.feedId.isNotBlank()) feedSelections[sourceId to restored.mode] = controls.value.feedId
@@ -224,7 +224,7 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
             val current = controls.value
             val filters = if (request.isSearch) current.searchFilters
                 else current.feeds.firstOrNull { it.id == current.feedId }?.filters.orEmpty()
-            val options = optionSelections["$id:${current.feedId}:${request.isSearch}"].orEmpty()
+            val options = optionSelections[optionKey(id, current.feedId, request.isSearch)].orEmpty()
             mutableControls.value = current.copy(options = normalizeOptions(filters, options))
         }
         show(request, retain = false)
@@ -261,15 +261,16 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         if (!filter.accepts(id) || filter.normalize(id) == current.options.getOrNull(index)) return
         retainCurrent()
         val values = filters.mapIndexed { i, item -> item.normalize(if (i == index) id else current.options.getOrNull(i)) }
-        optionSelections["$sourceId:${current.feedId}:${state.value.isSearch}"] = values
+        optionSelections[optionKey(sourceId, current.feedId, state.value.isSearch)] = values
         mutableControls.value = current.copy(options = values)
         show(selection(state.value), retain = false)
     }
 
     private fun metadataKey(id: String = sourceId): String = id + ":" + sources.firstOrNull { it.id == id }?.revision.orEmpty()
+    private fun controlsKey(revision: String, searching: Boolean): String = "$revision:$searching"
     private fun filterKey(id: String, feed: String): String = metadataKey(id) + ":" + feed
     private fun controlsReady(searching: Boolean): Boolean = sourceId == ALL ||
-        metadataKey() in readyMetadata && (searching || controls.value.feedId.isEmpty() ||
+        controlsKey(metadataKey(), searching) in readyMetadata && (searching || controls.value.feedId.isEmpty() ||
             filterKey(sourceId, controls.value.feedId) in feedFilterCache)
     private fun normalizeOptions(filters: List<SourceFilter>, saved: List<String>): List<String> = filters.mapIndexed { index, filter ->
         filter.normalize(saved.getOrNull(index))
@@ -297,38 +298,43 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         controlsJob = scope.launch {
             try {
                 val old = controls.value
-                val metadataReady = revision in readyMetadata
-                val capabilities = if (metadataReady) old.capabilities else repository.sourceCapabilities(id)
-                val feeds = if (metadataReady) old.feeds else if (capabilities.supports(SourceFeature.DISCOVERY) ||
+                val browseReady = controlsKey(revision, false) in readyMetadata
+                val searchReady = controlsKey(revision, true) in readyMetadata
+                val capabilities = if (browseReady || searchReady) old.capabilities else repository.sourceCapabilities(id)
+                // Keyword search does not need the site's browsing menus or recommendations.
+                val feeds = if (searching || browseReady) old.feeds else if (capabilities.supports(SourceFeature.DISCOVERY) ||
                     capabilities.supports(SourceFeature.CATEGORIES) || capabilities.supports(SourceFeature.RANKING)) repository.sourceFeeds(id) else emptyList()
-                val searchFilters = if (metadataReady) old.searchFilters else if (capabilities.supports(SourceFeature.SEARCH))
+                val searchFilters = if (!searching || searchReady) old.searchFilters else if (capabilities.supports(SourceFeature.SEARCH))
                     repository.sourceSearchFilters(id) else emptyList()
                 if (!current()) return@launch
                 val mode = state.value.mode
                 val remembered = feedSelections[id to mode] ?: requestedFeed
-                val feed = feeds.firstOrNull { it.id == remembered && it.discoveryMode() == mode } ?: feeds.defaultFeed(mode)
+                val feed = if (searching) null else {
+                    feeds.firstOrNull { it.id == remembered && it.discoveryMode() == mode } ?: feeds.defaultFeed(mode)
+                }
+                val feedId = if (searching) requestedFeed else feed?.id.orEmpty()
                 val feedKey = feed?.let { filterKey(id, it.id) }
-                val selectedFilters = if (searching || feed == null) emptyList() else
+                val selectedFilters = if (feed == null) emptyList() else
                     feedFilterCache[filterKey(id, feed.id)] ?: if (feed.filters.isNotEmpty()) feed.filters else repository.sourceFeedFilters(id, feed.id)
                 if (!current()) return@launch
                 // Cache actual resolved choices only after the exact source/feed request survives cancellation.
-                if (!searching && feedKey != null) feedFilterCache[feedKey] = selectedFilters
+                if (feedKey != null) feedFilterCache[feedKey] = selectedFilters
                 val resolvedFeeds = feeds.map { item ->
                     val known = feedFilterCache[filterKey(id, item.id)]
                     if (known == null) item else item.copy(filters = known)
                 }
                 val filters = if (searching) searchFilters else selectedFilters
-                val saved = optionSelections["$id:${feed?.id.orEmpty()}:$searching"]
-                    ?: old.options.takeIf { old.feedId == feed?.id.orEmpty() }.orEmpty()
+                val saved = optionSelections[optionKey(id, feedId, searching)]
+                    ?: old.options.takeIf { old.feedId == feedId }.orEmpty()
                 val options = normalizeOptions(filters, saved)
                 // Publish metadata and the selected feed atomically; then send its one intended list request.
                 retainCurrent()
                 mutableControls.value = old.copy(capabilities = capabilities, feeds = resolvedFeeds, searchFilters = searchFilters,
-                    feedId = feed?.id.orEmpty(), options = options, loading = false, error = null)
+                    feedId = feedId, options = options, loading = false, error = null)
                 sourceControls[id] = controls.value
                 if (feed != null) feedSelections[id to mode] = feed.id
-                optionSelections["$id:${feed?.id.orEmpty()}:$searching"] = options
-                readyMetadata.add(revision)
+                optionSelections[optionKey(id, feedId, searching)] = options
+                readyMetadata.add(controlsKey(revision, searching))
                 val pending = pendingLoad ?: PendingLoad(false, false)
                 pendingLoad = null
                 show(selection(state.value), force = pending.force, debounce = pending.debounce, retain = false)
@@ -358,9 +364,10 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         if (wasSearch != isSearch) {
             retainCurrent(); cancelControls()
             val current = controls.value
-            optionSelections["$sourceId:${current.feedId}:$wasSearch"] = current.options
+            optionSelections[optionKey(sourceId, current.feedId, wasSearch)] = current.options
             val filters = if (isSearch) current.searchFilters else current.feeds.firstOrNull { it.id == current.feedId }?.filters.orEmpty()
-            mutableControls.value = current.copy(options = normalizeOptions(filters, optionSelections["$sourceId:${current.feedId}:$isSearch"].orEmpty()))
+            mutableControls.value = current.copy(options = normalizeOptions(filters,
+                optionSelections[optionKey(sourceId, current.feedId, isSearch)].orEmpty()))
         }
         show(selection(state.value).copy(query = query), debounce = query.isNotBlank(), retain = wasSearch == isSearch)
     }
@@ -392,10 +399,10 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         if (current.isSearch != next.isSearch) {
             retainCurrent(); cancelControls()
             val control = controls.value
-            optionSelections["$sourceId:${control.feedId}:${current.isSearch}"] = control.options
+            optionSelections[optionKey(sourceId, control.feedId, current.isSearch)] = control.options
             val filters = if (next.isSearch) control.searchFilters else control.feeds.firstOrNull { it.id == control.feedId }?.filters.orEmpty()
             mutableControls.value = control.copy(options = normalizeOptions(filters,
-                optionSelections["$sourceId:${control.feedId}:${next.isSearch}"].orEmpty()))
+                optionSelections[optionKey(sourceId, control.feedId, next.isSearch)].orEmpty()))
         }
         show(next, retain = current.isSearch == next.isSearch)
     }
@@ -464,15 +471,22 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
     override fun browseBackground(selection: BrowseState): BrowseState = if (!selection.isSearch) selection else backgrounds[sourceId] ?: homeSelection(selection)
     private fun selection(value: BrowseState) = BrowseState(query = value.query, searchTarget = value.searchTarget,
         selectedTags = value.selectedTags, mode = value.mode, period = value.period, audience = value.audience,
-        availableTags = value.availableTags, loading = false, sourceScope = scopeKey())
+        availableTags = value.availableTags, loading = false, sourceScope = scopeKey(value.isSearch))
     private fun homeSelection(value: BrowseState) = selection(value).copy(query = "")
-    private fun scopeKey() = "scoped:" + sourceId + ":" + controls.value.feedId + ":" + controls.value.options.joinToString("\u001f")
+    private fun optionKey(id: String, feedId: String, searching: Boolean) =
+        if (searching) "$id::true" else "$id:$feedId:false"
+
+    private fun scopeKey(searching: Boolean = state.value.isSearch): String {
+        val controls = controls.value
+        val feedId = controls.feedId.takeUnless { searching }.orEmpty()
+        return "scoped:$sourceId:$feedId:" + controls.options.joinToString("\u001f")
+    }
     private fun key(value: BrowseState): String {
         val nativeOrder = if (sourceId == ALL && !value.isSearch && value.mode == DiscoveryMode.RANKING)
             optionSelections.entries.filter { it.key.endsWith(":false") }.sortedBy { it.key }
                 .joinToString("|") { (key, options) -> key + options.joinToString(prefix = "[", postfix = "]") }
         else ""
-        return scopeKey() + ":" + sources.joinToString("|") { it.id + ":" + it.revision } + ":" + value.cacheKey + ":" + nativeOrder
+        return scopeKey(value.isSearch) + ":" + sources.joinToString("|") { it.id + ":" + it.revision } + ":" + value.cacheKey + ":" + nativeOrder
     }
     private fun selectedSources() = if (sourceId == ALL) sources else sources.filter { it.id == sourceId }
 
@@ -510,7 +524,7 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         val cached = snapshots[key(configured)]
         mutableState.value = cached?.copy(query = configured.query, searchTarget = configured.searchTarget,
             selectedTags = configured.selectedTags, loading = false, loadingMore = false, refreshing = false,
-            sourceScope = scopeKey()) ?: configured
+            sourceScope = scopeKey(configured.isSearch)) ?: configured
         if (!active) return
         if (configured.isSearch && configured.selectedTags.isEmpty() &&
             (configured.query.isBlank() || configured.searchTarget == SearchTarget.TAG)) return
@@ -529,7 +543,7 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         if (!active || disposed || pages.isEmpty()) return
         if (!controlsReady(value.isSearch)) { show(selection(value), force = force, debounce = debounce, retain = false); return }
         cancelRequest()
-        val expected = generation; val owner = scopeKey(); val selectedKey = key(value)
+        val expected = generation; val owner = scopeKey(value.isSearch); val selectedKey = key(value)
         val selectedSource = sourceId; val selectedControls = controls.value
         val rememberedOptions = optionSelections.toMap()
         val infos = selectedSources().associateBy { it.id }
@@ -645,18 +659,17 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                                                 selectedControls.feedId.takeIf(String::isNotEmpty)
                                                     ?.let { SourceBrowseRequest(it, page, selectedControls.options) }
                                             } else {
-                                                repository.sourceFeeds(id).firstOrNull { it.kind == SourceFeedKind.EXPLORE }
+                                                repository.primarySourceFeed(id, SourceFeedKind.EXPLORE)
                                                     ?.let { SourceBrowseRequest(it.id, page, it.filters.map { filter -> filter.normalize() }) }
                                             }
                                             DiscoveryMode.RANKING, DiscoveryMode.LATEST -> {
                                                 val kind = if (value.mode == DiscoveryMode.RANKING)
                                                     SourceFeedKind.RANKING else SourceFeedKind.LATEST
-                                                val feeds = if (selectedSource != ALL && selectedControls.feeds.isNotEmpty())
-                                                    selectedControls.feeds else repository.sourceFeeds(id)
-                                                val feed = (if (selectedSource != ALL) feeds.firstOrNull {
-                                                    it.id == selectedControls.feedId && it.kind == kind
-                                                } else null) ?: feeds.firstOrNull { it.kind == kind }
-                                                    ?: return@withTimeout null
+                                                val feeds = selectedControls.feeds
+                                                    .takeIf { selectedSource != ALL && it.isNotEmpty() }
+                                                val feed = (if (feeds == null) repository.primarySourceFeed(id, kind)
+                                                    else feeds.firstOrNull { it.id == selectedControls.feedId && it.kind == kind }
+                                                        ?: feeds.firstOrNull { it.kind == kind }) ?: return@withTimeout null
                                                 val remembered = if (selectedSource != ALL && selectedControls.feedId == feed.id)
                                                     selectedControls.options else rememberedOptions["$id:${feed.id}:false"].orEmpty()
                                                 val options = if (kind == SourceFeedKind.RANKING)

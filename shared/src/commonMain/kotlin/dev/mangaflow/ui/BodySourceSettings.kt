@@ -62,6 +62,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.anime.sources.lanerc.LANERC_SOURCE_DIRECTORY
+import dev.mangaflow.anime.sources.lanerc.LanercSourceKind
+import dev.mangaflow.anime.sources.lanerc.lanercAccessNote
 import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.data.plugins.StarterSourceInstaller
 import dev.mangaflow.storage.BodySourceRegistry
@@ -120,6 +123,7 @@ internal fun BodySourceSettingsSheet(
     var importing by remember { mutableStateOf(false) }
     var movingExisting by remember { mutableStateOf(false) }
     var showHelp by remember { mutableStateOf(false) }
+    var showLanercSources by remember { mutableStateOf(false) }
     var busyId by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     var failed by remember { mutableStateOf(false) }
@@ -284,6 +288,31 @@ internal fun BodySourceSettingsSheet(
                         }
                     }
                 }
+                if (!importAsAdult) {
+                    item(key = "lanerc-manga-sources") {
+                        MotionTextButton(onClick = { showLanercSources = !showLanercSources },
+                            modifier = Modifier.heightIn(min = 44.dp).semantics {
+                                contentDescription = if (showLanercSources) "收起 Lanerc 漫画来源" else "查看 Lanerc 漫画来源"
+                            }) {
+                            Text("Lanerc 漫画 · 待接入", fontSize = 13.sp)
+                            Icon(if (showLanercSources) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                                null, Modifier.padding(start = 6.dp).size(18.dp))
+                        }
+                    }
+                    if (showLanercSources) items(lanercMangaReferences, key = { "lanerc:${it.id}" }) { source ->
+                        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                            .padding(start = 12.dp, end = 8.dp, top = 5.dp, bottom = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            ChapterSourceLogo(source.id, source.name, Modifier.size(24.dp))
+                            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text(source.name, fontSize = 13.sp)
+                                Text(lanercAccessNote(source.id).orEmpty(), fontSize = 11.sp, lineHeight = 16.sp,
+                                    color = colors.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -296,6 +325,8 @@ internal fun BodySourceSettingsSheet(
             failed = false
         })
 }
+
+private val lanercMangaReferences = LANERC_SOURCE_DIRECTORY.filter { it.kind == LanercSourceKind.COMIC }
 
 @Composable
 private fun BodySourceSettingsRow(

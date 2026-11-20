@@ -468,11 +468,8 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         private const val MAX_STORE_BYTES = 64 * 1024 * 1024
         private fun installable(descriptor: LanercSourceDescriptor) = descriptor.kind in
             setOf(LanercSourceKind.VIDEO, LanercSourceKind.BROWSE, LanercSourceKind.DANMAKU)
-        private fun unsupported(descriptor: LanercSourceDescriptor): String? = when (descriptor.kind) {
-            LanercSourceKind.COMIC -> "漫画图片协议，不能作为视频播放源；漫画宿主接入待完成。"
-            LanercSourceKind.UNKNOWN -> "此来源发布的是 ENC1 加密包，当前宿主尚未接入其解包协议。"
-            else -> null
-        }
+        private fun unsupported(descriptor: LanercSourceDescriptor): String? =
+            lanercAccessNote(descriptor.id) ?: if (!installable(descriptor)) "正在核对来源的接入方式。" else null
 
 
         private val lock = SynchronizedObject()

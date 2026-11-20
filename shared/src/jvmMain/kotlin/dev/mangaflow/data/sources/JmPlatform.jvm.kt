@@ -205,14 +205,17 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
     private var clientObservesRelayTraffic = true
     @kotlin.concurrent.Volatile private var probeResponse: (() -> Unit)? = null
     @kotlin.concurrent.Volatile private var imageTransfer: JmImageTransfer? = null
-    @kotlin.concurrent.Volatile private var probeSession = 0L
-    override fun connectionProbeIdentity(): String = probeSession.toString()
     private var savedSession: JSONObject? = readSecret(context, SECRET_KEY)?.let {
         runCatching { JSONObject(it) }.getOrNull()
     }
-    @Volatile private var imageEpoch = jmDigest(savedSession?.toString() ?: "native-jm-anonymous")
-    fun imageSessionEpoch(): String = imageEpoch
-    private var accountName: String = savedSession?.optString("owner").orEmpty()
+    private data class AccountSnapshot(val displayName: String, val imageEpoch: String, val generation: Long)
+    @Volatile private var account = AccountSnapshot(
+        savedSession?.optString("owner").orEmpty(),
+        jmDigest(savedSession?.toString() ?: "native-jm-anonymous"),
+        0L,
+    )
+    override fun connectionProbeIdentity(): String = account.generation.toString()
+    fun imageSessionEpoch(): String = account.imageEpoch
     private val photoImages = LinkedHashMap<String, List<JmImage>>()
     private val imageActivityLock = Any()
     private class ImageSlot {
@@ -271,8 +274,8 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                         if (host in created.domainStates && cookies.isNotEmpty()) {
                             created.useDomain(host)
                             created.cookies = cookies
-                        } else accountName = ""
-                    }.onFailure { accountName = "" } }
+                        } else account = account.copy(displayName = "")
+                    }.onFailure { account = account.copy(displayName = "") } }
                     clientConfig = config
                     clientImageHttp = imageHttp
                     clientRoute = route
@@ -290,7 +293,11 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                 if (failure is PrefetchBudgetExceeded || failure is ExperienceAdmissionDeferred ||
                     failure is PrefetchPromoted || failure is DownloadRouteException || failure is JmImageRefreshRequired ||
                     failure is DownloadStorageException || failure is JmImagePayloadException) throw failure
-                if (failure.message.orEmpty().contains("請先登入會員")) accountName = ""
+                if (failure is SourceException && failure.message == LOGIN_REQUIRED) throw failure
+                if (failure.message.orEmpty().contains("請先登入會員")) {
+                    account = account.copy(displayName = "")
+                    throw SourceException(LOGIN_REQUIRED, info.homeUrl)
+                }
                 throw SourceException("禁漫请求失败：${failure.cause?.message ?: failure.message}", info.homeUrl, cause = failure)
             }
             finally { probeResponse = null; imageTransfer = null }
@@ -378,19 +385,24 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
             SourceChoice("Male", "男"), SourceChoice("Female", "女"))),
     ), authorSearch = SourceSearchCoverage.NATIVE_INDEX, tagSearch = SourceSearchCoverage.NATIVE_INDEX)
 
+    private val foundationFeeds = listOf(
+        SourceFeed("latest", "最近更新", SourceFeedKind.LATEST),
+        SourceFeed("new", "新上架", SourceFeedKind.LATEST),
+        SourceFeed("random", "随机推荐", SourceFeedKind.EXPLORE),
+        SourceFeed("serialization", "连载作品", SourceFeedKind.EXPLORE),
+        SourceFeed("ranking", "热榜", SourceFeedKind.RANKING,
+            listOf(periodFilter.copy(defaultValue = "w"), sortFilter.copy(defaultValue = "mv"))),
+    ) + Category.values().filter { it != Category.ALL }.map { category ->
+        SourceFeed("category:${category.value}", category.description, SourceFeedKind.CATEGORY,
+            listOf(sortFilter, periodFilter))
+    }
+
+    override suspend fun primaryFeed(kind: SourceFeedKind): SourceFeed? = foundationFeeds.firstOrNull { it.kind == kind }
+
+    override suspend fun feedFilters(feedId: String): List<SourceFilter> =
+        foundationFeeds.firstOrNull { it.id == feedId }?.filters.orEmpty()
+
     override suspend fun feeds(): List<SourceFeed> {
-        val foundation = listOf(
-            SourceFeed("latest", "最近更新", SourceFeedKind.LATEST),
-            SourceFeed("new", "新上架", SourceFeedKind.LATEST),
-            SourceFeed("random", "随机推荐", SourceFeedKind.EXPLORE),
-            SourceFeed("serialization", "连载作品", SourceFeedKind.EXPLORE),
-            SourceFeed("hot-tags", "热门搜索", SourceFeedKind.EXPLORE),
-            SourceFeed("ranking", "热榜", SourceFeedKind.RANKING,
-                listOf(periodFilter.copy(defaultValue = "w"), sortFilter.copy(defaultValue = "mv"))),
-        ) + Category.values().filter { it != Category.ALL }.map { category ->
-            SourceFeed("category:${category.value}", category.description, SourceFeedKind.CATEGORY,
-                listOf(sortFilter, periodFilter))
-        }
         // Promotional data is optional. Its temporary outage cannot remove the core feeds.
         val additions = try { clientCall { active ->
             val weekly = active.weeklyPicksList.categories().orEmpty()
@@ -404,11 +416,11 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
             weekly + promoted
         } } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { emptyList() }
-        val personal = if (accountName.isNotBlank()) listOf(
+        val personal = if (account.displayName.isNotBlank()) listOf(
             SourceFeed("site-history", "站点浏览记录", SourceFeedKind.EXPLORE),
             SourceFeed("tracking", "追更作品", SourceFeedKind.EXPLORE),
         ) else emptyList()
-        return (foundation + additions + personal).distinctBy(SourceFeed::id)
+        return (foundationFeeds + additions + personal).distinctBy(SourceFeed::id)
     }
 
     override suspend fun browse(request: SourceBrowseRequest): MangaPage {
@@ -452,10 +464,10 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                         MangaPage(items, hasMore, if (hasMore) request.page + 1 else null)
                     }
                     else -> {
-                        if (request.page > 0) return@clientCall MangaPage(emptyList(), false)
                         val rawId = request.feedId.substringAfter(':')
                         require(rawId.matches(Regex("[A-Za-z0-9_-]{1,80}"))) { "来源栏目编号无效。" }
                         val works = if (request.feedId.startsWith("weekly:")) {
+                            if (request.page > 0) return@clientCall MangaPage(emptyList(), false)
                             val valid = active.weeklyPicksList.categories().orEmpty().any { it.id() == rawId }
                             require(valid) { "每周必看栏目已更新，请刷新来源。" }
                             active.getWeeklyPicksDetail(rawId).list().orEmpty()
@@ -520,8 +532,9 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
             .page(page + 1).build()), page) }
     }
 
-    override suspend fun accountState(): SourceAccountState = mutex.withLock {
-        SourceAccountState(accountName.isNotBlank(), accountName)
+    override suspend fun accountState(): SourceAccountState {
+        val displayName = account.displayName
+        return SourceAccountState(displayName.isNotBlank(), displayName)
     }
 
     /**
@@ -621,7 +634,8 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                         val previous = client
                         client = replacement; clientConfig = config; clientImageHttp = imageHttp; clientRoute = route
                         clientTimeouts = timeouts; clientObservesRelayTraffic = true
-                        savedSession = secret; imageEpoch = jmDigest(secret.toString()); accountName = owner; probeSession++
+                        savedSession = secret
+                        account = AccountSnapshot(owner, jmDigest(secret.toString()), account.generation + 1)
                         photoImages.clear()
                         notifySourceImageSessionChanged(info.id)
                         committed = true
@@ -651,7 +665,8 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
     override suspend fun logout(): Unit = withContext(Dispatchers.IO) {
         mutex.withLock {
             deleteSecret(context, SECRET_KEY)
-            savedSession = null; imageEpoch = jmDigest("native-jm-anonymous"); accountName = ""; probeSession++
+            savedSession = null
+            account = AccountSnapshot("", jmDigest("native-jm-anonymous"), account.generation + 1)
             photoImages.clear()
             notifySourceImageSessionChanged(info.id)
             val previous = client
@@ -751,7 +766,9 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
             row.postDate().orEmpty(), maxOf(row.likes(), row.voteUp(), 0), inlineReplies = replies)
     }
 
-    private fun requireAccount() = check(accountName.isNotBlank()) { "请先登录禁漫账号。" }
+    private fun requireAccount() {
+        if (account.displayName.isBlank()) throw SourceException(LOGIN_REQUIRED, info.homeUrl)
+    }
 
     private fun readCookies(session: JSONObject): List<Cookie> {
         val rows = session.optJSONArray("cookies") ?: return emptyList()
@@ -822,7 +839,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
             images.mapIndexed { index, image ->
                 val url = image.downloadUrl
                 require(url.startsWith("https://") && url.length <= 4096) { "禁漫返回的图片地址无效。" }
-                Page(index, url, sourceSessionEpoch = imageEpoch)
+                Page(index, url, sourceSessionEpoch = account.imageEpoch)
             }
         }
     }
@@ -839,8 +856,8 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
         val caller = currentCoroutineContext()
         val transport = caller[ChapterDownloadTransport]
         val route = transport?.route ?: DownloadRoutingStore.get(context).sourceSnapshot(info.id)
-        val epoch = imageEpoch
-        val session = probeSession
+        val session = account
+        val epoch = session.imageEpoch
         if (page.sourceSessionEpoch.isNotBlank() && page.sourceSessionEpoch != epoch)
             throw JmImageRefreshRequired("禁漫账号会话已变化，请刷新本章后重试。")
         val policy = ExperiencePolicyStore.get(context)
@@ -854,7 +871,8 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
         val pending = StorageFile(root, "$fingerprint.part")
         fun current() {
             caller.ensureActive()
-            if (imageEpoch != epoch || probeSession != session ||
+            val live = account
+            if (live.imageEpoch != epoch || live.generation != session.generation ||
                 budget != null && transport == null && DownloadRoutingStore.get(context).sourceSnapshot(info.id) != route)
                 throw JmImageRefreshRequired("禁漫图片会话或预读路由已变化，请重新读取。")
         }
@@ -1016,7 +1034,8 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                                 if (imageTransfer === transfer) imageTransfer = null
                                 policy.releasePrefetchBytes(retainedWire, resourceOwner)
                                 retainedWire = 0L
-                                if (!ignoreFeedback && caller.isActive && imageEpoch == epoch && probeSession == session)
+                                val live = account
+                                if (!ignoreFeedback && caller.isActive && live.imageEpoch == epoch && live.generation == session.generation)
                                     policy.recordTransfer(info.id, responseCode, received,
                                         monotonicTimeMillis() - transferStarted, retryAfter, failed)
                             }
@@ -1159,6 +1178,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
 
     companion object {
         private const val SECRET_KEY = "adult_jm_session_v1"
+        private const val LOGIN_REQUIRED = "此来源需要登录禁漫账号。"
         private val sortFilter = SourceFilter("sort", "排序", listOf(SourceChoice("mr", "最新"),
             SourceChoice("mv", "最多浏览"), SourceChoice("tf", "最多喜欢"), SourceChoice("mp", "图片最多")), "mr")
         private val periodFilter = SourceFilter("period", "时间", listOf(SourceChoice("t", "今日"),

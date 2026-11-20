@@ -134,7 +134,7 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                         if (references.isNotEmpty()) {
                             item(key = "reference-toggle") {
                                 CompactMenuAction(if (referenceExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                                    "参考目录 · ${references.size} 个", onClick = { referenceExpanded = !referenceExpanded })
+                                    "待接入 · ${references.size} 个", onClick = { referenceExpanded = !referenceExpanded })
                             }
                             if (referenceExpanded) sourceManagerRows(references, state, ::openSource)
                         }
@@ -351,7 +351,7 @@ private fun AnimeSourceManagerDetail(
                     onClick = { onSelectAlternative(alternative) })
             }
         }
-        val declared = source.capabilities.mapNotNull(::animeExtensionCapability).distinct()
+        val declared = source.capabilities.mapNotNull { animeExtensionCapability(it, source.kind) }.distinct()
         val hasTechnical = native || source.aliases.isNotEmpty() || declared.isNotEmpty() || source.scriptUrl.isNotBlank()
         if (hasTechnical) item {
             CompactMenuAction(if (technicalExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
@@ -379,13 +379,13 @@ private fun animeExtensionKind(kind: LanercSourceKind): String = when (kind) {
     LanercSourceKind.UNKNOWN -> "类型尚未确认"
 }
 
-private fun animeExtensionCapability(function: String): String? = when (function) {
+private fun animeExtensionCapability(function: String, kind: LanercSourceKind): String? = when (function) {
     "search" -> "关键词搜索"
     "searchFiltered", "categories" -> "分类筛选"
     "homeSections", "latest" -> "发现内容"
-    "detail" -> "作品资料"
+    "detail" -> if (kind == LanercSourceKind.COMIC) "作品和章节" else "作品资料"
     "related" -> "相关推荐"
-    "play" -> "播放解析"
+    "play" -> if (kind == LanercSourceKind.COMIC) "章节取图" else "播放解析"
     "danmu" -> "弹幕"
     "login" -> "来源登录"
     else -> null
@@ -395,8 +395,8 @@ private fun animeSourceManagerLabel(source: LanercSourceListing, state: AnimeScr
     val preparation = state.sourcePreparation[source.id]
     return when {
         source.id in state.sourceOperationIds -> "正在处理"
-        source.kind == LanercSourceKind.COMIC -> "漫画图片协议 · 仅作参考"
-        source.kind == LanercSourceKind.UNKNOWN -> "ENC1 格式待适配 · 仅作参考"
+        source.kind == LanercSourceKind.COMIC -> "漫画 · 待接入"
+        source.kind == LanercSourceKind.UNKNOWN -> "ENC1 · 待兼容"
         !source.installable -> "暂不兼容 · 查看原因"
         native && source.error != null -> "内置 · 读取状态失败"
         native -> when {

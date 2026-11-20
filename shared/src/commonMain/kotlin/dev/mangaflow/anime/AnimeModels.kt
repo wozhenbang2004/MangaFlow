@@ -161,6 +161,7 @@ data class AnimeSourceResult(
     val page: Int = 0,
     val hasMore: Boolean = false,
     val loadingMore: Boolean = false,
+    val queued: Boolean = false,
 )
 
 data class AnimeEpisodeOption(

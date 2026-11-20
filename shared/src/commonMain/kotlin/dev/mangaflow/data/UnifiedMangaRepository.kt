@@ -351,6 +351,8 @@ class UnifiedMangaRepository(
 
     suspend fun sourceCapabilities(id: String): SourceCapabilities = if (id == "copy") SourceCapabilities() else adapter(id).capabilities()
     suspend fun sourceFeeds(id: String): List<SourceFeed> = if (id == "copy") emptyList() else adapter(id).feeds()
+    suspend fun primarySourceFeed(id: String, kind: SourceFeedKind): SourceFeed? =
+        if (id == "copy") null else adapter(id).primaryFeed(kind)
     suspend fun sourceFeedFilters(id: String, feedId: String): List<SourceFilter> = if (id == "copy") emptyList() else adapter(id).feedFilters(feedId)
     suspend fun sourceSearchFilters(id: String): List<SourceFilter> = if (id == "copy") emptyList() else adapter(id).searchFilters()
     suspend fun sourceHotTags(id: String): List<String> = if (id == "copy") emptyList() else adapter(id).hotTags()

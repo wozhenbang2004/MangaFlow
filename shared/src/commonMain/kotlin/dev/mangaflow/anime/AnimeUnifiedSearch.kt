@@ -223,7 +223,8 @@ internal class AnimeUnifiedSearch(
         val page = if (lateRetry) 1 else nextPage(previous.page) ?: return
         if (page == 1) emptyFirstPageAttempts.remove(provider.id)
         val term = sourceTerms[provider.id] ?: state.query
-        publishSource(previous.copy(loading = page == 1, loadingMore = page > 1, error = null))
+        val waiting = previous.copy(loading = page == 1, loadingMore = page > 1, error = null, queued = true)
+        publishSource(waiting)
         // Register the exact job before it can start on the immediate main dispatcher.
         val job = scope.launch(start = CoroutineStart.LAZY) {
             fun current(): Boolean {
@@ -236,6 +237,7 @@ internal class AnimeUnifiedSearch(
                 key.route.requireAvailable()
                 suspend fun find() = permits.withPermit {
                     if (!current()) return@withPermit null
+                    publishSource(waiting.copy(queued = false))
                     withTimeoutOrNull(SEARCH_TIMEOUT_MILLIS) { searchPage(provider, term, page, newTerms) }
                         ?: error("搜索超时，请重试。")
                 }

@@ -3,6 +3,15 @@ package dev.mangaflow.anime.sources.lanerc
 /** Reference directory observed in the public config v8 (2026-11-05); never a playability claim. */
 enum class LanercSourceKind { VIDEO, BROWSE, COMIC, DANMAKU, UNKNOWN }
 
+/** Reasons established by the package audit or an anonymous connection check. */
+internal fun lanercAccessNote(id: String): String? = when (id) {
+    "anime-lanerc-kumanxing", "anime-lanerc-yulu" -> "目录和读页需要来源方提供授权接口。"
+    "anime-lanerc-xfy" -> "目录要求设备验证，读页要求账号及会员资格。"
+    "anime-lanerc-zhg" -> "公开目录连接未收到响应，读页需要来源方提供图链。"
+    "anime-lanerc-jcy" -> "发布包使用 ENC1 格式，需来源方提供兼容包。"
+    else -> null
+}
+
 data class LanercSourceDescriptor(
     val id: String,
     val name: String,

@@ -35,6 +35,7 @@ interface BodySource : MangaRepository {
     suspend fun searchGenres(ids: List<String>, page: Int): MangaPage = unsupportedSourceFeature()
     suspend fun capabilities(): SourceCapabilities = SourceCapabilities()
     suspend fun feeds(): List<SourceFeed> = listOf(SourceFeed("latest", "最近更新", SourceFeedKind.LATEST))
+    suspend fun primaryFeed(kind: SourceFeedKind): SourceFeed? = feeds().firstOrNull { it.kind == kind }
     suspend fun feedFilters(feedId: String): List<SourceFilter> = feeds().firstOrNull { it.id == feedId }?.filters.orEmpty()
     suspend fun browse(request: SourceBrowseRequest): dev.mangaflow.data.MangaPage {
         require(request.feedId == "latest" && request.options.isEmpty()) { "来源不支持这个浏览条件。" }
