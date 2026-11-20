@@ -1,5 +1,9 @@
 # MangaFlow · current work
 
+## Android 阅读状态首次浮层尺寸 · 2026-11-20
+
+「弄这么大？」对应上版默认任务浮层占屏过多。按 [READ-STATUS-MIN-05](../design/reading-and-discovery-redesign-20261119.md#read-status-min-05) 改为首次点按先看单行摘要，再点开明细。最终本机包在 Android 14 模拟器同页测得默认任务浮层高 158 px，旧版约 824 px。大字和缓存跨范围操作一并复看后用一个主线提交交付。
+
 ## Android 阅读状态的最小表达 · 2026-11-20
 
 用户指出刚交付的阅读状态像文档，要求落实最小信息表达。基线、主要判断、要求和验收见 [READ-STATUS-MIN-01–04](../design/reading-and-discovery-redesign-20261119.md#android-阅读状态的最小表达--2026-11-20)。先收齐默认标题、重复计数、自动展开和说明问题，本机包 `0.1.452-local.minimal-status.618170b` 已在第179话的一般和大字竖屏下复验默认状态、展开计数、缓存独立摘要与重新打开、简要说明和回原页。通过后合并一次。

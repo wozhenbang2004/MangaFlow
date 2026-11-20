@@ -153,6 +153,8 @@ internal fun ReaderExperienceStatus(
     val dockWidth = if (ambient) 200.dp else 248.dp
     var selected by remember(sessionKey) { mutableStateOf<ReaderStatusSection?>(null) }
     var retainedSection by remember(sessionKey) { mutableStateOf(ReaderStatusSection.PREPARATION) }
+    var showStatusDetails by remember(sessionKey) { mutableStateOf(false) }
+    val showPeek = android && !showStatusDetails
     val sectionHeader = remember(sessionKey) { BringIntoViewRequester() }
     val expandedWorks = remember(sessionKey) { mutableStateMapOf<ReaderStatusSection, ReaderWork?>() }
     var cacheView by remember(sessionKey) { mutableStateOf(ReaderWork.MEMORY) }
@@ -178,8 +180,8 @@ internal fun ReaderExperienceStatus(
         if (!visible) { selected = null; pendingPolicy = false; pendingEnhancement = false; showPolicy = false; pendingSources = false; pendingStandby = null }
     }
     LaunchedEffect(shown) { if (!shown) selected = null }
-    LaunchedEffect(selected, popoverPresent) {
-        if (selected != null && popoverPresent) {
+    LaunchedEffect(selected, popoverPresent, showPeek) {
+        if (selected != null && popoverPresent && !showPeek) {
             withFrameNanos { }
             sectionHeader.bringIntoView()
         }
@@ -229,12 +231,14 @@ internal fun ReaderExperienceStatus(
         if (top) topClearance else restingBottom,
         animationSpec = if (motion) tween(MangaMotion.Chrome) else snap(), label = "reading-status-clearance",
     )
-    fun inspect(section: ReaderStatusSection) {
+    fun inspect(section: ReaderStatusSection, openDetails: Boolean = false) {
         if (android && selected == null) {
+            showStatusDetails = false
             expandedWorks[section] = null
             scopeHelp[section] = false
         }
-        if (selected == section && popoverPresent && !pinStatusHeader) scope.launch {
+        if (android && openDetails) showStatusDetails = true
+        if (selected == section && popoverPresent && !pinStatusHeader && !showPeek) scope.launch {
             withFrameNanos { }
             sectionHeader.bringIntoView()
         }
@@ -341,7 +345,7 @@ internal fun ReaderExperienceStatus(
                     AnimatedVisibility(summary.mark == ReaderStatusMark.ERROR,
                         enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)),
                         exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
-                        MotionTextButton(onClick = { inspect(summary.section) }, enabled = shown,
+                        MotionTextButton(onClick = { inspect(summary.section, openDetails = true) }, enabled = shown,
                             modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
                             Row(Modifier.background(MaterialTheme.colorScheme.surface.copy(alpha = .94f), RoundedCornerShape(12.dp))
@@ -405,11 +409,43 @@ internal fun ReaderExperienceStatus(
             }
             CompactGlassPopover(visible = shown && selected != null, backdrop = backdrop,
                 aboveAnchor = !top, alignToStart = alignStatusStart,
-                maximumWidth = if (window.width >= 720.dp) 480.dp else 344.dp,
+                maximumWidth = if (showPeek) 208.dp else if (window.width >= 720.dp) 480.dp else 344.dp,
                 maximumHeight = if (android) window.height * .72f else Dp.Infinity,
                 contentBackground = if (android) MaterialTheme.colorScheme.surface.copy(alpha = .78f) else Color.Transparent,
-                scrollContent = !pinStatusHeader,
-                onDismiss = { selected = null }, onPresenceChange = { popoverPresent = it }) {
+                scrollContent = !showPeek && !pinStatusHeader,
+                onDismiss = { selected = null }, onPresenceChange = { popoverPresent = it },
+                content = statusPanel@{
+                if (showPeek) {
+                    val peekStatus = when (retainedSection) {
+                        ReaderStatusSection.PREPARATION -> when {
+                            aheadMark == ReaderStatusMark.ERROR -> ReaderStatusSummary("准备失败", aheadMark)
+                            aheadPages.isNotEmpty() -> ReaderStatusSummary("原图 ${originalReadinessValue(aheadPages)}", aheadMark)
+                            preparation.pages.isNotEmpty() && preparation.aheadTarget == 0 -> ReaderStatusSummary("无前方目标", ReaderStatusMark.IDLE)
+                            else -> ReaderStatusSummary("待核实", ReaderStatusMark.UNKNOWN)
+                        }
+                        ReaderStatusSection.WORK -> if (summary.section == ReaderStatusSection.WORK) summary
+                        else ReaderStatusSummary(when {
+                            failed > 0 -> "失败 $failed 项"
+                            active > 0 -> "进行 $active 项"
+                            deferred > 0 -> "暂缓 $deferred 项"
+                            preparation.pauseReason != null -> "暂缓"
+                            queued > 0 -> "排队 $queued 项"
+                            !workKnown -> "待核实"
+                            else -> "空闲"
+                        }, activityMark)
+                        ReaderStatusSection.SOURCES -> if (repairBusy) ReaderStatusSummary("正在补当前页", ReaderStatusMark.ACTIVE)
+                        else ReaderStatusSummary(when {
+                            sourceStatus.mark == ReaderStatusMark.ERROR -> "准备失败"
+                            sourceStatus.value == "—" -> "待核实"
+                            sourceStatus.hasTargets -> "已备 ${sourceStatus.value}"
+                            else -> sourceStatus.value
+                        }, sourceStatus.mark)
+                        ReaderStatusSection.CACHE -> readerCachePeekStatus(store, cacheView == ReaderWork.DISK)
+                    }
+                    ReaderStatusPeek(retainedSlot.title, peekStatus, enabled = selected != null,
+                        onOpenDetails = { showStatusDetails = true }, onClose = { selected = null })
+                    return@statusPanel
+                }
                 val actionSize = if (android) 48.dp else 44.dp
                 val panelTools: @Composable () -> Unit = {
                     MotionIconButton(onClick = { scopeHelp[retainedSection] = scopeHelp[retainedSection] != true },
@@ -621,7 +657,7 @@ internal fun ReaderExperienceStatus(
                     if (android) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.End) { panelTools() }
                 }
-            }
+            })
         }
     }
     ExperienceSettingsDialog(visible = showPolicy && visible, backdrop = backdrop,
@@ -636,6 +672,29 @@ private data class ReaderStatusSummary(
     val mark: ReaderStatusMark,
     val section: ReaderStatusSection = ReaderStatusSection.PREPARATION,
 )
+@Composable
+private fun ReaderStatusPeek(title: String, status: ReaderStatusSummary, enabled: Boolean,
+    onOpenDetails: () -> Unit, onClose: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Row(Modifier.fillMaxWidth().semantics { paneTitle = "阅读状态" }, verticalAlignment = Alignment.CenterVertically) {
+        MotionTextButton(onClick = onOpenDetails, enabled = enabled, modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+            .semantics { stateDescription = status.mark.description },
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (status.mark != ReaderStatusMark.IDLE) StatusMark(status.mark, Modifier.size(12.dp))
+                Text("$title · ${status.label}", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
+                    color = if (status.mark == ReaderStatusMark.ERROR) colors.error else colors.onSurface,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Icon(Icons.Outlined.ChevronRight, "查看详情", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+            }
+        }
+        MotionIconButton(onClick = onClose, modifier = Modifier.size(48.dp), enabled = enabled, tooltip = "关闭阅读状态") {
+            Icon(Icons.Outlined.Close, "关闭阅读状态", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+        }
+    }
+}
+
 private enum class StandbyAction { RETRY, USE, ALIGN, UNDO_PAGE, UNDO_SOURCE }
 private enum class ReaderWork(val title: String, val icon: ImageVector) {
     RESOLVE("解析", Icons.Outlined.Link), ORIGINAL("原图", Icons.Outlined.Download),
@@ -1698,6 +1757,18 @@ private fun cacheState(used: Long?, limit: Long?, pending: Boolean = false): Cac
         used == 0L -> CacheState("空缓存", ReaderStatusMark.IDLE, occupancy)
         else -> CacheState("有缓存", ReaderStatusMark.IDLE, occupancy)
     }
+}
+
+@Composable
+private fun readerCachePeekStatus(store: ExperiencePolicyStore, disk: Boolean): ReaderStatusSummary {
+    val cache = projectedCacheUsage(store)
+    if (cache.error != null) return ReaderStatusSummary("缓存异常", ReaderStatusMark.ERROR)
+    val used = if (disk) cache.diskBytes else cache.memoryBytes
+    val limit = if (disk) cache.diskLimit else cache.memoryLimit
+    val state = cacheState(used, limit, pending = disk && cache.pending)
+    val label = if (used != null && state.mark == ReaderStatusMark.IDLE)
+        experienceCacheSize(used).replace(' ', '\u00a0') else state.label
+    return ReaderStatusSummary(label, state.mark)
 }
 
 /** Shared cache observations occupy one quiet dock slot; the panel exposes both owners. */

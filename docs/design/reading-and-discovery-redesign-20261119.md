@@ -13,6 +13,18 @@
 
 本机 `:app:assembleDebug` 成功，新包 `0.1.452-local.minimal-status.618170b` SHA-256 为 `c7c8f9a218a12daa0eea2811879841689481dd86aec64ad3b1abfae38e807cc5`。Android 14 模拟器在 1080×1920 里复读《月刊少女野崎君》第179话第1页。约411dp 的默认任务面板高度比上版少约四分之一。展开原图看到完整计数及对应页，内存和磁盘默认各自一项用量。磁盘展开后关掉再打开，仍在磁盘摘要。另在360dp、1.30倍字下复查状态切换、范围说明和关闭后原页。证据位于本机 `reader-minimal-20261120` 下的 `task-summary.png`、`task-details.png`、`memory-summary.png`、`disk-reopened.png`、`sources-narrow.png` 和 `scope-help-narrow.png`。实体机和读屏操作待对应环境验证。
 
+<a id="read-status-min-05"></a>
+
+### READ-STATUS-MIN-05　首次打开的尺寸
+
+用户看到 `e09db26` 的任务摘要后反馈「弄这么大？」。同一话截图 `task-summary.png` 中浮层约高 824 px，占 1080×1920 画面高度的 43%。这次按首次点开的真实遮挡范围验收。
+
+沿用原 CompactGlassPopover、Motion 和 Haze。常驻图标首次点开只显示当前范围、一条实际状态和明细入口。常用字号下浮层为单个 48dp 控件行加外边距，宽度上限 208dp。范围切换、计数、说明和策略在点开明细后出现。受阻提示仍直达恢复明细。用同一页实测浮层尺寸和关闭后的阅读位置，再复查大字、缓存选择与重开。
+
+最终包 `0.1.453-local.reader-peek.e09db26.r2` 由本机 `:app:assembleDebug` 构建，SHA-256 `ed400110ca0b895bd1a09a538f11c22c7b9549d6956ccec6cfe895e15906063c`。在 Android 14 模拟器复读《月刊少女野崎君》第179话第1页。1080×1920、约 411dp 默认字体下任务浮层为 546×158 px，屏高占比从约 43% 降至 8%。点摘要能看解析、原图、解码和画质明细，返回仍在第1页。内存与磁盘用量显示各自实测值，切磁盘后关闭再打开仍是磁盘摘要。360dp、1.30 倍字号下复查补页、明细和关闭。长摘要可换行，缓存数值与单位同组。上述观察为竖屏模拟器结果。
+
+图证位于本机 `reader-peek-20261120`。对照 `task-peek-final.png`、`task-details-final.png`、`memory-peek-final.png`、`disk-peek-reopened-final.png`、`sources-ready-narrow-final.png` 和 `memory-peek-narrow-final.png`。
+
 ## Android 阅读状态栏接续 · 2026-11-20
 
 用户原话「阅读时那个状态栏 uiux 也得优化吧」。基于 `27d0339` 的本机包在 Android 14 实际打开《月刊少女野崎君》第179话。任务页截图 `status-before-task-panel.png` 显示入口重复整组实时图标、任务和缓存读数，已选范围只有浅灰底，未开启的画质处理排在解析、原图和解码之前。缓存截图 `status-before-page.png` 显示展开后数据会继续增高，原弹层共用一条滚动轴，标题、范围切换和关闭也会随内容移动。
