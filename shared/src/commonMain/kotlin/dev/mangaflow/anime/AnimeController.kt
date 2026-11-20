@@ -49,6 +49,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeoutOrNull
@@ -286,6 +287,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private data class PreparationTarget(
         val subjectId: String, val episodeId: String, val option: AnimeEpisodeOption,
         val revision: String, val route: DownloadRouteSnapshot, val preferredHeight: Int, val timelineGeneration: Long,
+        val explicitSourceId: String?,
         val settings: AnimePlaybackSettings,
         val budget: AnimePreparationBudget,
     )
@@ -293,6 +295,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val target: PreparationTarget, val asset: AnimePlaybackAsset, val validUntil: Long,
         var decoderAsset: AnimePlaybackAsset? = null,
         var cacheAsset: AnimePlaybackAsset? = null,
+        var cacheResult: AnimeStartupCacheResult? = null,
+        var cachePositionMs: Long? = null,
+        var mediaSettled: Boolean = false,
     )
     private data class ResolvedPlaybackOption(val option: AnimeEpisodeOption, val asset: AnimePlaybackAsset,
         val revision: String?)
@@ -1347,7 +1352,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             autoAssociateAndPlay(episodeId)
         } else {
             resolveAndPlay(episodeId, option)
-            verifyEpisodeSources(episodeId)
         }
     }
 
@@ -2147,9 +2151,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private fun fairPlaybackOptions(subjectId: String, episodeId: String,
         options: List<AnimeEpisodeOption>, preferContinuity: Boolean = true): List<AnimeEpisodeOption> {
         val preferred = mutableState.value.preferredSourceId.takeIf { preferContinuity }
-        val explicit = mutableState.value.sourceBindings.firstOrNull {
-            it.subjectId == subjectId && it.preferred && it.preferredExplicitly
-        }?.catalog?.sourceId.takeIf { preferContinuity }
+        val explicit = if (preferContinuity) explicitPlaybackSource(subjectId) else null
         val recent = recentPlaybackSources[subjectId]?.takeIf { preferContinuity &&
             monotonicTimeMillis() - it.observedAt in 0L until 30 * 60_000L &&
             it.route == playbackHistoryRoute(it.sourceId) && it.revision == discoverySourceRevision(it.sourceId) }
@@ -2273,8 +2275,15 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             playerInstance?.state?.value?.takeIf { belongsTo(owner, it) }
         }
         val refreshResolutionId = startupRefresh?.explicitResolutionId
-        val selected = if (option == null) options.firstOrNull() else currentPlaybackLine(episodeId, option)
-            ?.takeIf { canAttemptPlaybackLine(episodeId, it) }
+        val ready = prepared?.takeIf { startupRefresh == null && it.target.subjectId == detail.subject.id &&
+            it.target.episodeId == episodeId && freshPreparation(it) }
+        val selected = if (option == null) {
+            val preparedLine = ready?.takeUnless { value ->
+                value.target.option.sourceId != value.target.explicitSourceId &&
+                    options.any { it.sourceId == value.target.explicitSourceId }
+            }?.let { value -> options.firstOrNull { samePlaybackLine(it, value.target.option) } }
+            preparedLine ?: options.firstOrNull()
+        } else currentPlaybackLine(episodeId, option)?.takeIf { canAttemptPlaybackLine(episodeId, it) }
         if (selected == null) {
             if (canFallback) {
                 autoAssociateAndPlay(episodeId, attempted = attempted, lastFailure = startupRefresh?.let { previous ->
@@ -2290,8 +2299,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             return
         }
         resumeRequest = null
-        val available = prepared?.takeIf { startupRefresh == null && it.target.subjectId == detail.subject.id &&
-            it.target.episodeId == episodeId && it.target.option == selected && freshPreparation(it) }
+        val available = ready?.takeIf { samePlaybackLine(it.target.option, selected) }
         clearPreparation(keepDecoder = available)
         val owner = detailGeneration
         val generation = ++resolveGeneration
@@ -2309,6 +2317,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             try {
                 library.awaitLoaded()
                 fun current() = generation == resolveGeneration && currentDetail(owner, detail.subject.id)
+                var raceOpen = true
+                fun currentAttempt() = raceOpen && current()
                 fun recoveryEnabled() = library.state.value.settings.let {
                     it.automaticSourceRecovery && it.automaticRecoveryAttempts > 0
                 }
@@ -2327,7 +2337,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             "已关闭自动恢复，可手动重试本集。")
                     }
                     suspend fun resolveOption(): ResolvedPlaybackOption {
-                        check(current()) { "播放请求已变化。" }
+                        check(currentAttempt()) { "播放请求已变化。" }
                         checkRefreshPermission()
                         val line = currentPlaybackLine(episodeId, candidate)
                             ?: error("本集来源关联已变化，请重新选集。")
@@ -2338,7 +2348,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             it.title.sourceId == candidate.sourceId && it.title.id == candidate.catalog.id && it.title.url == candidate.catalog.url
                         } ?: error("来源目录已变化，请重新选集。")
                         val provider = sources.provider(candidate.sourceId) ?: error("这个来源当前不可用。")
-                        val preparedAsset = available?.takeIf { it.target.option == line && freshPreparation(it) }?.asset
                         check(!bounded || monotonicTimeMillis() < autoPlaybackDeadline) { "本轮播放准备已到时限，请重试。" }
                         // Only admitted attempts count; exhausted-budget candidates remain untried.
                         val historyKey = playbackHistoryKey(detail.subject.id, episodeId, candidate)
@@ -2349,13 +2358,17 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         }
                         admissionKey = historyKey
                         admissionStillCurrent = {
-                            current() && refreshAllowed() &&
+                            currentAttempt() && refreshAllowed() &&
                                 mutableState.value.settings.preferredSourceHeight == preferredHeight &&
                                 revision == sourceRevision(candidate.sourceId) &&
                                 discoveryRevision == discoverySourceRevision(candidate.sourceId) &&
                                 historyKey.route == playbackHistoryRoute(candidate.sourceId) &&
                                 currentPlaybackLine(episodeId, line) != null
                         }
+                        val preparedAsset = available?.takeIf { samePlaybackLine(it.target.option, line) &&
+                            monotonicTimeMillis() < it.validUntil && it.asset.expiresAt?.let { expiry -> expiry > wallTimeMillis() } != false &&
+                            it.target.revision == discoveryRevision && it.target.route == historyKey.route &&
+                            it.target.explicitSourceId == explicitPlaybackSource(detail.subject.id) }?.asset
                         rememberPlaybackAttempt(historyKey, candidate.sourceId)
                         val addressStarted = monotonicTimeMillis()
                         val resolved = (preparedAsset ?: provider.resolve(catalog, line.episode)).copy(
@@ -2370,7 +2383,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             "来源已更新，请重新解析。"
                         }
                         check(resolved.expiresAt == null || resolved.expiresAt > wallTimeMillis()) { "播放地址已过期，请重试解析。" }
-                        check(current()) { "播放请求已变化。" }
+                        check(currentAttempt()) { "播放请求已变化。" }
                         check(resolved.route == historyKey.route && resolved.route == playbackHistoryRoute(candidate.sourceId)) {
                             "本集网络线路已变化，请重试。"
                         }
@@ -2399,7 +2412,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             if (refreshing) throw failure
                             val previousRoute = admissionKey?.route ?: throw failure
                             val currentRoute = playbackHistoryRoute(candidate.sourceId) ?: throw failure
-                            if (!current() || previousRoute == currentRoute) throw failure
+                            if (!currentAttempt() || previousRoute == currentRoute) throw failure
                         }
                         // A real settings change discards the previous asset. Retry this exact
                         // line once using the current configured route and the same time budget.
@@ -2410,13 +2423,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             else withTimeoutOrNull(minOf(8_000L, (autoPlaybackDeadline - monotonicTimeMillis()).coerceAtLeast(1L))) {
                                 resolveOnCurrentRoute()
                             } ?: error("本集线路解析超时。")
-                        if (current()) tried += key
+                        if (currentAttempt()) tried += key
                         Result.success(resolved)
                     } catch (cancel: CancellationException) {
                         // A provider can cancel its own child session on revision changes. A
                         // cancelled playback request still cancels the whole race.
                         currentCoroutineContext().ensureActive()
-                        if (current()) rejected += key
+                        if (currentAttempt()) rejected += key
                         Result.failure(IllegalStateException("${candidate.sourceName} · 本集来源已变化，请重试。", cancel))
                     } catch (failure: Exception) {
                         val diagnostic = when {
@@ -2428,7 +2441,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         val incident = (failure as? PlaybackResolutionException)?.failure ?: AnimePlaybackFailure(candidate.sourceId, candidate.sourceName,
                             (failure as? TvtFunPlaybackException)?.playbackPhase?.label ?: "取播放地址",
                             diagnostic, unsupported = failure is LanercMediaSniffingUnsupported)
-                        if (current()) {
+                        if (currentAttempt()) {
                             val admitted = admissionKey
                             if (admitted != null && admissionStillCurrent?.invoke() == true) {
                                 tried += key
@@ -2439,9 +2452,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         Result.failure(PlaybackResolutionException(incident, failure))
                     }
                 }
-                val resolvedSelection = coroutineScope<Result<ResolvedPlaybackOption>> {
+                val resolvedSelection = run race@{
                     val results = Channel<Pair<AnimeEpisodeOption, Result<ResolvedPlaybackOption>>>(Channel.UNLIMITED)
-                    val jobs = mutableListOf<Job>()
+                    // The winning address can open while cancelled providers unwind their requests.
+                    val raceJob = SupervisorJob(scope.coroutineContext[Job])
+                    val attempts = CoroutineScope(scope.coroutineContext + raceJob)
                     val queued = mutableListOf<AnimeEpisodeOption>()
                     val scheduled = attempted.toMutableSet()
                     val runningSources = mutableSetOf<String>()
@@ -2462,7 +2477,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             if (index < 0) break
                             val candidate = queued.removeAt(index)
                             runningSources += candidate.sourceId
-                            jobs += launch { results.send(candidate to attempt(candidate)) }
+                            attempts.launch { results.send(candidate to attempt(candidate)) }
                         }
                         if (runningSources.size > 1 || manualFailed) {
                             resolvingSourceId = null
@@ -2480,9 +2495,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     }
                     // A deliberate selection or an already prepared episode gets the first
                     // attempt. A failure then joins the bounded race with other sources.
-                    enqueue(selected, retry = startupRefresh != null)
-                    if (!manualFirst && canFallback && recoveryEnabled()) options.forEach { enqueue(it) }
                     try {
+                        enqueue(selected, retry = startupRefresh != null)
+                        if (!manualFirst && canFallback && recoveryEnabled()) options.forEach { enqueue(it) }
                         startAvailable()
                         while (runningSources.isNotEmpty() && current()) {
                             val now = monotonicTimeMillis()
@@ -2492,7 +2507,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 else withTimeoutOrNull(remaining) { results.receive() } ?: break
                             val (candidate, result) = completed
                             runningSources -= candidate.sourceId
-                            if (result.isSuccess) return@coroutineScope result
+                            if (result.isSuccess) return@race result
                             lastFailure = result
                             if (manualFirst && samePlaybackLine(candidate, selected)) manualFailed = true
                             addAvailableSources()
@@ -2505,7 +2520,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         }
                         lastFailure ?: Result.failure(IllegalStateException("对应片源暂不可用。"))
                     } finally {
-                        jobs.forEach { it.cancel() }
+                        raceOpen = false
+                        raceJob.cancel()
                         results.cancel()
                     }
                 }.getOrThrow()
@@ -2916,10 +2932,16 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     playbackDiscoveryRetried = false
                     recoveryOptions.clear()
                 }
-                if (!playingSteadily) {
-                    if (!snapshot.ended && preparationTarget != null) {
+                if (!playingSteadily && !snapshot.ended && preparationTarget != null) {
+                    if (prepared == null || snapshot.phase == AnimePlayerPhase.ERROR) {
                         clearPreparation()
                         owner.nextPreparationNotBefore = now + 1_000L
+                    } else if (cacheNextJob != null) {
+                        // Keep the exact address and completed cache work while current playback needs resources.
+                        cacheNextJob?.cancel()
+                        cacheNextJob = null
+                        mutableState.update { it.copy(nextEpisodePreparation = it.nextEpisodePreparation?.copy(
+                            phase = AnimePreparationPhase.WAITING, detail = "优先当前播放，已准备的下一集内容保留。")) }
                     }
                 }
                 if (snapshot.isPlaying) {
@@ -2936,10 +2958,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         engine.seekTo(snapshot.durationMs)
                     }
                     if (stableFor >= 2_000L && foreground && owner.localMedia == null && settings.prepareNextEpisode &&
-                        preparationTarget == null && now >= owner.nextPreparationNotBefore && !mutableState.value.resolving &&
+                        now >= owner.nextPreparationNotBefore && !mutableState.value.resolving &&
                         !mutableState.value.sleepAtEpisodeEnd && snapshot.durationMs > 0L &&
                         remaining <= preparationBudget(settings).nextEpisodeLeadMs) {
-                        prepareNext(owner, snapshot.timelineGeneration)
+                        val ready = prepared
+                        if (ready != null) warmNextEpisode(owner, ready)
+                        else if (preparationTarget == null) prepareNext(owner, snapshot.timelineGeneration)
                     }
                 }
                 if (snapshot.ended && hasPlaybackOutput(snapshot) && !owner.endActionHandled) {
@@ -3003,16 +3027,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val settings = mutableState.value.settings
         val budget = preparationBudget(settings)
         val target = PreparationTarget(subjectId, next.id, option, revision, route,
-            settings.preferredSourceHeight, timelineGeneration, settings, budget)
+            settings.preferredSourceHeight, timelineGeneration, explicitPlaybackSource(subjectId), settings, budget)
         val generation = resolveGeneration
         preparationTarget = target
         mutableState.update { it.copy(nextEpisodePreparation = AnimeNextEpisodePreparation(next.id,
             targetDurationMs = budget.nextEpisodeDurationMs, maximumBytes = budget.nextEpisodeBytes)) }
-        fun publish(change: (AnimeNextEpisodePreparation) -> AnimeNextEpisodePreparation) {
-            if (preparationTarget !== target || active !== owner) return
-            mutableState.update { state -> if (preparationTarget !== target || active !== owner) state else
-                state.copy(nextEpisodePreparation = state.nextEpisodePreparation?.takeIf { it.episodeId == next.id }?.let(change)) }
-        }
         prepareJob = scope.launch(start = CoroutineStart.LAZY) {
             var failed = false
             try {
@@ -3042,88 +3061,15 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     subjectId = subjectId, subjectTitle = owner.detail.subject.title, episodeTitle = next.title)
                 val ready = PreparedPlayback(target, canonical, monotonicTimeMillis() + lifetime)
                 prepared = ready
-                publish { it.copy(addressResolved = true, phase = AnimePreparationPhase.WAITING) }
-                cacheNextJob = launch(start = CoroutineStart.UNDISPATCHED) nextMedia@{
-                    try {
-                        val startup = preferredSourceAsset(canonical, option.episode, target.preferredHeight)
-                        ready.cacheAsset = startup
-                        val resume = library.progressFor(subjectId, next.id)?.takeUnless { it.completed }?.positionMs
-                        val position = resume?.takeIf { it > 0L } ?: startup.startPositionMs?.coerceAtLeast(0L) ?: 0L
-                        fun mayPrepare() = foreground && !playbackBusy() && preparationTarget === target &&
-                            freshPreparation(ready) && active === owner
-                        publish { it.copy(positionMs = position) }
-                        val pauseReason = when {
-                            budget.nextEpisodeBytes <= 0L -> "下一集缓存容量为 0，仅保留已解析的地址。"
-                            policy.state.value.prefetchBytes < budget.nextEpisodeBytes ->
-                                "共享预读预算不足以容纳所设容量；已保留设置，可在体验设置调整总预算。"
-                            else -> null
-                        }
-                        if (pauseReason != null) {
-                            publish { it.copy(phase = AnimePreparationPhase.PARTIAL, detail = pauseReason) }
-                            return@nextMedia
-                        }
-                        val result = if (budget.nextEpisodeDurationMs == 0L) AnimeStartupCacheResult(0L,
-                            detail = "下一集原片预读已关闭。") else try {
-                            withTimeoutOrNull(minOf(lifetime, 30_000L)) {
-                                policy.withPrefetchAdmission(option.sourceId, budget.nextEpisodeBytes, { false },
-                                    onWaiting = { wait -> if (wait != null) publish { it.copy(
-                                        phase = AnimePreparationPhase.WAITING, detail = "等待共享预读资源，优先当前播放。") } }) {
-                                    if (!mayPrepare()) return@withPrefetchAdmission AnimeStartupCacheResult(0L,
-                                        detail = "当前播放需要资源，已暂停下一集准备。")
-                                    publish { it.copy(phase = AnimePreparationPhase.CACHING, detail = null) }
-                                    engine.prepareStartupCache(AnimeStartupCacheRequest(startup, position,
-                                        budget.nextEpisodeDurationMs, budget.nextEpisodeBytes, ready.validUntil))
-                                }
-                            } ?: AnimeStartupCacheResult(0L, detail = "下一集原片准备超时，已写入的缓存仍保留。")
-                        } catch (cancel: CancellationException) { throw cancel }
-                        catch (_: Exception) { AnimeStartupCacheResult(0L, detail = "下一集原片暂未准备完成，仍可正常切集。") }
-                        if (!mayPrepare()) return@nextMedia
-                        publish { it.copy(cachedBytes = result.bytes, bufferedDurationMs = result.bufferedDurationMs,
-                            phase = AnimePreparationPhase.PARTIAL, detail = result.detail) }
-                        val timeLeft = ready.validUntil - monotonicTimeMillis()
-                        if (timeLeft <= 0L) return@nextMedia
-                        val decoded = settings.predecodeNextEpisode && withTimeoutOrNull(minOf(timeLeft, 12_000L)) {
-                            policy.withPrefetchAdmission(option.sourceId, budget.nextEpisodeBytes, { false },
-                                onWaiting = { wait -> if (wait != null) publish { it.copy(
-                                    phase = AnimePreparationPhase.WAITING, detail = "等待首帧准备资源，原片缓存已保留。") } }) {
-                                policy.withDecodeAdmission(optional = true, promoted = { false }) {
-                                    if (!mayPrepare()) return@withDecodeAdmission false
-                                    publish { it.copy(phase = AnimePreparationPhase.DECODING, detail = null) }
-                                    engine.prepareStartup(startup, position, budget.nextEpisodeBytes, ready.validUntil)
-                                }
-                            }
-                        } == true
-                        if (decoded) {
-                            if (mayPrepare()) ready.decoderAsset = startup else engine.discardStartup(startup)
-                        }
-                        if (!mayPrepare()) return@nextMedia
-                        val cacheReady = budget.nextEpisodeDurationMs == 0L ||
-                            result.bufferedDurationMs?.let { it >= budget.nextEpisodeDurationMs } == true
-                        val complete = cacheReady && (!settings.predecodeNextEpisode || decoded)
-                        publish { it.copy(startupFramePrepared = decoded,
-                            phase = if (complete) AnimePreparationPhase.READY else AnimePreparationPhase.PARTIAL,
-                            detail = when {
-                                settings.predecodeNextEpisode && !decoded -> "首帧尚未就绪；已准备的原片仍保留。"
-                                result.detail != null -> result.detail
-                                !cacheReady && result.bufferedDurationMs == null -> "已缓存的字节不能换算为可靠时长。"
-                                !cacheReady -> "已准备部分原片，达到本次容量或可用片段边界。"
-                                else -> null
-                            }) }
-                    } catch (cancel: CancellationException) {
-                        throw cancel
-                    } catch (_: Exception) {
-                        // A failed optional transfer must leave the resolved address available.
-                        publish { it.copy(phase = AnimePreparationPhase.PARTIAL,
-                            detail = "媒体准备暂未完成，已解析的播放地址仍可使用。") }
-                    }
-                }
+                publishNextPreparation(owner, target) { it.copy(addressResolved = true, phase = AnimePreparationPhase.WAITING) }
+                warmNextEpisode(owner, ready)
                 delay(lifetime)
             } catch (cancel: CancellationException) { throw cancel }
             catch (_: Exception) {
                 if (preparationTarget === target) {
                     failed = true
                     owner.nextPreparationNotBefore = monotonicTimeMillis() + 30_000L
-                    publish { it.copy(phase = AnimePreparationPhase.FAILED, detail = "下一集地址未能准备，稍后自动重试。") }
+                    publishNextPreparation(owner, target) { it.copy(phase = AnimePreparationPhase.FAILED, detail = "下一集地址未能准备，稍后自动重试。") }
                 }
             } finally {
                 if (preparationTarget === target) releasePreparation(keepStatus = failed)
@@ -3132,9 +3078,118 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         prepareJob?.start()
     }
 
+    private fun publishNextPreparation(owner: ActivePlayback, target: PreparationTarget,
+        change: (AnimeNextEpisodePreparation) -> AnimeNextEpisodePreparation) {
+        mutableState.update { state ->
+            if (preparationTarget !== target || active !== owner) state else state.copy(
+                nextEpisodePreparation = state.nextEpisodePreparation?.takeIf { it.episodeId == target.episodeId }?.let(change))
+        }
+    }
+
+    private fun warmNextEpisode(owner: ActivePlayback, ready: PreparedPlayback) {
+        if (cacheNextJob != null || ready.mediaSettled || !freshPreparation(ready)) return
+        val engine = playerInstance ?: return
+        val target = ready.target
+        val snapshot = engine.state.value
+        if (!foreground || !snapshot.isPlaying || snapshot.playbackSuppressed || playbackBusy(snapshot)) return
+        val option = target.option
+        val settings = target.settings
+        val budget = target.budget
+        val policy = ExperiencePolicyStore.get(context)
+        cacheNextJob = scope.launch(start = CoroutineStart.LAZY) nextMedia@{
+            val job = currentCoroutineContext()[Job]
+            fun mayPrepare() = cacheNextJob === job && foreground && !playbackBusy() &&
+                active === owner && prepared === ready && freshPreparation(ready)
+            fun publish(change: (AnimeNextEpisodePreparation) -> AnimeNextEpisodePreparation) {
+                if (cacheNextJob === job) publishNextPreparation(owner, target, change)
+            }
+            try {
+                val startup = preferredSourceAsset(ready.asset, option.episode, target.preferredHeight)
+                ready.cacheAsset = startup
+                val resume = library.progressFor(target.subjectId, target.episodeId)?.takeUnless { it.completed }?.positionMs
+                val position = resume?.takeIf { it > 0L } ?: startup.startPositionMs?.coerceAtLeast(0L) ?: 0L
+                publish { it.copy(positionMs = position) }
+                val pauseReason = when {
+                    budget.nextEpisodeBytes <= 0L -> "下一集缓存容量为 0，仅保留已解析的地址。"
+                    policy.state.value.prefetchBytes < budget.nextEpisodeBytes ->
+                        "共享预读预算不足以容纳所设容量；已保留设置，可在体验设置调整总预算。"
+                    else -> null
+                }
+                if (pauseReason != null) {
+                    publish { it.copy(phase = AnimePreparationPhase.PARTIAL, detail = pauseReason) }
+                    ready.mediaSettled = true
+                    return@nextMedia
+                }
+                val cached = ready.cacheResult.takeIf { ready.cachePositionMs == position }
+                val result = cached ?: if (budget.nextEpisodeDurationMs == 0L) AnimeStartupCacheResult(0L,
+                    detail = "下一集原片预读已关闭。") else try {
+                    withTimeoutOrNull(minOf(ready.validUntil - monotonicTimeMillis(), 30_000L)) {
+                        policy.withPrefetchAdmission(option.sourceId, budget.nextEpisodeBytes, { false },
+                            onWaiting = { wait -> if (wait != null) publish { it.copy(
+                                phase = AnimePreparationPhase.WAITING, detail = "等待共享预读资源，优先当前播放。") } }) {
+                            if (!mayPrepare()) return@withPrefetchAdmission AnimeStartupCacheResult(0L,
+                                detail = "当前播放需要资源，已暂停下一集准备。")
+                            publish { it.copy(phase = AnimePreparationPhase.CACHING, detail = null) }
+                            engine.prepareStartupCache(AnimeStartupCacheRequest(startup, position,
+                                budget.nextEpisodeDurationMs, budget.nextEpisodeBytes, ready.validUntil))
+                        }
+                    } ?: AnimeStartupCacheResult(0L, detail = "下一集原片准备超时，已写入的缓存仍保留。")
+                } catch (cancel: CancellationException) { throw cancel }
+                catch (_: Exception) { AnimeStartupCacheResult(0L, detail = "下一集原片暂未准备完成，仍可正常切集。") }
+                if (!mayPrepare()) return@nextMedia
+                ready.cacheResult = result
+                ready.cachePositionMs = position
+                publish { it.copy(cachedBytes = result.bytes, bufferedDurationMs = result.bufferedDurationMs,
+                    phase = AnimePreparationPhase.PARTIAL, detail = result.detail) }
+                val timeLeft = ready.validUntil - monotonicTimeMillis()
+                if (timeLeft <= 0L) return@nextMedia
+                val decoded = settings.predecodeNextEpisode && withTimeoutOrNull(minOf(timeLeft, 12_000L)) {
+                    policy.withPrefetchAdmission(option.sourceId, budget.nextEpisodeBytes, { false },
+                        onWaiting = { wait -> if (wait != null) publish { it.copy(
+                            phase = AnimePreparationPhase.WAITING, detail = "等待首帧准备资源，原片缓存已保留。") } }) {
+                        policy.withDecodeAdmission(optional = true, promoted = { false }) {
+                            if (!mayPrepare()) return@withDecodeAdmission false
+                            publish { it.copy(phase = AnimePreparationPhase.DECODING, detail = null) }
+                            engine.prepareStartup(startup, position, budget.nextEpisodeBytes, ready.validUntil)
+                        }
+                    }
+                } == true
+                if (decoded) ready.decoderAsset = startup
+                if (!mayPrepare()) return@nextMedia
+                val cacheReady = budget.nextEpisodeDurationMs == 0L ||
+                    result.bufferedDurationMs?.let { it >= budget.nextEpisodeDurationMs } == true
+                val complete = cacheReady && (!settings.predecodeNextEpisode || decoded)
+                ready.mediaSettled = true
+                publish { it.copy(startupFramePrepared = decoded,
+                    phase = if (complete) AnimePreparationPhase.READY else AnimePreparationPhase.PARTIAL,
+                    detail = when {
+                        settings.predecodeNextEpisode && !decoded -> "首帧尚未就绪；已准备的原片仍保留。"
+                        result.detail != null -> result.detail
+                        !cacheReady && result.bufferedDurationMs == null -> "已缓存的字节不能换算为可靠时长。"
+                        !cacheReady -> "已准备部分原片，达到本次容量或可用片段边界。"
+                        else -> null
+                    }) }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                if (!mayPrepare()) return@nextMedia
+                ready.mediaSettled = true
+                publish { it.copy(phase = AnimePreparationPhase.PARTIAL,
+                    detail = "媒体准备暂未完成，已解析的播放地址仍可使用。") }
+            } finally {
+                if (cacheNextJob === job) cacheNextJob = null
+            }
+        }
+        cacheNextJob?.start()
+    }
+
     private fun defaultPreparationOption(subjectId: String, episodeId: String): AnimeEpisodeOption? =
         fairPlaybackOptions(subjectId, episodeId, automaticPlaybackLines(episodeId))
             .firstOrNull()
+
+    private fun explicitPlaybackSource(subjectId: String): String? = mutableState.value.sourceBindings.firstOrNull {
+        it.subjectId == subjectId && it.preferred && it.preferredExplicitly
+    }?.catalog?.sourceId
 
     private fun preparationStillCurrent(target: PreparationTarget): Boolean {
         val budget = preparationBudget()
@@ -3148,7 +3203,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             active?.let(::nextEpisode)?.id == target.episodeId &&
             target.route == playbackHistoryRoute(target.option.sourceId) &&
             target.revision == discoverySourceRevision(target.option.sourceId) &&
-            defaultPreparationOption(target.subjectId, target.episodeId) == target.option
+            target.explicitSourceId == explicitPlaybackSource(target.subjectId) &&
+            currentPlaybackLine(target.episodeId, target.option) != null &&
+            recentPlaybackLineFailure(target.episodeId, target.option) == null
     }
 
     private fun freshPreparation(value: PreparedPlayback): Boolean =
