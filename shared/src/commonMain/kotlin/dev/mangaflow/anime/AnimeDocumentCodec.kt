@@ -47,6 +47,7 @@ internal object AnimeDocumentCodec {
             JSONObject().put("id", episode.id).put("subject", episode.subjectId).put("title", episode.title)
                 .put("number", episode.number).put("kind", episode.kind.name)
                 .put("duration", episode.durationMs).put("airDate", episode.airDate)
+                .put("numberInSubject", episode.numberInSubject)
         }))
 
     fun detail(json: JSONObject): AnimeDetail {
@@ -57,7 +58,8 @@ internal object AnimeDocumentCodec {
             AnimeEpisode(row.getString("id"), row.getString("subject"), row.getString("title"),
                 row.getDouble("number"), AnimeEpisodeKind.valueOf(row.getString("kind")),
                 if (row.isNull("duration")) null else row.getLong("duration"),
-                row.optString("airDate", null))
+                row.optString("airDate", null),
+                row.optDouble("numberInSubject").takeIf { it.isFinite() && it > 0.0 })
         }
         require(episodes.all { it.subjectId == subject.id && it.number.isFinite() && it.id.isNotBlank() })
         require(episodes.map { it.id }.distinct().size == episodes.size)

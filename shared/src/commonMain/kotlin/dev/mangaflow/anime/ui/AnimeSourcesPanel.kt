@@ -346,8 +346,8 @@ internal fun AnimeSourcesPanel(
                             val unavailable = progress.count { it.phase == AnimeSourceMeasurementPhase.UNAVAILABLE }
                             val stopped = progress.count { it.phase == AnimeSourceMeasurementPhase.CANCELLED }
                             val finished = completed + unavailable + stopped
-                            AnimeQuietLabel((if (measuring) "测速 $finished/${progress.size}" else "已测 $completed/${progress.size}") +
-                                if (focusEpisode == null) " · 各源采样一集" else " · 当前集",
+                            AnimeQuietLabel((if (measuring) "测速 $finished/${progress.size} 个来源" else "已测 $completed 个来源") +
+                                if (focusEpisode == null) " · 各源采样一集" else if (state.sourceAggregationRunning) " · 正在找片源" else "",
                                 Modifier.padding(start = 8.dp, bottom = 2.dp))
                             if (unavailable > 0 || stopped > 0) AnimeQuietLabel(listOfNotNull(
                                 "$unavailable 个待重试".takeIf { unavailable > 0 },

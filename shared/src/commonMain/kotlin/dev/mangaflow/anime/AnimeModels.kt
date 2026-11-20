@@ -30,6 +30,8 @@ data class AnimeEpisode(
     val kind: AnimeEpisodeKind = AnimeEpisodeKind.MAIN,
     val durationMs: Long? = null,
     val airDate: String? = null,
+    /** Episode number within this subject, when the metadata provider supplies one. */
+    val numberInSubject: Double? = null,
 )
 
 data class AnimeDetail(val subject: AnimeSubject, val episodes: List<AnimeEpisode>)

@@ -139,10 +139,43 @@ private fun autoSeasonCatalogOffset(detail: AnimeDetail, catalog: AnimeSourceCat
 internal fun autoPlayCatalogSubjectMatches(detail: AnimeDetail, catalog: AnimeSourceCatalog): Boolean =
     autoPlaySubjectMatches(detail.subject, catalog.title) || autoSeasonCatalogOffset(detail, catalog) != null
 
-/** A canonical episode maps to a source-local number only with whole-season evidence. */
+/**
+ * Bangumi can give one episode both a series-wide sort number and a number in
+ * this subject. A verified season catalogue can start at 1 while still airing.
+ */
+private fun subjectEpisodeNumber(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog): Double? {
+    val local = requested.numberInSubject ?: return null
+    val offset = requested.number - local
+    if (!offset.isFinite() || offset <= 0.0 || catalog.notice != null ||
+        requested.subjectId != detail.subject.id || !detail.subject.id.startsWith("bangumi:") ||
+        !autoPlaySubjectMatches(detail.subject, catalog.title)) return null
+
+    val knownEpisodes = detail.episodes.filter { it.kind == AnimeEpisodeKind.MAIN && it.numberInSubject != null }
+    val knownNumbers = knownEpisodes.mapNotNull { it.numberInSubject }.toSet()
+    if (1.0 !in knownNumbers || local !in knownNumbers || knownNumbers.size != knownEpisodes.size ||
+        knownEpisodes.any { it.number != offset + requireNotNull(it.numberInSubject) }) return null
+
+    val mainGroups = catalog.episodes.filter { it.kind == AnimeEpisodeKind.MAIN }.groupBy { it.group }
+    if (mainGroups.isEmpty()) return null
+    val usesSubjectNumbers = mainGroups.values.all { rows ->
+        val numbers = rows.map { it.number }
+        1.0 in numbers && numbers.toSet().size == numbers.size && numbers.all { it != null && it in knownNumbers }
+    }
+    return local.takeIf { usesSubjectNumbers }
+}
+
 internal fun autoPlayEpisodeNumber(detail: AnimeDetail, requested: AnimeEpisode,
-    catalog: AnimeSourceCatalog): Double = if (requested.kind == AnimeEpisodeKind.MAIN)
-    requested.number - (autoSeasonCatalogOffset(detail, catalog) ?: 0.0) else requested.number
+    catalog: AnimeSourceCatalog): Double {
+    if (requested.kind != AnimeEpisodeKind.MAIN) return requested.number
+    return subjectEpisodeNumber(detail, requested, catalog)
+        ?: (requested.number - (autoSeasonCatalogOffset(detail, catalog) ?: 0.0))
+}
+
+internal fun hasLmmCatalogWorkId(title: AnimeSourceTitle): Boolean = when {
+    title.sourceId == "anime-lmm" -> title.externalIds["lmm22"] == title.id
+    isLmm85Source(title.sourceId) -> title.externalIds["lmm85"] == title.id
+    else -> false
+}
 
 /** Group selection still requires the source's audited line contracts. */
 internal fun autoPlayGroup(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog): String? =
@@ -182,9 +215,9 @@ internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalo
             episodeNumber.isFinite()) return listOf(name)
         return emptyList()
     }
-    // In LMM85's pinned catalogue, each numeric flag carries the same work ID
-    // and a stable route ID. Unequal coverage in other episodes does not affect this episode.
-    if (isLmm85Source(catalog.title.sourceId) && catalog.title.externalIds["lmm85"] == catalog.title.id) {
+    // Verified LMM work pages carry their native work ID in each route.
+    // Check the episode label and edition before admitting another route.
+    if (hasLmmCatalogWorkId(catalog.title)) {
         val matches = groups.mapNotNull { (name, rows) ->
             rows.singleOrNull { it.kind == requested.kind && it.number == episodeNumber }?.let { name to it }
         }

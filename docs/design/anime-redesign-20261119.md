@@ -1,5 +1,21 @@
 # 番剧全流程重做 · 2026-11-19
 
+<a id="anime-episode-numbering"></a>
+
+## 续作的总集数与季内编号 · 2026-11-20
+
+用户反馈「你就已测一，但是你下面那些又全部又显示了」并指出 Lanerc 搜到同一部番后能播放。截图中《东京复仇者 三天战争篇》第 51 集只有 TvTFun 进入探测，返回 403。LMM 动漫的来源目录有三组各 7 条记录，均从「第 01 集」开始。
+
+Bangumi 同一条记录给出 `sort=51`、`ep=1`、`subject_id=499474`。官方活动页明确把本篇第 1 话和总第 51 话并列。漫流此前只保留 `sort`。旧的编号推断又要求明确的季号后缀和完整的来源目录，仍在更新的篇章无法使用这条路径。 [Bangumi 目录记录](https://api.bgm.tv/v0/episodes/1749333) · [制作方公告](https://tokyo-revengers-anime.com/special/event-20260906/)
+
+Android 14 模拟器实际打开 Lanerc 1.1.6，搜索 `Tokyo Revengers`、选择同一篇，从 Auv 源 6 播出第 1 集，再从「换源」选中同篇并在 Auv 源 2 播出。反编译同包的 `defpackage.AE.d/e`、`AE.r` 与 `AE.l`，分别核对按来源取原生目录、按源检索及把原生播放参数交给该来源。界面仍可查到 2021 原季，同名命中与用户所选篇章分别保留。
+
+漫流保留 Bangumi 总集号与剧集身份，用经核对的季内编号匹配采用该编号的真实正片目录。更新中的来源可先提供已有集，未读到的集不能补造。来源身份、同组唯一性、手工映射及不同版本边界沿用原规则。旧缓存可先显示，首次刷新补取编号，来源核对随编号证据更新。测速口径明确为实际探测的来源数。LMM22 的公开作品目录 `8287` 有三组线路，播放链接均携带该作品 ID。验证同一目录、同一站点和原生作品 ID 后，同集号、同名和同版本的组可自动加入备选。
+
+最终本机包 `0.1.455-local.episode-numbers` 由 `:app:assembleDebug` 构建，SHA-256 `9ee7e0dc5e3f3eefe3ed17202ed6592bfbbea46827ed14d3cfb6fb1b55680936`。在同一台 Android 14 模拟器查询同番，从 Bangumi 条目打开总第 51 集。进入播放前，选集页已有 TvTFun、LMM 动漫、yzx 和 GiriGiriLove。点主播放按钮后自动从金牌开播，实际到达 0:13，显示总长 24:29。对照截图位于本机 `anime-episode-numbering-evidence-20261120` 的 `lanerc-episode1-play.png`、`lanerc-switched-source-playing.png`、`mf-ep51-detail.png` 与 `mf-ep51-playing-auto.png`。
+
+11 月 21 日在相同包复开第 51 集。播放来源列出 LMM 动漫，展开可见 `dev云播 [1]`、`聚合线路 [2]`、`vx云播 [3]`。试切 LMM 后实际回到金牌继续播放，金牌已确认出画，LMM 记录已确认参加本集选线。对应面板证据为 `mf-ep51-lmm-lines-confirmed.png`。
+
 ## Android 开播接口回归 · ANIME-LOAD-01 · 2026-11-20
 
 用户连续询问“现在呢”，随后发“。。。”并提供 `1000122199.png`、`1000122198.png`。已查看：同一集在 AniCh 与金牌两个来源均显示“本集暂时无法播放”，具体错误相同：`getBackBufferDurationUs not implemented`；视频输入、呈现及缓冲均无观测。安装版本和消息ID未提供，不将截图认定为特定APK。初始修复基线为 `b8fbd4bf24d6babd8ae66ec77fab39a892293473`，发布前无损接入最新main `582e1127fd25ad6cecb9c2426f32ae349490160b`；包含并行播放恢复、RIFE、此前缓冲轨，以及并行合入的缓存异常隔离和本机初始化错误分类。

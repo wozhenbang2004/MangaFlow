@@ -565,8 +565,17 @@ private class LmmProvider : RoutedAnimeProvider() {
                 val samePage = response.url.scheme == url.scheme && response.url.host == url.host &&
                     response.url.port == url.port && response.url.encodedPath == url.encodedPath
                 val exactWork = url.encodedPath == "/index.php/vod/detail/id/${title.id}.html"
-                if (trustedOrigin && samePage && exactWork && name == title.title.trim() && year != null &&
-                    (title.year == null || title.year == year)) title.copy(year = year) else title
+                val unverified = title.copy(externalIds = title.externalIds - "lmm22")
+                if (!trustedOrigin || !samePage || !exactWork || name != title.title.trim() || year == null ||
+                    (title.year != null && title.year != year)) return@withContext unverified
+                val playPath = Regex("""/play/${Regex.escape(title.id)}_\d+_\d+\.html""")
+                val sameWorkLines = episodes.isNotEmpty() && episodes.all { episode ->
+                    val link = runCatching { animePublicUrl(episode.url) }.getOrNull()
+                    link != null && link.scheme == home.scheme && link.host == home.host && link.port == home.port &&
+                        playPath.matches(link.encodedPath)
+                }
+                val ids = if (sameWorkLines) unverified.externalIds + ("lmm22" to title.id) else unverified.externalIds
+                unverified.copy(year = year, externalIds = ids)
             }
             requireEpisodes(identity, episodes)
         } finally { http.close() }

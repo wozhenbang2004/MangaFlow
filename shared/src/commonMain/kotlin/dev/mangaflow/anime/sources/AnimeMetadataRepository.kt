@@ -117,8 +117,12 @@ class AnimeMetadataRepository(context: PlatformContext) {
         val id = animeNumericId(subject.id.removePrefix("bangumi:"))
         val key = "detail:${subject.id}"
         cache.read(key)?.takeIf { cache.isFresh(it, ContentCacheKind.DETAILS) }?.let {
-            runCatching { AnimeDocumentCodec.detail(JSONObject(it.text)) }.getOrNull()
-                ?.takeIf { detail -> detail.subject.id == subject.id }?.let { detail ->
+            // Old cache entries can still render immediately through cachedDetail,
+            // but refresh them once to recover Bangumi's subject-relative episode numbers.
+            runCatching {
+                val document = JSONObject(it.text)
+                if (document.optBoolean("hasSubjectEpisodeNumbers")) AnimeDocumentCodec.detail(document) else null
+            }.getOrNull()?.takeIf { detail -> detail.subject.id == subject.id }?.let { detail ->
                     return@withContext AnimeMetadataDetailResult(detail.subject, detail.episodes)
                 }
         }
@@ -148,6 +152,7 @@ class AnimeMetadataRepository(context: PlatformContext) {
                             number = number, kind = bangumiEpisodeKind(episode.optInt("type", -1)),
                             durationMs = bangumiDuration(episode.text("duration")),
                             airDate = episode.text("airdate").takeIf { it.isNotBlank() && it != "0000-00-00" },
+                            numberInSubject = episode.finiteNumber("ep")?.takeIf { it > 0.0 },
                         )
                     }.sortedWith(compareBy<AnimeEpisode> { it.kind.ordinal }.thenBy { it.number }.thenBy { it.id })
                 } }
@@ -155,7 +160,7 @@ class AnimeMetadataRepository(context: PlatformContext) {
             }
             if (canonical.isSuccess && episodes.isSuccess) {
                 val complete = AnimeDetail(canonical.getOrThrow(), episodes.getOrThrow())
-                cache.write(key, AnimeDocumentCodec.detail(complete).toString(), cacheGeneration)
+                cache.write(key, AnimeDocumentCodec.detail(complete).put("hasSubjectEpisodeNumbers", true).toString(), cacheGeneration)
             }
             // Partial responses never replace the complete persisted snapshot or its freshness.
             AnimeMetadataDetailResult(canonical.getOrNull(), episodes.getOrNull(),

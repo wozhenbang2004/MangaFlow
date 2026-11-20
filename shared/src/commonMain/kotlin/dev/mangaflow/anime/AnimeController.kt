@@ -23,7 +23,6 @@ import dev.mangaflow.anime.sources.AnimeSourceStage
 import dev.mangaflow.anime.sources.AnimeTrackingRepository
 import dev.mangaflow.anime.sources.TvtFunPlaybackException
 import dev.mangaflow.anime.sources.animeContentIdentity
-import dev.mangaflow.anime.sources.isLmm85Source
 import dev.mangaflow.anime.sources.lanerc.LanercCapabilityException
 import dev.mangaflow.anime.sources.lanerc.LanercMediaSniffingUnsupported
 import dev.mangaflow.net.DownloadCategory
@@ -181,6 +180,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val revision: String?,
         val route: DownloadRouteSnapshot?,
         val episodeId: String?,
+        val episodeNumbers: Pair<Double, Double?>?,
     )
     private val associationSignatures = mutableMapOf<String, AssociationSignature>()
     private val associationCandidates = mutableMapOf<String, Pair<String?, List<AnimeSourceTitle>>>()
@@ -1298,6 +1298,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     }
                     else -> automaticGroups
                 }
+                val sourceNumber = autoPlayEpisodeNumber(detail, canonical, catalog)
                 groups.flatMap groupLoop@ { group ->
                     val inGroup = catalog.episodes.filter { it.group == group }
                     val intrinsic = nativeSource == binding.catalog.sourceId
@@ -1305,7 +1306,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         else binding.episodeMappings[canonical.id]?.let { id -> inGroup.singleOrNull { it.id == id } }
                     val matches = explicit?.let(::listOf) ?: if ((intrinsic && groups.size == 1) || !canonical.number.isFinite()) emptyList() else inGroup.filter {
                         it.kind == canonical.kind && it.number != null &&
-                            it.number == autoPlayEpisodeNumber(detail, canonical, catalog)
+                            it.number == sourceNumber
                     }
                     matches.map { episode -> AnimeEpisodeOption(binding.catalog.sourceId,
                         sources.provider(binding.catalog.sourceId)?.name ?: binding.catalog.sourceId,
@@ -1420,10 +1421,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             val bound = library.state.value.bindings.any { it.subjectId == detail.subject.id && it.catalog.sourceId == sourceId }
             val oldSignature = associationSignatures[sourceId]
             val signature = with(detail.subject) {
+                val unboundFocus = focus.takeUnless { bound }
                 AssociationSignature(id, title, originalTitle, year, externalIds, revision, route,
-                    focus?.id.takeUnless { bound })
+                    unboundFocus?.id, unboundFocus?.let { it.number to it.numberInSubject })
             }
-            if (!force && !retryFailed && bound && oldSignature?.copy(episodeId = null) == signature &&
+            if (!force && !retryFailed && bound && oldSignature?.copy(episodeId = null, episodeNumbers = null) == signature &&
                 mutableState.value.sourceAggregation[sourceId]?.phase == AnimeAssociationPhase.LINKED) continue
             if (!force && associationSignatures[sourceId] == signature &&
                 !(retryFailed && mutableState.value.sourceAggregation[sourceId]?.phase == AnimeAssociationPhase.UNAVAILABLE)) continue
@@ -1609,9 +1611,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             }
                             val groups = focus?.let { autoPlayGroups(detail, it, catalog) }.orEmpty()
                             if (groups.isEmpty() && !autoPlaySubjectHasSharedId(detail.subject, catalog.title)) {
-                                val exists = focus != null && catalog.episodes.any { it.kind == focus.kind && it.number == focus.number }
+                                val exists = focus?.let { episode ->
+                                    val sourceNumber = autoPlayEpisodeNumber(detail, episode, catalog)
+                                    catalog.episodes.any { it.kind == episode.kind && it.number == sourceNumber }
+                                } == true
                                 val phase = if (exists) AnimeAssociationPhase.NEEDS_SELECTION else AnimeAssociationPhase.EPISODE_UNMATCHED
-                                val reason = if (exists) "目录中有相同集数，季或线路仍需确认。"
+                                val reason = if (exists) "目录中有对应集，线路组仍需确认。"
                                     else if (focus == null) "当前作品没有可确认的剧集编号。" else "作品身份已核对，目录中暂无本集。"
                                 report(phase, checks = candidateChecks + AnimeAssociationCandidateCheck(catalog.title, phase, reason))
                                 return@aggregation true
@@ -1677,7 +1682,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 it.title.sourceId == base.sourceId && it.title.id == base.catalog.id && it.title.url == base.catalog.url
             } ?: return@flatMap emptyList()
             if (base.episode !in catalog.episodes) return@flatMap emptyList()
-            if ((base.sourceId != "anime-age" && !isLmm85Source(base.sourceId)) || base.episode.kind != episode.kind ||
+            if ((base.sourceId != "anime-age" && !hasLmmCatalogWorkId(catalog.title)) || base.episode.kind != episode.kind ||
                 base.episode.number != autoPlayEpisodeNumber(detail, episode, catalog)) return@flatMap listOf(base)
             val groups = autoPlayGroups(detail, episode, catalog, base.episode.group)
             if (groups.size < 2 || base.episode.group !in groups) return@flatMap listOf(base)
