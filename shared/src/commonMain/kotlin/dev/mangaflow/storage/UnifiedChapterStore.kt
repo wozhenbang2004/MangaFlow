@@ -219,14 +219,15 @@ class UnifiedChapterStore(context: Context) {
         fun nativeDirectory(manga: Manga, chapters: List<Chapter>): List<Chapter> {
             val owner = SourceKeys.decodeManga(manga.id)
             return chapters.mapNotNull { original ->
+                val group = ChapterSemantics.canonicalVolumeLabels(original.group)
                 val native = original.variants.firstOrNull {
                     it.sourceId == owner.sourceId && it.mangaId == owner.mangaId
                 }
                 when {
-                    native != null -> original.copy(id = native.chapterId, title = native.title,
+                    native != null -> original.copy(id = native.chapterId, title = native.title, group = group,
                         variants = listOf(native), sourceId = native.sourceId,
                         sourceMangaId = native.mangaId, sourceChapterId = native.chapterId)
-                    original.variants.isEmpty() -> original
+                    original.variants.isEmpty() -> if (group == original.group) original else original.copy(group = group)
                     else -> null
                 }
             }.distinctBy { it.id }
@@ -253,8 +254,8 @@ class UnifiedChapterStore(context: Context) {
             val meaning = ChapterSemantics.parse(chapter, confirmedSerialSystem = true) ?: return@mapNotNull null
             val native = chapter.variants.firstOrNull { it.sourceId == baseRef.sourceId && it.mangaId == baseRef.mangaId }
             val edition = native?.edition ?: if (meaning.system.startsWith("volume")) "单行本" else "连载版"
-            ChapterSemantics.editionFamily(edition, meaning, true) + "\u0000" + meaning.key
-        }.groupingBy { it }.eachCount().filterValues { it > 1 }.keys
+            (ChapterSemantics.editionFamily(edition, meaning, true) + "\u0000" + meaning.key) to chapter.title
+        }.groupBy({ it.first }, { it.second }).filterValues { it.size > 1 && !ChapterSemantics.paddedTitleAliases(it) }.keys
         val serialDisplayGroup = nativeBase.firstOrNull {
             ChapterSemantics.parse(it, true)?.let { meaning -> meaning.system == "chapter" && meaning.branch.isBlank() } == true
         }?.group?.substringBefore('·')?.trim() ?: "连载"
@@ -265,16 +266,15 @@ class UnifiedChapterStore(context: Context) {
                 val variant = chapter.variants.firstOrNull()
                 val edition = variant?.edition ?: "连载版"
                 val key = ChapterSemantics.editionFamily(edition, meaning, confirmed) + "\u0000" + meaning.key
-                val volume = Regex("(?:第\\s*)?[0-9]+(?:\\.[0-9]+)?\\s*[卷巻册冊]")
-                    .find(edition + " " + chapter.group)?.value.orEmpty()
+                val volume = ChapterSemantics.volumeNumberIn(edition + " " + chapter.group).orEmpty()
                 key to volume
             }.groupBy({ it.first }, { it.second })
             val duplicateVolumes = catalog.chapters.mapNotNull { chapter ->
                 val meaning = ChapterSemantics.parse(chapter, confirmed) ?: return@mapNotNull null
                 if (meaning.system != "volume") return@mapNotNull null
                 val edition = chapter.variants.firstOrNull()?.edition ?: "单行本"
-                ChapterSemantics.editionFamily(edition, meaning, confirmed) + "\u0000" + meaning.key
-            }.groupingBy { it }.eachCount().filterValues { it > 1 }.keys
+                (ChapterSemantics.editionFamily(edition, meaning, confirmed) + "\u0000" + meaning.key) to chapter.title
+            }.groupBy({ it.first }, { it.second }).filterValues { it.size > 1 && !ChapterSemantics.paddedTitleAliases(it) }.keys
             catalog.manga.id to (byMeaning.filterValues { volumes ->
                 volumes.filter(String::isNotBlank).distinct().size > 1
             }.keys + duplicateVolumes)

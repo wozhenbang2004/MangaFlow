@@ -24,7 +24,9 @@ import dev.mangaflow.initializeMangaFlow
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.update.DesktopUpdateExit
+import dev.mangaflow.reader.LocalReaderFullscreen
 import dev.mangaflow.reader.ProvideDesktopReaderKeyboard
+import dev.mangaflow.reader.ReaderFullscreen
 import dev.mangaflow.ui.MangaFlowTheme
 import androidx.compose.material3.MaterialTheme
 import java.io.File
@@ -66,9 +68,21 @@ fun main() {
                 position = windowPreferences.initialPosition,
                 placement = windowPreferences.initialPlacement,
             )
-            var restoredPlacement by remember { mutableStateOf(windowPreferences.initialPlacement) }
+            val fullscreen = remember { DesktopFullscreen() }
+            val toggleFullscreen: () -> Unit = {
+                if (!fullscreen.active && !fullscreen.restoring) {
+                    windowPreferences.capture(windowState.desktopSnapshot())
+                }
+                fullscreen.toggle(inReader = model?.reading?.value != null)
+            }
+            LaunchedEffect(model, fullscreen) {
+                model?.reading?.collectLatest { if (it == null) fullscreen.onReaderClosed() }
+            }
             LaunchedEffect(windowState, windowPreferences) {
-                snapshotFlow { windowState.desktopSnapshot(restoredPlacement) }.collectLatest { snapshot ->
+                snapshotFlow {
+                    if (fullscreen.active || fullscreen.restoring) null else windowState.desktopSnapshot()
+                }.collectLatest { snapshot ->
+                    if (snapshot == null) return@collectLatest
                     // Capture immediately for close; persist only once movement has settled.
                     windowPreferences.capture(snapshot)
                     delay(400)
@@ -79,7 +93,9 @@ fun main() {
                 {
                     if (!closing) {
                         closing = true
-                        windowPreferences.capture(windowState.desktopSnapshot(restoredPlacement))
+                        if (!fullscreen.active && !fullscreen.restoring) {
+                            windowPreferences.capture(windowState.desktopSnapshot())
+                        }
                         windowPreferences.save()
                         scope.launch {
                             val saved = withContext(Dispatchers.IO) { model?.library?.flushPendingWrites() ?: flushLocalPreferences() }
@@ -103,20 +119,12 @@ fun main() {
                         }
                         event.key == Key.F11 -> {
                             // Commit on release: holding F11 cannot toggle repeatedly.
-                            if (event.type == KeyEventType.KeyUp) {
-                                if (windowState.placement == WindowPlacement.Fullscreen) {
-                                    windowState.placement = restoredPlacement
-                                } else {
-                                    restoredPlacement = windowState.placement
-                                    windowState.placement = WindowPlacement.Fullscreen
-                                }
-                            }
+                            if (event.type == KeyEventType.KeyUp) toggleFullscreen()
                             true
                         }
-                        event.key == Key.Escape &&
-                            windowState.placement == WindowPlacement.Fullscreen -> {
+                        event.key == Key.Escape && fullscreen.active -> {
                             // Consume the complete Escape stroke before the reader's Back.
-                            if (event.type == KeyEventType.KeyUp) windowState.placement = restoredPlacement
+                            if (event.type == KeyEventType.KeyUp) fullscreen.exit()
                             true
                         }
                         else -> false
@@ -124,6 +132,7 @@ fun main() {
                 },
                 icon = painterResource("mangaflow.png")) {
                 DisposableEffect(window) {
+                    fullscreen.window = window
                     window.minimumSize = java.awt.Dimension(320, 320)
                     context.playbackDisplayRefreshHz = {
                         window.graphicsConfiguration?.device?.displayMode?.refreshRate
@@ -131,13 +140,18 @@ fun main() {
                     }
                     val detachPerformance = performance.attach(window)
                     onDispose {
+                        fullscreen.window = null
                         detachPerformance()
                         context.playbackDisplayRefreshHz = null
                     }
                 }
-                CompositionLocalProvider(LocalMangaContext provides context) {
+                CompositionLocalProvider(
+                    LocalMangaContext provides context,
+                    LocalReaderFullscreen provides ReaderFullscreen(fullscreen.active, toggleFullscreen),
+                ) {
                     MangaFlowTheme {
-                        DesktopWindowChrome(window, MaterialTheme.colorScheme.background, MaterialTheme.colorScheme.onBackground)
+                        DesktopWindowChrome(window, MaterialTheme.colorScheme.background,
+                            MaterialTheme.colorScheme.onBackground, fullscreen.active)
                         ProvideDesktopReaderKeyboard(context) {
                             MangaFlowHost(context, onModelReady = { model = it; lastModel = it })
                         }
@@ -166,10 +180,8 @@ private data class DesktopWindowSnapshot(
     val position: WindowPosition,
     val placement: WindowPlacement,
     val minimized: Boolean,
-    val beforeFullscreen: WindowPlacement,
 )
-private fun WindowState.desktopSnapshot(beforeFullscreen: WindowPlacement) =
-    DesktopWindowSnapshot(size, position, placement, isMinimized, beforeFullscreen)
+private fun WindowState.desktopSnapshot() = DesktopWindowSnapshot(size, position, placement, isMinimized)
 
 /** Compose 1.12 maps these window units directly to AWT coordinates; never apply image-pixel scale. */
 private fun desktopWorkAreas(): List<DesktopWorkArea> = runCatching {
@@ -233,8 +245,7 @@ private class DesktopWindowPreferences(context: PlatformContext) {
 
     fun capture(snapshot: DesktopWindowSnapshot) {
         if (snapshot.minimized) return
-        maximized = (if (snapshot.placement == WindowPlacement.Fullscreen)
-            snapshot.beforeFullscreen else snapshot.placement) == WindowPlacement.Maximized
+        maximized = snapshot.placement == WindowPlacement.Maximized
         val width = snapshot.size.width.value
         val height = snapshot.size.height.value
         val position = snapshot.position
@@ -243,7 +254,7 @@ private class DesktopWindowPreferences(context: PlatformContext) {
         val bounds = DesktopWindowBounds(position.x.value.roundToInt(), position.y.value.roundToInt(),
             width.roundToInt(), height.roundToInt())
         currentBounds = bounds
-        // Maximized and fullscreen resize events must never overwrite the restore rectangle.
+        // Maximized resize events must never overwrite the restore rectangle.
         if (snapshot.placement == WindowPlacement.Floating) normalBounds = bounds
     }
 

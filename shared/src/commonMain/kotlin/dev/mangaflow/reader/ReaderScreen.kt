@@ -4,7 +4,11 @@ package dev.mangaflow.reader
 
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitHorizontalTouchSlopOrCancellation
+import androidx.compose.foundation.gestures.horizontalDrag
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.isPrimaryPressed
 import me.saket.telephoto.zoomable.ZoomableState
 import me.saket.telephoto.zoomable.rememberZoomableState
 import me.saket.telephoto.zoomable.ZoomableContentLocation
@@ -12,7 +16,7 @@ import me.saket.telephoto.zoomable.zoomable
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.LayoutDirection
-import dev.mangaflow.storage.PageTurnGesture
+import dev.mangaflow.storage.swipeRightForNext
 
 import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.mangaFontFamily
@@ -113,6 +117,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material.icons.outlined.Fullscreen
+import androidx.compose.material.icons.outlined.FullscreenExit
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Search
@@ -457,6 +463,9 @@ fun ReaderScreen(
     val currentSourceName = chapter.variants.firstOrNull { it.storageId == chapter.id }?.sourceName
     val sourceSwitchWait = remember(sourceLoading, sourceSwitchName) { ReaderLoadAttempt() }
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
+    val fullscreen = LocalReaderFullscreen.current
+    val immersive = fullscreen?.active == true
+    val hideAmbientChrome = immersive && !controlsVisible
     var topControlsHeightPx by remember { mutableIntStateOf(0) }
     var bottomControlsHeightPx by remember { mutableIntStateOf(0) }
     var readerStatusInspecting by remember(chapterId) { mutableStateOf(false) }
@@ -472,7 +481,7 @@ fun ReaderScreen(
     var manualSingles by remember(manga.id, chapterId, presentedCollection?.key) {
         mutableStateOf(presentedCollection?.singlePages ?: libraryStore.spreadSinglesFor(manga.id, chapterId))
     }
-    var atChapterEnd by remember(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles,
+    var atChapterEnd by remember(chapterId, preferences.mode == ReadingMode.VERTICAL, preferences.doublePage, preferences.coverAlone, manualSingles,
         preferences.panelLayoutKey) {
         mutableStateOf(false)
     }
@@ -858,6 +867,10 @@ fun ReaderScreen(
         // Persist only settings the user actually changed, never the collection's temporary layout.
         val saved = savedPreferences.copy(
             mode = if (next.mode != preferences.mode) next.mode else savedPreferences.mode,
+            lastPagedMode = if (next.mode != preferences.mode) {
+                next.mode.takeUnless { it == ReadingMode.VERTICAL }
+                    ?: preferences.mode.takeUnless { it == ReadingMode.VERTICAL } ?: savedPreferences.lastPagedMode
+            } else savedPreferences.lastPagedMode,
             theme = if (next.theme != preferences.theme) next.theme else savedPreferences.theme,
             keepScreenOn = if (next.keepScreenOn != preferences.keepScreenOn) next.keepScreenOn else savedPreferences.keepScreenOn,
             pageGap = if (next.pageGap != preferences.pageGap) next.pageGap else savedPreferences.pageGap,
@@ -1080,6 +1093,12 @@ fun ReaderScreen(
         }
     }
     LaunchedEffect(preferences.dimAmount) { dimPreview.value = null }
+    LaunchedEffect(immersive, active) {
+        if (immersive && active && !touchExploration) {
+            controlsVisible = false
+            keyboardFocusRestore++
+        }
+    }
     LaunchedEffect(touchExploration) { if (touchExploration) controlsVisible = true }
     LaunchedEffect(discussionState, pageIndex, pages.size, readerForeground, leavingReader, localImport) {
         if (!localImport && readerForeground && !leavingReader && pages.isNotEmpty() && pageIndex >= pages.lastIndex - 3) {
@@ -1112,7 +1131,8 @@ fun ReaderScreen(
         // dialogs and their text/IME handling never share its shortcut target.
         .onKeyEvent { event ->
             if (!keyboardReady || !keyboardFocused || event.type != KeyEventType.KeyDown) false
-            else keyboard.actionFor(event, preferences.mode == ReadingMode.RIGHT_TO_LEFT)?.let { action ->
+            else keyboard.actionFor(event, preferences.mode != ReadingMode.VERTICAL &&
+                preferences.swipeRightForNext(desktop = true))?.let { action ->
                 if (action == ReaderKeyboardAction.TOGGLE_CONTROLS) controlsVisible = !controlsVisible
                 else keyboardRequest = ReaderKeyboardRequest(++keyboardSerial, action)
                 true
@@ -1296,7 +1316,8 @@ fun ReaderScreen(
                                 previous = true)
                         },
                         endContent = { pull ->
-                            if (!controlsVisible && !showComments && !showSettings && !showChapters && !showSpreadAdjustment) {
+                            if (!controlsVisible && (!immersive || pull.progress > 0f) &&
+                                !showComments && !showSettings && !showChapters && !showSpreadAdjustment) {
                                 ChapterEndFooter(
                                     pull = pull,
                                     nextTitle = nextChapter?.title,
@@ -1404,7 +1425,7 @@ fun ReaderScreen(
             }
         }
 
-        if (commentsAvailable && active && !leavingReader && atChapterEnd && !loading && error == null &&
+        if (commentsAvailable && !hideAmbientChrome && active && !leavingReader && atChapterEnd && !loading && error == null &&
             !showComments && !showSettings && !showChapters && !showSpreadAdjustment &&
             !showReaderActions && !readerActionsPresent && !showPageNavigator && !sourcePickerBlocking &&
             !readerStatusInspecting && !progressInteracting) {
@@ -1488,6 +1509,11 @@ fun ReaderScreen(
                     ReaderIcon(Icons.Rounded.Tune, if (desktop) "阅读设置与快捷键" else "阅读设置",
                         interactive = controlsVisible, emphasis = if (showSettings) 1f else .82f,
                         onClick = ::toggleReaderSettings)
+                    if (fullscreen != null) ReaderIcon(
+                        if (immersive) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen,
+                        if (immersive) "退出全屏（Esc）" else "沉浸全屏（F11）",
+                        interactive = controlsVisible, onClick = fullscreen.toggle,
+                    )
                 }
             }
         }
@@ -1738,7 +1764,7 @@ fun ReaderScreen(
         }
 
         ReaderExperienceStatus(
-            visible = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
+            visible = readerForeground && !hideAmbientChrome && !leavingReader && !panelBlocksReading && !showPanelModels &&
                 !showEnhancement && !compareEnhancement &&
                 !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking &&
                 !chapterChangeRequested && !showReaderActions && !readerActionsPresent && repairState.selection == null,
@@ -1803,7 +1829,7 @@ fun ReaderScreen(
             },
         )
 
-        if (!controlsVisible && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF) Box(
+        if (!controlsVisible && !immersive && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF) Box(
             modifier = Modifier.align(Alignment.BottomEnd)
                 .windowInsetsPadding(readerNavigationInsets().union(WindowInsets.displayCutout)
                     .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
@@ -2039,7 +2065,8 @@ private fun ChapterPages(
     val nearEnd by rememberUpdatedState(onNearEnd)
     val atEndChanged by rememberUpdatedState(onAtEndChanged)
     val currentPages by rememberUpdatedState(pages)
-    val layoutKey = remember(preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles) { Any() }
+    val vertical = preferences.mode == ReadingMode.VERTICAL
+    val layoutKey = remember(vertical, preferences.doublePage, preferences.coverAlone, manualSingles) { Any() }
     val loadedPages = remember(pages, headers, sourceId, layoutKey) { mutableStateMapOf<Int, String>() }
     val composedPages = remember(pages, headers, sourceId, layoutKey) { mutableStateMapOf<Int, Boolean>() }
     val pageDimensions = remember(pages, headers, sourceId) { mutableStateMapOf<String, IntSize>() }
@@ -2051,7 +2078,7 @@ private fun ChapterPages(
     val keyboardMotion = LocalMotionEnabled.current
     var prefetchViewport: ReaderPrefetchViewport? = null
     key(layoutKey) {
-    if (preferences.mode == ReadingMode.VERTICAL) {
+    if (vertical) {
         val list = rememberLazyListState(initialFirstVisibleItemIndex = startPage)
         val pageLayoutReady = remember { mutableStateMapOf<Int, Boolean>() }
         val endLayoutReady = {
@@ -2374,11 +2401,8 @@ private fun ChapterPages(
             (it.zoomFraction ?: 0f) > .001f || it.isAnimationRunning
         } == true
         val pageLayoutDirection = LocalLayoutDirection.current
-        val swipeRightNext = when (preferences.pageTurnGesture) {
-            PageTurnGesture.FOLLOW_READING_ORDER -> preferences.mode == ReadingMode.RIGHT_TO_LEFT
-            PageTurnGesture.SWIPE_LEFT_NEXT -> false
-            PageTurnGesture.SWIPE_RIGHT_NEXT -> true
-        }
+        val desktop = platformKind == PlatformKind.DESKTOP
+        val swipeRightNext = preferences.swipeRightForNext(desktop)
         val atEnd by remember(pager, groups) {
             derivedStateOf {
                 pager.settledPage == groups.lastIndex && pager.currentPage == groups.lastIndex &&
@@ -2398,6 +2422,41 @@ private fun ChapterPages(
             orientation = Orientation.Horizontal,
             towardStart = swipeRightNext,
         )
+        val mouseScope = rememberCoroutineScope()
+        val mouseSwipeEnabled by rememberUpdatedState(!spreadZoomed(pager.currentPage))
+        val onMouseSwipe by rememberUpdatedState<(Int, Boolean) -> Unit> { step, longSwipe ->
+            if (!pager.isScrollInProgress && mouseSwipeEnabled) {
+                val destination = pager.settledPage + step
+                if (destination in groups.indices) {
+                    readingNavigation()
+                    mouseScope.launch {
+                        if (keyboardMotion) pager.animateScrollToPage(destination) else pager.scrollToPage(destination)
+                    }
+                } else if (step > 0 && longSwipe && atEnd && endReady) {
+                    onNext?.invoke()
+                }
+            }
+        }
+        val mouseSwipe = if (desktop && active) Modifier.pointerInput(pager, swipeRightNext) {
+            // Foundation's pager already owns touch and trackpad scroll. Add primary-button drags.
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                if (down.type != PointerType.Mouse || !currentEvent.buttons.isPrimaryPressed || !mouseSwipeEnabled)
+                    return@awaitEachGesture
+                val drag = awaitHorizontalTouchSlopOrCancellation(down.id) { change, _ -> change.consume() }
+                    ?: return@awaitEachGesture
+                var last = drag.position
+                val released = horizontalDrag(drag.id) { change ->
+                    last = change.position
+                    change.consume()
+                }
+                val dx = last.x - down.position.x
+                val distance = kotlin.math.abs(dx)
+                if (released && distance >= 48.dp.toPx() && distance > kotlin.math.abs(last.y - down.position.y)) {
+                    onMouseSwipe(if ((dx > 0f) == swipeRightNext) 1 else -1, distance >= 96.dp.toPx())
+                }
+            }
+        } else Modifier
         LaunchedEffect(atEnd) { atEndChanged(atEnd) }
         LaunchedEffect(pager, groups) {
             snapshotFlow { groups.getOrNull(pager.currentPage)?.first }
@@ -2442,6 +2501,7 @@ private fun ChapterPages(
                 shown.first to shown.last
             })
         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
+            .then(mouseSwipe)
             .bottomPullLoad(pull)) {
             // Physical swipe direction is a user preference, not the OS layout direction.
             CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
@@ -2456,9 +2516,8 @@ private fun ChapterPages(
             ) { index ->
                 val group = groups.getOrNull(index)
                 val replacements = LocalReaderPageRepair.current?.state?.replacements
-                if (group != null) key(sourceId, headers, pages[group.first], group.second?.let { pages[it] }, preferences.mode,
+                if (group != null) key(sourceId, headers, pages[group.first], group.second?.let { pages[it] },
                     replacements?.get(group.first), group.second?.let { replacements?.get(it) }) {
-                    CompositionLocalProvider(LocalLayoutDirection provides pageLayoutDirection) {
                     val second = group.second
                     val spreadZoom = rememberZoomableState()
                     var spreadViewport by remember { mutableStateOf(IntSize.Zero) }
@@ -2485,6 +2544,7 @@ private fun ChapterPages(
                                 spreadSlots[imageIndex] = IntRect(x, y, x + coordinates.size.width, y + coordinates.size.height)
                             }
                         }) {
+                            CompositionLocalProvider(LocalLayoutDirection provides pageLayoutDirection) {
                             ReaderPage(
                                 pages[imageIndex], headers, sourceId = sourceId, resolvePage = resolvePage, retryPage = retryPage,
                                 observePageTransfer = observePageTransfer, paged = true, pagedAlignment = alignment, onTap = onTap,
@@ -2512,6 +2572,7 @@ private fun ChapterPages(
                                     if (ready) swipeReadyPages[imageIndex] = true else swipeReadyPages.remove(imageIndex)
                                 },
                             )
+                            }
                         }
                     }
                     if (second != null) {
@@ -2538,20 +2599,16 @@ private fun ChapterPages(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             val rightToLeft = preferences.mode == ReadingMode.RIGHT_TO_LEFT
-                            renderImage(
-                                if (rightToLeft) second else group.first,
-                                Modifier.weight(1f).fillMaxHeight(),
-                                AbsoluteAlignment.CenterRight,
-                            )
-                            renderImage(
-                                if (rightToLeft) group.first else second,
-                                Modifier.weight(1f).fillMaxHeight(),
-                                AbsoluteAlignment.CenterLeft,
-                            )
+                            val ordered = if (rightToLeft) listOf(second, group.first) else listOf(group.first, second)
+                            ordered.forEachIndexed { slot, imageIndex ->
+                                key(imageIndex) {
+                                    renderImage(imageIndex, Modifier.weight(1f).fillMaxHeight(),
+                                        if (slot == 0) AbsoluteAlignment.CenterRight else AbsoluteAlignment.CenterLeft)
+                                }
+                            }
                         }
                     } else {
                         renderImage(group.first, Modifier.fillMaxSize(), Alignment.Center)
-                    }
                     }
                 }
             }

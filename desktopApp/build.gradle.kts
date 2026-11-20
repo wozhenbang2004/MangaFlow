@@ -14,6 +14,7 @@ dependencies {
     implementation(project(":shared"))
     implementation(compose.desktop.currentOs)
     implementation("net.java.dev.jna:jna:5.19.1")
+    implementation("net.java.dev.jna:jna-platform:5.18.1")
 }
 
 val mangaVersion = providers.gradleProperty("mangaVersionName").orElse("0.1.0")

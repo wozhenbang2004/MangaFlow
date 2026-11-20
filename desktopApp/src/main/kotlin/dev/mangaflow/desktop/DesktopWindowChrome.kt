@@ -24,7 +24,7 @@ private val captionApi by lazy {
     runCatching { Native.load("dwmapi", DwmCaption::class.java) }.getOrNull()
 }
 
-private data class CaptionColors(val dark: Boolean, val background: Int, val foreground: Int)
+private data class CaptionColors(val dark: Boolean, val background: Int, val foreground: Int, val fullscreen: Boolean)
 
 private fun Color.colorRef(): Int {
     val argb = toArgb()
@@ -33,8 +33,8 @@ private fun Color.colorRef(): Int {
 
 /** Uses the native frame so Windows drag, Snap, resize and caption buttons remain native. */
 @Composable
-internal fun DesktopWindowChrome(window: Window, background: Color, foreground: Color) {
-    val colors = CaptionColors(background.luminance() < .5f, background.colorRef(), foreground.colorRef())
+internal fun DesktopWindowChrome(window: Window, background: Color, foreground: Color, fullscreen: Boolean) {
+    val colors = CaptionColors(background.luminance() < .5f, background.colorRef(), foreground.colorRef(), fullscreen)
     val latestColors = rememberUpdatedState(colors)
     val controller = remember(window) { NativeCaptionController(window) }
     SideEffect { controller.apply(colors) }
@@ -69,7 +69,8 @@ private class NativeCaptionController(private val window: Window) {
                 set(20, if (colors.dark) 1 else 0) // DWMWA_USE_IMMERSIVE_DARK_MODE
                 set(35, colors.background) // DWMWA_CAPTION_COLOR
                 set(36, colors.foreground) // DWMWA_TEXT_COLOR
-                set(34, colors.background) // DWMWA_BORDER_COLOR
+                set(33, if (colors.fullscreen) 1 else 0) // DWMWA_WINDOW_CORNER_PREFERENCE
+                set(34, if (colors.fullscreen) -2 else colors.background) // DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE = -2
             }
             lastHandle = address
             lastColors = colors

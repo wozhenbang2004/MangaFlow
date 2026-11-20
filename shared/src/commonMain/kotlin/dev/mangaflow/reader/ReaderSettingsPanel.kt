@@ -56,6 +56,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.storage.ReaderPreferences
 import dev.mangaflow.storage.PageTurnGesture
 import dev.mangaflow.storage.ReadingMode
+import dev.mangaflow.storage.swipeRightForNext
 import dev.mangaflow.reader.panels.PanelSettings
 import dev.mangaflow.reader.panels.PanelEngine
 import dev.mangaflow.reader.panels.PanelReadingAvailable
@@ -90,6 +91,12 @@ internal fun ReaderSettingsDialog(
     val desktop = platformKind == PlatformKind.DESKTOP
     val modes = listOf(ReadingMode.VERTICAL to "纵向",
         ReadingMode.RIGHT_TO_LEFT to "右至左", ReadingMode.LEFT_TO_RIGHT to "左至右")
+    val vertical = preferences.mode == ReadingMode.VERTICAL
+    val layout = when {
+        vertical -> 0
+        preferences.doublePage -> 2
+        else -> 1
+    }
     LaunchedEffect(visible, preferences.dimAmount) { if (visible) dimAmount = preferences.dimAmount }
 
     val panel: @Composable () -> Unit = {
@@ -105,11 +112,19 @@ internal fun ReaderSettingsDialog(
                 Column(Modifier.fillMaxWidth().verticalScroll(scroll)
                     .padding(end = if (desktop) 10.dp else 0.dp, bottom = 14.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp)) {
-                    ReaderSettingsSection("阅读顺序") {
+                    ReaderSettingsSection(if (desktop) "阅读布局" else "阅读顺序") {
                         MotionTabs(
-                            selected = modes.indexOfFirst { it.first == preferences.mode },
-                            labels = modes.map { it.second },
-                            onSelect = { update(preferences.copy(mode = modes[it].first)) },
+                            selected = if (desktop) layout else modes.indexOfFirst { it.first == preferences.mode },
+                            labels = if (desktop) listOf("条漫", "单页", "双页") else modes.map { it.second },
+                            onSelect = { index ->
+                                if (desktop) {
+                                    val pagedMode = if (vertical) preferences.lastPagedMode else preferences.mode
+                                    update(preferences.copy(
+                                        mode = if (index == 0) ReadingMode.VERTICAL else pagedMode,
+                                        doublePage = if (index == 0) preferences.doublePage else index == 2,
+                                    ))
+                                } else update(preferences.copy(mode = modes[index].first))
+                            },
                             foreground = colors.onSurface,
                             muted = colors.onSurfaceVariant,
                             track = colors.onSurface.copy(alpha = .04f), indicator = colors.surface,
@@ -117,11 +132,31 @@ internal fun ReaderSettingsDialog(
                             controlHeight = 52.dp, fontSize = 14.sp, role = Role.RadioButton,
                             selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
                         )
-                        if (preferences.panelEngine == PanelEngine.OFF && preferences.mode != ReadingMode.VERTICAL) {
-                            Text("翻页手势 · 所有漫画", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                            val gestures = PageTurnGesture.entries
-                            MotionTabs(selected = gestures.indexOf(preferences.pageTurnGesture),
-                                labels = listOf("跟随顺序", "左滑下一页", "右滑下一页"),
+                        if (preferences.panelEngine == PanelEngine.OFF && !vertical) {
+                            if (desktop && preferences.doublePage) {
+                                Text("双页阅读顺序 · 本作品", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                                MotionTabs(
+                                    selected = if (preferences.mode == ReadingMode.LEFT_TO_RIGHT) 0 else 1,
+                                    labels = listOf("先左页，后右页", "先右页，后左页"),
+                                    onSelect = { index ->
+                                        val mode = if (index == 0) ReadingMode.LEFT_TO_RIGHT else ReadingMode.RIGHT_TO_LEFT
+                                        update(preferences.copy(mode = mode))
+                                    },
+                                    foreground = colors.onSurface, muted = colors.onSurfaceVariant,
+                                    track = colors.onSurface.copy(alpha = .04f), indicator = colors.surface,
+                                    fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
+                                    controlHeight = 44.dp, fontSize = 12.sp, role = Role.RadioButton,
+                                )
+                            }
+                            Text(if (desktop) "翻页方向 · 所有漫画" else "翻页手势 · 所有漫画",
+                                style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                            val gestures = if (desktop) listOf(PageTurnGesture.SWIPE_LEFT_NEXT, PageTurnGesture.SWIPE_RIGHT_NEXT)
+                                else PageTurnGesture.entries
+                            val selected = if (desktop) {
+                                if (preferences.swipeRightForNext(desktop = true)) 1 else 0
+                            } else gestures.indexOf(preferences.pageTurnGesture)
+                            MotionTabs(selected = selected,
+                                labels = if (desktop) listOf("左滑前进", "右滑前进") else listOf("跟随顺序", "左滑下一页", "右滑下一页"),
                                 onSelect = { update(preferences.copy(pageTurnGesture = gestures[it])) },
                                 foreground = colors.onSurface, muted = colors.onSurfaceVariant,
                                 track = colors.onSurface.copy(alpha = .04f), indicator = colors.surface,
@@ -132,10 +167,10 @@ internal fun ReaderSettingsDialog(
                             animationSpec = tween(if (motion) MangaMotion.Content else 0,
                                 easing = MangaMotion.EnterEasing),
                         )) {
-                            if (preferences.panelEngine == PanelEngine.OFF && preferences.mode == ReadingMode.VERTICAL) {
+                            if (preferences.panelEngine == PanelEngine.OFF && vertical) {
                                 ReaderToggle("页间留白", preferences.pageGap) { update(preferences.copy(pageGap = it)) }
                             } else if (preferences.panelEngine == PanelEngine.OFF) {
-                                ReaderToggle("双页跨页", preferences.doublePage) { update(preferences.copy(doublePage = it)) }
+                                if (!desktop) ReaderToggle("双页跨页", preferences.doublePage) { update(preferences.copy(doublePage = it)) }
                                 if (preferences.doublePage) {
                                     ReaderToggle("封面独页", preferences.coverAlone) { update(preferences.copy(coverAlone = it)) }
                                 }
@@ -203,7 +238,7 @@ internal fun ReaderSettingsDialog(
                         PaperThemePicker(preferences.theme) { update(preferences.copy(theme = it)) }
                     }
 
-                    LocalReaderKeyboard.current?.settings?.invoke(preferences.mode == ReadingMode.RIGHT_TO_LEFT)
+                    LocalReaderKeyboard.current?.settings?.invoke(!vertical && preferences.swipeRightForNext(desktop = true))
 
                     ReaderSettingsSection("屏幕") {
                         ReaderToggle("保持常亮", preferences.keepScreenOn) { update(preferences.copy(keepScreenOn = it)) }

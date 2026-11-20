@@ -1181,11 +1181,10 @@ class LibraryStore(context: Context) {
 
     private fun JSONObject.toReaderPreferences(): ReaderPreferences {
         val storedMode = optString("mode")
+        val mode = ReadingMode.entries.firstOrNull { it.name == storedMode } ?: ReadingMode.VERTICAL
+        val lastPagedMode = optString("lastPagedMode")
         return ReaderPreferences(
-            mode = when (storedMode) {
-                "WEBTOON" -> ReadingMode.VERTICAL
-                else -> ReadingMode.entries.firstOrNull { it.name == storedMode } ?: ReadingMode.VERTICAL
-            },
+            mode = mode,
             theme = ReaderTheme.entries.firstOrNull { it.name == optString("theme") } ?: ReaderTheme.PAPER,
             keepScreenOn = optBoolean("keepScreenOn", true),
             // The former webtoon choice always rendered without page gaps.
@@ -1206,6 +1205,8 @@ class LibraryStore(context: Context) {
             panelLearnedOrder = optBoolean("panelLearnedOrder", false),
             pageTurnGesture = PageTurnGesture.entries.firstOrNull { it.name == optString("pageTurnGesture") }
                 ?: PageTurnGesture.FOLLOW_READING_ORDER,
+            lastPagedMode = ReadingMode.entries.firstOrNull { it != ReadingMode.VERTICAL && it.name == lastPagedMode }
+                ?: mode.takeUnless { it == ReadingMode.VERTICAL } ?: ReadingMode.RIGHT_TO_LEFT,
         )
     }
 
@@ -1231,6 +1232,7 @@ class LibraryStore(context: Context) {
         put("panelDirection", panelDirection.name)
         put("panelLearnedOrder", panelLearnedOrder)
         put("pageTurnGesture", pageTurnGesture.name)
+        put("lastPagedMode", lastPagedMode.name)
     }
 
     private fun readLegacyLongImageMigration(): Boolean {

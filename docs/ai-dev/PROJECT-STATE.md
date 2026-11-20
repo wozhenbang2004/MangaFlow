@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Windows 沉浸阅读与翻页 · 2026-11-21
+
+从主线 `f388ca4` 接续，用户原话、界面和交互落点见 [DESKTOP-READ-01–03](../design/reading-and-discovery-redesign-20261119.md#desktop-reader-fullscreen)。本次交付范围为 Windows 本机包，工作副本位于 `D:/Kayokoi/MangaFlowLocal/desktop-fullscreen-20261121`。实机阅读和触控板手感按仓库交付约定由用户确认。
+
+追加「01和1 应该被判断成一个章节/卷的才行」及「记得提交代码」。同作品、同编号体系的聚合按 [MANGA-NUMBER-01](../design/reading-and-discovery-redesign-20261119.md#manga-number-01) 处理编号格式，并与 Windows 阅读更新合为一次 main 提交和一个本机包。
+
 ## 番剧续作集号与多源开播 · 2026-11-21
 
 从用户反馈《东京复仇者 三天战争篇》第 51 集只测到一条 403 的线路接续。在同一 Android 14 模拟器对比 Lanerc 第 1 集与漫流第 51 集，并核对 Bangumi 的两套编号。修复版保留总集号并按来源目录匹配季内编号，LMM 同作品的三组线路进入本集播放面板，金牌自动开播。两款实际播放、原码对应位置、构建身份及换源观察见 [续作总集数与季内编号](../design/anime-redesign-20261119.md#anime-episode-numbering)。

@@ -27,4 +27,11 @@ data class ReaderPreferences(
     val panelDirection: PanelDirection = PanelDirection.RIGHT_TO_LEFT,
     val panelLearnedOrder: Boolean = false,
     val pageTurnGesture: PageTurnGesture = PageTurnGesture.FOLLOW_READING_ORDER,
+    val lastPagedMode: ReadingMode = ReadingMode.RIGHT_TO_LEFT,
 )
+
+internal fun ReaderPreferences.swipeRightForNext(desktop: Boolean): Boolean = when (pageTurnGesture) {
+    PageTurnGesture.SWIPE_LEFT_NEXT -> false
+    PageTurnGesture.SWIPE_RIGHT_NEXT -> true
+    PageTurnGesture.FOLLOW_READING_ORDER -> !desktop && mode == ReadingMode.RIGHT_TO_LEFT
+}

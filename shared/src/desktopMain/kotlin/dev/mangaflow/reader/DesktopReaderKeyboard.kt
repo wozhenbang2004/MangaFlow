@@ -123,9 +123,11 @@ private fun DesktopShortcutSettings(bindings: DesktopKeyBindings, rtl: Boolean) 
     LaunchedEffect(recording) { if (recording != null) requester.requestFocus() }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("键盘快捷键", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
-        Text("左右方向随阅读方向调整；PageUp / PageDown、空格也可翻页。",
+        Text("左右方向键随翻页方向调整。PageUp / PageDown、空格也可翻页。",
             color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
         Text("Ctrl+F 查找本书章节，Ctrl+K 搜索其他作品。",
+            color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+        Text("F11 切换全屏，Esc 退出全屏。",
             color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
         ReaderKeyboardAction.entries.forEach { action ->
             Row(Modifier.fillMaxWidth().heightIn(min = 44.dp)
