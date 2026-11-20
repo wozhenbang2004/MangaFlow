@@ -79,7 +79,7 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
         if (mapped.isEmpty() && detail.optString("name").isBlank() && description.isBlank())
             throw LanercCapabilityException("来源未返回可识别的作品详情或剧集，可能需要更新来源。")
         return AnimeSourceCatalog(title.copy(title = detail.optString("name").ifBlank { title.title },
-            coverUrl = sourceCover(homeUrl, detail.optString("pic")).ifBlank { title.coverUrl },
+            coverUrl = sourceCover(homeUrl, lanercArtworkUrl(id, detail.optString("pic"))).ifBlank { title.coverUrl },
             year = lanercYear(detail.optString("year")) ?: title.year,
             episodeCount = detail.optString("episodeCount").toIntOrNull()?.takeIf { it > 0 } ?: title.episodeCount,
             updateText = detail.optString("remarks").trim().ifBlank { title.updateText },
@@ -182,6 +182,10 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
 
 private val LMM85_EPISODE_FLAG = Regex("[0-9]{1,24}_[0-9]{1,8}_[0-9]{1,8}")
 
+/** The Lanerc script appends its image request options to its display URL. */
+internal fun lanercArtworkUrl(sourceId: String?, value: String): String = if (sourceId == "anime-lanerc-lanerc")
+    value.substringBefore("@Referer=").substringBefore("@Headers=") else value
+
 internal fun lanercCards(descriptor: LanercSourceDescriptor, value: Any?, revision: String): List<AnimeSourceTitle> {
     val list = value as? JSONArray ?: throw LanercCapabilityException("来源列表格式不兼容，请更新来源。")
     require(list.length() <= 2000) { "来源单页结果过多。" }
@@ -194,7 +198,7 @@ internal fun lanercCards(descriptor: LanercSourceDescriptor, value: Any?, revisi
         val url = item.optString("url").ifBlank { id }.let { raw ->
             runCatching { animePublicUrl(raw).toString() }.getOrDefault(descriptor.scriptUrl)
         }
-        AnimeSourceTitle(descriptor.id, id, name, url, sourceCover(descriptor.homeUrl, item.optString("pic")),
+        AnimeSourceTitle(descriptor.id, id, name, url, sourceCover(descriptor.homeUrl, lanercArtworkUrl(descriptor.id, item.optString("pic"))),
             year = lanercYear(item.optString("year")),
             episodeCount = item.opt("episodeCount")?.toString()?.toIntOrNull()?.takeIf { it >= 0 },
             externalIds = if (descriptor.id == "anime-lanerc-douban" && id.toLongOrNull()?.let { it > 0 } == true)

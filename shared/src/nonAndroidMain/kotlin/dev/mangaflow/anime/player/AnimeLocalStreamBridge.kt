@@ -86,13 +86,13 @@ internal class AnimeLocalStreamBridge private constructor(
     }
 
     companion object {
-        suspend fun create(lease: AnimeLocalMediaLease, scope: CoroutineScope, inspectLmm85: Boolean): AnimeLocalStreamBridge {
+        suspend fun create(lease: AnimeLocalMediaLease, scope: CoroutineScope, inspectImagePrefixedTransport: Boolean): AnimeLocalStreamBridge {
             var pending: AnimeLocalStreamBridge? = null
             return try {
                 withContext(Dispatchers.IO) {
                     val aliases = linkedMapOf<String, String>()
                     val manifest = lease.entry.takeIf {
-                        inspectLmm85 && it.mimeType.contains("mpegurl", ignoreCase = true) && it.size in 1L..(1024L * 1024)
+                        inspectImagePrefixedTransport && it.mimeType.contains("mpegurl", ignoreCase = true) && it.size in 1L..(1024L * 1024)
                     }?.file?.readText()?.takeIf(::isIndependentAnimeHlsSegmentPlaylist)
                         ?.lineSequence()?.joinToString("\n") { line ->
                             val name = line.trim()

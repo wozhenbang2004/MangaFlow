@@ -36,8 +36,13 @@ import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
+import dev.mangaflow.anime.sources.AnimeHttp
+import dev.mangaflow.anime.sources.lanerc.lanercArtworkUrl
 import dev.mangaflow.experience.sourceNetwork
 import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
+import coil3.network.NetworkHeaders
+import coil3.network.httpHeaders
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.ui.mangaCoverCard
@@ -126,8 +131,19 @@ internal fun AnimePoster(url: String, modifier: Modifier = Modifier, sourceId: S
         if (url.isNotBlank()) {
             val context = LocalMangaContext.current
             val request = remember(context, url, sourceId) {
-                sourceId?.let { ImageRequest.Builder(imagePlatformContext(context)).data(url)
-                    .sourceNetwork(it, DownloadCategory.ANIME).build() } ?: url
+                sourceId?.let { id ->
+                    val imageUrl = lanercArtworkUrl(id, url)
+                    val builder = ImageRequest.Builder(imagePlatformContext(context)).data(imageUrl)
+                        .sourceNetwork(id, DownloadCategory.ANIME)
+                    val host = imageUrl.toHttpUrlOrNull()?.takeIf { it.isHttps }?.host
+                    if (id == "anime-lanerc-lanerc" && (host == "doubanio.com" || host?.endsWith(".doubanio.com") == true)) {
+                        builder.httpHeaders(NetworkHeaders.Builder().apply {
+                            set("Referer", "https://movie.douban.com/")
+                            set("User-Agent", AnimeHttp.USER_AGENT)
+                        }.build())
+                    }
+                    builder.build()
+                } ?: url
             }
             AsyncImage(model = request, contentDescription = null,
                 contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())

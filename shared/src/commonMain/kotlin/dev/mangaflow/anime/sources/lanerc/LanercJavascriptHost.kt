@@ -16,7 +16,7 @@ internal val LANERC_JAVASCRIPT_HOST = """
       if (agent) headers['User-Agent'] = (g.UA && g.UA[agent.toLowerCase()]) || agent;
     }
     var request = {url: text(url), method: method || text(input.method || 'GET').toUpperCase(),
-      headers: headers, responseEncoding: input.responseEncoding || 'utf8',
+      headers: headers, responseEncoding: input.responseEncoding || input.charset || 'utf8',
       bodyEncoding: input.bodyEncoding || 'utf8', noCookie: input.noCookie === true};
     if (body != null) request.body = typeof body === 'object' ? JSON.stringify(body) : text(body);
     else if (input.body != null) request.body = input.body;
@@ -74,6 +74,8 @@ internal val LANERC_JAVASCRIPT_HOST = """
   });
   g.base64Encode = function (value) { return g.crypto.base64.encode(value); };
   g.base64Decode = function (value) { return g.crypto.base64.decode(value); };
+  g.atob = function (value) { return g.crypto.base64.decode(value, {output:'latin1'}); };
+  g.btoa = function (value) { return g.crypto.base64.encode(value, {input:'latin1'}); };
   g.encodeUri = function (value) { return encodeURIComponent(text(value)).replace(/%20/g, '+').replace(/[!~'()]/g, function (ch) { return '%' + ch.charCodeAt(0).toString(16).toUpperCase(); }); };
   g.decodeUri = function (value) { try { return decodeURIComponent(text(value).replace(/\+/g, ' ')); } catch (_) { return text(value); } };
   function regex(value, global) {
@@ -118,7 +120,7 @@ internal val LANERC_JAVASCRIPT_HOST = """
   g.UA.iphone = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
   g.UA.ipad = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
   g.UA.safari = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15';
-  g.__mlInvoke = function (method, args, sourceId) {
+  g.__mlInvoke = function (method, args, sourceId, exactLanercDanmaku) {
     if (typeof g[method] !== 'function') return JSON.stringify({missing:true});
     var value;
     // The observed AniCh script silently substitutes got[0] when a selected slug disappears.
@@ -131,6 +133,16 @@ internal val LANERC_JAVASCRIPT_HOST = """
       var matches = Array.isArray(rows) ? rows.filter(function (row) { return row.slug === selection.slug; }) : [];
       if (matches.length !== 1) return JSON.stringify({selectionChanged:true});
       value = {url:matches[0].url, type:matches[0].type || 'auto'};
+    } else if (sourceId === 'anime-lanerc-lanerc' && method === 'danmu') {
+      if (!exactLanercDanmaku) return JSON.stringify({selectionUnsupported:true});
+      // The pinned script normally recalls a title. Its episode flag already
+      // identifies the exact content and the zero-based native episode index.
+      var episode = JSON.parse(args[0]);
+      if (!episode || !/^[A-Za-z0-9_-]{1,256}$/.test(episode.contentId) ||
+          !Number.isInteger(episode.episodeIndex) || episode.episodeIndex < 0 || episode.episodeIndex > 20000)
+        return JSON.stringify({selectionChanged:true});
+      g._lastDetail = {id:episode.contentId, name:''};
+      value = g.danmu(JSON.stringify({episode:episode.episodeIndex}));
     } else value = g[method].apply(g, args);
     if (value && typeof value.then === 'function') return JSON.stringify({asyncUnsupported:true});
     if (typeof value === 'string') { try { value = JSON.parse(value); } catch (_) { return JSON.stringify({invalid:true}); } }

@@ -1,6 +1,16 @@
 # Lanerc feature transfer into MangaFlow
 
+## 次元城原生来源 · 2026-11-20
+
+官网主线路与备用线路下载得到同一份 Android 5.6.1 arm64 APK，包名 `com.ynwtandroid.fork.xl`，版本码 `1789561015`，APK v2 签名校验通过，SHA-256 `d282d183f0dff5694fc82d78d8729fc23dce705a6aee22746549cac24dad145e`。发布页标示的 5.6.0 与 APK 清单内版本有差异。静态读取 APK 中 `classes6.dex`、`classes7.dex` 确认登录字面量，`classes7.dex` 同时含搜索字面量。公网网页主机为 `www.cycani.org`，已与发布域 `cycity.pro` 一起加入 Relay 的自动分流直连。 [官网发布页](https://www.cycity.pro/) · [官方网页](https://www.cycani.org/) · [Relay 规则](https://github.com/wozhenbang2004/Relay-Desktop/commit/48ae7d5a18bc6af30597079b09ab723f6230f310)
+
+MangaFlow 以官方网页同源 API 接入最新更新、分页搜索、作品详情和按线路分页选集。近期更新走 `/api/videos`，搜索走 `/api/videos/search`，作品与剧集走 `/api/videos/{id}` 和 `/api/videos/{id}/sections`。每次取流使用对应的线路和真实剧集标识，缺失的线路不会覆盖已取得的目录。已移植入口沿用现有来源管理和播放器。本轮复用 ANIME-INTEGRATION-01、08 的原生来源身份、路由及交互基线。 [官方目录逻辑](https://www.cycani.org/assets/CategoryPage-CvGZy_-J.js) · [官方详情、选集与播放契约](https://www.cycani.org/assets/api-Bas6vfPh.js)
+
+取流由 `/api/v2/sections/{id}/play-url` 按账号会话返回。本人账号通过 `/api/auth/login` 登录，失效时可按 `/api/auth/refresh` 刷新一次。密码只用于登录请求，会话保留在平台安全存储。来源管理可以登录或断开，从该来源点播时可直接进入登录。匿名状态仍可浏览、搜索和选集，自动播放会继续尝试其他有可用线路的来源。账号登录、分线路播放和用户 Relay 直连体验未实测。 [官方登录页实现](https://www.cycani.org/assets/LoginPage-DTFTvrjc.js) · [官方会话实现](https://www.cycani.org/assets/index-BysvtvH-.js)
+
 ## 片源入口及失败恢复 · 2026-11-20
+
+Lanerc 主源的三条 Protobuf 取流调用明确要求 ISO-8859-1。宿主现在保留原始字节，并为脚本提供 Latin-1 语义的 `atob` 和 `btoa`。主源和 LMM85 的完整明文 HLS 片段共用图片头识别，覆盖在线、缓存及离线播放。Lanerc 站内弹幕直接使用剧集标记里的原生作品 ID 和集序。豆瓣图床封面请求从地址中去掉脚本附加标记，并送出该图床所需的 Referer。后台队列等待并发许可时不再占用片源会话锁，播放仍可优先取址。
 
 来源管理可以从内置来源打开对应的固定脚本版入口。AkiAnime、动漫巴士等脚本版提供原有的推荐、分类和筛选。继续用固定摘要和版本校验安装，保留两种实现各自的来源、作品和剧集身份。
 
@@ -19,7 +29,7 @@ iOS 复用通用脚本传输对七条已审核的匿名公开 HTTP 入口做精�
 | 16 个视频源、豆瓣发现、弹弹play | 漫流保留原生和已装扩展的真实来源身份，按搜索、资料、剧集、取址及弹幕消费支持的操作。 | 既有接入。账号类操作仍依据支持的访问方式，是否可播由实际线路响应决定。 |
 | 酷漫星、咸番鸭、yulu、漫时光 | 均使用 `search(keyword,page)`、`detail(id)` 与 `play(flag)`。卡片保留 source 和 id，章节保留 opaque flag，读页交给同源解析。 | 四个原脚本分别涉及上游应用身份、设备校验、会员操作或长期存储凭据。漫时光匿名目录在本机得到 HTTP 000。漫流依接入状态展示其公开前提。 |
 | 囧次元 | 下载包与固定记录相符。 | ENC1 发布包待来源方提供兼容形式。 |
-| 次元城 | 官方网页版入口在当前线路返回地区限制 403，Android 版调用链已静态分析。 | 匿名目录及读取接口当前无可复现实测。 |
+| 次元城 | 较早线路曾返回地区限制 403；已复核 Android APK 和官方网页调用。 | 原生目录、搜索、详情、选集与账号取流已接入，账号登录、实播及用户直连待核对。 |
 
 将可用来源保留在原有搜索与正文聚合中。同一作品卡继续持有各个原生来源身份。首批结果可先使用，尚在排队的查询与刚发出的查询有独立状态。HTTP 401、403、429 或 5xx 后的空回复保留可解释的来源问题，真正取得的有效结果仍可显示。普通漫画来源管理可以按需展开已核对但未就绪的四个来源，目的与状态分组相同。采用既有 Motion 控件与布局原则 DP-05、DP-06、DP-27。 [Mihon 官方来源管理](https://mihon.app/docs/guides/getting-started) · [次元城发布页](https://www.cycity.pro/)
 

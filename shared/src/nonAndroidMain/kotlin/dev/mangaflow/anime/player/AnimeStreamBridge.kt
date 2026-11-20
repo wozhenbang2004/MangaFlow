@@ -424,7 +424,7 @@ internal class AnimeStreamBridge private constructor(
         }
         // Observe the original playlist before registering the segment representation.
         // Byte-range, fragmented MP4, encrypted and low-latency resources use raw bytes.
-        val inspectPlainSegments = asset.sourceId == "anime-lanerc-lmm85" && isIndependentAnimeHlsSegmentPlaylist(text)
+        val inspectPlainSegments = usesImagePrefixedAnimeHls(asset.sourceId) && isIndependentAnimeHlsSegmentPlaylist(text)
         fun local(uri: String, kind: Kind): String {
             if (uri.startsWith("data:")) {
                 require(kind == Kind.KEY) { "当前播放器不支持内联的远程清单" }

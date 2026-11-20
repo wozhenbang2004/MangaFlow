@@ -29,6 +29,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
+private val LANERC_CONTENT_ID = Regex("[A-Za-z0-9_-]{1,256}")
+
 /** Current playback owns every search, selection and rendered frame. No title-to-episode guesswork. */
 class AnimeDanmakuController(context: PlatformContext, scope: CoroutineScope, private val extensions: LanercSourceStore) {
     private val application = context.applicationContext
@@ -146,33 +148,29 @@ class AnimeDanmakuController(context: PlatformContext, scope: CoroutineScope, pr
         job.start()
     }
 
-    /** Only the observed AniCh flag protocol identifies the actual selected station episode. */
+    internal fun supportsSource(catalog: AnimeSourceCatalog, episode: AnimeSourceEpisode): Boolean =
+        sourceDanmakuRequest(catalog, episode) != null
+
+    /** The request belongs to the exact source work and currently selected station episode. */
     fun loadSource(catalog: AnimeSourceCatalog, episode: AnimeSourceEpisode) {
         val job = synchronized(lock) {
             if (closed) return
             val owner = mutableState.value.ownerKey ?: return
-            if (catalog.title.sourceId != "anime-lanerc-ani" || episode !in catalog.episodes || episode.playbackData == null) {
+            val request = sourceDanmakuRequest(catalog, episode)
+            if (request == null) {
                 mutableState.value = mutableState.value.copy(error = "该来源尚无可核实的精确弹幕映射，请通过弹幕库搜索选择。")
-                return
-            }
-            val ticket = try { JSONObject(episode.playbackData) } catch (_: Exception) {
-                mutableState.value = mutableState.value.copy(error = "剧集标记已失效，请刷新来源。")
-                return
-            }
-            if (ticket.optString("catalogId") != catalog.title.id || ticket.optString("group") != episode.group) {
-                mutableState.value = mutableState.value.copy(error = "所选弹幕线路与剧集不一致。")
                 return
             }
             val epoch = generation
             val sequence = ++loadSequence
             searchSequence++; searchJob?.cancel(); loadJob?.cancel(); rebuildJob?.cancel()
             comments = emptyList(); timeline = AnimeDanmakuTimeline(emptyList(), mutableState.value.settings)
-            mutableState.value = mutableState.value.copy(selected = null, selectionLabel = "AniCh · ${episode.title}",
+            mutableState.value = mutableState.value.copy(selected = null, selectionLabel = "${request.sourceName} · ${episode.title}",
                 searching = false, loading = true, visible = emptyList(), totalCount = 0, error = null, notice = null)
             owned.launch(start = CoroutineStart.LAZY) {
                 try {
                     ready.await()
-                    val raw = extensions.danmaku(catalog.title.sourceId, JSONObject().put("flag", ticket.getString("flag")).toString(), ticket.getString("revision"))
+                    val raw = extensions.danmaku(catalog.title.sourceId, request.payload, request.revision)
                     val values = withContext(Dispatchers.Default) { parseLanercComments(raw) }
                     acceptComments(owner, epoch, sequence, values)
                 } catch (failure: Exception) { finishFailure(owner, epoch, sequence, false, failure) }
@@ -182,6 +180,26 @@ class AnimeDanmakuController(context: PlatformContext, scope: CoroutineScope, pr
             }.also { loadJob = it }
         }
         job.start()
+    }
+
+    private data class SourceDanmakuRequest(val sourceName: String, val payload: String, val revision: String)
+
+    private fun sourceDanmakuRequest(catalog: AnimeSourceCatalog, episode: AnimeSourceEpisode): SourceDanmakuRequest? {
+        val source = catalog.title.sourceId
+        if ((source != "anime-lanerc-ani" && source != "anime-lanerc-lanerc") || episode !in catalog.episodes) return null
+        val ticket = episode.playbackData?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return null
+        if (ticket.optString("catalogId") != catalog.title.id || ticket.optString("group") != episode.group) return null
+        val revision = ticket.optString("revision").takeIf(String::isNotBlank) ?: return null
+        val flag = ticket.optString("flag").takeIf(String::isNotBlank) ?: return null
+        if (source == "anime-lanerc-ani")
+            return SourceDanmakuRequest("AniCh", JSONObject().put("flag", flag).toString(), revision)
+        val native = runCatching { JSONObject(flag) }.getOrNull() ?: return null
+        val contentId = native.optString("contentId")
+        val index = native.optDouble("episodeIndex")
+        if (contentId != catalog.title.id || !LANERC_CONTENT_ID.matches(contentId) ||
+            !index.isFinite() || index !in 0.0..20_000.0 || index != index.toInt().toDouble()) return null
+        return SourceDanmakuRequest("Lanerc", JSONObject().put("contentId", contentId)
+            .put("episodeIndex", index.toInt()).toString(), revision)
     }
 
     fun updateViewport(availableRows: Int) {

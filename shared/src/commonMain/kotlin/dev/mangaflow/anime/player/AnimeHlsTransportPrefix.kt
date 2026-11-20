@@ -6,6 +6,9 @@ internal const val ANIME_HLS_IMAGE_PREFIX_LIMIT = 256 * 1024
 internal const val ANIME_HLS_IMAGE_INSPECTION_LIMIT =
     ANIME_HLS_IMAGE_PREFIX_LIMIT + TRANSPORT_PACKET_BYTES * TRANSPORT_CONFIRM_PACKETS
 
+internal fun usesImagePrefixedAnimeHls(sourceId: String): Boolean =
+    sourceId == "anime-lanerc-lmm85" || sourceId == "anime-lanerc-lanerc"
+
 internal fun isIndependentAnimeHlsSegmentPlaylist(text: String): Boolean {
     val lines = text.lineSequence().map(String::trim)
     return lines.any { it.startsWith("#EXTINF:") } && lines.none { line ->

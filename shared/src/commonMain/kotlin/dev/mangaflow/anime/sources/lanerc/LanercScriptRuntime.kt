@@ -49,7 +49,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
     }
 
     suspend fun validate(value: LanercInstalledPackage, descriptor: LanercSourceDescriptor) {
-        execute(value, descriptor, "__validate", JSONArray(), false)
+        backgroundSlots.withPermit { execute(value, descriptor, "__validate", JSONArray(), false) }
     }
 
     suspend fun call(id: String, method: String, args: JSONArray = JSONArray(), expectedRevision: String? = null): LanercInvocation {
@@ -57,21 +57,22 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
         require(args.toString().length <= 2 * 1024 * 1024) { "来源操作参数过大。" }
         store.ready.await()
         val sourceLock = synchronized(lock) { sourceLocks.getOrPut(id) { Mutex() } }
-        return sourceLock.withLock {
-            val value = store.snapshot(id) ?: throw LanercCapabilityException("该来源未安装或已停用，请先启用来源。")
-            if (expectedRevision != null && value.revision != expectedRevision)
+        suspend fun invokeCurrent(): LanercInvocation = sourceLock.withLock {
+            val bundle = store.snapshot(id) ?: throw LanercCapabilityException("该来源未安装或已停用，请先启用来源。")
+            if (expectedRevision != null && bundle.revision != expectedRevision)
                 throw LanercCapabilityException("来源版本或参数已改变，请刷新剧集后重新选择。")
-            execute(value, store.descriptor(id), method, args, true)
+            execute(bundle, store.descriptor(id), method, args, true)
         }
+        // An operation waiting for a shared background slot must not hold this
+        // source's session lock ahead of an explicit playback request.
+        return if (method == "play") invokeCurrent() else backgroundSlots.withPermit { invokeCurrent() }
     }
 
     private suspend fun execute(bundle: LanercInstalledPackage, descriptor: LanercSourceDescriptor,
         method: String, args: JSONArray, networkAllowed: Boolean): LanercInvocation = withContext(Dispatchers.Default) {
         try {
             withTimeout(60_000L) {
-                val background = method != "play"
-                if (background) backgroundSlots.acquire()
-                try { slots.withPermit {
+                slots.withPermit {
                 prepareJavascriptEngine(context)
                 val operationContext = currentCoroutineContext()
                 operationContext.ensureActive()
@@ -164,7 +165,10 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                             else -> throw LanercCapabilityException("该来源的内容协议尚未接入。")
                         }
                         js.evaluate<String>("JSON.stringify({result: ${JSONArray(required)}.every(function (key) { return typeof globalThis[key] === 'function'; })})", "anime-validate.js")
-                    } else js.evaluate<String>("__mlInvoke(${JSONObject.quote(method)}, $args, ${JSONObject.quote(bundle.id)})", "anime-call.js")
+                    } else {
+                        val exactLanercDanmaku = bundle.id == "anime-lanerc-lanerc" && bundle.digest == descriptor.observedDigest
+                        js.evaluate<String>("__mlInvoke(${JSONObject.quote(method)}, $args, ${JSONObject.quote(bundle.id)}, $exactLanercDanmaku)", "anime-call.js")
+                    }
                     require(encoded.length <= 8 * 1024 * 1024) { "来源返回内容过大。" }
                     val envelope = JSONObject(encoded)
                     when {
@@ -215,7 +219,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                     runCatching { if (!js.isClosed) js.interruptEvaluation() }
                     js.close()
                 }
-                } } finally { if (background) backgroundSlots.release() }
+                }
             }
         } catch (_: TimeoutCancellationException) {
             throw LanercCapabilityException("来源响应超时，已停止本次请求，可重试或切换来源。")
@@ -242,6 +246,9 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
         val useCookies = !input.optBoolean("noCookie", false)
         val follow = input.optBoolean("followRedirects", true)
         val timeout = input.optLong("timeout", 15_000).coerceIn(1_000, 20_000)
+        val responseEncoding = input.optString("responseEncoding", "utf8").lowercase()
+        // The script reads ISO-8859-1 as one JS code unit per protobuf byte.
+        val rawByteText = responseEncoding in RAW_BYTE_ENCODINGS
         repeat(4) { redirect ->
             checkCurrent()
             val sentHeaders = JSONObject(headers.toString())
@@ -249,7 +256,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                 preferences.header(url).takeIf(String::isNotBlank)?.let { sentHeaders.put("Cookie", it) }
             }
             val hop = JSONObject().put("url", url.toString()).put("method", method).put("headers", sentHeaders)
-                .put("responseEncoding", input.optString("responseEncoding", "utf8")).put("followRedirects", false)
+                .put("responseEncoding", if (rawByteText) "base64" else responseEncoding).put("followRedirects", false)
             if (body != null && body !== JSONObject.NULL) hop.put("body", body)
             val response = JSONObject(withTimeout(timeout) { network.request(hop.toString()) })
             checkCurrent()
@@ -260,7 +267,10 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
             // Only the first actual hop is eligible: redirects can change POST into GET.
             if (redirect == 0 && method == "POST" && status == 200)
                 sdEvidence?.afterResponse(hop.toString(), response.toString())
-            if (!follow || status !in setOf(301, 302, 303, 307, 308)) return response.toString()
+            if (!follow || status !in setOf(301, 302, 303, 307, 308)) {
+                if (rawByteText) response.put("body", encodeLanercBytes(decodeLanercBytes(response.getString("body"), "base64"), "latin1"))
+                return response.toString()
+            }
             require(redirect < 3) { "来源重定向次数过多。" }
             val location = responseHeaders.keys().asSequence().firstOrNull { it.equals("Location", true) }
                 ?.let(responseHeaders::optString) ?: error("来源重定向缺少目标。")
@@ -309,6 +319,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
     }
 
     private companion object {
+        val RAW_BYTE_ENCODINGS = setOf("iso-8859-1", "iso8859-1", "latin-1", "latin1", "binary")
         val METHODS = setOf("config", "search", "detail", "play", "homeSections", "categories", "searchFiltered", "related", "danmu")
         fun argument(values: Array<Any?>): String = (values.singleOrNull() as? String)
             ?.also { require(it.length <= 2 * 1024 * 1024) }

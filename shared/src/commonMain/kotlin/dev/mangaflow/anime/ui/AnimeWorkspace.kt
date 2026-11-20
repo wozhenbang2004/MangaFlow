@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
+import dev.mangaflow.anime.sources.CYCITY_SOURCE_ID
 import dev.mangaflow.anime.player.AnimePlayerPhase
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.glass.mangaHazeSource
@@ -128,6 +129,7 @@ internal fun AnimeWorkspace(
     var pendingTool by remember { mutableStateOf<AnimeWorkspaceTool?>(null) }
     var sourcesVisible by remember { mutableStateOf(false) }
     var sourceManagerVisible by remember { mutableStateOf(false) }
+    var sourceManagerEntry by remember { mutableStateOf<String?>(null) }
     var downloadsVisible by remember { mutableStateOf(false) }
     var storageVisible by remember { mutableStateOf(false) }
     var storagePresent by remember { mutableStateOf(false) }
@@ -372,8 +374,21 @@ internal fun AnimeWorkspace(
         sourceEpisode = episode
         sourcesVisible = true
     }
+    fun showSourceManager(sourceId: String? = null) {
+        sourceManagerEntry = sourceId
+        sourceManagerVisible = true
+    }
     fun requestPlayback(episode: AnimeEpisode, option: AnimeEpisodeOption?) {
         controller.dismissNotice()
+        val selectedSource = option?.sourceId ?: CYCITY_SOURCE_ID.takeIf {
+            controller.state.value.detail?.subject?.externalIds?.get("native-source") == CYCITY_SOURCE_ID &&
+                !controller.hasAutomaticPlaybackLine(episode.id) &&
+                controller.confirmedPlaybackLines(episode.id).any { it.sourceId == CYCITY_SOURCE_ID }
+        }
+        if (selectedSource != null && controller.sourcePlaybackAccessMessage(selectedSource) != null) {
+            showSourceManager(selectedSource)
+            return
+        }
         controller.play(episode.id, option)
     }
     fun openDirectory(sourceId: String? = null) {
@@ -416,7 +431,7 @@ internal fun AnimeWorkspace(
         pendingTool = null
         if (!active || route.depth != 0 || searchExpanded) return
         when (next) {
-            AnimeWorkspaceTool.SOURCES -> sourceManagerVisible = true
+            AnimeWorkspaceTool.SOURCES -> showSourceManager()
             null -> Unit
         }
     }
@@ -444,7 +459,7 @@ internal fun AnimeWorkspace(
         when (requestedDestination) {
             AnimeWorkspaceDestination.DOWNLOADS -> downloadsVisible = true
             AnimeWorkspaceDestination.TRACKING -> trackingVisible = true
-            AnimeWorkspaceDestination.SOURCES -> sourceManagerVisible = true
+            AnimeWorkspaceDestination.SOURCES -> showSourceManager()
             AnimeWorkspaceDestination.DIRECTORY -> {
                 controller.sourceBrowse.closeTitle()
                 openDirectory()
@@ -708,7 +723,7 @@ internal fun AnimeWorkspace(
                 controller.configureDiscovery(AnimeDiscoveryTab.RANKING,
                     AnimeDiscoveryQuery(provider = provider, order = AnimeDiscoveryOrder.RANK))
             }
-        })
+        }, initialSourceId = sourceManagerEntry)
     AnimeSourcesPanel(sourcesVisible, state, controller, backdrop, sourceEpisode,
         recovering = playbackPhase == AnimePlayerPhase.ERROR || state.playbackTarget?.error != null,
         onDismiss = ::dismissSources, onAutomaticPlay = { episode ->
@@ -717,7 +732,10 @@ internal fun AnimeWorkspace(
         }, onPlay = { episodeId, option ->
             sourcesVisible = false
             state.detail?.episodes?.firstOrNull { it.id == episodeId }?.let { requestPlayback(it, option) }
-        }, onOpenSourceWork = { chooseReference(it, true) })
+        }, onOpenSourceWork = { chooseReference(it, true) }, onOpenSourceAccount = {
+            dismissSources()
+            showSourceManager(it)
+        })
     AnimeTrackingPanel(trackingVisible, state, controller, backdrop,
         onDismiss = { trackingVisible = false }, onReview = { reviewsVisible = true })
     AnimeProgressReviewPanel(reviewsVisible, state, controller, backdrop, onDismiss = { reviewsVisible = false },

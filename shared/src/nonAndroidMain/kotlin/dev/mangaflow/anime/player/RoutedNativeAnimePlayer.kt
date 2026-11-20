@@ -296,7 +296,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
                 localLease = lease
                 pending = null
                 val server = AnimeLocalStreamBridge.create(lease, playerScope,
-                    inspectLmm85 = request.asset.sourceId == "anime-lanerc-lmm85" && !request.localMedia.enhancedVersion)
+                    inspectImagePrefixedTransport = usesImagePrefixedAnimeHls(request.asset.sourceId) && !request.localMedia.enhancedVersion)
                 if (!isCurrent(generation)) { server.close(); return }
                 localBridge = server
             } finally { pending?.close() }
