@@ -806,6 +806,7 @@ private fun DiscoveryPane(
                 (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >=
                     info.totalItemsCount - visibleColumns * 2 - 1
         }, onMore = onMore)
+    val showCategoryLabel = androidManga && maxWidth >= 360.dp && fontScale <= 1.3f
     val sectionControls: @Composable () -> Unit = {
         Row(verticalAlignment = Alignment.CenterVertically) {
             val title = when {
@@ -821,7 +822,7 @@ private fun DiscoveryPane(
                 style = if (androidManga) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Medium)
             if (onExplore != null) {
-                if (androidManga && maxWidth >= 360.dp && fontScale <= 1.3f) {
+                if (showCategoryLabel) {
                     TextButton(onClick = onExplore, enabled = active, modifier = Modifier.heightIn(min = 48.dp),
                         contentPadding = PaddingValues(horizontal = 8.dp)) {
                         Icon(Icons.Outlined.Explore, null, Modifier.size(16.dp))
