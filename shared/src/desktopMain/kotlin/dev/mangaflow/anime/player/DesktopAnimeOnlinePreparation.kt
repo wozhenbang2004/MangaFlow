@@ -6,6 +6,7 @@ import dev.mangaflow.enhancement.engine.DesktopVideoPreparation
 import dev.mangaflow.enhancement.engine.EngineContent
 import dev.mangaflow.enhancement.engine.EngineVideoRequest
 import dev.mangaflow.enhancement.engine.EnhancementEngineIds
+import dev.mangaflow.enhancement.engine.engineSha256
 import dev.mangaflow.enhancement.engine.runEngineProcess
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.monotonicTimeMillis
@@ -55,7 +56,8 @@ internal class DesktopAnimeOnlinePreparation(
         val directory: File,
         val original: File,
         val media: File,
-        val sourceReceipt: File,
+        val originalHash: String,
+        val mediaHash: String,
         val receipt: File,
         val fps: Double,
         val firstSeconds: Double,
@@ -98,12 +100,10 @@ internal class DesktopAnimeOnlinePreparation(
                 }
                 if (usable) {
                     val intact = withContext(Dispatchers.IO) {
-                        cached.original.isFile && cached.media.isFile && cached.media.length() == cached.state.bytes &&
-                            // Old output receipts must never acknowledge a newly reattached consumer.
-                            runCatching {
-                                cached.sourceReceipt.writeText("")
-                                cached.receipt.writeText("")
-                            }.isSuccess
+                        cached.original.isFile && cached.media.isFile &&
+                            cached.original.length() + cached.media.length() == cached.state.bytes &&
+                            engineSha256(cached.original) == cached.originalHash && engineSha256(cached.media) == cached.mediaHash &&
+                            runCatching { cached.receipt.writeText("") }.isSuccess
                     }
                     withContext(Dispatchers.Main.immediate) {
                         if (intact && valid() &&
@@ -127,25 +127,19 @@ internal class DesktopAnimeOnlinePreparation(
                     "在线预处理需要已安装的 VideoJaNai 番剧模型"
                 }
                 require(request.endMs - request.startMs in 1_000L..30_000L) { "Windows 单次在线增强窗口支持 1～30 秒，当前目标已保留" }
+                require(request.width in 2..16_384 && request.height in 2..16_384 &&
+                    request.width % 2 == 0 && request.height % 2 == 0) { "在线增强要求有效的偶数色度尺寸" }
                 val width = request.width.toLong() * request.model.nativeScale
                 val height = request.height.toLong() * request.model.nativeScale
                 require(width > 0 && height > 0 && width * height <= 8_847_360L) { "当前 Windows 增强窗口最多支持约 884 万输出像素" }
                 require(request.maximumSourceBytes > 0L && request.maximumResultBytes > 0L) { "在线预处理没有可用字节额度" }
                 val sourceFps = handle.getPropertyDoubleOrNull("container-fps")?.takeIf { it.isFinite() && it in 1.0..60.0 }
                     ?: error("当前片源帧率不在可确认的 1～60 FPS 范围")
-                val gamma = handle.getPropertyString("video-params/gamma")?.lowercase()
-                require(gamma in SDR) { "当前在线增强只处理已确认的 SDR 画面" }
-                val decoder = handle.getPropertyString("hwdec-current")
-                require(decoder == "no" || decoder?.endsWith("-copy") == true) {
-                    "当前 GPU 直连解码不能安全接入本地窗口；重新打开当前视频可应用预处理解码方式"
-                }
-                require(handle.getPropertyDoubleOrNull("video-params/rotate")?.let { abs(it) < 0.01 } != false) {
-                    "带旋转的视频尚不能安全映射增强窗口"
-                }
-                val nativePts = handle.getPropertyDoubleOrNull("video-pts") ?: error("当前视频时间轴尚未可读")
+                checkVideoFormat(handle, request)
                 val playback = handle.getPropertyDoubleOrNull("time-pos") ?: error("当前播放时钟尚未可读")
-                require(nativePts.isFinite() && playback.isFinite() && abs(nativePts - playback) <= 0.1) {
-                    "当前视频 PTS 与播放时间轴尚未对齐"
+                require(playback.isFinite() && playback >= 0.0 &&
+                    handle.getPropertyDoubleOrNull("avsync")?.let { abs(it) <= 0.1 } != false) {
+                    "当前时间轴尚未稳定，原视频继续播放"
                 }
                 val probe = runtime.executable(DesktopEnginePackages.ffmpeg) ?: error("媒体处理组件尚未准备，请先安装运行组件")
                 require(runtime.executable(DesktopEnginePackages.video) != null) { "VideoJaNai 运行组件尚未准备" }
@@ -204,26 +198,25 @@ internal class DesktopAnimeOnlinePreparation(
                             captured.last() * 1000 <= request.endMs + 2.0 && captured.last() + frameSeconds >= request.endMs / 1000.0 - 0.004) {
                             "原视频窗口未覆盖目标时间轴"
                         }
-                        require(captured.zipWithNext().all { (a, b) -> abs((b - a) - frameSeconds) <= 0.003 }) {
+                        require(captured.indices.all { abs(captured[it] - first - it * frameSeconds) <= TIME_TOLERANCE }) {
                             "当前窗口含变速、跳帧或不连续时间戳，保留原画"
                         }
+                        verifyFrameTimes(probe, input, captured, first)
+                        val sourceHash = engineSha256(input)
                         check(valid()) { "播放窗口已变化" }
                         val encoded = DesktopVideoPreparation(runtime).process(EngineVideoRequest(
                             sourcePath = input.canonicalPath, destinationPath = output.canonicalPath,
                             workDirectory = File(work, "processing").canonicalPath, model = request.model,
                             scale = request.model.nativeScale, encoder = "ffv1",
                         )) { check(valid()) { "播放窗口已变化" } }
-                        require(encoded.bytes <= request.maximumResultBytes) { "增强窗口结果超过可用字节额度" }
-                        val timestamps = frameTimes(probe, output)
-                        require(timestamps.size == captured.size && timestamps.indices.all {
-                            abs(timestamps[it] - (captured[it] - first)) <= 0.003
-                        }) { "增强帧与原始帧的时间戳未逐帧对齐" }
+                        require(encoded.bytes <= request.maximumResultBytes - input.length()) { "原始参考帧与增强窗口合计超过可用字节额度" }
+                        val timestamps = verifyFrameTimes(probe, output, captured, first)
                         check(valid()) { "播放窗口已变化" }
                         val endSeconds = minOf(request.endMs / 1000.0, first + timestamps.last() + frameSeconds)
-                        Prepared(request, handle, work, input, output, File(work, "source-confirmed.txt"),
+                        Prepared(request, handle, work, input, output, sourceHash, encoded.sha256,
                             File(work, "consumed.txt"), sourceFps, first, endSeconds,
                             AnimePreparedVideoWindow((first * 1000).roundToLong(), (endSeconds * 1000).roundToLong(),
-                                timestamps.size, encoded.bytes, request.model.title, encoded.width, encoded.height,
+                                timestamps.size, input.length() + encoded.bytes, request.model.title, encoded.width, encoded.height,
                                 monotonicTimeMillis() - started, usageIsSampled = true))
                     } finally { watch.cancelAndJoin() }
                 }
@@ -325,10 +318,7 @@ internal class DesktopAnimeOnlinePreparation(
         val generation = ++consumerGeneration
         fun ownsWindow() = consumerGeneration == generation && prepared === window
         observer = scope.launch(Dispatchers.Main.immediate) {
-            val sourceReader = ReceiptReader(window.sourceReceipt)
-            val outputReader = ReceiptReader(window.receipt)
-            val witnessedSource = mutableSetOf<Double>()
-            val sourceFuture = sortedSetOf<Double>()
+            val reader = ReceiptReader(window.receipt)
             val acknowledgements = mutableSetOf<Double>()
             val future = sortedSetOf<Double>()
             var misses = 0
@@ -337,41 +327,27 @@ internal class DesktopAnimeOnlinePreparation(
             try {
                 while (ownsWindow() && current(window.request, window.handle)) {
                     rendering.first { it }
-                    val position = withContext(Dispatchers.IO) { window.handle.getPropertyDoubleOrNull("video-pts") }
+                    // During active video mpv exposes its video playback position through time-pos.
+                    val position = withContext(Dispatchers.IO) { window.handle.getPropertyDoubleOrNull("time-pos") }
                         ?.takeIf(Double::isFinite)
                     if (!ownsWindow() || !current(window.request, window.handle)) return@launch
                     if (position == null) { delay(200L); continue }
                     if (position >= window.endSeconds) { clear(); return@launch }
                     if (installed == null && position >= window.firstSeconds - 0.3) {
+                        withContext(Dispatchers.IO) { checkVideoFormat(window.handle, window.request) }
+                        if (!ownsWindow() || !current(window.request, window.handle)) return@launch
                         suspendRealtime(true)
-                        install(window.handle, SOURCE_LABEL, sourceGraph(window))
+                        install(window.handle, graph(window))
                     }
                     if (installed != null) {
                         val sample = withContext(Dispatchers.IO) {
-                            Triple(sourceReader.read() to outputReader.read(), window.handle.getPropertyLongOrNull("frame-drop-count"),
+                            Triple(reader.read(), window.handle.getPropertyLongOrNull("frame-drop-count"),
                                 window.handle.getPropertyLongOrNull("video-out-params/w") to
                                     window.handle.getPropertyLongOrNull("video-out-params/h"))
                         }
                         if (!ownsWindow() || !current(window.request, window.handle)) return@launch
-                        sample.first.first.filter { it.first >= window.firstSeconds - 0.002 && it.first < window.endSeconds }.forEach { (time, identical) ->
-                            check(identical) { "当前原画与准备时的原视频帧不一致，已请求退出增强窗口" }
-                            sourceFuture += time
-                        }
-                        val sourceReady = sourceFuture.filter { it <= position + 0.002 }
-                        sourceFuture.removeAll(sourceReady.toSet())
-                        witnessedSource.addAll(sourceReady)
-                        if (LABEL !in installedLabels && witnessedSource.size >= 2) {
-                            // Verify actual decoded source frames before adding the prepared-video overlay.
-                            // Keeping the first graph also detects an upstream content change during reuse.
-                            install(window.handle, LABEL, graph(window))
-                            // mpv may retain or recreate upstream filters when its graph changes.
-                            // Re-read source receipts without assuming either lifecycle behavior.
-                            sourceReader.reset()
-                            misses = 0
-                        }
-                        sample.first.second.filter { it.first >= window.firstSeconds - 0.002 && it.first < window.endSeconds }.forEach { (time, identical) ->
-                            check(identical) { "增强输出与已校验的准备帧不一致，已请求恢复原画" }
-                            future += time
+                        sample.first.forEach { (time, opaque) ->
+                            if (opaque && time >= window.firstSeconds - TIME_TOLERANCE && time < window.endSeconds) future += time
                         }
                         val ready = future.filter { it <= position + 0.002 }
                         future.removeAll(ready.toSet())
@@ -386,7 +362,7 @@ internal class DesktopAnimeOnlinePreparation(
                         val drops = sample.second
                         if (drops != null && dropCount != null && drops - checkNotNull(dropCount) >= 4L) overloaded++ else overloaded = 0
                         dropCount = drops
-                        check(misses < 10) { "未确认增强窗口的真实画面输出，已请求恢复原画" }
+                        check(misses < 10) { "当前画面未持续匹配准备窗口，已退出该窗口" }
                         check(overloaded < 3) { "增强窗口连续丢帧，已请求恢复原画" }
                     }
                     delay(200L)
@@ -403,12 +379,12 @@ internal class DesktopAnimeOnlinePreparation(
         }
     }
 
-    private fun install(handle: MPVHandle, label: String, graph: String) {
-        check(handle.command("vf", "add", "@$label:lavfi=graph=%${graph.toByteArray().size}%$graph")) {
+    private fun install(handle: MPVHandle, graph: String) {
+        check(handle.command("vf", "add", "@$LABEL:lavfi=o=threads=2:graph=%${graph.toByteArray().size}%$graph")) {
             "当前播放内核不支持视频窗口滤镜，继续原画"
         }
         installed = handle
-        installedLabels += label
+        installedLabels += LABEL
     }
 
     private class ReceiptReader(private val file: File) {
@@ -445,28 +421,84 @@ internal class DesktopAnimeOnlinePreparation(
         }
     }
 
-    private fun sourceGraph(window: Prepared): String {
-        val step = ceil(window.fps / 4.0).toInt().coerceAtLeast(1)
-        return "[in]format=yuv420p,split[out][audit];" +
-            "movie=filename=${filterPath(window.original)}:stream_index=0,setpts=PTS-STARTPTS+${window.firstSeconds}/TB,format=yuv420p[reference];" +
-            "[audit]select='not(mod(n,$step))'[selected];[selected][reference]psnr=eof_action=pass:repeatlast=0:shortest=0," +
-            "metadata=mode=print:key=lavfi.psnr.psnr_avg:file=${filterPath(window.sourceReceipt)}:direct=1,nullsink"
-    }
-
-    private fun graph(window: Prepared): String {
+    private fun graph(window: Prepared): String = buildString {
+        val start = window.firstSeconds
+        val end = window.endSeconds
+        val fps = window.fps
         val width = window.state.outputWidth
         val height = window.state.outputHeight
-        val start = window.firstSeconds.toString()
-        val end = window.endSeconds.toString()
-        // The audit branch samples at most about four actual frames per second. PSNR infinity
-        // requires identical pixels, not a self-issued marker or a filter-installation receipt.
-        val step = ceil(window.fps / 4.0).toInt().coerceAtLeast(1)
-        return "[in]scale=$width:$height:flags=bilinear,format=yuv420p[base];" +
-            "movie=filename=${filterPath(window.media)}:stream_index=0,setpts=PTS-STARTPTS+$start/TB,format=yuv420p,split[patch][reference];" +
-            "[base][patch]overlay=eof_action=pass:repeatlast=0:shortest=0:format=yuv420:enable='gte(t,$start)*lt(t,$end)'[replaced];" +
-            "[replaced]split[out][audit];[audit]select='not(mod(n,$step))'[selected];" +
-            "[selected][reference]psnr=eof_action=pass:repeatlast=0:shortest=0," +
-            "metadata=mode=print:key=lavfi.psnr.psnr_avg:file=${filterPath(window.receipt)}:direct=1,nullsink"
+        val step = ceil(fps / 4.0).toInt().coerceAtLeast(1)
+        val mismatch = "if(eq(x,y),0,255)"
+        val maskSize = "scale=$width:$height:flags=neighbor:in_range=full:out_range=full"
+        val sync = "ts_sync_mode=nearest"
+        val overlay = "overlay=format=yuv420:$sync"
+
+        // Both local files passed frame-by-frame CFR validation. Give matching ordinals the
+        // same timestamp. Prepend a transparent sentinel before the window so the
+        // reference filters cannot drop original frames while waiting for the first match.
+        fun movie(file: File) = "movie=filename=${filterPath(file)}:stream_index=0:dec_threads=2," +
+            "tpad=start=1:start_mode=clone,settb=AVTB,setpts='if(eq(N,0),-1/TB,($start+(N-1)/$fps)/TB)',format=yuv420p"
+
+        // Two gray columns carry a 16-bit source ordinal. Non-CFR, out-of-window and absent
+        // timestamps are distinct between live and reference and can never be opaque.
+        fun timeCode(invalidLow: Int): String {
+            val ordinal = "round((T-$start)*$fps)"
+            val valid = "gte(T,$start)*lt(T,$end)*lte(abs(T-$start-$ordinal/$fps),$TIME_TOLERANCE)"
+            return "scale=2:2:flags=neighbor,format=gray,setrange=full," +
+                "geq=lum='if($valid,if(eq(X,0),mod($ordinal,256),floor($ordinal/256)),if(eq(X,0),$invalidLow,255))'"
+        }
+
+        // Area resampling no more than 8× in each axis cannot round away a 255 mismatch
+        // even when it is the only differing sample in an entire tile. Re-binarize each stage.
+        fun reduce(inputWidth: Int, inputHeight: Int): String = buildString {
+            var w = inputWidth
+            var h = inputHeight
+            append("setrange=full")
+            while (w > 1 || h > 1) {
+                w = (w + 7) / 8
+                h = (h + 7) / 8
+                append(",scale=$w:$h:flags=area:in_range=full:out_range=full,lut=y='if(gt(val,0),255,0)'")
+            }
+        }
+
+        append("[in]format=yuv420p,split=3[base][livePixels][liveTime];")
+        append("${movie(window.original)},split[referencePixels][referenceTime];")
+        append("[livePixels][referencePixels]lut2=c0='$mismatch':c1='$mismatch':c2='$mismatch':$sync,")
+        append("extractplanes=planes=y+u+v[dy][du][dv];")
+        append("[dy]${reduce(window.request.width, window.request.height)}[y];")
+        val chroma = reduce(window.request.width / 2, window.request.height / 2)
+        append("[du]$chroma[u];[dv]$chroma[v];[y][u]blend=all_mode=lighten[yu];[yu][v]blend=all_mode=lighten[pixels];")
+        append("[liveTime]${timeCode(255)}[lt];[referenceTime]${timeCode(254)}[rt];")
+        append("[lt][rt]lut2=c0='$mismatch':$sync,${reduce(2, 2)}[time];")
+        append("[pixels][time]blend=all_mode=lighten,lut=y='if(gt(val,0),0,255)',split[mask][sample];")
+
+        // The nearest prepared candidate is retimed to the live frame clock before attaching the
+        // gate. A transparent mask passes the original picture through at that same live PTS.
+        append("[base]scale=$width:$height:flags=bilinear,split[master][clock];")
+        append("${movie(window.media)}[candidate];[clock][candidate]$overlay[aligned];")
+        append("[mask]$maskSize[alpha];[aligned][alpha]alphamerge[verified];")
+        append("[master][verified]$overlay:alpha=straight:enable='gte(t,$start)*lt(t,$end)'[out];")
+
+        // A small receipt branch samples the real gate result. It is never consulted for admission.
+        append("[sample]select='not(mod(n,$step))',split[decision][white];[white]lut=y=255[expected];")
+        append("[decision][expected]psnr,metadata=mode=print:key=lavfi.psnr.psnr_avg:file=${filterPath(window.receipt)}:direct=1,nullsink")
+    }
+
+    private fun checkVideoFormat(handle: MPVHandle, request: AnimePreparedVideoRequest) {
+        require(handle.getPropertyString("video-params/gamma")?.lowercase() in SDR &&
+            handle.getPropertyString("video-params/pixelformat") in YUV_420) {
+            "在线增强只处理已确认的 8 位 SDR 画面"
+        }
+        val decoder = handle.getPropertyString("hwdec-current")
+        require(decoder == "no" || decoder?.endsWith("-copy") == true) {
+            "当前 GPU 直连解码不能安全接入本地窗口；重新打开当前视频可应用预处理解码方式"
+        }
+        require(handle.getPropertyLongOrNull("video-params/w") == request.width.toLong() &&
+            handle.getPropertyLongOrNull("video-params/h") == request.height.toLong() &&
+            handle.getPropertyLongOrNull("video-params/rotate") == 0L &&
+            handle.getPropertyDoubleOrNull("video-params/par")?.let { abs(it - 1.0) < 0.001 } == true) {
+            "原始画面尺寸、方向或像素比例无法匹配增强窗口"
+        }
     }
 
     private fun checkRemoteMedia(json: String, request: AnimePreparedVideoRequest, fps: Double) {
@@ -476,7 +508,7 @@ internal class DesktopAnimeOnlinePreparation(
         val video = videos.single()
         require(video.number("width") == request.width && video.number("height") == request.height) { "预处理片源尺寸与当前视频不一致" }
         require(video.text("sample_aspect_ratio") in setOf("1:1", "0:1", "")) { "当前片源不是方形像素，保留原画" }
-        require(video.text("pix_fmt") in setOf("yuv420p", "yuvj420p", "nv12")) {
+        require(video.text("pix_fmt") in YUV_420) {
             "当前在线增强支持 8 位 4:2:0 视频；不会为准备窗口降低原片位深或色度"
         }
         require(video.text("color_transfer") !in setOf("smpte2084", "arib-std-b67")) { "在线增强暂不处理 HDR 视频" }
@@ -493,24 +525,33 @@ internal class DesktopAnimeOnlinePreparation(
         } == true) { "片源缺少可对齐的起点或完整时长" }
     }
 
-    private suspend fun frameTimes(probe: File, file: File): List<Double> {
+    private suspend fun verifyFrameTimes(probe: File, file: File, captured: List<Double>, first: Double): List<Double> {
         val output = runEngineProcess(probe, listOf("-v", "error", "-select_streams", "v:0", "-show_frames",
             "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", file.canonicalPath), timeoutMillis = 15_000L)
-        return (Json.parseToJsonElement(output).jsonObject["frames"] as? JsonArray).orEmpty().map {
+        val times = (Json.parseToJsonElement(output).jsonObject["frames"] as? JsonArray).orEmpty().map {
             it.jsonObject.decimal("best_effort_timestamp_time")?.takeIf(Double::isFinite) ?: error("增强帧缺少时间戳")
         }
+        require(times.size == captured.size && times.indices.all { abs(times[it] - (captured[it] - first)) <= TIME_TOLERANCE }) {
+            "本地参考帧与增强帧的时间戳未逐帧对齐"
+        }
+        return times
     }
 
     private fun JsonObject.text(key: String) = (this[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
     private fun JsonObject.number(key: String) = (this[key] as? JsonPrimitive)?.intOrNull
     private fun JsonObject.decimal(key: String) = (this[key] as? JsonPrimitive)?.doubleOrNull
     private fun seconds(milliseconds: Long) = (milliseconds / 1000.0).toString()
-    private fun filterPath(file: File) = "'" + file.canonicalPath.replace('\\', '/').replace(":", "\\:").replace("'", "'\\''") + "'"
+    private fun filterPath(file: File): String {
+        fun quote(value: String) = "'" + value.replace("'", "'\\''") + "'"
+        // libavfilter parses graph delimiters first, then filter-option delimiters.
+        return quote(quote(file.canonicalPath.replace('\\', '/')))
+    }
 
     companion object {
         private const val LABEL = "mangaflow-prepared-window"
-        private const val SOURCE_LABEL = "mangaflow-prepared-source"
+        private const val TIME_TOLERANCE = 0.003
         private val SDR = setOf("bt.1886", "srgb", "gamma1.8", "gamma2.0", "gamma2.2", "gamma2.4", "gamma2.6", "gamma2.8")
+        private val YUV_420 = setOf("yuv420p", "yuvj420p", "nv12")
         private val FRAME_TIME = Regex("\\bn:\\s*[0-9]+\\s+pts:.*?\\bpts_time:([0-9.eE+\\-]+)")
         private val RECEIPT_TIME = Regex("\\bpts_time:([0-9.eE+\\-]+)")
     }

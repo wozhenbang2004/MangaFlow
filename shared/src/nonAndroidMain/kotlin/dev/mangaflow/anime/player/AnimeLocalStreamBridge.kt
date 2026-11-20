@@ -20,6 +20,8 @@ import okio.use as useOkio
 internal class AnimeLocalStreamBridge private constructor(
     private val lease: AnimeLocalMediaLease,
     parentScope: CoroutineScope,
+    private val segmentsByAlias: Map<String, String>,
+    private val compatibleManifest: ByteArray?,
 ) {
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[Job]))
     private val token = randomUuid().replace("-", "") + randomUuid().replace("-", "")
@@ -38,10 +40,20 @@ internal class AnimeLocalStreamBridge private constructor(
             if (request.method !in setOf("GET", "HEAD")) { output.error(405, "Method not allowed"); return }
             val prefix = "/$token/"
             val path = request.target.substringBefore('?')
-            val resource = if (path.startsWith(prefix)) lease.resources[path.removePrefix(prefix)] else null
+            val fileName = path.removePrefix(prefix)
+            val originalSegment = segmentsByAlias[fileName]
+            val resource = lease.resources[originalSegment ?: fileName].takeIf { path.startsWith(prefix) }
             if (resource == null) { output.error(404, "Unknown offline resource"); return }
             check(resource.file.isFile && resource.file.length() == resource.size) { "Offline resource changed" }
-            val rangeHeader = request.headers["range"]
+            if (fileName == lease.entryName && compatibleManifest != null) {
+                output.headers(200, mapOf("Content-Type" to resource.mimeType,
+                    "Content-Length" to compatibleManifest.size.toString(), "Cache-Control" to "private, no-store",
+                    "Accept-Ranges" to "none"))
+                if (request.method == "GET") output.bytes(compatibleManifest)
+                return
+            }
+            val normalize = originalSegment != null
+            val rangeHeader = request.headers["range"].takeUnless { normalize }
             val range = if (rangeHeader == null) 0L to (resource.size - 1L) else animeByteRange(rangeHeader, resource.size)
             if (range == null) {
                 output.headers(416, mapOf("Content-Range" to "bytes */${resource.size}", "Content-Length" to "0"))
@@ -51,8 +63,9 @@ internal class AnimeLocalStreamBridge private constructor(
             val headers = linkedMapOf("Content-Type" to resource.mimeType, "Content-Length" to length.toString(),
                 "Accept-Ranges" to "bytes", "Cache-Control" to "private, no-store")
             if (rangeHeader != null) headers["Content-Range"] = "bytes ${range.first}-${range.second}/${resource.size}"
-            output.headers(if (rangeHeader == null) 200 else 206, headers)
-            if (request.method == "HEAD") return
+            val segment = if (normalize) PlainHlsSegmentResponse(output, headers, request.method) else null
+            if (segment == null) output.headers(if (rangeHeader == null) 200 else 206, headers)
+            if (request.method == "HEAD") { segment?.finish(); return }
             FileSystem.SYSTEM.openReadOnly(resource.file.nativePath).useOkio { file ->
                 file.source(range.first).buffer().useOkio { input ->
                     val buffer = ByteArray(32 * 1024)
@@ -61,22 +74,33 @@ internal class AnimeLocalStreamBridge private constructor(
                         currentCoroutineContext().ensureActive()
                         val count = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
                         check(count > 0) { "Offline resource truncated" }
-                        output.bytes(buffer, count)
+                        if (segment == null) output.bytes(buffer, count) else segment.write(buffer, count)
                         remaining -= count
                     }
                 }
             }
+            segment?.finish()
         } catch (cancel: CancellationException) { throw cancel }
         catch (_: Throwable) { if (!output.started) runCatching { output.error(500, "Offline resource unavailable") } }
         finally { connection.close() }
     }
 
     companion object {
-        suspend fun create(lease: AnimeLocalMediaLease, scope: CoroutineScope): AnimeLocalStreamBridge {
+        suspend fun create(lease: AnimeLocalMediaLease, scope: CoroutineScope, inspectLmm85: Boolean): AnimeLocalStreamBridge {
             var pending: AnimeLocalStreamBridge? = null
             return try {
                 withContext(Dispatchers.IO) {
-                    AnimeLocalStreamBridge(lease, scope).also { bridge ->
+                    val aliases = linkedMapOf<String, String>()
+                    val manifest = lease.entry.takeIf {
+                        inspectLmm85 && it.mimeType.contains("mpegurl", ignoreCase = true) && it.size in 1L..(1024L * 1024)
+                    }?.file?.readText()?.takeIf(::isIndependentAnimeHlsSegmentPlaylist)
+                        ?.lineSequence()?.joinToString("\n") { line ->
+                            val name = line.trim()
+                            if (name.isEmpty() || name.startsWith("#") || name == lease.entryName ||
+                                name !in lease.resources) line
+                            else "${name}.ts".also { aliases[it] = name }
+                        }?.encodeToByteArray()
+                    AnimeLocalStreamBridge(lease, scope, aliases, manifest).also { bridge ->
                         pending = bridge
                         bridge.server = AnimeLoopbackServer(bridge.scope, bridge::handle)
                     }

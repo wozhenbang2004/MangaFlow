@@ -69,6 +69,7 @@ internal class AnimeStreamBridge private constructor(
         val credentialOrigin: HttpUrl,
         val kind: Kind,
         val variables: Map<String, String> = emptyMap(),
+        val imagePrefixedTransport: Boolean = false,
     )
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[Job]))
     private val client = NetworkClient(acceptCompression = false, route = asset.route)
@@ -114,12 +115,17 @@ internal class AnimeStreamBridge private constructor(
     private fun register(resource: Resource): String = synchronized(lock) {
         checkedUrl(resource.url.toString())
         val existing = resources.entries.firstOrNull { it.value == resource }
+        val filename = resource.url.encodedPath.substringAfterLast('/')
         val suffix = when (resource.kind) {
             Kind.MANIFEST -> "playlist.m3u8"
             Kind.KEY -> "key.bin"
-            else -> resource.url.encodedPath.substringAfterLast('/').takeIf {
-                it.isNotEmpty() && it.length < 120 && it.all { c -> c.isLetterOrDigit() || c == '.' || c == '-' || c == '_' }
-            } ?: "stream"
+            else -> when {
+                resource.imagePrefixedTransport &&
+                    filename.substringAfterLast('.', "").lowercase() in setOf("", "png", "jpg", "jpeg", "bin") -> "segment.ts"
+                filename.isNotEmpty() && filename.length < 120 &&
+                    filename.all { it.isLetterOrDigit() || it == '.' || it == '-' || it == '_' } -> filename
+                else -> "stream"
+            }
         }
         val path = existing?.key ?: "/$token/${randomUuid()}/$suffix".also { resources[it] = resource }
         "http://127.0.0.1:${server.port}$path"
@@ -146,10 +152,14 @@ internal class AnimeStreamBridge private constructor(
                 output.error(404, "Unknown playback session")
                 return
             }
-            val range = request.headers["range"]
-            require(range == null || Regex("bytes=(?:[0-9]+-[0-9]*|-[0-9]+)").matches(range)) {
+            val requestedRange = request.headers["range"]
+            require(requestedRange == null || Regex("bytes=(?:[0-9]+-[0-9]*|-[0-9]+)").matches(requestedRange)) {
                 "播放器发送了不支持的 Range 请求"
             }
+            // For an independent HLS segment, the normalized response can have a
+            // different byte coordinate system. Serve the complete representation.
+            val normalize = resource.imagePrefixedTransport
+            val range = requestedRange.takeUnless { normalize }
             val resourceKey = resource.url.toString()
             val disk = if (resource.kind in setOf(Kind.MEDIA, Kind.AUTO) && '?' !in request.target &&
                 synchronized(lock) { resourceKey !in bypassedCacheResources }) {
@@ -162,7 +172,8 @@ internal class AnimeStreamBridge private constructor(
                         "Content-Length" to (disk.end - disk.start + 1L).toString(),
                         "Accept-Ranges" to "bytes", "Cache-Control" to "private, no-store")
                     if (range != null) headers["Content-Range"] = "bytes ${disk.start}-${disk.end}/${disk.total}"
-                    output.headers(if (range == null) 200 else 206, headers)
+                    val segment = if (normalize) PlainHlsSegmentResponse(output, headers, request.method) else null
+                    if (segment == null) output.headers(if (range == null) 200 else 206, headers)
                     if (request.method == "GET") {
                         val buffer = ByteArray(64 * 1024)
                         while (true) {
@@ -175,9 +186,10 @@ internal class AnimeStreamBridge private constructor(
                             }
                             if (count < 0) break
                             warmReads?.admit(count)
-                            output.bytes(buffer, count)
+                            if (segment == null) output.bytes(buffer, count) else segment.write(buffer, count)
                         }
                     }
+                    segment?.finish()
                 } finally { disk.close() }
                 return
             }
@@ -197,8 +209,14 @@ internal class AnimeStreamBridge private constructor(
                 val headers = linkedMapOf("Content-Type" to buffered.contentType, "Content-Length" to count.toString(),
                     "Accept-Ranges" to "bytes", "Cache-Control" to "private, no-store")
                 if (range != null) headers["Content-Range"] = "bytes $start-$end/$size"
-                output.headers(if (range == null) 200 else 206, headers)
-                if (request.method == "GET") connection.write(buffered.bytes, start.toInt(), count)
+                if (normalize) {
+                    val segment = PlainHlsSegmentResponse(output, headers, request.method)
+                    if (request.method == "GET") segment.write(buffered.bytes, count)
+                    segment.finish()
+                } else {
+                    output.headers(if (range == null) 200 else 206, headers)
+                    if (request.method == "GET") connection.write(buffered.bytes, start.toInt(), count)
+                }
                 return
             }
             var url = resource.url
@@ -224,6 +242,7 @@ internal class AnimeStreamBridge private constructor(
                 var response: NetworkResponse? = null
                 var manifest = resource.kind == Kind.MANIFEST
                 var classified = manifest || resource.kind in setOf(Kind.KEY, Kind.SUBTITLE, Kind.MEDIA)
+                var segment: PlainHlsSegmentResponse? = null
                 val prefix = Buffer()
                 val manifestBody = Buffer()
                 client.downloadWithHeaders(
@@ -249,8 +268,10 @@ internal class AnimeStreamBridge private constructor(
                                 false
                             }
                             request.method == "HEAD" -> {
-                                output.headers(received.code, responseHeaders(received,
-                                    manifest || received.header("Content-Type").orEmpty().contains("mpegurl", true)))
+                                val forwarded = responseHeaders(received,
+                                    manifest || received.header("Content-Type").orEmpty().contains("mpegurl", true))
+                                if (normalize) PlainHlsSegmentResponse(output, forwarded, "HEAD").finish()
+                                else output.headers(received.code, forwarded)
                                 false
                             }
                             else -> {
@@ -264,7 +285,11 @@ internal class AnimeStreamBridge private constructor(
                                 require(contentType != "audio/x-scpls") { "当前线路不是受支持的视频清单" }
                                 if (contentType.contains("mpegurl")) { manifest = true; classified = true }
                                 if (classified && !manifest) {
-                                    output.headers(received.code, responseHeaders(received, false))
+                                    val forwarded = responseHeaders(received, false)
+                                    if (normalize) {
+                                        require(received.code == 200) { "来源没有返回完整的 HLS 媒体段" }
+                                        segment = PlainHlsSegmentResponse(output, forwarded, request.method)
+                                    } else output.headers(received.code, forwarded)
                                     if (resource.kind == Kind.MEDIA) cacheWriter = runCatching {
                                         cache?.write(asset, resource.url.toString(), received)
                                     }.getOrNull()
@@ -296,7 +321,11 @@ internal class AnimeStreamBridge private constructor(
                         } else if (manifest) {
                             manifestBody.write(bytes, 0, count)
                             require(manifestBody.size <= MAX_MANIFEST_BYTES) { "播放清单超过可解析大小" }
-                        } else { save(bytes, count); output.bytes(bytes, count) }
+                        } else {
+                            save(bytes, count)
+                            val normalized = segment
+                            if (normalized == null) output.bytes(bytes, count) else normalized.write(bytes, count)
+                        }
                     },
                 )
                 if (redirect != null) {
@@ -305,6 +334,7 @@ internal class AnimeStreamBridge private constructor(
                     continue
                 }
                 if (request.method == "HEAD" || output.finished) return
+                segment?.finish()
                 if (!classified && prefix.size > 0) {
                     val sample = prefix.snapshot().utf8().trimStart('\uFEFF', ' ', '\r', '\n', '\t')
                     manifest = sample.startsWith("#EXTM3U")
@@ -392,6 +422,9 @@ internal class AnimeStreamBridge private constructor(
             attributes["NAME"]?.let { name -> attributes["VALUE"]?.let { variables[name] = it } }
             attributes["QUERYPARAM"]?.let { name -> base.queryParameter(name)?.let { variables[name] = it } }
         }
+        // Observe the original playlist before registering the segment representation.
+        // Byte-range, fragmented MP4, encrypted and low-latency resources use raw bytes.
+        val inspectPlainSegments = asset.sourceId == "anime-lanerc-lmm85" && isIndependentAnimeHlsSegmentPlaylist(text)
         fun local(uri: String, kind: Kind): String {
             if (uri.startsWith("data:")) {
                 require(kind == Kind.KEY) { "当前播放器不支持内联的远程清单" }
@@ -402,7 +435,8 @@ internal class AnimeStreamBridge private constructor(
             }
             val remote = base.resolve(expanded)?.let { checkedUrl(it.toString()) }
                 ?: error("播放清单包含无效的资源地址")
-            return register(Resource(remote, resource.headers, resource.credentialOrigin, kind, variables.toMap()))
+            return register(Resource(remote, resource.headers, resource.credentialOrigin, kind, variables.toMap(),
+                imagePrefixedTransport = inspectPlainSegments && kind == Kind.MEDIA))
         }
         var nextIsPlaylist = false
         return text.lineSequence().joinToString("\n") { original ->
@@ -765,12 +799,68 @@ internal class ResponseWriter(private val connection: AnimeLoopbackConnection) {
         }
         connection.write(header.encodeToByteArray())
     }
-    fun bytes(bytes: ByteArray, count: Int = bytes.size) { connection.write(bytes, 0, count) }
+    fun bytes(bytes: ByteArray, count: Int = bytes.size, offset: Int = 0) { connection.write(bytes, offset, count) }
     fun error(status: Int, message: String) {
         val bytes = message.encodeToByteArray()
         headers(status, mapOf("Content-Type" to "text/plain", "Content-Length" to bytes.size.toString()))
         this.bytes(bytes)
         finished = true
+    }
+}
+
+/**
+ * One full, unencrypted HLS segment served to a native media client.
+ * The bridge continues storing the unmodified upstream bytes.
+ */
+internal class PlainHlsSegmentResponse(
+    private val output: ResponseWriter,
+    private val headers: Map<String, String>,
+    private val method: String,
+) {
+    private var pending = ByteArray(8)
+    private var pendingSize = 0
+
+    fun write(bytes: ByteArray, count: Int) {
+        var offset = 0
+        while (!output.started && offset < count) {
+            val take = minOf(count - offset, pending.size - pendingSize)
+            bytes.copyInto(pending, pendingSize, offset, offset + take)
+            pendingSize += take
+            offset += take
+            if (pending.size == 8 && pendingSize == 8) {
+                if (!animeHlsImageSignature(pending)) start(0)
+                else pending = pending.copyOf(ANIME_HLS_IMAGE_INSPECTION_LIMIT)
+            } else if (pending.size > 8) {
+                val transportOffset = animeHlsTransportOffset(pending, pendingSize)
+                if (transportOffset > 0 || pendingSize == pending.size) start(transportOffset)
+            }
+        }
+        if (offset < count) output.bytes(bytes, count - offset, offset)
+    }
+
+    fun finish() {
+        if (!output.started) start(0)
+    }
+
+    private fun start(transportOffset: Int) {
+        val changed = transportOffset > 0
+        val forwarded = headers.filterKeys { key ->
+            key.lowercase() !in setOf("accept-ranges", "content-range", "etag") &&
+                (!changed || !key.equals("Content-Type", true)) &&
+                (method == "GET" && !changed || !key.equals("Content-Length", true))
+        }.toMutableMap()
+        val byteLength = headers.entries.firstOrNull { it.key.equals("Content-Length", true) }?.value?.toLongOrNull()
+        if (changed) {
+            forwarded["Content-Type"] = "video/mp2t"
+            byteLength?.takeIf { it > transportOffset }?.let {
+                forwarded["Content-Length"] = (it - transportOffset).toString()
+            }
+        }
+        forwarded["Accept-Ranges"] = "none"
+        output.headers(200, forwarded)
+        if (method == "GET" && pendingSize > transportOffset) {
+            output.bytes(pending, pendingSize - transportOffset, transportOffset)
+        }
     }
 }
 

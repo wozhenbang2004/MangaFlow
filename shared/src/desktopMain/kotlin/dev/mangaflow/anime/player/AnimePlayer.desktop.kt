@@ -94,6 +94,10 @@ private class DesktopAnimePlayer(
 
     override suspend fun prepareVideoWindow(request: AnimePreparedVideoRequest): Boolean {
         val handle = engine.value?.impl as? MPVHandle ?: return false
+        animeJaNai.onlineWindowUnavailableReason()?.let { reason ->
+            noteVideoPreparationIssue(reason)
+            return false
+        }
         return onlinePreparation.prepare(request, handle)
     }
 
@@ -145,8 +149,11 @@ private class DesktopAnimePlayer(
         return try {
             withContext(Dispatchers.IO) {
                 // The shipped platform runtime loads off the Swing UI thread.
-                animeJaNai.configureProcess(configuration.enhancementModel?.engineId == EnhancementEngineIds.DESKTOP_REALTIME ||
-                    configuration.realtimeFrames != null)
+                animeJaNai.configureProcess(
+                    requestAlternate = configuration.enhancementModel?.engineId == EnhancementEngineIds.DESKTOP_REALTIME ||
+                        configuration.realtimeFrames != null,
+                    requestOnlineWindow = configuration.preparedVideoModel != null,
+                )
                 MpvMediampPlayerFactory().create(context, playerScope.coroutineContext) { handle ->
                     if (animeJaNai.usesNativeRuntime()) handle.option("hwdec", "d3d11va")
                     if (configuration.preparedVideoModel != null && configuration.realtimeFrames == null &&

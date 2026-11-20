@@ -82,9 +82,6 @@ private class ImagePrefixedHlsExtractor(
     override fun onTruncatedSegmentParsed() = delegate.onTruncatedSegmentParsed()
 }
 
-private const val TRANSPORT_PACKET_BYTES = 188
-private const val TRANSPORT_CONFIRM_PACKETS = 5
-private const val IMAGE_PREFIX_LIMIT = 256 * 1024
 private const val PREFIX_PEEK_BLOCK = 4096
 
 private fun skipConfirmedImagePrefix(input: ExtractorInput) {
@@ -108,19 +105,13 @@ private fun imageTransportOffset(input: ExtractorInput): Int {
             if (count <= 0) return 0
             size += count
         }
-        val png = signature[0].unsigned() == 0x89 && signature[1].unsigned() == 0x50 &&
-            signature[2].unsigned() == 0x4e && signature[3].unsigned() == 0x47 &&
-            signature[4].unsigned() == 0x0d && signature[5].unsigned() == 0x0a &&
-            signature[6].unsigned() == 0x1a && signature[7].unsigned() == 0x0a
-        val jpeg = signature[0].unsigned() == 0xff && signature[1].unsigned() == 0xd8 &&
-            signature[2].unsigned() == 0xff
-        if (!png && !jpeg) return 0
+        if (!animeHlsImageSignature(signature)) return 0
 
         // Allocate the bounded scan buffer only after an actual image signature.
-        val bytes = ByteArray(IMAGE_PREFIX_LIMIT + TRANSPORT_PACKET_BYTES * TRANSPORT_CONFIRM_PACKETS)
+        val bytes = ByteArray(ANIME_HLS_IMAGE_INSPECTION_LIMIT)
         signature.copyInto(bytes)
         while (true) {
-            val offset = if (png) pngTransportOffset(bytes, size) else jpegTransportOffset(bytes, size)
+            val offset = animeHlsTransportOffset(bytes, size)
             if (offset > 0) return offset
             if (size >= bytes.size) return 0
             val count = input.peek(bytes, size, minOf(PREFIX_PEEK_BLOCK, bytes.size - size))
@@ -135,52 +126,3 @@ private fun imageTransportOffset(input: ExtractorInput): Int {
         input.resetPeekPosition()
     }
 }
-
-private fun pngTransportOffset(bytes: ByteArray, size: Int): Int {
-    if (size < 33 || pngChunkLength(bytes, 8) != 13L ||
-        !pngChunkIs(bytes, 12, 0x49, 0x48, 0x44, 0x52)) return 0
-    var position = 8
-    while (position + 12 <= size && position < IMAGE_PREFIX_LIMIT) {
-        val length = pngChunkLength(bytes, position)
-        val end = position.toLong() + 12L + length
-        if (length > IMAGE_PREFIX_LIMIT || end > size || end > IMAGE_PREFIX_LIMIT) return 0
-        if (pngChunkIs(bytes, position + 4, 0x49, 0x45, 0x4e, 0x44)) {
-            val offset = end.toInt()
-            return if (length == 0L && hasTransportPackets(bytes, size, offset)) offset else 0
-        }
-        position = end.toInt()
-    }
-    return 0
-}
-
-private fun pngChunkLength(bytes: ByteArray, offset: Int): Long =
-    (bytes[offset].unsigned().toLong() shl 24) or
-        (bytes[offset + 1].unsigned().toLong() shl 16) or
-        (bytes[offset + 2].unsigned().toLong() shl 8) or bytes[offset + 3].unsigned().toLong()
-
-private fun pngChunkIs(bytes: ByteArray, offset: Int, a: Int, b: Int, c: Int, d: Int): Boolean =
-    bytes[offset].unsigned() == a && bytes[offset + 1].unsigned() == b &&
-        bytes[offset + 2].unsigned() == c && bytes[offset + 3].unsigned() == d
-
-private fun jpegTransportOffset(bytes: ByteArray, size: Int): Int {
-    val last = minOf(size - TRANSPORT_PACKET_BYTES * TRANSPORT_CONFIRM_PACKETS, IMAGE_PREFIX_LIMIT)
-    // An embedded thumbnail may have its own EOI. It is not accepted unless
-    // complete consecutive transport packets immediately follow that boundary.
-    for (offset in 4..last) {
-        if (bytes[offset - 2].unsigned() == 0xff && bytes[offset - 1].unsigned() == 0xd9 &&
-            hasTransportPackets(bytes, size, offset)) return offset
-    }
-    return 0
-}
-
-private fun hasTransportPackets(bytes: ByteArray, size: Int, offset: Int): Boolean {
-    if (offset <= 0 || offset + TRANSPORT_PACKET_BYTES * TRANSPORT_CONFIRM_PACKETS > size) return false
-    repeat(TRANSPORT_CONFIRM_PACKETS) { packet ->
-        val start = offset + packet * TRANSPORT_PACKET_BYTES
-        if (bytes[start].unsigned() != 0x47 || (bytes[start + 1].unsigned() and 0x80) != 0 ||
-            (bytes[start + 3].unsigned() and 0x30) == 0) return false
-    }
-    return true
-}
-
-private fun Byte.unsigned(): Int = toInt() and 0xff

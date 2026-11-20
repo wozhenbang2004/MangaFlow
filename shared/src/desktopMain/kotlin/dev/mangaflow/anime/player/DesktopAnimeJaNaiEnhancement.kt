@@ -245,7 +245,7 @@ internal class DesktopAnimeJaNaiEnhancement(
         paused = handle.getPropertyBooleanOrNull("pause") == true,
         outputWidth = dimension(handle, "video-out-params/w"),
         outputHeight = dimension(handle, "video-out-params/h"),
-        position = handle.getPropertyDoubleOrNull("video-pts")?.takeIf(Double::isFinite),
+        position = handle.getPropertyDoubleOrNull("time-pos")?.takeIf(Double::isFinite),
         filteredFps = handle.getPropertyDoubleOrNull("estimated-vf-fps")?.takeIf { it.isFinite() && it in 1.0..240.0 },
         droppedFrames = handle.getPropertyLongOrNull("frame-drop-count")?.takeIf { it >= 0L },
     )

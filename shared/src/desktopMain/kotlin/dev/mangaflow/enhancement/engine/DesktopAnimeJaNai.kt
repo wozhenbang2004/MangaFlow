@@ -78,7 +78,7 @@ internal class DesktopAnimeJaNai(private val root: File) {
     }
 
     /** Mediamp loads this process-wide before its first player. A failed launch returns to stock on the next boot. */
-    fun configureProcess(requestAlternate: Boolean) = synchronized(processLock) {
+    fun configureProcess(requestAlternate: Boolean, requestOnlineWindow: Boolean = false) = synchronized(processLock) {
         if (processStarted) return@synchronized
         processStarted = true
         if (!isWindows()) return@synchronized
@@ -90,7 +90,7 @@ internal class DesktopAnimeJaNai(private val root: File) {
         }
         // A user-installed live RIFE bundle can be enabled after playback starts.
         // The DLL must already be selected before Mediamp creates its first player.
-        if (!requestAlternate && frames().isEmpty()) return@synchronized
+        if (!requestAlternate && frames().isEmpty() && !(requestOnlineWindow && available(native, runtimeFiles))) return@synchronized
         try {
             require(available(native, runtimeFiles, verifyContents = true)) { "组件完整性校验未通过" }
             require(root.isDirectory || root.mkdirs())
@@ -114,6 +114,13 @@ internal class DesktopAnimeJaNai(private val root: File) {
     fun usesNativeRuntime() = selectedNative == native
 
     fun unavailableReason() = processIssue ?: "AnimeJaNai 内核需在重新打开应用后启用"
+
+    fun onlineWindowUnavailableReason(): String? = when {
+        usesNativeRuntime() -> null
+        !isWindows() -> "当前平台没有在线增强窗口的播放内核"
+        !available(native, runtimeFiles) -> "在线增强的播放需要已安装的 AnimeJaNai 播放内核。当前使用原画或实时增强。"
+        else -> processIssue ?: "重新打开应用后可启用支持在线增强窗口的 AnimeJaNai 内核"
+    }
 
     fun session(model: EngineModel?, frame: EngineModel?, fraction: Pair<Int, Int>?): FilterSession? {
         if (selectedNative != native || model == null && frame == null) return null

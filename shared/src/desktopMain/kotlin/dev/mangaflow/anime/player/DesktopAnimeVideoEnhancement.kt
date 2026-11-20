@@ -232,7 +232,7 @@ internal class DesktopAnimeVideoEnhancement(
             else model?.let { readArtCnnPasses(fresh, it.title)?.let { nanos -> ShaderPasses(nanos, upscaled = true) } }
         } else null
         return Observation(width, height, gamma, output, shaderList, passes,
-            if (passes != null) handle.getPropertyDoubleOrNull("video-pts")?.takeIf(Double::isFinite) else null,
+            if (passes != null) handle.getPropertyDoubleOrNull("time-pos")?.takeIf(Double::isFinite) else null,
             if (passes != null) handle.getPropertyDoubleOrNull("container-fps")?.takeIf { it.isFinite() && it > 0 } else null)
     }
 
