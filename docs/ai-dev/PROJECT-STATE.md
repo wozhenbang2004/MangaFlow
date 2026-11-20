@@ -1,5 +1,9 @@
 # MangaFlow · current work
 
+## Android 阅读状态的最小表达 · 2026-11-20
+
+用户指出刚交付的阅读状态像文档，要求落实最小信息表达。基线、主要判断、要求和验收见 [READ-STATUS-MIN-01–04](../design/reading-and-discovery-redesign-20261119.md#android-阅读状态的最小表达--2026-11-20)。先收齐默认标题、重复计数、自动展开和说明问题，本机包 `0.1.452-local.minimal-status.618170b` 已在第179话的一般和大字竖屏下复验默认状态、展开计数、缓存独立摘要与重新打开、简要说明和回原页。通过后合并一次。
+
 ## Android 阅读状态栏接续 · 2026-11-20
 
 用户原话、模拟器基线及交互依据见 [ANDROID-READ-STATUS-01–04](../design/reading-and-discovery-redesign-20261119.md#android-阅读状态栏接续--2026-11-20)。从 `27d0339` 接续，范围为阅读器常驻状态、展开面板、任务层级和窄屏恢复。本机已构建并安装 `0.1.451-local.reader-status.27d0339`。Android 14 模拟器复验了 411dp、360dp / 1.30 倍字号、五项切换、长明细滚动、说明和回到原阅读页。本机复验后将这批源码与证据说明合为一个主线提交。

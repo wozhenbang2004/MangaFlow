@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
@@ -154,6 +155,7 @@ internal fun ReaderExperienceStatus(
     var retainedSection by remember(sessionKey) { mutableStateOf(ReaderStatusSection.PREPARATION) }
     val sectionHeader = remember(sessionKey) { BringIntoViewRequester() }
     val expandedWorks = remember(sessionKey) { mutableStateMapOf<ReaderStatusSection, ReaderWork?>() }
+    var cacheView by remember(sessionKey) { mutableStateOf(ReaderWork.MEMORY) }
     var popoverPresent by remember { mutableStateOf(false) }
     var pendingPolicy by remember(sessionKey) { mutableStateOf(false) }
     var pendingEnhancement by remember(sessionKey) { mutableStateOf(false) }
@@ -228,6 +230,10 @@ internal fun ReaderExperienceStatus(
         animationSpec = if (motion) tween(MangaMotion.Chrome) else snap(), label = "reading-status-clearance",
     )
     fun inspect(section: ReaderStatusSection) {
+        if (android && selected == null) {
+            expandedWorks[section] = null
+            scopeHelp[section] = false
+        }
         if (selected == section && popoverPresent && !pinStatusHeader) scope.launch {
             withFrameNanos { }
             sectionHeader.bringIntoView()
@@ -235,8 +241,9 @@ internal fun ReaderExperienceStatus(
         retainedSection = section
         selected = section
     }
-    val selectedSlot = selected?.slot(expandedWorks[ReaderStatusSection.CACHE])
-    val retainedSlot = retainedSection.slot(expandedWorks[ReaderStatusSection.CACHE]) ?: ReaderStatusSlot.MEMORY
+    val cacheSelection = if (android) cacheView else expandedWorks[ReaderStatusSection.CACHE]
+    val selectedSlot = selected?.slot(cacheSelection)
+    val retainedSlot = retainedSection.slot(cacheSelection) ?: ReaderStatusSlot.MEMORY
     val visibleFailed = preparation.pages.any { it.role == ReaderPreparationRole.VISIBLE &&
         (it.resolve.phase == ReaderPreparationPhase.FAILED || it.original.phase == ReaderPreparationPhase.FAILED) }
     val nextPage = preparation.pages.firstOrNull {
@@ -362,7 +369,7 @@ internal fun ReaderExperienceStatus(
                             ReaderStatusStrip(dockSlot, dockRetained, shown, { slot ->
                                 if (selected == slot.section) selected = null
                                 else {
-                                    if (slot.section == ReaderStatusSection.CACHE &&
+                                    if (!android && slot.section == ReaderStatusSection.CACHE &&
                                         expandedWorks[ReaderStatusSection.CACHE] !in listOf(ReaderWork.MEMORY, ReaderWork.DISK)) {
                                         expandedWorks[ReaderStatusSection.CACHE] = ReaderWork.MEMORY
                                     }
@@ -403,41 +410,33 @@ internal fun ReaderExperienceStatus(
                 contentBackground = if (android) MaterialTheme.colorScheme.surface.copy(alpha = .78f) else Color.Transparent,
                 scrollContent = !pinStatusHeader,
                 onDismiss = { selected = null }, onPresenceChange = { popoverPresent = it }) {
-                val headerActionSize = if (android) 48.dp else 44.dp
-                Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)) {
-                    Row(Modifier.fillMaxWidth().bringIntoViewRequester(sectionHeader), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text("阅读状态",
-                                style = if (android) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(if (preparation.lastVisible >= preparation.firstVisible && preparation.pageCount > 0)
-                                "第 ${pageRange(preparation.firstVisible, preparation.lastVisible)} 页 · 共 ${preparation.pageCount} 页"
-                                else summary.label,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                        MotionIconButton(onClick = { scopeHelp[retainedSection] = scopeHelp[retainedSection] != true },
-                            modifier = Modifier.size(headerActionSize),
-                            enabled = selected != null, tooltip = "图标与当前范围说明") {
-                            Icon(Icons.Outlined.Info, "图标与当前范围说明", Modifier.size(18.dp),
-                                tint = if (scopeHelp[retainedSection] == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        MotionIconButton(onClick = { selected = null; pendingPolicy = true },
-                            modifier = Modifier.size(headerActionSize), enabled = selected != null, tooltip = "配置体验策略") {
-                            Icon(Icons.Outlined.Tune, "配置体验策略", Modifier.size(18.dp))
-                        }
-                        MotionIconButton(onClick = { selected = null }, modifier = Modifier.size(headerActionSize),
-                            enabled = selected != null, tooltip = "关闭状态详情") {
-                            Icon(Icons.Outlined.Close, "关闭状态详情", Modifier.size(18.dp))
-                        }
+                val actionSize = if (android) 48.dp else 44.dp
+                val panelTools: @Composable () -> Unit = {
+                    MotionIconButton(onClick = { scopeHelp[retainedSection] = scopeHelp[retainedSection] != true },
+                        modifier = Modifier.size(actionSize), enabled = selected != null, tooltip = "图标与当前范围说明") {
+                        Icon(Icons.Outlined.Info, "图标与当前范围说明", Modifier.size(17.dp),
+                            tint = if (scopeHelp[retainedSection] == true) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    MotionIconButton(onClick = { selected = null; pendingPolicy = true },
+                        modifier = Modifier.size(actionSize), enabled = selected != null, tooltip = "配置体验策略") {
+                        Icon(Icons.Outlined.Tune, "配置体验策略", Modifier.size(17.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                val closeButton: @Composable () -> Unit = {
+                    MotionIconButton(onClick = { selected = null }, modifier = Modifier.size(actionSize),
+                        enabled = selected != null, tooltip = "关闭状态详情") {
+                        Icon(Icons.Outlined.Close, "关闭状态详情", Modifier.size(18.dp))
+                    }
+                }
+                val statusTabs: @Composable (Modifier) -> Unit = { modifier ->
                     ReaderStatusStrip(selectedSlot, retainedSlot, shown && selected != null, { slot ->
                         if (selected != null) {
-                            slot.cacheWork?.let { expandedWorks[ReaderStatusSection.CACHE] = it }
+                            slot.cacheWork?.let { if (android) cacheView = it else expandedWorks[ReaderStatusSection.CACHE] = it }
                             inspect(slot.section)
                         }
-                    }) { slot, isSelected ->
+                    }, modifier = modifier) { slot, isSelected ->
                         when (slot) {
                             ReaderStatusSlot.PREPARATION -> StatusMicro(Icons.AutoMirrored.Outlined.MenuBook,
                                 aheadValue, "前方已备原图", aheadMark, aheadDetail,
@@ -459,8 +458,30 @@ internal fun ReaderExperienceStatus(
                                 memorySlot = slot == ReaderStatusSlot.MEMORY, selected = isSelected)
                         }
                     }
-                    if (android) HorizontalDivider(Modifier.padding(top = 2.dp, bottom = 4.dp),
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
+                }
+                Column(Modifier.fillMaxWidth().padding(horizontal = if (android) 4.dp else 10.dp, vertical = 4.dp)
+                    .semantics { paneTitle = "阅读状态" }) {
+                    Row(Modifier.fillMaxWidth().bringIntoViewRequester(sectionHeader), verticalAlignment = Alignment.CenterVertically) {
+                        if (android) {
+                            statusTabs(Modifier.weight(1f))
+                        } else {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("阅读状态", style = MaterialTheme.typography.titleSmall,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(if (preparation.lastVisible >= preparation.firstVisible && preparation.pageCount > 0)
+                                    "第 ${pageRange(preparation.firstVisible, preparation.lastVisible)} 页 · 共 ${preparation.pageCount} 页"
+                                    else summary.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            panelTools()
+                        }
+                        closeButton()
+                    }
+                    if (android) HorizontalDivider(Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .075f))
+                    else statusTabs(Modifier)
                     MotionTabContent(selected = retainedSection, contentKey = { it }, order = { it.ordinal },
                         modifier = if (pinStatusHeader) Modifier.weight(1f, fill = false) else Modifier,
                         fillContent = false) { shownSection ->
@@ -474,7 +495,8 @@ internal fun ReaderExperienceStatus(
                         }
                         val bodyScroll = if (pinStatusHeader)
                             Modifier.verticalScroll(bodyPosition, enabled = bodyEnabled) else Modifier
-                        Column(Modifier.fillMaxWidth().then(bodyScroll).motionInputGate(bodyEnabled)) {
+                        Column(Modifier.fillMaxWidth().then(bodyScroll)
+                            .padding(horizontal = if (android) 4.dp else 0.dp).motionInputGate(bodyEnabled)) {
                             StatusReveal(showHelp) { ReaderStatusLegend(shownSection, budget, preparation) }
                             when (shownSection) {
                                 ReaderStatusSection.PREPARATION -> {
@@ -491,7 +513,7 @@ internal fun ReaderExperienceStatus(
                                         PreparationPages(preparation.pages.filter { it.role == ReaderPreparationRole.BEHIND }, ReaderWork.ORIGINAL)
                                     }
                                     preparation.pauseReason?.let { StatusExplanation(it) }
-                                    ReaderEnhancementWork(enhancement, enhancementPolicy,
+                                    if (!android) ReaderEnhancementWork(enhancement, enhancementPolicy,
                                         expandedWork == ReaderWork.ENHANCEMENT, bodyEnabled,
                                         onToggle = { toggle(ReaderWork.ENHANCEMENT) },
                                         onOpen = onOpenEnhancement?.let { { selected = null; pendingEnhancement = true } })
@@ -592,10 +614,12 @@ internal fun ReaderExperienceStatus(
                                 }
                                 ReaderStatusSection.CACHE -> CacheOverview(store, expandedWork, bodyEnabled,
                                     custom.contentCache.memoryIdleMinutes, custom.contentCache.imageRetentionHours,
-                                    custom.memoryMiB, custom.diskMiB, onToggle = ::toggle)
+                                    custom.memoryMiB, custom.diskMiB, owner = cacheView.takeIf { android }, onToggle = ::toggle)
                             }
                         }
                     }
+                    if (android) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.End) { panelTools() }
                 }
             }
         }
@@ -652,6 +676,7 @@ private fun ReaderStatusStrip(selected: ReaderStatusSlot?, retained: ReaderStatu
     entries: List<ReaderStatusSlot> = ReaderStatusSlot.entries,
     labelsVisible: Boolean = true,
     ambient: Boolean = false,
+    modifier: Modifier = Modifier,
     content: @Composable (ReaderStatusSlot, Boolean) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val scroll = rememberScrollState()
@@ -661,7 +686,7 @@ private fun ReaderStatusStrip(selected: ReaderStatusSlot?, retained: ReaderStatu
     val density = LocalDensity.current
     val minimumTouchSize = if (android || ambient) 48.dp else 44.dp
     val minimumSlotWidth = when {
-        scopeLabelsOnly -> maxOf(minimumTouchSize, with(density) { labelStyle.fontSize.toDp() * 2 } + 16.dp)
+        scopeLabelsOnly -> maxOf(minimumTouchSize, with(density) { labelStyle.fontSize.toDp() * 2 } + 8.dp)
         ambient -> minimumTouchSize
         else -> maxOf(minimumTouchSize, statusNumberWidth("99+?", 20.dp))
     }
@@ -678,7 +703,7 @@ private fun ReaderStatusStrip(selected: ReaderStatusSlot?, retained: ReaderStatu
             anchors[selectedIndex].bringIntoView()
         }
     }
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
+    BoxWithConstraints(modifier.fillMaxWidth()) {
         val trackWidth = maxOf(maxWidth, minimumSlotWidth * entries.size)
         Box(Modifier.fillMaxWidth().horizontalScroll(scroll)) {
             MotionTabs(selected = entries.indexOf(retained).coerceAtLeast(0), labels = entries.map { it.title },
@@ -739,6 +764,19 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
                 Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
+    }
+    if (platformKind == PlatformKind.ANDROID) {
+        if (section != ReaderStatusSection.CACHE && preparation.pageCount > 0 &&
+            preparation.lastVisible >= preparation.firstVisible) {
+            StatusExplanation("可见 ${pageRange(preparation.firstVisible, preparation.lastVisible)} / ${preparation.pageCount} 页")
+        }
+        StatusExplanation(when (section) {
+            ReaderStatusSection.PREPARATION -> "已核实原图 / 目标页。？表示有待核实的页。"
+            ReaderStatusSection.WORK -> "进行中按任务计，完成按页计。"
+            ReaderStatusSection.SOURCES -> "单页补图先核对画面。整章切换在来源选择。"
+            ReaderStatusSection.CACHE -> "内存可按闲置到期，磁盘按容量或保留规则回收。"
+        })
+        return
     }
     StatusExplanation("底栏四项为预读、任务、补页、缓存；缓存详情再分内存和磁盘。数字是已备页数、活动任务数与可用源数；99+ 只缩写显示，不限制配置。? 表示尚有未核实项。")
     when (section) {
@@ -859,6 +897,7 @@ private fun ReaderEnhancementWork(
         ?: state.detail?.takeIf { policy.tier != QualityTier.ORIGINAL && !state.currentEnhanced && task == null }
     val progress = task?.let { if (it.phase == EnhancementTaskPhase.FAILED) "本页增强失败"
         else readerEnhancementTaskProgress(it) }
+    val compactOriginal = platformKind == PlatformKind.ANDROID && !expanded && policy.tier == QualityTier.ORIGINAL
     val readiness = if (policy.tier == QualityTier.ORIGINAL) "原画 · 增强未启用"
         else (if (state.currentEnhanced) "本页增强已备" else progress ?: "本页增强未备") +
             if (state.nextReady) " · 前方增强已备" else " · 前方增强未备"
@@ -868,8 +907,11 @@ private fun ReaderEnhancementWork(
         Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
         Column(Modifier.weight(1f).padding(horizontal = 7.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text("画质处理", style = MaterialTheme.typography.labelLarge, color = colors.onSurface)
-            Text(readiness, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            if (!compactOriginal) Text(readiness, style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant)
         }
+        if (compactOriginal) Text("原图", style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant)
         if (state.running > 0) StatusCounter(Icons.Outlined.PlayArrow, state.running.toLong(), "正在增强",
             iconColor = mangaStatusColors().activity)
         Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
@@ -964,8 +1006,10 @@ private fun WorkDisclosure(icon: ImageVector, title: String, active: Long, maxim
     val colors = MaterialTheme.colorScheme
     val status = mangaStatusColors()
     val reserve = "8".repeat(maximum.coerceAtLeast(1L).toString().length)
+    val android = platformKind == PlatformKind.ANDROID
+    val compact = android && !expanded
     MotionTextButton(onClick = onToggle, enabled = enabled,
-        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
+        modifier = Modifier.fillMaxWidth().heightIn(min = if (android) 48.dp else 44.dp)
             .background(if (expanded) colors.primary.copy(alpha = .065f) else Color.Transparent, RoundedCornerShape(12.dp))
             .semantics(mergeDescendants = true) {
             contentDescription = title
@@ -975,21 +1019,36 @@ private fun WorkDisclosure(icon: ImageVector, title: String, active: Long, maxim
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Icon(icon, null, Modifier.size(18.dp), tint = if (expanded) colors.primary else colors.onSurfaceVariant)
                 Text(title, Modifier.weight(1f).padding(horizontal = 7.dp), style = MaterialTheme.typography.labelLarge,
-                    color = if (platformKind != PlatformKind.ANDROID) Color.Unspecified
-                        else if (expanded) colors.primary else colors.onSurface)
-                if (known && phaseDeferred) {
-                    StatusToken(Icons.Outlined.Pause, "准备阶段", "暂缓", status.waiting)
-                    Spacer(Modifier.width(8.dp))
-                }
-                StatusCounter(Icons.Outlined.PlayArrow, active.takeIf { known }, "进行中的任务，不是线程数",
-                    reserve = reserve, iconColor = if (known && active > 0L) status.activity else status.neutral)
-                Box(Modifier.width(19.dp), contentAlignment = Alignment.CenterEnd) {
-                    if (hasFailure && failed == 0L) Icon(Icons.Outlined.ErrorOutline, "准备失败", Modifier.size(13.dp), tint = colors.error)
+                    color = if (!android) Color.Unspecified else if (expanded) colors.primary else colors.onSurface)
+                if (compact) {
+                    when {
+                        known && failed > 0L -> StatusCounter(Icons.Outlined.ErrorOutline, failed, "失败页", color = status.error)
+                        hasFailure -> StatusToken(Icons.Outlined.ErrorOutline, "准备阶段", "失败", status.error)
+                        !known -> StatusToken(Icons.Outlined.HelpOutline, "准备阶段", "待核实", status.neutral)
+                        active > 0L -> StatusCounter(Icons.Outlined.PlayArrow, active, "进行中任务", color = status.activity)
+                        queued > 0L -> StatusCounter(Icons.Outlined.Schedule, queued, "排队任务", iconColor = status.waiting)
+                        deferred > 0L -> StatusCounter(Icons.Outlined.Pause, deferred, "暂缓页", iconColor = status.waiting)
+                        phaseDeferred -> StatusToken(Icons.Outlined.Pause, "准备阶段", "暂缓", status.waiting)
+                        completed != null && completed > 0L ->
+                            StatusCounter(Icons.Outlined.Check, completed, "$completedLabel，页", iconColor = status.success)
+                        completed == null -> StatusToken(Icons.Outlined.HelpOutline, "完成页数", "待核实", status.neutral)
+                        else -> Text("空闲", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                    }
+                } else {
+                    if (known && phaseDeferred) {
+                        StatusToken(Icons.Outlined.Pause, "准备阶段", "暂缓", status.waiting)
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    StatusCounter(Icons.Outlined.PlayArrow, active.takeIf { known }, "进行中的任务，不是线程数",
+                        reserve = reserve, iconColor = if (known && active > 0L) status.activity else status.neutral)
+                    Box(Modifier.width(19.dp), contentAlignment = Alignment.CenterEnd) {
+                        if (hasFailure && failed == 0L) Icon(Icons.Outlined.ErrorOutline, "准备失败", Modifier.size(13.dp), tint = colors.error)
+                    }
                 }
                 Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
                     Modifier.padding(start = 6.dp).size(16.dp), tint = colors.onSurfaceVariant)
             }
-            StatusMetricSlots(reserve, Modifier.padding(start = 25.dp)) { index ->
+            if (!compact) StatusMetricSlots(reserve, Modifier.padding(start = 25.dp)) { index ->
                 when (index) {
                     0 -> StatusCounter(Icons.Outlined.Schedule, queued.takeIf { known }, "排队任务", reserve = reserve,
                         iconColor = if (known && queued > 0L) status.waiting else status.neutral)
@@ -1299,12 +1358,13 @@ private fun StandbyDetails(row: ReaderSourceStandby, reserve: String, expanded: 
         row.phase == ReaderSourceStandbyPhase.READY -> ReaderStatusMark.IDLE
         else -> standbyMark(row.phase)
     }
+    val android = platformKind == PlatformKind.ANDROID
     val original = when {
         row.requestedPages <= 0 -> "—"
         row.cacheInspectedAtMillis == null && row.preparedPages == 0 -> "—/${row.requestedPages}"
         else -> "${row.preparedPages}/${row.requestedPages}"
     }
-    MotionTextButton(onClick = onToggle, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
+    MotionTextButton(onClick = onToggle, modifier = Modifier.fillMaxWidth().heightIn(min = if (android) 48.dp else 44.dp)
         .background(if (expanded) colors.primary.copy(alpha = .065f) else Color.Transparent, RoundedCornerShape(12.dp))
         .semantics(mergeDescendants = true) {
             contentDescription = row.sourceName
@@ -1323,7 +1383,7 @@ private fun StandbyDetails(row: ReaderSourceStandby, reserve: String, expanded: 
                 Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
                     Modifier.padding(start = 6.dp).size(16.dp), tint = colors.onSurfaceVariant)
             }
-            StatusMetricSlots(reserve, Modifier.padding(start = 25.dp)) { index ->
+            if (!android || expanded) StatusMetricSlots(reserve, Modifier.padding(start = 25.dp)) { index ->
                 when (index) {
                     0 -> StatusCounter(Icons.Outlined.PhotoSizeSelectLarge,
                         row.previewResidentPages.toLong().takeIf { row.cacheInspectedAtMillis != null || it > 0L },
@@ -1461,85 +1521,89 @@ private fun NextChapterDetails(next: ReaderNextChapterPreparation) {
 @Composable
 private fun CacheOverview(store: ExperiencePolicyStore, expanded: ReaderWork?, enabled: Boolean,
     memoryIdleMinutes: Int, imageRetentionHours: Int, memoryMiB: Int?, diskMiB: Int?,
-    onToggle: (ReaderWork) -> Unit) {
+    owner: ReaderWork?, onToggle: (ReaderWork) -> Unit) {
     val cache = projectedCacheUsage(store)
-    val memory = projectedMemoryLifecycle(store)
     val scope = rememberCoroutineScope()
     var clearing by remember(store) { mutableStateOf(false) }
     var clearResult by remember(store) { mutableStateOf<String?>(null) }
     var clearError by remember(store) { mutableStateOf<String?>(null) }
     val status = mangaStatusColors()
-    CacheWorkRow(Icons.Outlined.Memory, "解码内存", cache.memoryBytes, cache.memoryLimit,
-        false, expanded == ReaderWork.MEMORY, enabled) { onToggle(ReaderWork.MEMORY) }
-    StatusReveal(expanded == ReaderWork.MEMORY) {
-        CacheMemoryLifecycle(memory, memoryIdleMinutes)
-        val idle = memory?.idleMinutes
-        FlowRow(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatusToken(Icons.Outlined.GridView, "当前解码条目", memory?.entries?.let { "$it 项" } ?: "—")
-            StatusToken(Icons.Outlined.Tune, "用户内存上限配置", memoryMiB?.let { "$it MB" } ?: "自动")
-            StatusToken(if (idle == 0) Icons.Outlined.TimerOff else Icons.Outlined.Timer, "最近采样时最早的闲置到期时间",
-                when {
-                    idle == 0 -> "∞"
-                    memory == null -> "—"
-                    else -> memory.nextExpiryAtMillis?.let { "约" + cacheElapsedLabel((it - memory.sampledAtMillis).coerceAtLeast(0L)) + "后到期" }
-                        ?: "无待清"
-                })
-        }
-        StatusExplanation(when (idle) {
-            null -> "等待解码缓存采样；范围移出与闲置到期分别计数"
-            0 -> "闲置到期关闭；范围移出与容量淘汰仍单独计数"
-            else -> "到期时间按最近采样估算；再次使用会延后，不是整批清空。"
-        })
-        val reclaimReserve = listOf(memory?.rangeBytes, memory?.evictedBytes, memory?.expiredBytes, memory?.clearedBytes)
-            .map { it?.let(::experienceCacheSize) ?: "—" }
-            .plus(listOf(memory?.rangeEntries, memory?.evictedEntries, memory?.expiredEntries, memory?.clearedEntries).map { it?.let { count -> "$count 项" } ?: "—" })
-            .maxByOrNull { it.length } ?: "—"
-        StatusMetricSlots(reclaimReserve, Modifier.padding(vertical = 6.dp), count = 4) { index ->
-            when (index) {
-                0 -> CacheReclaimMetric(Icons.Outlined.GridView, "范围", memory?.rangeBytes, memory?.rangeEntries)
-                1 -> CacheReclaimMetric(Icons.Outlined.SwapHoriz, "淘汰", memory?.evictedBytes, memory?.evictedEntries)
-                2 -> CacheReclaimMetric(Icons.Outlined.Timer, "到期", memory?.expiredBytes, memory?.expiredEntries)
-                else -> CacheReclaimMetric(Icons.Outlined.CleaningServices, "清空", memory?.clearedBytes, memory?.clearedEntries)
+    if (owner != ReaderWork.DISK) {
+        CacheWorkRow(Icons.Outlined.Memory, "解码内存", cache.memoryBytes, cache.memoryLimit,
+            false, expanded == ReaderWork.MEMORY, enabled) { onToggle(ReaderWork.MEMORY) }
+        StatusReveal(expanded == ReaderWork.MEMORY) {
+            val memory = projectedMemoryLifecycle(store)
+            CacheMemoryLifecycle(memory, memoryIdleMinutes)
+            val idle = memory?.idleMinutes
+            FlowRow(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                StatusToken(Icons.Outlined.GridView, "当前解码条目", memory?.entries?.let { "$it 项" } ?: "—")
+                StatusToken(Icons.Outlined.Tune, "用户内存上限配置", memoryMiB?.let { "$it MB" } ?: "自动")
+                StatusToken(if (idle == 0) Icons.Outlined.TimerOff else Icons.Outlined.Timer, "最近采样时最早的闲置到期时间",
+                    when {
+                        idle == 0 -> "∞"
+                        memory == null -> "—"
+                        else -> memory.nextExpiryAtMillis?.let { "约" + cacheElapsedLabel((it - memory.sampledAtMillis).coerceAtLeast(0L)) + "后到期" }
+                            ?: "无待清"
+                    })
             }
-        }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Spacer(Modifier.weight(1f))
-            clearResult?.let { result ->
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = "清理完成，已移出可复用解码缓存 $result" }) {
-                    Icon(Icons.Outlined.CheckCircle, null, Modifier.size(14.dp), tint = status.success)
-                    Text(result, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            StatusExplanation(when (idle) {
+                null -> "等待解码缓存采样；范围移出与闲置到期分别计数"
+                0 -> "闲置到期关闭；范围移出与容量淘汰仍单独计数"
+                else -> "到期时间按最近采样估算；再次使用会延后，不是整批清空。"
+            })
+            val reclaimReserve = listOf(memory?.rangeBytes, memory?.evictedBytes, memory?.expiredBytes, memory?.clearedBytes)
+                .map { it?.let(::experienceCacheSize) ?: "—" }
+                .plus(listOf(memory?.rangeEntries, memory?.evictedEntries, memory?.expiredEntries, memory?.clearedEntries).map { it?.let { count -> "$count 项" } ?: "—" })
+                .maxByOrNull { it.length } ?: "—"
+            StatusMetricSlots(reclaimReserve, Modifier.padding(vertical = 6.dp), count = 4) { index ->
+                when (index) {
+                    0 -> CacheReclaimMetric(Icons.Outlined.GridView, "范围", memory?.rangeBytes, memory?.rangeEntries)
+                    1 -> CacheReclaimMetric(Icons.Outlined.SwapHoriz, "淘汰", memory?.evictedBytes, memory?.evictedEntries)
+                    2 -> CacheReclaimMetric(Icons.Outlined.Timer, "到期", memory?.expiredBytes, memory?.expiredEntries)
+                    else -> CacheReclaimMetric(Icons.Outlined.CleaningServices, "清空", memory?.clearedBytes, memory?.clearedEntries)
                 }
             }
-            MotionIconButton(onClick = {
-                if (enabled && !clearing) {
-                    clearing = true; clearResult = null; clearError = null
-                    scope.launch {
-                        try { clearResult = "−" + experienceCacheSize(store.clearDecodedMemory().await()) }
-                        catch (cancelled: CancellationException) { throw cancelled }
-                        catch (_: Exception) { clearError = "未能释放，请重试" }
-                        finally { clearing = false }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.weight(1f))
+                clearResult?.let { result ->
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = "清理完成，已移出可复用解码缓存 $result" }) {
+                        Icon(Icons.Outlined.CheckCircle, null, Modifier.size(14.dp), tint = status.success)
+                        Text(result, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-            }, enabled = enabled && !clearing && (cache.memoryBytes ?: 0L) > 0L, modifier = Modifier.size(44.dp),
-                tooltip = "释放可复用解码缓存，保留当前画面与磁盘原图") {
-                if (clearing) MotionBusyIndicator(Modifier.size(18.dp), color = status.activity, strokeWidth = 1.5.dp)
-                else Icon(Icons.Outlined.CleaningServices, "释放可复用解码缓存", Modifier.size(19.dp),
-                    tint = MaterialTheme.colorScheme.primary)
+                MotionIconButton(onClick = {
+                    if (enabled && !clearing) {
+                        clearing = true; clearResult = null; clearError = null
+                        scope.launch {
+                            try { clearResult = "−" + experienceCacheSize(store.clearDecodedMemory().await()) }
+                            catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { clearError = "未能释放，请重试" }
+                            finally { clearing = false }
+                        }
+                    }
+                }, enabled = enabled && !clearing && (cache.memoryBytes ?: 0L) > 0L, modifier = Modifier.size(44.dp),
+                    tooltip = "释放可复用解码缓存，保留当前画面与磁盘原图") {
+                    if (clearing) MotionBusyIndicator(Modifier.size(18.dp), color = status.activity, strokeWidth = 1.5.dp)
+                    else Icon(Icons.Outlined.CleaningServices, "释放可复用解码缓存", Modifier.size(19.dp),
+                        tint = MaterialTheme.colorScheme.primary)
+                }
             }
+            clearError?.let { StatusExplanation(it, error = true) }
         }
-        clearError?.let { StatusExplanation(it, error = true) }
     }
-    CacheWorkRow(Icons.Outlined.Storage, "共享磁盘缓存", cache.diskBytes, cache.diskLimit,
-        cache.pending, expanded == ReaderWork.DISK, enabled, limitLabel = "预算") { onToggle(ReaderWork.DISK) }
-    StatusReveal(expanded == ReaderWork.DISK) {
-        FlowRow(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            StatusToken(Icons.Outlined.Tune, "用户磁盘上限配置", diskMiB?.let { "$it MB" } ?: "自动")
-            StatusToken(Icons.Outlined.Timer, "原图保留", if (imageRetentionHours == 0) "按空间回收" else "$imageRetentionHours h")
+    if (owner != ReaderWork.MEMORY) {
+        CacheWorkRow(Icons.Outlined.Storage, "共享磁盘缓存", cache.diskBytes, cache.diskLimit,
+            cache.pending, expanded == ReaderWork.DISK, enabled, limitLabel = "预算") { onToggle(ReaderWork.DISK) }
+        StatusReveal(expanded == ReaderWork.DISK) {
+            FlowRow(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                StatusToken(Icons.Outlined.Tune, "用户磁盘上限配置", diskMiB?.let { "$it MB" } ?: "自动")
+                StatusToken(Icons.Outlined.Timer, "原图保留", if (imageRetentionHours == 0) "按空间回收" else "$imageRetentionHours h")
+            }
+            if (cache.pending) StatusExplanation("等待缓存核实、调整或回收；上方是策略预算，不是底层已应用容量。在用内容会保留。")
         }
-        if (cache.pending) StatusExplanation("等待缓存核实、调整或回收；上方是策略预算，不是底层已应用容量。在用内容会保留。")
     }
     cache.error?.let { StatusExplanation(it, error = true) }
 }
@@ -1726,8 +1790,10 @@ private fun CacheWorkRow(icon: ImageVector, title: String, used: Long?, limit: L
                 StatusNumber(used?.let(::experienceCacheSize) ?: "—", color = if (expanded) colors.primary else colors.onSurface)
                 Text((if (limitLabel == "预算") "/ 预算 " else "/ ") + (limit?.let(::experienceCacheSize) ?: "—"),
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                Text(state.label, style = MaterialTheme.typography.labelSmall,
-                    color = if (pending) mangaStatusColors().waiting else colors.onSurfaceVariant)
+                if (platformKind != PlatformKind.ANDROID || expanded || pending) {
+                    Text(state.label, style = MaterialTheme.typography.labelSmall,
+                        color = if (pending) mangaStatusColors().waiting else colors.onSurfaceVariant)
+                }
             }
             CacheOccupancy(state.occupancy, Modifier.padding(start = 24.dp, end = 23.dp).fillMaxWidth().height(2.dp), accent)
         }
