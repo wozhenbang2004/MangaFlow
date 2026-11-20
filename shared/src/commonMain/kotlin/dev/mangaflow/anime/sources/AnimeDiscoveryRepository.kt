@@ -31,6 +31,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
+internal data class AnimeAniListMatch(val id: Int, val malId: Int?, val rating: Double?)
+
 /** Public catalogue queries; playback availability and canonical identity remain separate. */
 class AnimeDiscoveryRepository(context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
@@ -43,8 +45,11 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
     internal fun isFresh(query: AnimeDiscoveryQuery, fetchedAt: Long): Boolean =
         cache.isFresh(fetchedAt, cacheKind(query))
 
-    /** Optional public rating. Provider failure does not prevent opening a canonical detail. */
-    internal suspend fun lookupAniListScore(subject: AnimeSubject): AnimeSourceScore? {
+    internal suspend fun lookupAniListScore(subject: AnimeSubject): AnimeSourceScore? =
+        lookupAniListMatch(subject)?.rating?.let { AnimeSourceScore(AnimeDiscoveryProvider.ANILIST, it, 100) }
+
+    /** Resolve the same exact or unique season identity used by the detail's AniList rating. */
+    internal suspend fun lookupAniListMatch(subject: AnimeSubject): AnimeAniListMatch? {
         if (!subject.id.startsWith("bangumi:")) return null
         val ids = subject.externalIds
         val aniListId = ids["anilist"]?.toIntOrNull()?.takeIf { it > 0 }
@@ -62,19 +67,18 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
             val identity = JSONObject().put("subject", subject.id).put("anilist", aniListId).put("mal", malId)
                 .put("title", subject.title).put("originalTitle", subject.originalTitle).put("year", year)
                 .put("episodes", subject.episodeCount)
-            val key = "anilist-score:v1:${identity}:${animeHash(route.identity())}"
+            val key = "anilist-match:v1:${identity}:${animeHash(route.identity())}"
             val cached = cache.read(key)?.takeIf { cache.isFresh(it, ContentCacheKind.DETAILS) }
-                ?.let { runCatching { JSONObject(it.text).finiteNumber("score") }.getOrNull() }
-                ?.takeIf { it > 0.0 && it <= 100.0 }
-            if (cached != null) {
+                ?.let { runCatching { JSONObject(it.text) }.getOrNull() }
+            cached?.positiveInt("id")?.let { id ->
                 checkRoute(query, route)
-                return AnimeSourceScore(AnimeDiscoveryProvider.ANILIST, cached, 100)
+                return AnimeAniListMatch(id, cached.positiveInt("idMal"), cached.finiteNumber("score"))
             }
             val generation = cache.generation
             val variables = JSONObject().put("id", aniListId).put("idMal", malId)
             if (!byId && year != null) variables.put("search", title).putAniListReleaseYear(year)
             checkRoute(query, route)
-            val score = withTimeoutOrNull(ANILIST_SCORE_TIMEOUT_MILLIS) {
+            val match = withTimeoutOrNull(ANILIST_SCORE_TIMEOUT_MILLIS) {
                 val http = AnimeHttp(ANILIST_PROVIDER, route)
                 try {
                     val payload = http.json(ANILIST_API, AnimeSourceStage.METADATA, "POST",
@@ -85,19 +89,25 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
                             (aniListId == null || externalIds["anilist"] == aniListId.toString()) &&
                                 (malId == null || externalIds["myanimelist"] == malId.toString())
                         }
-                        if (byId) return@withContext candidates.singleOrNull()?.rating?.takeIf { it > 0.0 }
-                            ?.let { AnimeSourceScore(AnimeDiscoveryProvider.ANILIST, it, 100) }
-                        val work = AnimeDiscoveryItem(key = subject.id, title = subject.title, year = year,
-                            episodeCount = subject.episodeCount, subject = subject)
-                        combineAnimeDiscoveryItems(listOf(work), candidates).firstOrNull { it.subject?.id == subject.id }
-                            ?.sourceScores?.firstOrNull { it.provider == AnimeDiscoveryProvider.ANILIST && it.rating > 0.0 }
+                        val item = if (byId) candidates.singleOrNull() else {
+                            val work = AnimeDiscoveryItem(key = subject.id, title = subject.title, year = year,
+                                episodeCount = subject.episodeCount, subject = subject)
+                            combineAnimeDiscoveryItems(listOf(work), candidates).firstOrNull { it.subject?.id == subject.id }
+                                ?.reference?.let { reference -> candidates.singleOrNull { it.reference == reference } }
+                        }
+                        val ids = item?.reference?.externalIds.orEmpty()
+                        ids["anilist"]?.toIntOrNull()?.let { id ->
+                            AnimeAniListMatch(id, ids["myanimelist"]?.toIntOrNull(),
+                                item?.rating?.takeIf { it in 1.0..100.0 })
+                        }
                     }
                 } finally { http.close() }
             } ?: return null
             checkRoute(query, route)
-            cache.write(key, JSONObject().put("score", score.rating).toString(), generation)
+            cache.write(key, JSONObject().put("id", match.id).put("idMal", match.malId)
+                .put("score", match.rating).toString(), generation)
             checkRoute(query, route)
-            score
+            match
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: Exception) {

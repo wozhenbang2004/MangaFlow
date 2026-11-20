@@ -138,12 +138,14 @@ internal fun AnimePlayerPane(
     var holdingFast by remember { mutableStateOf(false) }
     var settingsVisible by remember { mutableStateOf(false) }
     var settingsPresent by remember { mutableStateOf(false) }
+    var discussionEpisode by remember(detail?.subject?.id) { mutableStateOf<AnimeEpisode?>(null) }
+    var discussionVisible by remember(detail?.subject?.id) { mutableStateOf(false) }
     var settingsSection by remember { mutableStateOf(AnimePlayerPanel.GENERAL) }
     var settingsEnhancementPage by remember { mutableStateOf(EnhancementPage.QUALITY) }
     var interactionEpoch by remember { mutableIntStateOf(0) }
     val awaitingVideo = playback.firstFrameRendered == false && playback.hasVideoTracks != false
     val requiredControls = state.resolving || failure != null || awaitingVideo ||
-        playback.phase != AnimePlayerPhase.READY || !playback.playWhenReady || obscured || settingsPresent ||
+        playback.phase != AnimePlayerPhase.READY || !playback.playWhenReady || obscured || settingsPresent || discussionVisible ||
         state.notice != null || touchExploration
     val forceControls = requiredControls || headerFocused || transportFocused || centerFocused
     val showChrome = !playback.inPictureInPicture && (!locked || touchExploration) &&
@@ -204,7 +206,9 @@ internal fun AnimePlayerPane(
     }
     LaunchedEffect(canControl) { if (!canControl) { transportFocused = false; centerFocused = false } }
     LaunchedEffect(playback.inPictureInPicture) {
-        if (playback.inPictureInPicture) { settingsVisible = false; settingsPresent = false; locked = false }
+        if (playback.inPictureInPicture) {
+            settingsVisible = false; settingsPresent = false; discussionVisible = false; locked = false
+        }
     }
     MotionBackHandler(active && locked && !obscured, state = null, onBack = { locked = false; interact() })
     LaunchedEffect(fullscreen, controlsVisible, forceControls, controlsHeld, interactionEpoch, active) {
@@ -241,7 +245,7 @@ internal fun AnimePlayerPane(
             .onKeyEvent { event ->
                 // Focused buttons and the native slider get first refusal.
                     if (!active || event.isCtrlPressed || event.isAltPressed || event.isMetaPressed ||
-                    event.type != KeyEventType.KeyUp || obscured || settingsPresent || playback.inPictureInPicture) false
+                    event.type != KeyEventType.KeyUp || obscured || settingsPresent || discussionVisible || playback.inPictureInPicture) false
                 else if (locked) { if (event.key == Key.Escape) { locked = false; true } else false }
                 else when (event.key) {
                     Key.Spacebar -> { toggle(); true }
@@ -441,9 +445,15 @@ internal fun AnimePlayerPane(
                             modifier = Modifier.size(44.dp), tooltip = "锁定触控") {
                             Icon(Icons.Outlined.LockOpen, "锁定触控", Modifier.size(20.dp))
                         }
-                        if (episode != null) MotionIconButton(onClick = ::showSources, modifier = Modifier.size(44.dp),
-                            tooltip = "来源与线路") {
-                            Icon(Icons.Outlined.SwapHoriz, "来源与线路", Modifier.size(20.dp))
+                        if (episode != null) MotionTextButton(onClick = ::showSources, modifier = Modifier.heightIn(min = 44.dp)) {
+                            Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("换线路", maxLines = 1)
+                        }
+                        if (episode != null) MotionIconButton(onClick = {
+                            interact(); discussionEpisode = episode; discussionVisible = true
+                        }, modifier = Modifier.size(44.dp), tooltip = "本集讨论") {
+                            Icon(Icons.Outlined.Forum, "本集讨论", Modifier.size(20.dp))
                         }
                         if (desktop && !fillVideo && detail != null) {
                             val label = if (episodesVisible) "收起选集" else "展开选集"
@@ -549,6 +559,13 @@ internal fun AnimePlayerPane(
             onDismiss = { settingsVisible = false; interact() }, onClosed = { settingsPresent = false },
             onPlayDownload = onPlayDownload, onSources = onSources, initialEnhancementPage = settingsEnhancementPage,
             onStorage = onStorage)
+        discussionEpisode?.let { focused ->
+            val reference = detail?.subject?.takeIf { it.canonicalBangumiId() != null } ?:
+                state.library.firstOrNull { it.subject.id == focused.subjectId }?.nativeMetadata
+            AnimeEpisodeDiscussionPanel(discussionVisible, focused, detail?.episodes.orEmpty(), reference?.id,
+                backdrop, controller, onDismiss = { discussionVisible = false; interact() },
+                onClosed = { if (!discussionVisible) discussionEpisode = null })
+        }
       }
     }
 }
@@ -576,8 +593,11 @@ private fun AnimeVideoStatus(
     when {
         resolving -> Column(Modifier.padding(horizontal = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             PlayerStageMessage(if (autoMatching) "正在查找本集线路" else "正在打开本集", sourceName)
-            if (canKeepPlayback) MotionTextButton(onClick = onKeepPlayback, modifier = Modifier.heightIn(min = 44.dp)) {
-                Text("继续原线路", color = Color.White)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
+                if (canChooseSource) PlayerSwitchLine(onSources)
+                if (canKeepPlayback) MotionTextButton(onClick = onKeepPlayback, modifier = Modifier.heightIn(min = 44.dp)) {
+                    Text("继续原线路", color = Color.White)
+                }
             }
         }
         failure != null -> Column(Modifier.widthIn(max = 500.dp).verticalScroll(rememberScrollState())
@@ -608,8 +628,19 @@ private fun AnimeVideoStatus(
                 ) { Text(if (canKeepPlayback) "继续原线路" else "返回上次播放", color = Color.White) }
             }
         }
-        playback.phase == AnimePlayerPhase.IDLE || playback.phase == AnimePlayerPhase.OPENING ->
-            PlayerStageMessage(if (playback.recoveryAttempt > 0) "正在重新连接视频" else "正在打开视频", sourceName)
+        playback.phase == AnimePlayerPhase.IDLE || playback.phase == AnimePlayerPhase.OPENING ||
+            playback.phase == AnimePlayerPhase.READY && awaitingVideo ->
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                val stage = when {
+                    playback.recoveryAttempt > 0 -> "正在重新连接视频"
+                    playback.phase != AnimePlayerPhase.READY -> "正在打开视频"
+                    !playback.playWhenReady -> "已暂停"
+                    playback.isBuffering -> "正在缓冲首帧"
+                    else -> "正在等待画面"
+                }
+                PlayerStageMessage(stage, sourceName)
+                if (canChooseSource) PlayerSwitchLine(onSources)
+            }
         playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && playback.hasVideoTracks == false ->
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 PlayerStageMessage("这条线路只有音频", null)
@@ -618,9 +649,6 @@ private fun AnimeVideoStatus(
                     Text("换条线路", color = Color.White)
                 }
             }
-        playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && awaitingVideo ->
-            PlayerStageMessage(if (playback.playWhenReady) "正在等待画面" else "已暂停", null)
-        playback.isBuffering && awaitingVideo -> PlayerStageMessage("正在缓冲首帧", sourceName)
         showBuffering -> Text("正在缓冲", Modifier.clip(RoundedCornerShape(14.dp))
             .background(Color.Black.copy(alpha = .72f)).padding(horizontal = 14.dp, vertical = 8.dp)
             .semantics { liveRegion = LiveRegionMode.Polite }, color = Color.White,
@@ -631,6 +659,15 @@ private fun AnimeVideoStatus(
             if (next != null) MotionButton(onClick = { onEpisode(next) }, shape = shape,
                 modifier = Modifier.heightIn(min = 44.dp)) { Text(if (nextReady) "播放下一集" else "查看下一集来源") }
         }
+    }
+}
+
+@Composable
+private fun PlayerSwitchLine(onSources: () -> Unit) {
+    MotionTextButton(onClick = onSources, modifier = Modifier.heightIn(min = 44.dp)) {
+        Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(18.dp), tint = Color.White)
+        Spacer(Modifier.width(4.dp))
+        Text("换线路", color = Color.White)
     }
 }
 

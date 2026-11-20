@@ -33,6 +33,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.net.DownloadRouteMode
@@ -164,19 +165,20 @@ internal fun AnimeSourcesPanel(
         it.subjectId == subjectId && it.episodeId == focusEpisode?.id
     }
     val measuring = measurementBatch?.running == true
+    val playerPhase by controller.playbackPhase.collectAsStateWithLifecycle()
     fun measureSources(force: Boolean = false) {
         if (focusEpisode != null) controller.measureEpisodeSources(focusEpisode.id, force = force)
         else controller.measureWorkSources(force = force)
     }
     val motion = LocalMotionEnabled.current
     LaunchedEffect(visible, subjectId, focusEpisode?.id) {
-        if (visible && focusEpisode != null) controller.verifyEpisodeSources(focusEpisode.id)
+        if (visible && subjectId != null) controller.verifyEpisodeSources(focusEpisode?.id)
     }
     // Opening the source sheet automatically verifies a small amount of actual media data.
     // Catalog updates trigger another pass; the controller caches each line/route for five minutes.
     LaunchedEffect(visible, subjectId, focusEpisode?.id, state.episodeOptions, state.sourceRoutes,
         state.sourceBindings, state.sourceCatalogs, state.sourceCatalogErrors, state.sourceAggregationRunning,
-        state.sourceExtensions, state.resolving, state.autoMatching, state.settings.preferredSourceHeight, recovering) {
+        state.sourceExtensions, state.resolving, state.autoMatching, state.settings.preferredSourceHeight, recovering, playerPhase) {
         // The controller admits new rows into a manual batch even while playback is recovering.
         // Background samples still yield to opening/buffering there.
         if (visible && subjectId != null) measureSources()
@@ -228,18 +230,20 @@ internal fun AnimeSourcesPanel(
                             previewing -> "确认作品关联"
                             else -> "播放来源"
                         }, style = MaterialTheme.typography.titleMedium)
-                        val context = if (previewing) subject?.title else focusEpisode?.let(::animeEpisodeLabel) ?: subject?.title
-                        if (!context.isNullOrBlank()) Text(context, style = MaterialTheme.typography.labelSmall,
+                        val context = listOfNotNull(subject?.title, focusEpisode?.takeUnless { previewing }?.let(::animeEpisodeLabel))
+                            .joinToString(" · ")
+                        if (context.isNotBlank()) Text(context, style = MaterialTheme.typography.labelSmall,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (!previewing && subjectId != null) {
                         if (measuring) Box(Modifier.size(44.dp).semantics { contentDescription = "正在预探测来源画质与媒体网络" },
                             contentAlignment = Alignment.Center) { MotionBusyIndicator(Modifier.size(17.dp), strokeWidth = 1.5.dp) }
                         else MotionIconButton(onClick = {
-                            // First refresh incomplete associations; only validated per-episode lines are probed.
-                            if (state.sourceAggregation.isEmpty() || state.sourceAggregation.values.any { it.phase != AnimeAssociationPhase.LINKED &&
-                                    it.phase != AnimeAssociationPhase.EXCLUDED })
-                                controller.verifyEpisodeSources(focusEpisode?.id, retry = true)
+                            controller.verifyEpisodeSources(focusEpisode?.id, retryFailed = true)
+                            bindings.filter { binding ->
+                                state.sourceAggregation[binding.catalog.sourceId]?.phase == AnimeAssociationPhase.LINKED &&
+                                    (binding.catalog.referenceKey() !in catalogs || binding.catalog.sourceId in state.sourceCatalogErrors)
+                            }.forEach { controller.refreshSource(it.catalog.sourceId) }
                             measureSources(force = true)
                         },
                             enabled = visible && state.sourceMeasurements?.running != true,
@@ -346,7 +350,7 @@ internal fun AnimeSourcesPanel(
                                 if (focusEpisode == null) " · 各源采样一集" else " · 当前集",
                                 Modifier.padding(start = 8.dp, bottom = 2.dp))
                             if (unavailable > 0 || stopped > 0) AnimeQuietLabel(listOfNotNull(
-                                "$unavailable 个暂不可测".takeIf { unavailable > 0 },
+                                "$unavailable 个待重试".takeIf { unavailable > 0 },
                                 "$stopped 个已停止".takeIf { stopped > 0 }).joinToString(" · "),
                                 Modifier.padding(start = 8.dp, bottom = 2.dp))
                         }
@@ -440,9 +444,19 @@ internal fun AnimeSourcesPanel(
                             }
                             val sample = workSamples[sourceId]
                             val measurementProgress = measurementBatch?.sources?.get(sourceId)
-                            val sampleEpisode = sample?.let { animeEpisodeLabel(it.episode) }
+                            val probeLine = focusEpisode?.let { episode ->
+                                val primary = line?.let { controller.playbackMeasurements(episode.id, it) }
+                                if (primary?.mediaVerified == true || primary?.playbackObservedAt != null) line
+                                else measurementProgress?.lines?.firstOrNull { candidate ->
+                                    lines.any { controller.samePlaybackLine(it, candidate) } &&
+                                        controller.playbackMeasurements(episode.id, candidate)?.mediaVerified == true
+                                } ?: line
+                            }
+                            val sampleEpisode = sample?.let { animeEpisodeLabel(it.episode) } ?: probeLine
+                                ?.takeIf { line != null && !controller.samePlaybackLine(it, line) }
+                                ?.episode?.group?.takeIf(String::isNotBlank)?.let(::animeSourceGroupLabel)
                             val measurements = if (focusEpisode == null) sample?.measurements
-                                else line?.let { controller.playbackMeasurements(focusEpisode.id, it) }
+                                else probeLine?.let { controller.playbackMeasurements(focusEpisode.id, it) }
                             val routeLabel = when (state.sourceRoutes[sourceId]) {
                                 DownloadRouteMode.DIRECT -> "直连"
                                 DownloadRouteMode.PROXY -> "代理"

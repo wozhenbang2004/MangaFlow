@@ -20,7 +20,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -35,7 +34,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -69,7 +67,8 @@ import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.CompactMenuAction
-import dev.mangaflow.ui.CommunityComment
+import dev.mangaflow.ui.CommunityPanel
+import dev.mangaflow.data.ReviewPage
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.ReviewSourceMark
@@ -96,16 +95,15 @@ internal fun AnimeDetailPane(
     val nativeSource = subject.externalIds["native-source"]
     val native = nativeSource != null
     val currentDiscussion by controller.discussion.state.collectAsStateWithLifecycle()
-    val discussion = currentDiscussion.takeIf { it.subjectId == subject.id && it.available }
-    val uriHandler = LocalUriHandler.current
-    var selectedDetailTab by rememberSaveable(subject.id, "detail-sections") { mutableIntStateOf(0) }
-    var discussionLinkError by remember(subject.id) { mutableStateOf(false) }
-    val detailTab = selectedDetailTab.takeIf { it < 2 || discussion != null } ?: 0
-    val commentsVisible = active && discussion != null && detailTab == 2
+    val discussion = currentDiscussion.takeIf { it.subjectId == subject.id }
+    var detailTab by rememberSaveable(subject.id, "detail-sections") { mutableIntStateOf(0) }
+    var discussionFilter by remember(subject.id) { mutableStateOf(false) }
+    val commentsVisible = active && detailTab == 2
     DisposableEffect(controller, subject.id, commentsVisible) {
         if (commentsVisible) controller.discussion.setVisible(subject.id, true)
         onDispose { if (commentsVisible) controller.discussion.setVisible(subject.id, false) }
     }
+    val detailTabs = listOf("剧集", "简介", "评论")
     val bindings = remember(state.sourceBindings, subject.id) {
         state.sourceBindings.filter { it.subjectId == subject.id }
     }
@@ -174,6 +172,45 @@ internal fun AnimeDetailPane(
         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
         val horizontal = if (maxWidth >= 720.dp) 28.dp else 16.dp
         val contentWidth = minOf(maxWidth, 1080.dp)
+        if (detailTab == 2) {
+            val commentSources = discussion?.sources.orEmpty()
+            Column(Modifier.widthIn(max = 1080.dp).fillMaxSize().padding(top = 10.dp)) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = horizontal),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    AnimeChoiceStrip(detailTabs, detailTab, onSelect = { detailTab = it }, active = active,
+                        modifier = Modifier.weight(1f).widthIn(max = 400.dp))
+                    if (commentSources.isNotEmpty()) {
+                        MotionIconButton(onClick = {
+                            commentSources.forEach { controller.discussion.retry(subject.id, it.id) }
+                            if (discussion?.matching != true) controller.discussion.retryMatch(subject.id)
+                        }, enabled = active && commentSources.none { it.loadingMore },
+                            modifier = Modifier.size(44.dp), tooltip = "刷新评论") {
+                            Icon(Icons.Outlined.Refresh, "刷新评论", Modifier.size(19.dp))
+                        }
+                        MotionIconButton(onClick = { discussionFilter = true }, enabled = active,
+                            modifier = Modifier.size(44.dp), tooltip = "筛选评论") {
+                            Icon(Icons.Outlined.Tune, "筛选评论", Modifier.size(19.dp))
+                        }
+                    }
+                }
+                if (native && nativeMetadata == null) {
+                    Box(Modifier.padding(horizontal = horizontal, vertical = 8.dp)) {
+                        AnimeDetailStatus("关联这部番后即可看评论", Icons.Outlined.Info,
+                            detail = "选择对应作品和季度，评论会显示在这里。",
+                            actionLabel = "关联 Bangumi", onAction = { detailTab = 1 })
+                    }
+                } else {
+                    CommunityPanel(mangaId = "anime:${subject.id}", sources = commentSources,
+                        loading = discussion == null || discussion.matching,
+                        onMore = { controller.discussion.loadMore(subject.id, it) },
+                        onRetry = { controller.discussion.retry(subject.id, it) },
+                        onMatch = { _, _ -> }, onRelink = {}, loadReplies = { _, _, _ -> ReviewPage(emptyList()) },
+                        modifier = Modifier.weight(1f), backdrop = backdrop, active = active,
+                        filterOpen = discussionFilter, onFilterDismiss = { discussionFilter = false })
+                }
+            }
+            return@BoxWithConstraints
+        }
         val columns = ((contentWidth - horizontal * 2).value / ((if (desktop) 100f else 78f) * fontScale))
             .toInt().coerceIn(1, 8)
         val episodeRows = remember(episodes, columns) { episodes.chunked(columns) }
@@ -219,8 +256,7 @@ internal fun AnimeDetailPane(
                 )
             }
             item(key = "detail-tabs") {
-                val labels = if (discussion != null) listOf("剧集", "简介", "评论") else listOf("剧集", "简介")
-                AnimeChoiceStrip(labels, detailTab, onSelect = { selectedDetailTab = it },
+                AnimeChoiceStrip(detailTabs, detailTab, onSelect = { detailTab = it },
                     active = active, modifier = Modifier.widthIn(max = 400.dp).padding(vertical = 4.dp))
             }
             if (detailTab == 1) {
@@ -252,52 +288,6 @@ internal fun AnimeDetailPane(
                     items(state.relatedSubjects, key = { "related:" + it.id }) { related ->
                         AnimeSubjectRow(related, animeSubjectSummary(related), onOpen = { onOpenRelated(related) })
                     }
-                }
-                return@LazyColumn
-            }
-            if (discussion != null && detailTab == 2) {
-                item(key = "comments-heading") {
-                    AnimeSectionTitle("Bangumi 讨论", discussion.total?.let { "$it 条评论" }) {
-                        Row {
-                            if (discussion.error == null) MotionIconButton(
-                                onClick = { controller.discussion.retry(subject.id) },
-                                enabled = active && !discussion.loading && !discussion.loadingMore,
-                                modifier = Modifier.size(44.dp), tooltip = "刷新评论",
-                            ) { Icon(Icons.Outlined.Refresh, null, Modifier.size(18.dp)) }
-                            discussion.sourceUrl?.takeIf(String::isNotBlank)?.let { url ->
-                                MotionIconButton(onClick = {
-                                    discussionLinkError = runCatching { uriHandler.openUri(url) }.isFailure
-                                }, enabled = active,
-                                    modifier = Modifier.size(44.dp), tooltip = "在 Bangumi 查看") {
-                                    Icon(Icons.Outlined.OpenInNew, null, Modifier.size(18.dp))
-                                }
-                            }
-                        }
-                    }
-                }
-                items(discussion.items, key = { "comment:${it.id}" }) { review ->
-                    Column {
-                        CommunityComment(review, Modifier.padding(vertical = 6.dp), sourceId = "bangumi")
-                        HorizontalDivider(Modifier.padding(start = 36.dp),
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .6f))
-                    }
-                }
-                item(key = "comments-status") {
-                    if (discussionLinkError) AnimeQuietLabel("暂时无法打开 Bangumi 页面")
-                    when {
-                        discussion.error != null -> AnimeDiscoveryInlineStatus(discussion.error,
-                            retry = { controller.discussion.retry(subject.id) }.takeIf { active })
-                        discussion.loading || discussion.loadingMore || !discussion.loaded -> AnimeDetailStatus(
-                            if (discussion.items.isEmpty()) "正在读取评论" else "正在更新评论",
-                            Icons.Outlined.Info, loading = true,
-                        )
-                        discussion.items.isEmpty() -> AnimeQuietLabel("暂无评论")
-                    }
-                    if (discussion.hasMore && discussion.error == null) MotionTextButton(
-                        onClick = { controller.discussion.loadMore(subject.id) },
-                        enabled = active && !discussion.loading && !discussion.loadingMore,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
-                    ) { Text("加载更多评论") }
                 }
                 return@LazyColumn
             }

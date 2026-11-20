@@ -246,6 +246,7 @@ internal data class AnimePlaybackMeasurements(
     val mediaVerified: Boolean? = null,
     val mediaFailure: String? = null,
     val mediaQuality: String? = null,
+    val mediaHeaderHeight: Int? = null,
     val mediaSampleBytesPerSecond: Long? = null,
     val mediaSampleMs: Long? = null,
 )
@@ -316,7 +317,7 @@ data class AnimeNextEpisodePreparation(
     val detail: String? = null,
 )
 
-enum class AnimeSourceMeasurementPhase { QUEUED, RUNNING, COMPLETE, UNAVAILABLE, CANCELLED }
+enum class AnimeSourceMeasurementPhase { QUEUED, RUNNING, COMPLETE, WAITING_CATALOG, NO_EPISODE, UNAVAILABLE, CANCELLED }
 
 data class AnimeSourceMeasurementProgress(
     val episodeId: String?,

@@ -715,45 +715,9 @@ class ReviewRepository(context: Context) {
 
     private suspend fun aniListReviews(id: Int, page: Int): ReviewPage {
         val url = "https://anilist.co/manga/$id"
-        val query = """
-            query MangaReviews(${'$'}id: Int!, ${'$'}page: Int!, ${'$'}perPage: Int!) {
-              Media(id: ${'$'}id, type: MANGA) {
-                id
-                reviews(page: ${'$'}page, perPage: ${'$'}perPage, sort: [ID_DESC]) {
-                  pageInfo { hasNextPage }
-                  nodes { id summary body(asHtml: false) score private createdAt user { name avatar { large medium } } }
-                }
-              }
-            }
-        """.trimIndent()
-        val media = graphql(query, JSONObject().put("id", id).put("page", page + 1).put("perPage", PAGE_SIZE), url)
+        val media = graphql(aniListReviewQuery(anime = false), aniListReviewVariables(id, page), url)
             .optJSONObject("Media") ?: throw SourceException("AniList 长评暂时没有返回有效数据。", url)
-        if (media.optInt("id") != id) throw SourceException("AniList 长评的漫画归属不一致。", url)
-        val connection = media.optJSONObject("reviews") ?: throw SourceException("AniList 长评暂时不可用。", url)
-        val rows = connection.optJSONArray("nodes") ?: throw SourceException("AniList 长评暂时没有返回有效数据。", url)
-        val info = connection.optJSONObject("pageInfo") ?: throw SourceException("AniList 没有返回评论分页信息。", url)
-        val more = info.opt("hasNextPage") as? Boolean ?: throw SourceException("AniList 没有返回评论分页信息。", url)
-        if (more && rows.length() == 0) {
-            throw SourceException("AniList 长评这一页暂时未能载入，请重试。", url)
-        }
-        val reviews = rows.objects().mapNotNull { review ->
-            if (review.optBoolean("private", false)) return@mapNotNull null
-            val reviewId = review.optInt("id")
-            val author = review.optJSONObject("user")?.text("name").orEmpty()
-            val heading = plainText(review.text("summary"), markdown = true)
-            val content = plainText(review.text("body"), markdown = true)
-            val excerpt = content.ifBlank { heading }
-            if (reviewId <= 0 || author.isBlank() || excerpt.isBlank()) return@mapNotNull null
-            // Review has no API spoiler flag. Hide whole-work long reviews conservatively.
-            MangaReview(id = reviewId.toString(), author = author, summary = excerpt.take(360),
-                url = "https://anilist.co/review/$reviewId", score = review.nullableScore("score", 100, allowZero = true),
-                scoreScale = 100, body = listOf(heading, content).filter(String::isNotBlank).distinct().joinToString("\n\n"),
-                date = date(review.optLong("createdAt", 0)), spoiler = true, kind = ReviewKind.REVIEW,
-                authorUrl = profileUrl("https://anilist.co", author),
-                avatarUrl = avatar(review.optJSONObject("user")?.optJSONObject("avatar"), setOf("anilist.co")))
-        }
-        // AniList documents PageInfo.total as inaccurate; do not present it as a review count.
-        return ReviewPage(reviews, total = null, nextPage = if (more) page + 1 else null)
+        return decodeAniListReviews(media, id, page, url)
     }
 
     private suspend fun withFirstPage(source: ReviewSource, load: suspend () -> ReviewPage): ReviewSource = try {
@@ -894,6 +858,80 @@ internal fun decodeBangumiComments(result: JSONObject, id: Int, page: Int): Revi
     }
     val more = if (total != null) offset + rows.length() < total else rows.length() == BANGUMI_COMMENT_PAGE_SIZE
     return ReviewPage(reviews, total, if (more && rows.length() > 0 && page < Int.MAX_VALUE) page + 1 else null)
+}
+
+internal data class BangumiEpisodeComments(val items: List<MangaReview>, val replies: Map<String, List<MangaReview>>)
+
+internal fun decodeBangumiEpisodeComments(rows: JSONArray, episodeId: Int): BangumiEpisodeComments {
+    val url = "https://bgm.tv/ep/$episodeId"
+    fun read(row: JSONObject, parent: Long): MangaReview? {
+        val id = row.optLong("id", 0L)
+        if (id <= 0L || row.optInt("mainID") != episodeId || row.optLong("relatedID", -1L) != parent) return null
+        val raw = row.text("content")
+        val content = plainText(raw)
+        if (content.isBlank()) return null
+        val user = row.optJSONObject("user")
+        val username = user?.text("username").orEmpty()
+        return MangaReview(id.toString(), user?.text("nickname").orEmpty().ifBlank { username }.ifBlank { "未署名" },
+            content.take(360), url, body = content, date = date(row.optLong("createdAt", 0L)),
+            spoiler = hasSpoilerMarkup(raw), kind = ReviewKind.CHAPTER,
+            authorUrl = username.takeIf(String::isNotBlank)?.let { profileUrl("https://bgm.tv", it) }.orEmpty(),
+            avatarUrl = avatar(user?.optJSONObject("avatar"), setOf("lain.bgm.tv")))
+    }
+    val threads = rows.objects().mapNotNull { row ->
+        val review = read(row, 0L) ?: return@mapNotNull null
+        val replies = row.optJSONArray("replies")?.objects().orEmpty()
+            .mapNotNull { read(it, row.optLong("id", 0L)) }.distinctBy(MangaReview::id)
+        review.copy(replyCount = replies.size.takeIf { it > 0 }) to replies
+    }.distinctBy { it.first.id }
+    return BangumiEpisodeComments(threads.map { it.first }, threads.associate { it.first.id to it.second })
+}
+
+internal fun aniListReviewQuery(anime: Boolean): String {
+    val type = if (anime) "ANIME" else "MANGA"
+    return """
+        query WorkReviews(${'$'}id: Int!, ${'$'}page: Int!, ${'$'}perPage: Int!) {
+          Media(id: ${'$'}id, type: $type) {
+            id
+            reviews(page: ${'$'}page, perPage: ${'$'}perPage, sort: [ID_DESC]) {
+              pageInfo { hasNextPage }
+              nodes { id summary body(asHtml: false) score private createdAt user { name avatar { large medium } } }
+            }
+          }
+        }
+    """.trimIndent()
+}
+
+internal fun aniListReviewVariables(id: Int, page: Int): JSONObject =
+    JSONObject().put("id", id).put("page", page + 1).put("perPage", 20)
+
+internal fun decodeAniListReviews(media: JSONObject, id: Int, page: Int, url: String): ReviewPage {
+    if (media.optInt("id") != id) throw SourceException("AniList 长评的作品归属不一致。", url)
+    val connection = media.optJSONObject("reviews") ?: throw SourceException("AniList 长评暂时不可用。", url)
+    val rows = connection.optJSONArray("nodes") ?: throw SourceException("AniList 长评暂时没有返回有效数据。", url)
+    val info = connection.optJSONObject("pageInfo") ?: throw SourceException("AniList 没有返回评论分页信息。", url)
+    val more = info.opt("hasNextPage") as? Boolean ?: throw SourceException("AniList 没有返回评论分页信息。", url)
+    if (more && rows.length() == 0) {
+        throw SourceException("AniList 长评这一页暂时未能载入，请重试。", url)
+    }
+    val reviews = rows.objects().mapNotNull { review ->
+        if (review.optBoolean("private", false)) return@mapNotNull null
+        val reviewId = review.optInt("id")
+        val author = review.optJSONObject("user")?.text("name").orEmpty()
+        val heading = plainText(review.text("summary"), markdown = true)
+        val content = plainText(review.text("body"), markdown = true)
+        val excerpt = content.ifBlank { heading }
+        if (reviewId <= 0 || author.isBlank() || excerpt.isBlank()) return@mapNotNull null
+        // Review has no API spoiler flag. Hide whole-work long reviews conservatively.
+        MangaReview(id = reviewId.toString(), author = author, summary = excerpt.take(360),
+            url = "https://anilist.co/review/$reviewId", score = review.nullableScore("score", 100, allowZero = true),
+            scoreScale = 100, body = listOf(heading, content).filter(String::isNotBlank).distinct().joinToString("\n\n"),
+            date = date(review.optLong("createdAt", 0)), spoiler = true, kind = ReviewKind.REVIEW,
+            authorUrl = profileUrl("https://anilist.co", author),
+            avatarUrl = avatar(review.optJSONObject("user")?.optJSONObject("avatar"), setOf("anilist.co")))
+    }
+    // AniList documents PageInfo.total as inaccurate; do not present it as a review count.
+    return ReviewPage(reviews, total = null, nextPage = if (more) page + 1 else null)
 }
 
 private fun avatar(value: JSONObject?, domains: Set<String>): String = sequenceOf("medium", "large", "small")

@@ -102,7 +102,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     internal val searchState = unifiedSearch.state
     private val discovery = AnimeDiscoveryRepository(context)
     val sourceBrowse = AnimeSourceBrowseController(context, scope, sources)
-    internal val discussion by lazy { AnimeDiscussionController(context, scope) }
+    internal val discussion by lazy { AnimeDiscussionController(context, scope, discovery, metadata) }
     private val tracking = AnimeTrackingRepository(context)
     private val library = AnimeLibraryStore.get(context)
     private val routing = DownloadRoutingStore.get(context)
@@ -1645,9 +1645,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         mutableState.value.detail?.let { startSourceAggregation(it, force = true) }
     }
 
-    internal fun verifyEpisodeSources(episodeId: String?, retry: Boolean = false, sourceId: String? = null) {
+    internal fun verifyEpisodeSources(episodeId: String?, retry: Boolean = false, sourceId: String? = null,
+        retryFailed: Boolean = false) {
         mutableState.value.detail?.let {
-            startSourceAggregation(it, force = retry, episodeId = episodeId, onlySourceId = sourceId)
+            startSourceAggregation(it, force = retry, retryFailed = retryFailed, episodeId = episodeId, onlySourceId = sourceId)
         }
     }
 
@@ -1826,6 +1827,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             mediaVerified = data.mediaVerified.takeIf { media != null },
             mediaFailure = data.mediaFailure.takeIf { media != null },
             mediaQuality = data.mediaQuality.takeIf { media != null },
+            mediaHeaderHeight = data.mediaHeaderHeight.takeIf { media != null },
             mediaSampleBytesPerSecond = data.mediaSampleBytesPerSecond.takeIf { media != null },
             mediaSampleMs = data.mediaSampleMs.takeIf { media != null })
     }
@@ -1852,6 +1854,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         line: AnimeEpisodeOption,
         revision: String,
         route: DownloadRouteSnapshot,
+        onResolved: (elapsedMs: Long, quality: String?, observedAt: Long) -> Unit,
         current: () -> Boolean,
     ): PlaybackProbe? {
         if (!current()) return null
@@ -1887,10 +1890,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         val elapsed = (monotonicTimeMillis() - startedAt).coerceAtLeast(0L)
         val selected = preferredSourceAsset(asset, line.episode, preferredHeight)
+        val quality = declaredPlaybackQuality(selected)
+        if (mutableState.value.settings.preferredSourceHeight != preferredHeight) return null
+        onResolved(elapsed, quality, addressAt)
         val media = try { inspectAnimeMediaBeforePlayback(selected) }
             catch (cancel: CancellationException) { throw cancel }
             catch (_: Exception) { AnimeMediaPreflight(wallTimeMillis(), failure = "本集未取得限量媒体样本") }
-        return PlaybackProbe(addressAt, elapsed, declaredPlaybackQuality(selected), media, preferredHeight)
+        return PlaybackProbe(addressAt, elapsed, quality, media, preferredHeight)
             .takeIf { current() && mutableState.value.settings.preferredSourceHeight == preferredHeight }
     }
 
@@ -1901,6 +1907,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             mediaObservedAt = media.observedAt, mediaPreferredHeight = probe.preferredHeight,
             mediaHttpStatus = media.httpStatus, mediaVerified = media.verified,
             mediaFailure = media.failure, mediaQuality = media.quality,
+            mediaHeaderHeight = media.headerHeight,
             mediaSampleBytesPerSecond = media.sampleBytesPerSecond, mediaSampleMs = media.elapsedMs) }
     }
 
@@ -1952,7 +1959,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 val catalog = mutableState.value.sourceCatalogs.firstOrNull {
                     it.title.sourceId == line.sourceId && it.title.id == line.catalog.id && it.title.url == line.catalog.url
                 } ?: return null to "来源目录已变化，请重新测速。"
-                val probe = probePlaybackLine(provider, catalog, line, revision, key.route) {
+                val probe = probePlaybackLine(provider, catalog, line, revision, key.route, onResolved = { elapsed, quality, at ->
+                    storePlaybackMeasurements(key, line) { it.copy(addressMs = elapsed,
+                        declaredQuality = quality, addressObservedAt = at) }
+                }) {
                     current() && discoverySourceRevision(line.sourceId) == revision &&
                         playbackHistoryRoute(line.sourceId) == key.route && currentPlaybackLine(target.episodeId, line) != null
                 } ?: return null to "线路或画质设置已变化，请重新测速。"
@@ -1980,15 +1990,15 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                     (onlyLine == null || samePlaybackLine(it, onlyLine))
                             }
                             fairPlaybackOptions(detail.subject.id, episode.id, options).groupBy { it.sourceId }.forEach { (id, lines) ->
-                                val ordered = if (sourceMeasurementsUserRequested) lines else lines.sortedByDescending {
-                                    playbackMeasurements(episode.id, it)?.mediaObservedAt != null
-                                }
-                                targets[id] = SourceMeasurementTarget(episode.id, ordered.take(2))
+                                targets[id] = SourceMeasurementTarget(episode.id, lines.take(2))
                             }
                         }
                         val pending = targets.filterKeys { it !in scheduled }.mapValues { (_, target) ->
                             val cachedSuccess = !sourceMeasurementsUserRequested && target.lines.any {
-                                playbackMeasurements(target.episodeId, it)?.mediaVerified == true
+                                playbackMeasurements(target.episodeId, it)?.let { sample ->
+                                    sample.playbackObservedAt != null || sample.mediaVerified == true &&
+                                        (sample.mediaQuality != null || sample.mediaHeaderHeight != null || sample.mediaSampleBytesPerSecond != null)
+                                } == true
                             }
                             target.copy(lines = if (cachedSuccess) emptyList() else target.lines.filter {
                                 sourceMeasurementsUserRequested || playbackMeasurements(target.episodeId, it)?.mediaObservedAt == null
@@ -1999,19 +2009,19 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             previous[id]?.takeIf { id in scheduled } ?: run {
                                 val target = targets[id]
                                 val extension = latest.sourceExtensions.firstOrNull { it.id == id }
-                                val reason = when {
-                                    target != null -> null
-                                    extension != null && (!extension.installed || !extension.enabled) -> "来源已停用，启用后可测速。"
-                                    latest.sourceCatalogErrors[id] != null -> "来源目录读取失败，展开来源可重试。"
-                                    latest.sourceCatalogs.none { it.title.sourceId == id } -> "来源目录尚未就绪，读取完成后继续。"
-                                    episodeId == null -> "尚无已确认对应的剧集，不能用其他作品代测。"
-                                    else -> "本集尚无已确认的线路，不能用其他集代测。"
+                                val (phase, reason) = when {
+                                    id in pending -> AnimeSourceMeasurementPhase.QUEUED to null
+                                    target != null -> AnimeSourceMeasurementPhase.COMPLETE to null
+                                    extension != null && (!extension.installed || !extension.enabled) ->
+                                        AnimeSourceMeasurementPhase.UNAVAILABLE to "来源已停用，启用后可探测。"
+                                    latest.sourceCatalogErrors[id] != null ->
+                                        AnimeSourceMeasurementPhase.UNAVAILABLE to "目录读取失败，展开来源可重试。"
+                                    latest.sourceCatalogs.none { it.title.sourceId == id } ->
+                                        AnimeSourceMeasurementPhase.WAITING_CATALOG to "来源目录就绪后自动探测。"
+                                    else -> AnimeSourceMeasurementPhase.NO_EPISODE to
+                                        if (episodeId == null) "该来源还没有已对应的剧集。" else "本集还没有已对应的线路。"
                                 }
-                                AnimeSourceMeasurementProgress(target?.episodeId, when {
-                                    target == null -> AnimeSourceMeasurementPhase.UNAVAILABLE
-                                    id in pending -> AnimeSourceMeasurementPhase.QUEUED
-                                    else -> AnimeSourceMeasurementPhase.COMPLETE
-                                }, reason, target?.lines.orEmpty())
+                                AnimeSourceMeasurementProgress(target?.episodeId, phase, reason, target?.lines.orEmpty())
                             }
                         }
                         mutableState.update { it.copy(sourceMeasurements = AnimeSourceMeasurementBatch(
@@ -2034,7 +2044,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                         } catch (_: Exception) { null to "此线路检查未完成，可重新测速。" }
                                     }
                                     if (probe != null) { measured += option; failure = null } else failure = reason
-                                    if (probe?.media?.verified == true) break
+                                    val sample = probe?.media
+                                    if (sample?.verified == true &&
+                                        (sample.quality != null || sample.headerHeight != null || sample.sampleBytesPerSecond != null)) break
                                 }
                                 report(sourceId, if (measured.isNotEmpty()) AnimeSourceMeasurementPhase.COMPLETE
                                     else AnimeSourceMeasurementPhase.UNAVAILABLE, failure,

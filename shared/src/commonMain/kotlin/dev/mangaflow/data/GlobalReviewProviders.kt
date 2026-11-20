@@ -449,36 +449,9 @@ internal class MyAnimeListReviewProvider(private val http: ReviewProviderHttp) :
     override suspend fun page(id: String, page: Int): ReviewPage {
         val mangaId = requireDecimalId(id, name, homeUrl)
         if (page !in 0 until 20_000) throw SourceException("已达到 MyAnimeList 数据通道的分页上限。", mangaUrl(mangaId))
-        val url = "$API/manga/$mangaId/reviews".toHttpUrl().newBuilder()
-            .addQueryParameter("page", (page + 1).toString()).addQueryParameter("sort", "newest")
-            .addQueryParameter("spoilers", "true").addQueryParameter("preliminary", "true").build().toString()
-        val response = request(url, mangaUrl(mangaId))
-        val rows = response.requiredArray("data", name, mangaUrl(mangaId)).reviewObjects()
-        val items = rows.mapNotNull { record ->
-            if (!record.reviewText("type").equals("manga", ignoreCase = true)) {
-                throw SourceException("MyAnimeList 返回的评论类型不是漫画。", mangaUrl(mangaId))
-            }
-            val reviewId = decimalIdOrNull(record.reviewId("mal_id")) ?: return@mapNotNull null
-            val body = reviewPlainText(record.reviewText("review"))
-            if (body.isBlank()) return@mapNotNull null
-            val user = record.optJSONObject("user")
-            val images = user?.optJSONObject("images")
-            val avatar = listOf("webp", "jpg").firstNotNullOfOrNull { format ->
-                reviewAvatar(images?.optJSONObject(format)?.reviewText("image_url").orEmpty(), IMAGE_HOSTS).takeIf(String::isNotBlank)
-            }.orEmpty()
-            MangaReview(
-                id = reviewId, author = user?.reviewText("username").orEmpty().ifBlank { "匿名读者" },
-                summary = "", body = body,
-                url = trustedReviewUrl(record.reviewText("url"), HOSTS).ifBlank { mangaUrl(mangaId) },
-                score = record.reviewScore("score", 10), scoreScale = 10,
-                date = reviewDate(record.reviewText("date")), spoiler = record.optBoolean("is_spoiler", false),
-                kind = ReviewKind.REVIEW, authorUrl = trustedReviewUrl(user?.reviewText("url").orEmpty(), HOSTS), avatarUrl = avatar,
-                // chapters_read is progress, not review scope; reactions.overall includes non-positive reactions.
-            )
-        }
-        val paging = response.optJSONObject("pagination") ?: throw SourceException("MyAnimeList 长评分页资料缺失。", mangaUrl(mangaId))
-        if (paging.opt("has_next_page") !is Boolean) throw SourceException("MyAnimeList 长评分页资料格式已变化。", mangaUrl(mangaId))
-        return ReviewPage(items, nextPage = if (paging.optBoolean("has_next_page") && page < 19_999 && rows.isNotEmpty()) page + 1 else null)
+        val publicUrl = mangaUrl(mangaId)
+        return decodeMyAnimeListReviews(request(myAnimeListReviewRequestUrl(mangaId, page, anime = false), publicUrl),
+            page, publicUrl, mediaType = "manga")
     }
 
     private suspend fun request(url: String, publicUrl: String) = http.json(url, "MyAnimeList（Tenrai）", publicUrl)
@@ -491,9 +464,48 @@ internal class MyAnimeListReviewProvider(private val http: ReviewProviderHttp) :
     private companion object {
         const val API = "https://api.tenrai.org/v1"
         val HOSTS = setOf("myanimelist.net")
-        val IMAGE_HOSTS = setOf("myanimelist.net", "myanimelist.cdn-dena.com")
         val COMIC_TYPES = setOf("manga", "oneshot", "doujinshi", "manhwa", "manhua")
     }
+}
+
+private val MAL_REVIEW_HOSTS = setOf("myanimelist.net")
+private val MAL_REVIEW_IMAGE_HOSTS = setOf("myanimelist.net", "myanimelist.cdn-dena.com")
+
+internal fun myAnimeListReviewRequestUrl(id: String, page: Int, anime: Boolean): String {
+    require(decimalIdOrNull(id) != null && page in 0 until 20_000)
+    val type = if (anime) "anime" else "manga"
+    return "https://api.tenrai.org/v1/$type/$id/reviews".toHttpUrl().newBuilder()
+        .addQueryParameter("page", (page + 1).toString()).addQueryParameter("sort", "newest")
+        .addQueryParameter("spoilers", "true").addQueryParameter("preliminary", "true").build().toString()
+}
+
+internal fun decodeMyAnimeListReviews(response: JSONObject, page: Int, publicUrl: String, mediaType: String): ReviewPage {
+    val rows = response.requiredArray("data", "MyAnimeList", publicUrl).reviewObjects()
+    val items = rows.mapNotNull { record ->
+        if (!record.reviewText("type").equals(mediaType, ignoreCase = true)) {
+            throw SourceException("MyAnimeList 返回的评论类型与请求不一致。", publicUrl)
+        }
+        val reviewId = decimalIdOrNull(record.reviewId("mal_id")) ?: return@mapNotNull null
+        val body = reviewPlainText(record.reviewText("review"))
+        if (body.isBlank()) return@mapNotNull null
+        val user = record.optJSONObject("user")
+        val images = user?.optJSONObject("images")
+        val avatar = listOf("webp", "jpg").firstNotNullOfOrNull { format ->
+            reviewAvatar(images?.optJSONObject(format)?.reviewText("image_url").orEmpty(), MAL_REVIEW_IMAGE_HOSTS).takeIf(String::isNotBlank)
+        }.orEmpty()
+        MangaReview(
+            id = reviewId, author = user?.reviewText("username").orEmpty().ifBlank { "匿名读者" },
+            summary = "", body = body,
+            url = trustedReviewUrl(record.reviewText("url"), MAL_REVIEW_HOSTS).ifBlank { publicUrl },
+            score = record.reviewScore("score", 10), scoreScale = 10,
+            date = reviewDate(record.reviewText("date")), spoiler = record.optBoolean("is_spoiler", false),
+            kind = ReviewKind.REVIEW, authorUrl = trustedReviewUrl(user?.reviewText("url").orEmpty(), MAL_REVIEW_HOSTS), avatarUrl = avatar,
+            // chapters_read is progress, not review scope; reactions.overall includes non-positive reactions.
+        )
+    }
+    val paging = response.optJSONObject("pagination") ?: throw SourceException("MyAnimeList 长评分页资料缺失。", publicUrl)
+    if (paging.opt("has_next_page") !is Boolean) throw SourceException("MyAnimeList 长评分页资料格式已变化。", publicUrl)
+    return ReviewPage(items, nextPage = if (paging.optBoolean("has_next_page") && page < 19_999 && rows.isNotEmpty()) page + 1 else null)
 }
 
 private fun decimalIdOrNull(raw: String): String? = raw.takeIf { it.matches(Regex("[1-9][0-9]{0,18}")) && it.toLongOrNull() != null }

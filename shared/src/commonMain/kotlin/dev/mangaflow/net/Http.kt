@@ -181,9 +181,20 @@ class NetworkClient(
         }
         return NetworkResponse(response.first, response.second, ByteArray(0))
     }
+    /** Read at most the requested prefix even when a server ignores Range. */
+    internal suspend fun readPrefix(request: Request, maximumBytes: Int,
+        accept: (NetworkResponse) -> Boolean): NetworkResponse {
+        val body = Buffer()
+        val (code, headers) = transfer(request, maximumBytes.toLong(), { _, _ -> },
+            { bytes, count -> body.write(bytes, 0, count) }, prefixOnly = true) { status, values ->
+            accept(NetworkResponse(status, values, ByteArray(0)))
+        }
+        return NetworkResponse(code, headers, body.readByteArray())
+    }
     private suspend fun transfer(
         request: Request, maximumBytes: Long, progress: (Long, Long) -> Unit,
         write: suspend (ByteArray, Int) -> Unit, streaming: Boolean = false,
+        prefixOnly: Boolean = false,
         acceptResponse: (Int, Map<String, String>) -> Boolean = { _, _ -> true },
     ): Pair<Int, Map<String, String>> = coroutineScope {
         selectedRoute?.checkedActive()
@@ -230,19 +241,20 @@ class NetworkClient(
                 observedHeaders = responseHeaders
                 if (!acceptResponse(response.status.value, responseHeaders)) return@execute response.status.value to responseHeaders
                 val announced = response.headers["Content-Length"]?.toLongOrNull()
-                require(announced == null || announced <= maximumBytes) { "Response exceeds the size limit" }
+                require(prefixOnly || announced == null || announced <= maximumBytes) { "Response exceeds the size limit" }
                 val input = response.bodyAsChannel()
                 val buffer = ByteArray(16 * 1024)
                 var lastByteAt = monotonicTimeMillis()
                 progress(0, announced ?: -1)
-                while (!input.isClosedForRead) {
+                while (!input.isClosedForRead && (!prefixOnly || received < maximumBytes)) {
                     currentCoroutineContext().ensureActive()
+                    val length = if (prefixOnly) minOf(buffer.size.toLong(), maximumBytes - received).toInt() else buffer.size
                     val count = if (streaming) {
                         val remaining = STREAM_IDLE_TIMEOUT_MILLIS - (monotonicTimeMillis() - lastByteAt)
                         if (remaining <= 0L) throw streamIdleTimeout(received)
                         withTimeoutOrNull(remaining) { input.readAvailable(buffer) }
                             ?: throw streamIdleTimeout(received)
-                    } else input.readAvailable(buffer)
+                    } else input.readAvailable(buffer, 0, length)
                     if (count < 0) break
                     if (count == 0) continue
                     received += count
@@ -251,7 +263,7 @@ class NetworkClient(
                     lastByteAt = monotonicTimeMillis()
                     progress(received, announced ?: -1)
                 }
-                input.closedCause?.let { throw it }
+                if (!prefixOnly || received < maximumBytes) input.closedCause?.let { throw it }
                 response.status.value to responseHeaders
             }
         } catch (cancel: CancellationException) {

@@ -1,5 +1,11 @@
 # Lanerc feature transfer into MangaFlow
 
+## 片源探测、换线路与评论 · 2026-11-20
+
+- 取址和媒体探测分开更新。探测能读取忽略 Range 的服务器返回的限量视频前缀、HLS 子清单和片段、DASH 清单及样本内完整的 MP4 视频轨道。来源面板区分等待目录、本集未对应、HTTP 错误、媒体采样和实播数据。
+- 播放器在正常播放的控制栏、打开视频和缓冲首帧时都提供「换线路」。面板绑定当前集，打开时保留正在尝试的播放请求，选定线路后沿用同集切换和观看位置确认流程。
+- 番剧评论使用漫画的评论面板。Bangumi 作品短评、AniList 与 MyAnimeList 长评按各自确认的条目读取，分页及错误独立处理。原生片源可从评论页进入作品关联。播放页本集讨论使用 Bangumi 对应集的主题与回复。 [Bangumi 分集讨论接口](https://github.com/bangumi/server-private/blob/master/routes/private/routes/episode.ts) · [Tenrai 动画长评接口](https://api.tenrai.org/documentation)
+
 ## 起播与下一集接续 · 2026-11-20
 
 - 已确认的集数直接取址。快速线路拿到地址后立即交给播放器，其他线路同时取消。已经匹配的集数切换时不再重启后台全源核对。缺少可用线路时继续按当前集查找和恢复。

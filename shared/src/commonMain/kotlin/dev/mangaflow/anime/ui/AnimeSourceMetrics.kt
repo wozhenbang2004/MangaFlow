@@ -46,10 +46,12 @@ internal fun AnimeSourceMetricsStrip(measurements: AnimePlaybackMeasurements?, m
     val measured = width != null && height != null
     val declared = measurements?.let(::animeDeclaredQuality)
     val mediaQuality = measurements?.mediaQuality
-    val quality = if (measured) "${height}p" else mediaQuality ?: declared
+    val headerHeight = measurements?.mediaHeaderHeight
+    val quality = if (measured) "${height}p" else headerHeight?.let { "${it}p" } ?: mediaQuality ?: declared
     val qualityChecked = measurements?.mediaObservedAt != null || measurements?.addressObservedAt != null
     val qualityDescription = when {
         measured -> "播放解码实测分辨率 $width × $height"
+        headerHeight != null -> "媒体轨道标注 ${headerHeight}p"
         mediaQuality != null -> "媒体清单标注最高画质 $mediaQuality，非实播分辨率"
         declared != null -> "来源标注画质 $declared，尚未实播验证"
         qualityChecked -> "本次取址或媒体检查未取得分辨率，播放后可读取实际画质"
@@ -59,7 +61,7 @@ internal fun AnimeSourceMetricsStrip(measurements: AnimePlaybackMeasurements?, m
     val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     FlowRow(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         SourceMetricToken(if (!measured && declared != null) Icons.AutoMirrored.Outlined.Label else Icons.Outlined.AspectRatio,
-            quality ?: if (qualityChecked) "未测得" else "—", scope + qualityDescription,
+            quality ?: if (qualityChecked) "待实播" else "—", scope + qualityDescription,
             modifier = Modifier.width(58.dp * scale))
         val speed = measurements?.measuredBytesPerSecond?.takeIf { it > 0 }?.let(::animeSourceRate)
         val probeSpeed = measurements?.mediaSampleBytesPerSecond?.takeIf { it > 0 }?.let(::animeSourceRate)
@@ -70,19 +72,20 @@ internal fun AnimeSourceMetricsStrip(measurements: AnimePlaybackMeasurements?, m
         val latestProbe = evidenceAt > 0L && (measurements?.playbackObservedAt ?: 0L) <= evidenceAt
         val progressLabel = progress?.takeIf { it.phase != AnimeSourceMeasurementPhase.COMPLETE }
             ?.let(::animeSourceMeasurementLabel)
+        val statusCode = measurements?.mediaHttpStatus?.takeIf { it >= 400 }
         when {
-            progressLabel != null -> SourceMetricToken(Icons.Outlined.Speed, progressLabel,
+            progressLabel != null && address == null && speed == null && probeSpeed == null && frame == null ->
+                SourceMetricToken(Icons.Outlined.Speed, progressLabel,
                 progress?.reason ?: "此来源$progressLabel", Modifier.width(82.dp * scale),
                 waiting = progress?.phase == AnimeSourceMeasurementPhase.UNAVAILABLE)
-            latestProbe && failure != null -> SourceMetricToken(Icons.Outlined.Link,
-                measurements?.mediaHttpStatus?.toString() ?: if ("超时" in failure) "超时" else "未完成", scope + failure,
+            latestProbe && failure != null && (statusCode != null || measurements?.mediaVerified == false) -> SourceMetricToken(Icons.Outlined.Link,
+                statusCode?.let { "HTTP $it" } ?: "未验证", scope + failure,
                 Modifier.width(82.dp * scale), waiting = true)
-            latestProbe && probeSpeed != null -> SourceMetricToken(Icons.Outlined.Speed, probeSpeed,
-                scope + "64 KiB 以内的小样本传输速率 $probeSpeed，非持续播放速率", Modifier.width(82.dp * scale))
             speed != null -> SourceMetricToken(Icons.Outlined.Speed, speed, scope + "播放实测传输速率 $speed", Modifier.width(82.dp * scale))
             probeSpeed != null -> SourceMetricToken(Icons.Outlined.Speed, probeSpeed, scope + "64 KiB 以内的小样本传输速率 $probeSpeed，非持续播放速率", Modifier.width(82.dp * scale))
             frame != null -> SourceMetricToken(Icons.Outlined.Timer, frame, scope + "播放实测首帧 $frame", Modifier.width(82.dp * scale))
             address != null -> SourceMetricToken(Icons.Outlined.Link, address, scope + "解析地址耗时 $address", Modifier.width(82.dp * scale))
+            measurements?.mediaVerified == true -> SourceMetricToken(Icons.Outlined.Link, "已读媒体", scope + "媒体头或清单已经读取", Modifier.width(82.dp * scale))
             failure != null -> SourceMetricToken(Icons.Outlined.Link, "未验证", scope + failure, Modifier.width(82.dp * scale))
             else -> SourceMetricToken(Icons.Outlined.Speed, "未测", scope + "尚未取得网络实测数据",
                 Modifier.width(82.dp * scale))
@@ -112,6 +115,7 @@ internal fun AnimeSourceMetricsDetails(measurements: AnimePlaybackMeasurements?,
     val decoded = if (width != null && height != null) "$width × $height" else null
     val declared = measurements?.let(::animeDeclaredQuality)
     val mediaQuality = measurements?.mediaQuality
+    val headerHeight = measurements?.mediaHeaderHeight
     val probeSpeed = measurements?.mediaSampleBytesPerSecond?.takeIf { it > 0 }?.let(::animeSourceRate)
     val frame = measurements?.firstFrameMs?.takeIf { it >= 0 }?.let(::animeSourceDuration)
     val rate = measurements?.measuredBytesPerSecond?.takeIf { it > 0 }?.let(::animeSourceRate)
@@ -125,6 +129,7 @@ internal fun AnimeSourceMetricsDetails(measurements: AnimePlaybackMeasurements?,
         }
         when {
             decoded != null -> SourceMetricDetail(Icons.Outlined.AspectRatio, "播放实测分辨率", decoded)
+            headerHeight != null -> SourceMetricDetail(Icons.Outlined.AspectRatio, "视频轨道标注", "${headerHeight}p")
             mediaQuality != null -> SourceMetricDetail(Icons.AutoMirrored.Outlined.Label, "清单最高画质", mediaQuality)
             declared != null -> SourceMetricDetail(Icons.AutoMirrored.Outlined.Label, "来源标注画质", declared)
             else -> SourceMetricDetail(Icons.Outlined.AspectRatio, "画质", null)
@@ -160,7 +165,9 @@ private fun animeSourceMeasurementLabel(progress: AnimeSourceMeasurementProgress
     AnimeSourceMeasurementPhase.QUEUED -> "排队中"
     AnimeSourceMeasurementPhase.RUNNING -> "测速中"
     AnimeSourceMeasurementPhase.COMPLETE -> "已完成"
-    AnimeSourceMeasurementPhase.UNAVAILABLE -> "不可测"
+    AnimeSourceMeasurementPhase.WAITING_CATALOG -> "等待目录"
+    AnimeSourceMeasurementPhase.NO_EPISODE -> "待对应"
+    AnimeSourceMeasurementPhase.UNAVAILABLE -> "待重试"
     AnimeSourceMeasurementPhase.CANCELLED -> "已停止"
 }
 

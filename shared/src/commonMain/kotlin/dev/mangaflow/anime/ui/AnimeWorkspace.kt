@@ -368,7 +368,6 @@ internal fun AnimeWorkspace(
     }
     fun showSources(episode: AnimeEpisode? = null) {
         controller.cancelPendingResume()
-        if (state.resolving) controller.pausePlaybackResolution()
         sourceEpisode = episode
         sourcesVisible = true
     }
