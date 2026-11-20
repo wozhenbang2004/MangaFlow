@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
@@ -18,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -60,7 +62,9 @@ import dev.mangaflow.enhancement.QualityTier
 import dev.mangaflow.enhancement.ReaderEnhancementState
 import dev.mangaflow.enhancement.ui.EnhancementReadouts
 import dev.mangaflow.enhancement.ui.enhancementResourceReadouts
+import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.formatDecimal
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.BodySourceMark
 import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.ExperienceSettingsDialog
@@ -131,13 +135,18 @@ internal fun ReaderExperienceStatus(
     var sourceLockError by remember(sessionKey) { mutableStateOf<String?>(null) }
     val motion = LocalMotionEnabled.current
     val window = LocalMangaWindow.current
+    val android = platformKind == PlatformKind.ANDROID
+    val pinStatusHeader = android && window.height >= 420.dp
     val placement = custom.readerStatusPlacement
     val shown = visible && placement != ReaderStatusPlacement.HIDDEN
     val displayPreferences by enhancementSettings.visibleMetrics.collectAsStateWithLifecycle()
     val visibleMetrics = displayPreferences.getValue(enhancementContent)
-    val dockMetrics = if (ambient && enhancementPolicy.tier == QualityTier.ORIGINAL)
-        visibleMetrics - EnhancementMetric.QUALITY - EnhancementMetric.DIMENSIONS - EnhancementMetric.PREPARED
-    else visibleMetrics
+    val dockMetrics = when {
+        enhancementPolicy.tier != QualityTier.ORIGINAL -> visibleMetrics
+        ambient -> visibleMetrics - EnhancementMetric.QUALITY - EnhancementMetric.DIMENSIONS - EnhancementMetric.PREPARED
+        android && EnhancementMetric.QUALITY in visibleMetrics -> visibleMetrics - EnhancementMetric.PREPARED
+        else -> visibleMetrics
+    }
     val enhancementReadings = readerEnhancementReadouts(dockMetrics, enhancement, enhancementPolicy, currentPage) +
         enhancementResourceReadouts(dockMetrics, store, shown)
     val dockWidth = if (ambient) 200.dp else 248.dp
@@ -210,6 +219,7 @@ internal fun ReaderExperienceStatus(
         while (true) { store.refreshCacheUsage(); delay(store.state.value.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L) }
     }
     val top = placement == ReaderStatusPlacement.TOP
+    val alignStatusStart = !top && (bottomEndClearance > 0.dp || android && window.width < 720.dp)
     // Share the idle corner control's bottom row; reserve its measured width rather
     // than assuming a centered rail can never overlap long page counts or large type.
     val restingBottom = if (bottomClearance <= 24.dp) 0.dp else bottomClearance
@@ -218,7 +228,7 @@ internal fun ReaderExperienceStatus(
         animationSpec = if (motion) tween(MangaMotion.Chrome) else snap(), label = "reading-status-clearance",
     )
     fun inspect(section: ReaderStatusSection) {
-        if (selected == section && popoverPresent) scope.launch {
+        if (selected == section && popoverPresent && !pinStatusHeader) scope.launch {
             withFrameNanos { }
             sectionHeader.bringIntoView()
         }
@@ -307,7 +317,7 @@ internal fun ReaderExperienceStatus(
         else -> "当前没有前方准备目标"
     }
     Box(modifier.fillMaxSize()) {
-        Box(Modifier.align(if (top) Alignment.TopCenter else if (bottomEndClearance > 0.dp) Alignment.BottomStart else Alignment.BottomCenter)
+        Box(Modifier.align(if (top) Alignment.TopCenter else if (alignStatusStart) Alignment.BottomStart else Alignment.BottomCenter)
             .windowInsetsPadding(
                 (if (top) readerStatusInsets().union(WindowInsets.captionBar) else readerNavigationInsets())
                     .union(WindowInsets.displayCutout)
@@ -387,13 +397,18 @@ internal fun ReaderExperienceStatus(
                 }
             }
             CompactGlassPopover(visible = shown && selected != null, backdrop = backdrop,
-                aboveAnchor = !top, alignToStart = !top && bottomEndClearance > 0.dp,
+                aboveAnchor = !top, alignToStart = alignStatusStart,
                 maximumWidth = if (window.width >= 720.dp) 480.dp else 344.dp,
+                maximumHeight = if (android) window.height * .72f else Dp.Infinity,
+                contentBackground = if (android) MaterialTheme.colorScheme.surface.copy(alpha = .78f) else Color.Transparent,
+                scrollContent = !pinStatusHeader,
                 onDismiss = { selected = null }, onPresenceChange = { popoverPresent = it }) {
+                val headerActionSize = if (android) 48.dp else 44.dp
                 Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)) {
                     Row(Modifier.fillMaxWidth().bringIntoViewRequester(sectionHeader), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text("阅读状态", style = MaterialTheme.typography.titleSmall,
+                            Text("阅读状态",
+                                style = if (android) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(if (preparation.lastVisible >= preparation.firstVisible && preparation.pageCount > 0)
                                 "第 ${pageRange(preparation.firstVisible, preparation.lastVisible)} 页 · 共 ${preparation.pageCount} 页"
@@ -402,16 +417,17 @@ internal fun ReaderExperienceStatus(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        MotionIconButton(onClick = { scopeHelp[retainedSection] = scopeHelp[retainedSection] != true }, modifier = Modifier.size(44.dp),
+                        MotionIconButton(onClick = { scopeHelp[retainedSection] = scopeHelp[retainedSection] != true },
+                            modifier = Modifier.size(headerActionSize),
                             enabled = selected != null, tooltip = "图标与当前范围说明") {
                             Icon(Icons.Outlined.Info, "图标与当前范围说明", Modifier.size(18.dp),
                                 tint = if (scopeHelp[retainedSection] == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         MotionIconButton(onClick = { selected = null; pendingPolicy = true },
-                            modifier = Modifier.size(44.dp), enabled = selected != null, tooltip = "配置体验策略") {
+                            modifier = Modifier.size(headerActionSize), enabled = selected != null, tooltip = "配置体验策略") {
                             Icon(Icons.Outlined.Tune, "配置体验策略", Modifier.size(18.dp))
                         }
-                        MotionIconButton(onClick = { selected = null }, modifier = Modifier.size(44.dp),
+                        MotionIconButton(onClick = { selected = null }, modifier = Modifier.size(headerActionSize),
                             enabled = selected != null, tooltip = "关闭状态详情") {
                             Icon(Icons.Outlined.Close, "关闭状态详情", Modifier.size(18.dp))
                         }
@@ -443,13 +459,23 @@ internal fun ReaderExperienceStatus(
                                 memorySlot = slot == ReaderStatusSlot.MEMORY, selected = isSelected)
                         }
                     }
+                    if (android) HorizontalDivider(Modifier.padding(top = 2.dp, bottom = 4.dp),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
                     MotionTabContent(selected = retainedSection, contentKey = { it }, order = { it.ordinal },
+                        modifier = if (pinStatusHeader) Modifier.weight(1f, fill = false) else Modifier,
                         fillContent = false) { shownSection ->
                         val bodyEnabled = selected == shownSection
                         val expandedWork = expandedWorks[shownSection]
                         fun toggle(work: ReaderWork) { if (bodyEnabled) expandedWorks[shownSection] = if (expandedWork == work) null else work }
-                        Column(Modifier.fillMaxWidth().motionInputGate(bodyEnabled)) {
-                            StatusReveal(scopeHelp[shownSection] == true) { ReaderStatusLegend(shownSection, budget, preparation) }
+                        val bodyPosition = rememberScrollState()
+                        val showHelp = scopeHelp[shownSection] == true
+                        LaunchedEffect(showHelp) {
+                            if (pinStatusHeader && bodyEnabled && showHelp) bodyPosition.scrollTo(0)
+                        }
+                        val bodyScroll = if (pinStatusHeader)
+                            Modifier.verticalScroll(bodyPosition, enabled = bodyEnabled) else Modifier
+                        Column(Modifier.fillMaxWidth().then(bodyScroll).motionInputGate(bodyEnabled)) {
+                            StatusReveal(showHelp) { ReaderStatusLegend(shownSection, budget, preparation) }
                             when (shownSection) {
                                 ReaderStatusSection.PREPARATION -> {
                                     ReadinessRow(Icons.Outlined.KeyboardDoubleArrowRight, "前方",
@@ -475,10 +501,13 @@ internal fun ReaderExperienceStatus(
                                     }
                                 }
                                 ReaderStatusSection.WORK -> {
-                                    ReaderEnhancementWork(enhancement, enhancementPolicy,
-                                        expandedWork == ReaderWork.ENHANCEMENT, bodyEnabled,
-                                        onToggle = { toggle(ReaderWork.ENHANCEMENT) },
-                                        onOpen = onOpenEnhancement?.let { { selected = null; pendingEnhancement = true } })
+                                    val enhancementRow: @Composable () -> Unit = {
+                                        ReaderEnhancementWork(enhancement, enhancementPolicy,
+                                            expandedWork == ReaderWork.ENHANCEMENT, bodyEnabled,
+                                            onToggle = { toggle(ReaderWork.ENHANCEMENT) },
+                                            onOpen = onOpenEnhancement?.let { { selected = null; pendingEnhancement = true } })
+                                    }
+                                    if (!android) enhancementRow()
                                     listOf(ReaderWork.RESOLVE, ReaderWork.ORIGINAL, ReaderWork.PREVIEW).forEach { work ->
                                         val counts = work.counts(preparation)
                                         WorkDisclosure(work.icon, work.title, counts.active.toLong(), workMaximum,
@@ -487,6 +516,7 @@ internal fun ReaderExperienceStatus(
                                             known = preparation.pages.isNotEmpty()) { toggle(work) }
                                         StatusReveal(expandedWork == work) { PreparationDetails(preparation, work) }
                                     }
+                                    if (android) enhancementRow()
                                     nextChapterPreparation?.let { next ->
                                         NextWorkRow(next, workMaximum, expandedWork == ReaderWork.NEXT, bodyEnabled) { toggle(ReaderWork.NEXT) }
                                         StatusReveal(expandedWork == ReaderWork.NEXT) { NextChapterDetails(next) }
@@ -625,13 +655,20 @@ private fun ReaderStatusStrip(selected: ReaderStatusSlot?, retained: ReaderStatu
     content: @Composable (ReaderStatusSlot, Boolean) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val scroll = rememberScrollState()
-    val minimumSlotWidth = if (ambient) 48.dp else maxOf(44.dp, statusNumberWidth("99+?", 20.dp))
-    val lineHeight = with(LocalDensity.current) { MaterialTheme.typography.labelSmall.lineHeight.toDp() }
-    // Custom tab content contains a metric row, its thin track, and an optional label.
-    // MotionTabs only budgets a single default text row, so reserve our actual type geometry.
+    val android = platformKind == PlatformKind.ANDROID
+    val scopeLabelsOnly = android && labelsVisible
+    val labelStyle = if (scopeLabelsOnly) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelSmall
+    val density = LocalDensity.current
+    val minimumTouchSize = if (android || ambient) 48.dp else 44.dp
+    val minimumSlotWidth = when {
+        scopeLabelsOnly -> maxOf(minimumTouchSize, with(density) { labelStyle.fontSize.toDp() * 2 } + 16.dp)
+        ambient -> minimumTouchSize
+        else -> maxOf(minimumTouchSize, statusNumberWidth("99+?", 20.dp))
+    }
+    val lineHeight = with(density) { labelStyle.lineHeight.toDp() }
     val microHeight = maxOf(18.dp, lineHeight) + 5.dp
-    val minimumHeight = if (labelsVisible) 62.dp else if (ambient) 48.dp else 44.dp
-    val controlHeight = maxOf(minimumHeight,
+    val controlHeight = if (scopeLabelsOnly) maxOf(minimumTouchSize, lineHeight + 16.dp)
+    else maxOf(if (labelsVisible) 62.dp else minimumTouchSize,
         microHeight + (if (labelsVisible) lineHeight + 4.dp else 0.dp) + 12.dp)
     val anchors = remember(entries) { List(entries.size) { BringIntoViewRequester() } }
     val selectedIndex = entries.indexOf(selected)
@@ -648,7 +685,8 @@ private fun ReaderStatusStrip(selected: ReaderStatusSlot?, retained: ReaderStatu
                 onSelect = { if (enabled) onSelect(entries[it]) },
                 modifier = Modifier.width(trackWidth).motionInputGate(enabled),
                 foreground = colors.onSurface, muted = colors.onSurfaceVariant,
-                indicator = colors.onSurface.copy(alpha = .075f), fullWidthIndicator = true,
+                indicator = if (android) colors.primary.copy(alpha = .15f) else colors.onSurface.copy(alpha = .075f),
+                fullWidthIndicator = true,
                 controlHeight = controlHeight,
                 indicatorHeight = if (labelsVisible) controlHeight - 10.dp else maxOf(30.dp, microHeight + 4.dp),
                 indicatorCornerRadius = if (labelsVisible) 13.dp else 15.dp,
@@ -664,10 +702,11 @@ private fun ReaderStatusStrip(selected: ReaderStatusSlot?, retained: ReaderStatu
                     Column(Modifier.fillMaxSize().bringIntoViewRequester(anchors[index]),
                         verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically),
                         horizontalAlignment = Alignment.CenterHorizontally) {
-                        content(entries[index], isSelected)
+                        if (!scopeLabelsOnly) content(entries[index], isSelected)
                         if (labelsVisible) Text(entries[index].title,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (isSelected) colors.onSurface else colors.onSurfaceVariant,
+                            style = labelStyle,
+                            color = if (isSelected) (if (scopeLabelsOnly) colors.primary else colors.onSurface)
+                                else colors.onSurfaceVariant,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 })
@@ -935,7 +974,9 @@ private fun WorkDisclosure(icon: ImageVector, title: String, active: Long, maxim
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Icon(icon, null, Modifier.size(18.dp), tint = if (expanded) colors.primary else colors.onSurfaceVariant)
-                Text(title, Modifier.weight(1f).padding(horizontal = 7.dp), style = MaterialTheme.typography.labelLarge)
+                Text(title, Modifier.weight(1f).padding(horizontal = 7.dp), style = MaterialTheme.typography.labelLarge,
+                    color = if (platformKind != PlatformKind.ANDROID) Color.Unspecified
+                        else if (expanded) colors.primary else colors.onSurface)
                 if (known && phaseDeferred) {
                     StatusToken(Icons.Outlined.Pause, "准备阶段", "暂缓", status.waiting)
                     Spacer(Modifier.width(8.dp))
@@ -1065,7 +1106,8 @@ private fun StatusMicro(icon: ImageVector, value: String, label: String,
     mark: ReaderStatusMark, detail: String, progress: Float?, selected: Boolean,
     stages: List<ReaderStatusMark> = emptyList(), busy: Boolean = false, showValue: Boolean = true) {
     val colors = MaterialTheme.colorScheme
-    val accent = colors.onSurface.copy(alpha = if (selected) .95f else .72f)
+    val accent = if (selected && platformKind == PlatformKind.ANDROID) colors.primary
+        else colors.onSurface.copy(alpha = if (selected) .95f else .72f)
     val progressColor = statusTone(mark)
     val numberWidth = statusNumberWidth("99+?", 0.dp)
     Column(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {
@@ -1602,7 +1644,8 @@ private fun ReaderCacheDock(store: ExperiencePolicyStore, selected: Boolean) {
     val disk = cacheState(cache.diskBytes, cache.diskLimit, cache.pending)
     val colors = MaterialTheme.colorScheme
     val status = mangaStatusColors()
-    val ink = colors.onSurface.copy(alpha = if (selected) .95f else .72f)
+    val ink = if (selected && platformKind == PlatformKind.ANDROID) colors.primary
+        else colors.onSurface.copy(alpha = if (selected) .95f else .72f)
     val mark = when {
         cache.error != null -> ReaderStatusMark.ERROR
         memory.mark == ReaderStatusMark.UNKNOWN || disk.mark == ReaderStatusMark.UNKNOWN -> ReaderStatusMark.UNKNOWN

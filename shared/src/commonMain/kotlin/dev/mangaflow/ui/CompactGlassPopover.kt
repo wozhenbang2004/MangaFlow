@@ -10,6 +10,7 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.rememberTransition
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Column
@@ -37,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -69,6 +71,9 @@ internal fun CompactGlassPopover(
     aboveAnchor: Boolean = false,
     maximumWidth: Dp = 264.dp,
     alignToStart: Boolean = false,
+    maximumHeight: Dp = Dp.Infinity,
+    contentBackground: Color = Color.Transparent,
+    scrollContent: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
@@ -130,8 +135,10 @@ internal fun CompactGlassPopover(
                     translationY = (if (origin.pivotFractionY >= .5f) 6.dp.toPx() else -6.dp.toPx()) * (1f - alpha.value)
                 }, cornerRadius = 18.dp, role = GlassSurfaceRole.POPOVER, softCard = true,
             materialExpansion = { alpha.value }) {
-            Column(Modifier.heightIn(max = (LocalMangaWindow.current.height - 64.dp).coerceAtLeast(1.dp))
-                .verticalScroll(rememberScrollState()).padding(6.dp), content = content)
+            val height = minOf(LocalMangaWindow.current.height - 64.dp, maximumHeight).coerceAtLeast(1.dp)
+            val scroll = if (scrollContent) Modifier.verticalScroll(rememberScrollState()) else Modifier
+            Column(Modifier.heightIn(max = height).background(contentBackground).then(scroll).padding(6.dp),
+                content = content)
         }
     }
 }
