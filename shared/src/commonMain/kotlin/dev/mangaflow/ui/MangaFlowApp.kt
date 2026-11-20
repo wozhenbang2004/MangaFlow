@@ -506,6 +506,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val ordinarySearch = rememberSaveable { mutableStateOf(false) }
     val restrictedSearch = rememberSaveable { mutableStateOf(false) }
     var searchExpanded by (if (restrictedMode) restrictedSearch else ordinarySearch)
+    val retainAndroidSearch = platformKind == PlatformKind.ANDROID && !restrictedMode
+    var androidSearchReturnedFromDetail by rememberSaveable { mutableStateOf(false) }
     var desktopNavigationMode by rememberSaveable { mutableIntStateOf(0) }
     var desktopSearchRequest by remember { mutableIntStateOf(0) }
     var desktopFindRequest by remember { mutableIntStateOf(0) }
@@ -1232,7 +1234,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 LaunchedEffect(current.key, entry.currentState, entry.isRunning) {
                     if (current is Frame.Detail && current.key == frame.key &&
                         entry.currentState == EnterExitState.Visible && !entry.isRunning &&
-                        !desktop && !restrictedMode && searchExpanded && selectedCover?.placement?.startsWith("search-") == true) {
+                        !desktop && !restrictedMode && !retainAndroidSearch && searchExpanded &&
+                        selectedCover?.placement?.startsWith("search-") == true) {
                         searchExpanded = false
                         browseActions.clearSearch()
                     }
@@ -1507,6 +1510,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             keyboard?.hide()
                             focus.clearFocus(force = true)
                             searchExpanded = false
+                            if (retainAndroidSearch) androidSearchReturnedFromDetail = false
                             if (desktop) browseActions.suspendBrowseSearch() else browseActions.clearSearch()
                         }
                         // The backdrop reaches every edge; only foreground controls
@@ -1922,6 +1926,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 SegmentedGlassHeader(searchBackdrop, navigation,
                                     controlsWidth = discoveryTabsWidth,
                                     actionsWidth = discoveryActionsWidth,
+                                    quietShadow = platformKind == PlatformKind.ANDROID && !restrictedMode,
                                     modifier = Modifier.align(Alignment.TopCenter).onSizeChanged { chromeHeightPx = it.height }
                                         .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
                                         .padding(horizontal = 8.dp, vertical = 2.dp),
@@ -1991,7 +1996,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             onSearchTarget = browseActions::setSearchTarget,
                             active = rootActive,
                             backdrop = searchBackdrop,
-                            onExpandedChange = { if (it) searchExpanded = true else closeSearch() },
+                            onExpandedChange = { expanded ->
+                                if (expanded) {
+                                    if (retainAndroidSearch) androidSearchReturnedFromDetail = false
+                                    searchExpanded = true
+                                } else closeSearch()
+                            },
+                            focusInputOnExpand = !retainAndroidSearch || !androidSearchReturnedFromDetail,
                             onPresenceChange = { searchPresent = it },
                             onForegroundState = { searchForeground = it },
                             onQuery = browseActions::setQuery,
@@ -2014,6 +2025,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 onTarget = browseActions::setSearchTarget, onTag = browseActions::toggleSearchTag,
                                 onRetryTags = browseActions::retrySearchTags,
                                 onOpen = { manga ->
+                                    if (retainAndroidSearch) androidSearchReturnedFromDetail = true
                                     keyboard?.hide()
                                     focus.clearFocus(force = true)
                                     model.openManga(manga)

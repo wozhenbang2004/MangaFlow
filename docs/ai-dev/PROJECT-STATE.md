@@ -1,5 +1,9 @@
 # MangaFlow · current work
 
+## Android 漫画视觉与交互升级 · 2026-11-20
+
+本轮补充原话和 15 个系统落点已固化至 [ANDROID-EDITORIAL-01–05](../design/reading-and-discovery-redesign-20261119.md#android-漫画视觉与交互升级--2026-11-20)。以模拟器观察到的发现首屏、真实作品详情、书架续读、搜索返回和沉浸阅读为一条旅程。先完成现有组件改造，再用正式 Android APK 复看布局、交互和真实进度。
+
 ## Android 普通漫画阅读旅程 · 2026-11-20
 
 本轮原话、模拟器基线与设计验收见 [MANGA-ANDROID-UX-01–04](../design/reading-and-discovery-redesign-20261119.md#android-普通漫画阅读旅程--2026-11-20)。Android 14 新装正式版 0.1.447，实际从推荐进入《月刊少女野崎君》，打开第01卷并通过最近阅读续读。当前批次处理发现加载、详情主动作、阅读器长目录、沉浸页码四处。原话固化至本轮用户请求，时区 Asia/Hong_Kong。正常 Android CI 产物用于对应的设备操作复验。

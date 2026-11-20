@@ -818,10 +818,20 @@ private fun DiscoveryPane(
                 ?.let { it.sourceName.ifBlank { sourceDisplayName(it.sourceId) } }
             Text(listOfNotNull(title, provider).joinToString(" · "),
                 modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
-            if (onExplore != null) MotionIconButton(onClick = onExplore, enabled = active,
-                modifier = Modifier.size(36.dp), tooltip = "分类与专题") {
-                Icon(Icons.Outlined.Explore, "分类与专题", Modifier.size(19.dp))
+                style = if (androidManga) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Medium)
+            if (onExplore != null) {
+                if (androidManga && maxWidth >= 360.dp && fontScale <= 1.3f) {
+                    TextButton(onClick = onExplore, enabled = active, modifier = Modifier.heightIn(min = 48.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Icon(Icons.Outlined.Explore, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("分类", style = MaterialTheme.typography.labelMedium)
+                    }
+                } else MotionIconButton(onClick = onExplore, enabled = active,
+                    modifier = Modifier.size(if (androidManga) 48.dp else 36.dp), tooltip = "分类与专题") {
+                    Icon(Icons.Outlined.Explore, "分类与专题", Modifier.size(19.dp))
+                }
             }
             DiscoveryLayoutControl(columns, visibleColumns, backdrop, active, onColumnsChange,
                 onPresenceChange = { layoutPresent = it })
@@ -1368,6 +1378,7 @@ internal fun ContinueRow(
     onManage: (() -> Unit)? = null,
     onHistory: (() -> Unit)? = null,
     namedHistory: Boolean = false,
+    prominent: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth()
@@ -1377,9 +1388,13 @@ internal fun ContinueRow(
             onLongClick = onManage)
         .motionPress(interaction, pressedScale = .985f).padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        MangaCover(progress.manga, repository, Modifier.width(46.dp).height(64.dp).mangaCoverCard(7.dp))
-        Column(Modifier.weight(1f).padding(start = 12.dp, end = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(progress.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        MangaCover(progress.manga, repository, Modifier
+            .width(if (prominent) 54.dp else 46.dp).height(if (prominent) 76.dp else 64.dp).mangaCoverCard(7.dp))
+        Column(Modifier.weight(1f).padding(start = 12.dp, end = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(if (prominent) 3.dp else 2.dp)) {
+            Text(progress.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                style = if (prominent) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
+                maxLines = if (prominent) 2 else 1, overflow = TextOverflow.Ellipsis)
             Text(mangaNumberText(recentReadingLocation(progress)), style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (progress.pageCount > 0) {

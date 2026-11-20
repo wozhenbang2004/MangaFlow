@@ -1751,6 +1751,7 @@ fun ReaderScreen(
             onOpenEnhancement = { showEnhancement = true; controlsVisible = true },
             chapterLoading = loading, chapterUnavailable = error != null,
             imageVisible = imageVisible, localChapter = localImport,
+            ambient = androidPageLabel && !controlsVisible && imageVisible && !loading && error == null,
             downloadedChapter = activeDownload?.status == DownloadStatus.COMPLETED,
             repairedPages = repairState.replacements.size, repairBusy = repairState.busy, repairReason = repairState.reason,
             onAlignPage = alternativeSources.firstOrNull()?.takeIf { pages.isNotEmpty() }?.let { variant ->
@@ -4419,7 +4420,12 @@ private fun ReaderChaptersDialog(
                 .padding(horizontal = if (embedded) 12.dp else 16.dp, vertical = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("章节", fontSize = 17.sp, fontWeight = FontWeight.Medium)
-                    Text("${if (searching) results.size else visibleCount} 章", Modifier.weight(1f).padding(start = 8.dp),
+                    val countLabel = when {
+                        android && searching -> "找到 ${results.size} 章"
+                        searching -> "${results.size} 章"
+                        else -> "$visibleCount 章"
+                    }
+                    Text(countLabel, Modifier.weight(1f).padding(start = 8.dp),
                         color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     if (!android || catalogBusy) Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
                         if (catalogBusy) CircularProgressIndicator(Modifier.size(13.dp)
@@ -4481,6 +4487,7 @@ private fun ReaderChaptersDialog(
                         chapters.filter { it.group == targetGroup }.sortedBy(Chapter::index)
                     }
                     val targetChapters = if (searching) results else groupChapters
+                    val listResults = android && searching
                     val initialIndex = remember(groupChapters, currentId) { groupChapters.indexOfFirst { it.id == currentId } }
                     val catalogPosition = rememberLazyGridState(
                         initialFirstVisibleItemIndex = (initialIndex - 6).coerceAtLeast(0))
@@ -4530,15 +4537,20 @@ private fun ReaderChaptersDialog(
                             Text("没有符合条件的章节", color = colors.onSurfaceVariant,
                                 fontSize = 12.sp, modifier = Modifier.padding(vertical = 12.dp))
                         }
-                        items(targetChapters, key = Chapter::id) { chapter ->
+                        items(targetChapters, key = Chapter::id, span = if (listResults) {
+                            { _ -> androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }
+                        } else null) { chapter ->
                             val selected = chapter.id == currentId
                             val entry = saved[chapter.id]
-                            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
+                            Row(Modifier.fillMaxWidth().heightIn(min = if (listResults) 56.dp else 48.dp)
+                                .clip(RoundedCornerShape(10.dp))
                                 .background(colors.onSurface.copy(alpha = if (selected) .09f else .035f))
                                 .selectable(selected = selected, role = Role.RadioButton, onClick = { onSelect(chapter.id) })
-                                .padding(horizontal = 6.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                .padding(horizontal = if (listResults) 12.dp else 6.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
-                                    Text(chapter.title, color = colors.onSurface, fontSize = 12.sp, lineHeight = 17.sp,
+                                    Text(chapter.title, color = colors.onSurface,
+                                        fontSize = if (listResults) 14.sp else 12.sp, lineHeight = if (listResults) 20.sp else 17.sp,
                                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                                     if (searching && groups.size > 1) Text(chapterGroupLabel(chapter.group),
@@ -4562,6 +4574,8 @@ private fun ReaderChaptersDialog(
                                         }
                                     }
                                 }
+                                if (listResults) Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, null,
+                                    Modifier.padding(start = 8.dp).size(18.dp), tint = colors.onSurfaceVariant)
                             }
                         }
                     }

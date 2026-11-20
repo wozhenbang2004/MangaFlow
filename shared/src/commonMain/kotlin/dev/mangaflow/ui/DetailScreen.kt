@@ -474,6 +474,7 @@ fun DetailScreen(
     ) {
         val density = LocalDensity.current
         val viewportWidth = minOf(maxWidth, MangaLayout.DetailWidth)
+        val androidEditorial = platformKind == PlatformKind.ANDROID && !adultProfile
         val fontScale = density.fontScale.coerceAtLeast(1f)
         val desktopDetail = platformKind == PlatformKind.DESKTOP &&
             maxWidth >= 840.dp * fontScale.coerceAtMost(1.5f)
@@ -491,7 +492,11 @@ fun DetailScreen(
         // Safety belongs to the artwork's content, not a clipped viewport below the toolbar.
         val toolbarClearance = statusInset + 56.dp
         val toolbarPixels = with(density) { toolbarClearance.roundToPx() }
-        val artworkHeadroom = toolbarClearance + if (compactHero) 8.dp else 16.dp
+        val artworkHeadroom = toolbarClearance + when {
+            androidEditorial -> 0.dp
+            compactHero -> 8.dp
+            else -> 16.dp
+        }
         val naturalHeroHeight = remember(current.id, viewportWidth, density) { mutableIntStateOf(0) }
         // Foreground measurement publishes this frame's actual height. Background layers
         // measure afterwards and draw behind it, without a zero-height first-frame handoff.
@@ -755,11 +760,17 @@ fun DetailScreen(
                     val height = size.height.coerceAtLeast(1f)
                     val fadeEnd = (1f - 24.dp.toPx() / height).coerceIn(.65f, .96f)
                     val fadeStart = (fadeEnd - 104.dp.toPx() / height).coerceIn(.25f, .84f)
+                    val veil = when {
+                        androidEditorial && lightDetail -> .65f
+                        androidEditorial -> .70f
+                        lightDetail -> .44f
+                        else -> .52f
+                    }
+                    val fadeVeil = if (androidEditorial) .87f else if (lightDetail) .72f else .78f
                     drawRect(Brush.verticalGradient(
-                        0f to informationTone.copy(alpha = if (lightDetail) .44f else .52f),
-                        fadeStart to informationTone.copy(alpha = if (lightDetail) .44f else .52f),
-                        (fadeStart + (fadeEnd - fadeStart) * .55f) to
-                            informationTone.copy(alpha = if (lightDetail) .72f else .78f),
+                        0f to informationTone.copy(alpha = veil),
+                        fadeStart to informationTone.copy(alpha = veil),
+                        (fadeStart + (fadeEnd - fadeStart) * .55f) to informationTone.copy(alpha = fadeVeil),
                         fadeEnd to informationTone,
                         1f to informationTone,
                     ))
@@ -934,20 +945,23 @@ private fun HeroBookInformation(
         label = "detail-poster-aspect")
     val ink = if (informationTone.luminance() > .5f) Color(0xFF242426) else Color.White
     val titleInteraction = remember(manga.id) { MutableInteractionSource() }
+    val editorial = platformKind == PlatformKind.ANDROID && !adultProfile
     val titleStyle = MaterialTheme.typography.headlineSmall.copy(
         fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-        fontSize = if (compact) 20.sp else 24.sp,
-        lineHeight = if (compact) 28.sp else 32.sp,
+        fontSize = if (compact) 20.sp else if (editorial) 23.sp else 24.sp,
+        lineHeight = if (compact) 28.sp else if (editorial) 30.sp else 32.sp,
         fontWeight = FontWeight.SemiBold,
     )
+    val contentGap = if (editorial) 14.dp else 16.dp
+    val headerGap = if (editorial) 8.dp else 12.dp
     BoxWithConstraints(modifier.fillMaxWidth().wrapContentHeight(unbounded = true)
-        .padding(horizontal = 20.dp).padding(top = 12.dp + artworkHeadroom, bottom = 2.dp)
+        .padding(horizontal = 20.dp).padding(top = headerGap + artworkHeadroom, bottom = if (editorial) 6.dp else 2.dp)
         .then(if (infoVisible) Modifier else Modifier.clearAndSetSemantics { })) {
         val contentWidth = maxWidth
-        val posterWidth = minOf(contentWidth * if (density.fontScale >= 1.4f) .34f else .38f,
-            224.dp, (contentWidth - 136.dp).coerceAtLeast(72.dp))
+        val posterShare = if (density.fontScale >= 1.4f || editorial) .34f else .38f
+        val posterWidth = minOf(contentWidth * posterShare, 224.dp, (contentWidth - 136.dp).coerceAtLeast(72.dp))
         val infoWidth = with(density) {
-            (contentWidth.roundToPx() - posterWidth.roundToPx() - 16.dp.roundToPx()).coerceAtLeast(1).toDp()
+            (contentWidth.roundToPx() - posterWidth.roundToPx() - contentGap.roundToPx()).coerceAtLeast(1).toDp()
         }
         val titleLayout = remember(manga.title, titleStyle, infoWidth, density) {
             measurer.measure(manga.title, style = titleStyle,
@@ -959,7 +973,7 @@ private fun HeroBookInformation(
         // can expand through the existing scroll without a size-feedback loop.
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             FlowRow(Modifier.fillMaxWidth(), maxItemsInEachRow = if (stacked) 1 else 2,
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(contentGap),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Box(Modifier.width(posterWidth).mangaSharedCover(manga.id)) {
                     LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 12.dp,
@@ -981,11 +995,15 @@ private fun HeroBookInformation(
                             interactionSource = titleInteraction, indication = null,
                             role = Role.Button, onClickLabel = "查看完整作品信息", onClick = onIntroduction)
                             .motionPress(titleInteraction, enabled = infoVisible, pressedScale = .985f))
-                    AuthorNames(manga.authors, ink.copy(alpha = .82f), enabled = infoVisible, onAuthor = onAuthor)
                     val state = listOf(manga.status, manga.latestChapter.takeIf(String::isNotBlank)
                         ?.let { "更新 · $it" }.orEmpty()).filter(String::isNotBlank).joinToString(" · ")
-                    if (state.isNotBlank()) Text(state, color = ink.copy(alpha = .80f),
-                        fontSize = 12.sp, lineHeight = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (manga.authors.any(String::isNotBlank) || state.isNotBlank()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(if (editorial) 2.dp else 6.dp)) {
+                            AuthorNames(manga.authors, ink.copy(alpha = .82f), enabled = infoVisible, onAuthor = onAuthor)
+                            if (state.isNotBlank()) Text(state, color = ink.copy(alpha = .80f),
+                                fontSize = 12.sp, lineHeight = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
                     if (!desktopSummary) HeroSynopsis(manga, ink, infoVisible, onIntroduction)
                 }
             }
@@ -993,8 +1011,8 @@ private fun HeroBookInformation(
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
                 DetailTags(manga, includeState = false, enabled = infoVisible, onTag = onTag,
                     neutral = adultProfile,
-                    maximumVisible = if (adultProfile) 6 else Int.MAX_VALUE,
-                    onMore = if (adultProfile) onIntroduction else null)
+                    maximumVisible = if (editorial) 4 else if (adultProfile) 6 else Int.MAX_VALUE,
+                    onMore = if (adultProfile || editorial) onIntroduction else null)
                 if (onRatings != null) DetailRatingStrip(manga, ink.copy(alpha = .86f), enabled = infoVisible,
                     compact = true, onExpand = onRatings)
                 else if (!adultProfile) MangaBrowseSource(manga, Modifier.padding(top = 6.dp), foreground = ink.copy(alpha = .80f))

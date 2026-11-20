@@ -42,8 +42,10 @@ internal fun GlassControlGroup(
     alpha: () -> Float,
     actions: @Composable () -> Unit,
     content: @Composable ColumnScope.() -> Unit,
+    quietShadow: Boolean = false,
 ) {
     val motion = LocalMotionEnabled.current
+    val elevation = if (quietShadow) 1.dp else null
     // This source owns proximity only. Each SDK member observes its own pointer
     // coordinates; broadcasting a sibling's local Press would light the wrong edge.
     val interaction = remember { MutableInteractionSource() }
@@ -65,13 +67,13 @@ internal fun GlassControlGroup(
         BoxWithConstraints(Modifier.weight(1f)) {
             LiquidGlassSurface(backdrop, Modifier.width(controlsWidth.coerceAtMost(maxWidth))
                 .glassGroupPress(interaction), cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION,
-                trackPointer = true) {
+                trackPointer = true, elevation = elevation, softCard = !quietShadow) {
                 Column(Modifier.fillMaxWidth(), content = content)
             }
         }
         Spacer(Modifier.width(6.dp))
         LiquidGlassSurface(backdrop, Modifier.width(actionsWidth).glassGroupPress(interaction),
             cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION,
-            trackPointer = true) { actions() }
+            trackPointer = true, elevation = elevation, softCard = !quietShadow) { actions() }
     }
 }

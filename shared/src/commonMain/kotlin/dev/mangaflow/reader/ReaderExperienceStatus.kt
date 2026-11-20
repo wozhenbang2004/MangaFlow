@@ -55,6 +55,7 @@ import dev.mangaflow.enhancement.EnhancementPolicy
 import dev.mangaflow.enhancement.EnhancementContent
 import dev.mangaflow.enhancement.EnhancementSettingsStore
 import dev.mangaflow.enhancement.EnhancementTaskPhase
+import dev.mangaflow.enhancement.EnhancementMetric
 import dev.mangaflow.enhancement.QualityTier
 import dev.mangaflow.enhancement.ReaderEnhancementState
 import dev.mangaflow.enhancement.ui.EnhancementReadouts
@@ -108,6 +109,7 @@ internal fun ReaderExperienceStatus(
     chapterLoading: Boolean = false,
     chapterUnavailable: Boolean = false,
     imageVisible: Boolean = false,
+    ambient: Boolean = false,
     localChapter: Boolean = false,
     downloadedChapter: Boolean = false,
     onAlignPage: (() -> Unit)? = null,
@@ -133,8 +135,12 @@ internal fun ReaderExperienceStatus(
     val shown = visible && placement != ReaderStatusPlacement.HIDDEN
     val displayPreferences by enhancementSettings.visibleMetrics.collectAsStateWithLifecycle()
     val visibleMetrics = displayPreferences.getValue(enhancementContent)
-    val enhancementReadings = readerEnhancementReadouts(visibleMetrics, enhancement, enhancementPolicy, currentPage) +
-        enhancementResourceReadouts(visibleMetrics, store, shown)
+    val dockMetrics = if (ambient && enhancementPolicy.tier == QualityTier.ORIGINAL)
+        visibleMetrics - EnhancementMetric.QUALITY - EnhancementMetric.DIMENSIONS - EnhancementMetric.PREPARED
+    else visibleMetrics
+    val enhancementReadings = readerEnhancementReadouts(dockMetrics, enhancement, enhancementPolicy, currentPage) +
+        enhancementResourceReadouts(dockMetrics, store, shown)
+    val dockWidth = if (ambient) 200.dp else 248.dp
     var selected by remember(sessionKey) { mutableStateOf<ReaderStatusSection?>(null) }
     var retainedSection by remember(sessionKey) { mutableStateOf(ReaderStatusSection.PREPARATION) }
     val sectionHeader = remember(sessionKey) { BringIntoViewRequester() }
@@ -310,11 +316,11 @@ internal fun ReaderExperienceStatus(
                 end = if (!top && bottomEndClearance > 0.dp) bottomEndClearance + 20.dp else 12.dp,
                 top = if (top) clearance + 2.dp else 0.dp,
                 bottom = if (top) 0.dp else clearance + 2.dp)
-            .widthIn(max = 248.dp)) {
+            .widthIn(max = dockWidth)) {
             AnimatedVisibility(shown,
                 enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)),
                 exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
-                Column(Modifier.width(248.dp).motionInputGate(shown)) {
+                Column(Modifier.width(dockWidth).motionInputGate(shown)) {
                     AnimatedVisibility(summary.mark == ReaderStatusMark.ERROR,
                         enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)),
                         exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
@@ -339,7 +345,8 @@ internal fun ReaderExperienceStatus(
                     LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 16.dp,
                         role = GlassSurfaceRole.READING_DOCK, elevation = 0.dp,
                         softCard = false, trackPointer = false) {
-                        Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface.copy(alpha = .86f))) {
+                        val backing = MaterialTheme.colorScheme.surface.copy(alpha = if (ambient) .8f else .86f)
+                        Column(Modifier.fillMaxWidth().background(backing)) {
                             if (enhancementReadings.isNotEmpty()) EnhancementReadouts(enhancementReadings, quiet = false,
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp))
                             ReaderStatusStrip(dockSlot, dockRetained, shown, { slot ->
@@ -352,23 +359,26 @@ internal fun ReaderExperienceStatus(
                                     inspect(slot.section)
                                 }
                             }, entries = listOf(ReaderStatusSlot.PREPARATION, ReaderStatusSlot.WORK,
-                                ReaderStatusSlot.SOURCES, ReaderStatusSlot.MEMORY), labelsVisible = false) { slot, isSelected ->
+                                ReaderStatusSlot.SOURCES, ReaderStatusSlot.MEMORY), labelsVisible = false,
+                                ambient = ambient) { slot, isSelected ->
                                 when (slot) {
                                     ReaderStatusSlot.PREPARATION -> StatusMicro(Icons.AutoMirrored.Outlined.MenuBook,
                                         aheadValue, "前方已备原图", aheadMark, aheadDetail,
                                         progress = if (preparation.aheadTarget > 0 && aheadPages.none { it.originalPresent == null })
                                             preparation.aheadReady.toFloat() / preparation.aheadTarget else null,
-                                        selected = isSelected)
+                                        selected = isSelected, showValue = !ambient)
                                     ReaderStatusSlot.WORK -> StatusMicro(Icons.Outlined.AccountTree,
                                         if (!workKnown) "—" else stripCount(active), "当前窗口任务与画质处理", activityMark,
                                         workDetail,
-                                        progress = null, selected = isSelected, stages = stageMarks)
+                                        progress = null, selected = isSelected, stages = stageMarks,
+                                        showValue = !ambient)
                                     ReaderStatusSlot.SOURCES -> StatusMicro(Icons.Outlined.Layers,
                                         if (sourceStatus.hasTargets) stripCount(standbys.count { it.requestedPages > 0 && it.targetOriginalPresent }) else "—",
                                         "备用来源与补页", if (sourceStatus.mark == ReaderStatusMark.ERROR) ReaderStatusMark.ERROR
                                             else if (repairBusy) ReaderStatusMark.ACTIVE else sourceStatus.mark,
                                         sourceStatus.detail + "；已补 $repairedPages 页",
-                                        progress = sourceStatus.progress, selected = isSelected, busy = repairBusy)
+                                        progress = sourceStatus.progress, selected = isSelected, busy = repairBusy,
+                                        showValue = !ambient)
                                     ReaderStatusSlot.MEMORY, ReaderStatusSlot.DISK -> ReaderCacheDock(store, isSelected)
                                 }
                             }
@@ -611,15 +621,17 @@ private fun ReaderStatusStrip(selected: ReaderStatusSlot?, retained: ReaderStatu
     onSelect: (ReaderStatusSlot) -> Unit,
     entries: List<ReaderStatusSlot> = ReaderStatusSlot.entries,
     labelsVisible: Boolean = true,
+    ambient: Boolean = false,
     content: @Composable (ReaderStatusSlot, Boolean) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val scroll = rememberScrollState()
-    val minimumSlotWidth = maxOf(44.dp, statusNumberWidth("99+?", 20.dp))
+    val minimumSlotWidth = if (ambient) 48.dp else maxOf(44.dp, statusNumberWidth("99+?", 20.dp))
     val lineHeight = with(LocalDensity.current) { MaterialTheme.typography.labelSmall.lineHeight.toDp() }
     // Custom tab content contains a metric row, its thin track, and an optional label.
     // MotionTabs only budgets a single default text row, so reserve our actual type geometry.
     val microHeight = maxOf(18.dp, lineHeight) + 5.dp
-    val controlHeight = maxOf(if (labelsVisible) 62.dp else 44.dp,
+    val minimumHeight = if (labelsVisible) 62.dp else if (ambient) 48.dp else 44.dp
+    val controlHeight = maxOf(minimumHeight,
         microHeight + (if (labelsVisible) lineHeight + 4.dp else 0.dp) + 12.dp)
     val anchors = remember(entries) { List(entries.size) { BringIntoViewRequester() } }
     val selectedIndex = entries.indexOf(selected)
@@ -1051,7 +1063,7 @@ private fun StatusNumber(value: String, modifier: Modifier = Modifier, color: Co
 @Composable
 private fun StatusMicro(icon: ImageVector, value: String, label: String,
     mark: ReaderStatusMark, detail: String, progress: Float?, selected: Boolean,
-    stages: List<ReaderStatusMark> = emptyList(), busy: Boolean = false) {
+    stages: List<ReaderStatusMark> = emptyList(), busy: Boolean = false, showValue: Boolean = true) {
     val colors = MaterialTheme.colorScheme
     val accent = colors.onSurface.copy(alpha = if (selected) .95f else .72f)
     val progressColor = statusTone(mark)
@@ -1066,7 +1078,7 @@ private fun StatusMicro(icon: ImageVector, value: String, label: String,
                     StatusMark(mark, Modifier.align(Alignment.TopEnd).size(8.dp))
                 }
                 // Keep the reserved width stable, but anchor short counts beside their own icon.
-                StatusNumber(value, Modifier.width(numberWidth), color = accent, textAlign = TextAlign.Start)
+                if (showValue) StatusNumber(value, Modifier.width(numberWidth), color = accent, textAlign = TextAlign.Start)
             }
             if (stages.isNotEmpty()) Row(Modifier.width(24.dp).height(2.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 stages.forEach { stage ->

@@ -61,10 +61,11 @@ internal val HeaderContentGap = 2.dp
 
 /** Every root menu button uses the same liquid role and fixed optical geometry. */
 @Composable
-private fun HeaderNavigationGlass(backdrop: HazeState, navigation: @Composable () -> Unit) {
+private fun HeaderNavigationGlass(backdrop: HazeState, navigation: @Composable () -> Unit,
+    quietShadow: Boolean = false) {
     LiquidGlassSurface(backdrop, Modifier.size(44.dp), cornerRadius = 22.dp,
-        role = GlassSurfaceRole.NAVIGATION,
-        trackPointer = true) { navigation() }
+        role = GlassSurfaceRole.NAVIGATION, elevation = if (quietShadow) 1.dp else null,
+        softCard = !quietShadow, trackPointer = true) { navigation() }
 }
 
 /** Root identity is already in the drawer; the header holds navigation and actual actions. */
@@ -105,6 +106,7 @@ internal fun SegmentedGlassHeader(
     controlsWidth: Dp,
     actionsWidth: Dp,
     controlsAlpha: () -> Float = { 1f },
+    quietShadow: Boolean = false,
     actions: @Composable () -> Unit,
     secondary: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
@@ -112,29 +114,33 @@ internal fun SegmentedGlassHeader(
     Column(modifier.fillMaxWidth()) {
         BoxWithConstraints(Modifier.fillMaxWidth().zIndex(1f)) {
         val stacked = maxWidth < 44.dp + 12.dp + controlsWidth + actionsWidth
+        val elevation = if (quietShadow) 1.dp else null
         if (stacked) {
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-                    HeaderNavigationGlass(backdrop, navigation)
+                    HeaderNavigationGlass(backdrop, navigation, quietShadow)
                     Spacer(Modifier.weight(1f))
                     LiquidGlassSurface(backdrop, Modifier.width(actionsWidth).graphicsLayer {
                         alpha = controlsAlpha()
                         compositingStrategy = CompositingStrategy.ModulateAlpha
-                    }, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true) { actions() }
+                    }, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true,
+                        elevation = elevation, softCard = !quietShadow) { actions() }
                 }
                 LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().graphicsLayer {
                     alpha = controlsAlpha()
                     compositingStrategy = CompositingStrategy.ModulateAlpha
-                }, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true) {
+                }, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true,
+                    elevation = elevation, softCard = !quietShadow) {
                     Column(Modifier.fillMaxWidth(), content = content)
                 }
             }
         } else {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.Top) {
-            HeaderNavigationGlass(backdrop, navigation)
+            HeaderNavigationGlass(backdrop, navigation, quietShadow)
             Box(Modifier.weight(1f)) {
-                GlassControlGroup(backdrop, controlsWidth, actionsWidth, controlsAlpha, actions, content)
+                GlassControlGroup(backdrop, controlsWidth, actionsWidth, controlsAlpha, actions, content,
+                    quietShadow = quietShadow)
             }
         }
         }

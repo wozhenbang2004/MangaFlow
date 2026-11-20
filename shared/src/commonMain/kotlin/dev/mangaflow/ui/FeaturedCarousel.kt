@@ -148,9 +148,12 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
         val fontScale = density.fontScale.coerceAtLeast(1f)
         // This is the complete gallery budget: artwork, labels, shadow and dots.
         // Image decode and score arrivals never resize the surrounding list.
-        val galleryHeight = if (window.shortHeight)
-            (window.height * .5f).coerceIn(164.dp, 220.dp)
-            else (window.height / 3f).coerceIn(220.dp, 280.dp)
+        val androidEditorial = platformKind == PlatformKind.ANDROID && !showSource
+        val galleryHeight = when {
+            window.shortHeight -> (window.height * .5f).coerceIn(164.dp, 220.dp)
+            androidEditorial -> (window.height * .28f).coerceIn(188.dp, 232.dp)
+            else -> (window.height / 3f).coerceIn(220.dp, 280.dp)
+        }
         val preferredWidth = minOf(galleryWidth, (galleryWidth * .82f).coerceAtMost(304.dp))
         val inlineInformation = preferredWidth >= 224.dp && fontScale <= 1.3f
         val titleLines = if (window.shortHeight || fontScale > 1.3f) 1 else 2
@@ -161,7 +164,7 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
         val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
         if (manga.isEmpty()) {
             Box(Modifier.fillMaxWidth().height(galleryHeight), contentAlignment = Alignment.Center) {
-                if (platformKind == PlatformKind.ANDROID && !showSource) {
+                if (androidEditorial) {
                     val colors = MaterialTheme.colorScheme
                     Box(Modifier.align(Alignment.TopCenter).padding(top = 6.dp)
                         .size(width = preferredWidth, height = itemHeight)

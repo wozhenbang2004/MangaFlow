@@ -202,6 +202,7 @@ fun LibraryScreen(
     val shelfTitle = if (adultProfile) "成人书架" else "书架"
     val historyTitle = "最近阅读"
     val desktop = platformKind == PlatformKind.DESKTOP
+    val androidManga = platformKind == PlatformKind.ANDROID && !adultProfile
     val density = LocalDensity.current
     val motion = LocalMotionEnabled.current
     val haptics = rememberFeelFeedback()
@@ -492,10 +493,11 @@ fun LibraryScreen(
                                 key = "resume-reading", span = {
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                                 }) {
-                                Column(Modifier.fillMaxWidth()) {
+                                Column(Modifier.fillMaxWidth().padding(bottom = if (androidManga) 8.dp else 0.dp)) {
                                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                         Text("继续阅读", Modifier.weight(1f),
-                                            style = MaterialTheme.typography.titleSmall)
+                                            style = if (androidManga) MaterialTheme.typography.titleMedium
+                                                else MaterialTheme.typography.titleSmall)
                                         TextButton(onClick = { onCancelOpen(); showHistory = true },
                                             enabled = active,
                                             colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
@@ -519,11 +521,13 @@ fun LibraryScreen(
                                                 }
                                             }
                                         } }
-                                    } else ContinueRow(recent.first(), repository, onContinue = { if (active) onContinue(it) })
+                                    } else ContinueRow(recent.first(), repository, prominent = androidManga,
+                                        onContinue = { if (active) onContinue(it) })
                                 }
                             }
-                            if ((adultProfile || desktop && shelfScope == UnifiedShelfScope.LOCAL && recent.isNotEmpty()) &&
-                                visibleFavorites.isNotEmpty()) item(
+                            val showCollectionHeading = adultProfile || shelfScope == UnifiedShelfScope.LOCAL &&
+                                (androidManga || desktop && recent.isNotEmpty())
+                            if (showCollectionHeading && visibleFavorites.isNotEmpty()) item(
                                 key = if (adultProfile) "adult-shelf-section" else "shelf-collection-section", span = {
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                                 }) {
@@ -609,7 +613,7 @@ fun LibraryScreen(
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                                 }) {
                                 when {
-                                    shelfScope == UnifiedShelfScope.LOCAL -> EmptyBookshelf(onDiscover)
+                                    shelfScope == UnifiedShelfScope.LOCAL -> EmptyBookshelf(onDiscover, androidManga)
                                     onAddCloudFavorite == null && onOpenAccount != null ->
                                         EmptyMessage("登录拷贝账号", "登录后，这里显示拷贝收藏。", "去登录", onOpenAccount)
                                     else -> EmptyMessage("拷贝书架还是空的", "在拷贝收藏的漫画会显示在这里。", "去发现", onDiscover)
@@ -1038,11 +1042,13 @@ private fun SiteShelfStatus(
 }
 
 @Composable
-private fun EmptyBookshelf(onDiscover: () -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 36.dp),
+private fun EmptyBookshelf(onDiscover: () -> Unit, editorial: Boolean) {
+    Column(Modifier.fillMaxWidth().padding(
+        horizontal = if (editorial) 0.dp else 24.dp, vertical = if (editorial) 14.dp else 36.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("书架还空着", style = MaterialTheme.typography.titleSmall)
-        Text("收藏喜欢的漫画，放好后点书接着读。", style = MaterialTheme.typography.bodySmall,
+        Text(if (editorial) "还没有收藏" else "书架还空着", style = MaterialTheme.typography.titleSmall)
+        Text(if (editorial) "在作品详情点收藏，即可在这里找到它。" else "收藏喜欢的漫画，放好后点书接着读。",
+            style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         TextButton(onClick = onDiscover) { Text("去发现") }
     }
