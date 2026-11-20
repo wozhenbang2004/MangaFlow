@@ -917,7 +917,7 @@ private fun AnimeEpisodeCell(
         AnimeEpisodeAvailability.UPCOMING -> upcomingEpisodeLabel(episode)
     }
     val visibleSourceState = sourceState.takeUnless {
-        compact && (availability == AnimeEpisodeAvailability.CHECKING || availability == AnimeEpisodeAvailability.UNMATCHED)
+        availability == AnimeEpisodeAvailability.CHECKING || compact && availability == AnimeEpisodeAvailability.UNMATCHED
     }
     val interaction = remember(episode.id) { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme

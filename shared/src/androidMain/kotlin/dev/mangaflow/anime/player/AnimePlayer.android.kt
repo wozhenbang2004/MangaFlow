@@ -62,6 +62,7 @@ import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.source.UnrecognizedInputFormatException
 import androidx.media3.effect.GlEffect
 import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.extractor.text.DefaultSubtitleParserFactory
@@ -87,6 +88,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlin.coroutines.EmptyCoroutineContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
@@ -140,8 +142,7 @@ internal class AndroidAnimePlayer(
         val cacheNotice: String?,
     ) {
         fun close() {
-            client.dispatcher.cancelAll()
-            client.connectionPool.evictAll()
+            closeAnimeMediaHttpClient(client)
             releaseCache?.invoke()
         }
     }
@@ -165,11 +166,11 @@ internal class AndroidAnimePlayer(
             gate.retire()
             result.complete(false)
             player.removeListener(listener)
-            resources.client.dispatcher.cancelAll()
+            closeAnimeMediaHttpClient(resources.client)
             try { player.release() }
             finally {
-                surface.close()
-                resources.close()
+                try { surface.close() }
+                finally { resources.releaseCache?.invoke() }
             }
         }
     }
@@ -664,7 +665,7 @@ internal class AndroidAnimePlayer(
                         .createMediaSource(MediaItem.fromUri(subtitle.url))
                 }
             }
-            val contentType = Util.inferContentTypeForUriAndMimeType(Uri.parse(asset.url), asset.mimeType)
+            val contentType = inferAnimeMediaContentType(Uri.parse(asset.url), asset.mimeType)
             val plan = RemoteMediaPlan(contentType, (cacheOwner?.targetBytes ?: 0L) > 0L) { type, bypassProgressiveCache ->
                 val mime = when (type) {
                     C.CONTENT_TYPE_HLS -> MimeTypes.APPLICATION_M3U8
@@ -694,8 +695,7 @@ internal class AndroidAnimePlayer(
             pendingClient = null
             return remote
         } finally {
-            pendingClient?.dispatcher?.cancelAll()
-            pendingClient?.connectionPool?.evictAll()
+            pendingClient?.let(::closeAnimeMediaHttpClient)
             // Cancellation can occur after IO acquired the lease, before delivering it to Main.
             pendingLease?.invoke()
         }
@@ -1652,13 +1652,8 @@ internal class AndroidAnimePlayer(
     }
 
     private fun inspectAfterParserFailure(generation: Long, exo: ExoPlayer, error: PlaybackException): Boolean {
-        if (inspectedAfterParserError || state.value.firstFrameRendered != false ||
-            error.errorCode !in setOf(
-                PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
-                PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
-                PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
-                PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
-            )) return false
+        if (inspectedAfterParserError || state.value.firstFrameRendered == true ||
+            !isStartupFormatError(error)) return false
         val plan = remoteMediaPlan ?: return false
         val client = http ?: return false
         val url = request?.asset?.url ?: return false
@@ -1699,13 +1694,17 @@ internal class AndroidAnimePlayer(
         return true
     }
 
+    private fun isStartupFormatError(error: PlaybackException): Boolean =
+        error.cause is UnrecognizedInputFormatException || error.errorCode in setOf(
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+            PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
+            PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+        )
+
     private fun mayRefreshStartupSource(error: PlaybackException): Boolean =
-        remoteMediaPlan != null && state.value.firstFrameRendered == false && state.value.hasVideoTracks != false &&
-            error.errorCode in setOf(
-                PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
-                PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
-                PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
-            )
+        remoteMediaPlan != null && state.value.firstFrameRendered != true && state.value.hasVideoTracks != false &&
+            isStartupFormatError(error) && error.errorCode != PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED
 
     private fun publishTracks(generation: Long, tracks: Tracks) {
         if (!isCurrent(generation)) return
@@ -1918,12 +1917,12 @@ internal class AndroidAnimePlayer(
         engine.value = null
         listener?.let { old?.removeListener(it) }
         listener = null
-        http?.dispatcher?.cancelAll()
+        val oldClient = http
+        http = null
+        oldClient?.let(::closeAnimeMediaHttpClient)
         old?.release()
         localLease?.close()
         localLease = null
-        http?.connectionPool?.evictAll()
-        http = null
         releaseCache?.invoke()
         releaseCache = null
     }
@@ -1944,6 +1943,24 @@ internal class AndroidAnimePlayer(
             notice = "系统暂未允许后台播放服务，离开应用后可能暂停；可回到前台重试",
         )
     }
+}
+
+internal fun inferAnimeMediaContentType(uri: Uri, mimeType: String?): Int {
+    val normalized = when (mimeType?.substringBefore(';')?.trim()?.lowercase()) {
+        "application/vnd.apple.mpegurl", "application/x-mpegurl" -> MimeTypes.APPLICATION_M3U8
+        "application/dash+xml" -> MimeTypes.APPLICATION_MPD
+        else -> mimeType
+    }
+    return Util.inferContentTypeForUriAndMimeType(uri, normalized)
+}
+
+internal fun closeAnimeMediaHttpClient(client: OkHttpClient) {
+    // Closing a pooled TLS socket can write a close-notify record. The retired
+    // client must be released off Main even after its playback scope has ended.
+    Dispatchers.IO.dispatch(EmptyCoroutineContext, Runnable {
+        try { client.dispatcher.cancelAll() }
+        finally { client.connectionPool.evictAll() }
+    })
 }
 
 internal fun animeMediaHttpClient(asset: AnimePlaybackAsset, forPrefetch: Boolean = false): OkHttpClient =
@@ -2048,7 +2065,9 @@ private fun playbackFailure(error: PlaybackException, mediaType: Int? = null): T
     PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED -> "当前设备不支持这条线路的媒体格式，请换个来源"
     PlaybackException.ERROR_CODE_DECODER_INIT_FAILED -> "这条线路的解码器未能启动，请重试或换个来源"
     PlaybackException.ERROR_CODE_DRM_SCHEME_UNSUPPORTED -> "这条线路需要当前播放器不支持的受保护媒体授权"
-    else -> readablePlayerError(error)
+    else -> if (error.cause is UnrecognizedInputFormatException)
+        "播放器未能识别这条线路返回的媒体格式，请重试或换个来源"
+    else readablePlayerError(error)
 }, error)
 
 private fun subtitleMime(url: String): String? = when (Uri.parse(url).lastPathSegment?.substringAfterLast('.')?.lowercase()) {

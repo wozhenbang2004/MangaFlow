@@ -70,10 +70,8 @@ internal actual class JavascriptHttpSession actual constructor(
 ) {
         // Only the host can grant these reviewed anonymous App endpoints to a pinned script.
         // Snapshot the capability; request JSON and mutable caller collections cannot enlarge it.
-        private val permittedCleartext = cleartextEndpoints.associate { address ->
-            val method = PUBLIC_APP_CLEARTEXT_METHODS[address]
-                ?: throw IllegalArgumentException("来源 HTTP 端点未获宿主授权。")
-            checkNotNull(address.toHttpUrlOrNull()) to method
+        private val permittedCleartext = cleartextEndpoints.toSet().also { endpoints ->
+            require(endpoints.all(PUBLIC_APP_CLEARTEXT_METHODS::containsKey)) { "来源 HTTP 端点未获宿主授权。" }
         }
         private val owned = route != null
         private val client = if (route == null) defaultClient else {
@@ -111,7 +109,9 @@ internal actual class JavascriptHttpSession actual constructor(
                     currentCoroutineContext().ensureActive()
                     checkSessionUrl(url)
                     if (!url.isHttps) {
-                        require(permittedCleartext[url] == method) { "来源 HTTP 端点不支持此请求方法。" }
+                        require(publicAppCleartextMethod(url.toString(), permittedCleartext) == method) {
+                            "来源 HTTP 端点不支持此请求方法。"
+                        }
                         require(headers.keys.none { it.lowercase() in CLEARTEXT_CREDENTIAL_HEADERS }) {
                             "公开 HTTP 来源接口不能携带 Cookie 或通用认证信息。"
                         }
@@ -161,9 +161,7 @@ internal actual class JavascriptHttpSession actual constructor(
             require(url.username.isEmpty() && url.password.isEmpty() && url.fragment == null &&
                 url.toString().length <= 8192) { "来源请求 URL 无效或包含内嵌凭据、片段。" }
             if (url.isHttps) checkUrl(url) else {
-                // Exact canonical URL equality includes scheme, host, port, encoded path and
-                // query. None of the reviewed HTTP calls uses a query or fragment.
-                require(url.scheme == "http" && url.encodedQuery == null && url in permittedCleartext) {
+                require(url.scheme == "http" && publicAppCleartextMethod(url.toString(), permittedCleartext) != null) {
                     "来源仅支持 HTTPS 或宿主为此脚本授权的精确 HTTP 接口。"
                 }
                 JvmScriptNetwork.checkPublicHost(url)

@@ -146,7 +146,7 @@ internal suspend fun prepareAndroidAnimeWindow(
                     }, cugan = cuganSession, onFrame = {})
             }
             coroutineScope {
-                val cancelRequests = launch {
+                val cancelRequests = launch(Dispatchers.IO) {
                     try { awaitCancellation() }
                     finally { client.dispatcher.cancelAll() }
                 }
@@ -181,8 +181,7 @@ internal suspend fun prepareAndroidAnimeWindow(
             SystemClock.elapsedRealtime() - started,
         ))
     } finally {
-        client.dispatcher.cancelAll()
-        client.connectionPool.evictAll()
+        closeAnimeMediaHttpClient(client)
         release()
         output.delete()
     }

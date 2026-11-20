@@ -12,6 +12,7 @@ import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
 import dev.mangaflow.platform.storage.PRIVATE_STORAGE
@@ -236,6 +237,13 @@ internal expect class JavascriptHttpSession(enabled: Boolean, route: DownloadRou
 }
 internal expect suspend fun fetchPluginText(context: PlatformContext, url: String): String
 
+/** The same-origin playback resolvers observed in the pinned Yuzu catalogue. */
+internal val YUZU_HTTP_PLAYBACK_ENDPOINTS = setOf(
+    "http://91.110.236.125:38569/1xyzjm.com/bba2.php/",
+    "http://91.110.236.125:38569/1xyzjm.com/bba.php/",
+    "http://91.110.236.125:38569/1xyzjm.com/jiamixmy.php/",
+)
+
 /** Reviewed public App calls. Only a pinned source host can grant these exact endpoints. */
 internal val PUBLIC_APP_CLEARTEXT_METHODS = mapOf(
     "http://app2.dsx.ac/ndsx.php/v7/logs" to "POST",
@@ -245,8 +253,22 @@ internal val PUBLIC_APP_CLEARTEXT_METHODS = mapOf(
     "http://23.224.53.35:2345/nllq.php/v7/logs" to "POST",
     "http://118.184.173.5:19987/app/bn/v2" to "POST",
     "http://frontend-static.kurte.cn/server_list_v2.json" to "GET",
-)
+) + YUZU_HTTP_PLAYBACK_ENDPOINTS.associateWith { "GET" }
 internal val CLEARTEXT_CREDENTIAL_HEADERS = setOf("cookie", "authorization", "proxy-authorization")
+
+internal fun publicAppCleartextMethod(address: String, permittedEndpoints: Set<String>): String? {
+    val endpoint = address.substringBefore('?')
+    if (endpoint !in permittedEndpoints) return null
+    val method = PUBLIC_APP_CLEARTEXT_METHODS[endpoint] ?: return null
+    if (endpoint in YUZU_HTTP_PLAYBACK_ENDPOINTS) {
+        val url = address.toHttpUrlOrNull() ?: return null
+        val value = url.queryParameter("url") ?: return null
+        if (url.querySize != 1 || value.isBlank() || value.any { it.code < 32 || it.code == 127 }) return null
+    } else if (address != endpoint) {
+        return null
+    }
+    return method
+}
 
 internal fun javascriptUrlInfo(raw: String): String {
     val value = JSONObject(raw)

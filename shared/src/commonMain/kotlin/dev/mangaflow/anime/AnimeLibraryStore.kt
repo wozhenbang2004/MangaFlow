@@ -143,9 +143,13 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             val previous = before.progress[progress.episodeId]
             if (previous != null && previous.updatedAt > progress.updatedAt) return@withLock false
             val completed = entry.completedEpisodeIds + if (progress.completed) setOf(progress.episodeId) else emptySet()
+            val resume = entry.resume?.takeIf {
+                it.updatedAt > progress.updatedAt || it.updatedAt == progress.updatedAt && it.episodeId != progress.episodeId
+            } ?: progress
             val changed = entry.copy(
-                subject = subject, resume = progress, completedEpisodeIds = completed,
-                updatedAt = progress.updatedAt,
+                subject = if (entry.updatedAt > progress.updatedAt) entry.subject else subject,
+                resume = resume, completedEpisodeIds = completed,
+                updatedAt = maxOf(entry.updatedAt, progress.updatedAt),
                 revision = entry.revision + if (completed != entry.completedEpisodeIds) 1L else 0L,
             )
             persist(before.copy(entries = before.entries + (subject.id to changed),

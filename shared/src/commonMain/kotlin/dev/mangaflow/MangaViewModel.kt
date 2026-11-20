@@ -170,7 +170,7 @@ data class BrowseState(
         isSearch -> {
             val keyword = if (searchTarget == SearchTarget.TAG) "" else query.trim()
             val prefix = when {
-                isFederatedSearch -> "search-v11-fields:$sourceScope"
+                isFederatedSearch -> "search-v12-fields:$sourceScope"
                 searchTarget == SearchTarget.TRANSLATION_GROUP -> "copy-translation-v1:$sourceScope"
                 else -> "search-v3-heat"
             }
@@ -1074,9 +1074,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 source !in failed || retained.none { old -> dev.mangaflow.data.federatedMangaIdentity(old).first == source }
             }
             val groups = withContext(Dispatchers.Default) {
-                FederatedSearchGrouper(state.query).group((retained + replacements).distinctBy {
-                    dev.mangaflow.data.federatedMangaIdentity(it)
-                }, state.sourceMatches)
+                FederatedSearchGrouper(state.query, exactTitleFirst = state.searchTarget == SearchTarget.TITLE)
+                    .group((retained + replacements).distinctBy(::federatedMangaIdentity), state.sourceMatches)
             }
             if (!current()) return
             val next = sources.values.filter { it.error == null && it.hasMore && it.nextPage != null }
@@ -1108,14 +1107,16 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         requestedPages: Map<String, Int>? = if (page == 0) null else state.sourceNextPages,
         retain: Boolean = page > 0, forceRefresh: Boolean = false) {
         val previousHits = if (retain) state.sourceMatches.values.flatten().ifEmpty { state.items } else emptyList()
-        val grouper = withContext(Dispatchers.Default) { FederatedSearchGrouper(state.query) }
+        val grouper = withContext(Dispatchers.Default) {
+            FederatedSearchGrouper(state.query, exactTitleFirst = state.searchTarget == SearchTarget.TITLE)
+        }
         var groupedHits: List<Manga>? = null
         var groups: List<FederatedSearchGroup> = emptyList()
         try {
             repository.searchAll(state.query.trim(), requestedPages, forceRefresh = forceRefresh,
                 target = state.searchTarget, selectedTags = state.selectedTags) { partial ->
                 if (requestId != browseRequestId || generation != browseCache.generation) return@searchAll
-                val hits = (previousHits + partial.hits).distinctBy(Manga::id)
+                val hits = (previousHits + partial.hits).distinctBy(::federatedMangaIdentity)
                 // Source callbacks are serialized by the repository. Keep the mutable derivation
                 // cache outside StateFlow.update, whose CAS lambda may be evaluated again.
                 if (hits != groupedHits) {

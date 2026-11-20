@@ -70,6 +70,8 @@ data class AnimeSourceCatalog(
     /** Actual partial-read status, not a claim that unavailable entries were deleted. */
     val notice: String? = null,
     val description: String = "",
+    /** The audited adapter read these playback groups from a single upstream work record. */
+    val sameWorkRoutes: Boolean = false,
 )
 
 data class AnimeSubtitle(
@@ -319,13 +321,22 @@ data class AnimeNextEpisodePreparation(
     val detail: String? = null,
 )
 
-enum class AnimeSourceMeasurementPhase { QUEUED, RUNNING, COMPLETE, WAITING_CATALOG, NO_EPISODE, UNAVAILABLE, CANCELLED }
+enum class AnimeSourceMeasurementPhase(internal val evidencePriority: Int = 0) {
+    QUEUED, RUNNING, COMPLETE(4), MANIFEST_ONLY(3), ADDRESS_ONLY(2), FAILED(1),
+    WAITING_CATALOG, NO_EPISODE, UNAVAILABLE, CANCELLED;
+
+    internal val checking: Boolean
+        get() = this == QUEUED || this == RUNNING
+}
+
+data class AnimeSourceLineMeasurement(val phase: AnimeSourceMeasurementPhase, val reason: String? = null)
 
 data class AnimeSourceMeasurementProgress(
     val episodeId: String?,
     val phase: AnimeSourceMeasurementPhase,
     val reason: String? = null,
     val lines: List<AnimeEpisodeOption> = emptyList(),
+    val lineMeasurements: Map<AnimeEpisodeOption, AnimeSourceLineMeasurement> = emptyMap(),
 )
 
 data class AnimeSourceMeasurementBatch(
@@ -334,6 +345,7 @@ data class AnimeSourceMeasurementBatch(
     val episodeId: String?,
     val running: Boolean,
     val sources: Map<String, AnimeSourceMeasurementProgress>,
+    val manual: Boolean = false,
 )
 
 data class AnimeScreenState(

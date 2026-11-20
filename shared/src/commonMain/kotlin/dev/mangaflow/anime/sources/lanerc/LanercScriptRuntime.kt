@@ -78,7 +78,9 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                 operationContext.ensureActive()
                 val route = DownloadRoutingStore.get(context).sourceSnapshot(bundle.id, DownloadCategory.ANIME)
                 val js = QuickJs.create(Dispatchers.Default)
-                val cleartextEndpoints = lanercCleartextEndpoints(bundle.id, bundle.digest)
+                val cleartextEndpoints = lanercCleartextEndpoints(bundle.id, bundle.digest, method)
+                val escapePlaybackQueryPipes = method == "play" && bundle.id == "anime-lanerc-07" &&
+                    bundle.digest == descriptor.observedDigest
                 val network = JavascriptHttpSession(networkAllowed, route, 8 * 1024 * 1024,
                     cleartextEndpoints = cleartextEndpoints)
                 val sessionRouteKey = animeHash(route.toString())
@@ -115,7 +117,8 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                             val request = argument(values)
                             sdEvidence?.beforeRequest(request)
                             lanercBlocking(operationContext) {
-                                http(request, network, preferences, cleartextEndpoints, ::checkCurrent, sdEvidence).also {
+                                http(request, network, preferences, cleartextEndpoints, ::checkCurrent,
+                                    sdEvidence, escapePlaybackQueryPipes).also {
                                     responseStatus = lanercResponseFailure(responseStatus, JSONObject(it).optInt("statusCode"))
                                 }
                             }
@@ -231,11 +234,19 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
     }
 
     private suspend fun http(raw: String, network: JavascriptHttpSession, preferences: LanercPreferences,
-        cleartextEndpoints: Set<String>, checkCurrent: () -> Unit, sdEvidence: SdSearchResponseEvidence? = null): String {
+        cleartextEndpoints: Set<String>, checkCurrent: () -> Unit, sdEvidence: SdSearchResponseEvidence?,
+        escapePlaybackQueryPipes: Boolean): String {
         val input = JSONObject(raw)
-        var url = lanercRequestUrl(input.getString("url"), cleartextEndpoints)
-        var headers = input.optJSONObject("headers") ?: JSONObject()
         var method = input.optString("method", "GET").uppercase()
+        val address = input.getString("url")
+        val queryAt = address.indexOf('?')
+        // The pinned 07 parser appends its opaque value with literal pipe characters.
+        val requestAddress = if (escapePlaybackQueryPipes && method == "GET" && queryAt >= 0 &&
+            address.startsWith("https://", ignoreCase = true)) {
+            address.substring(0, queryAt + 1) + address.substring(queryAt + 1).replace("|", "%7C")
+        } else address
+        var url = lanercRequestUrl(requestAddress, cleartextEndpoints)
+        var headers = input.optJSONObject("headers") ?: JSONObject()
         var body: Any? = input.opt("body")
         val bodyEncoding = input.optString("bodyEncoding", "utf8").lowercase()
         if (body != null && body !== JSONObject.NULL && bodyEncoding !in setOf("utf8", "utf-8", "text")) {

@@ -28,7 +28,7 @@ data class AnimeMetadataDetailResult(
     val subjectError: String? = null,
     val episodeError: String? = null,
 )
-private class AnimeMetadataIdentityException(message: String) : IllegalStateException(message)
+internal class AnimeMetadataIdentityException(message: String) : IllegalStateException(message)
 
 class AnimeMetadataRepository(context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
@@ -112,7 +112,10 @@ class AnimeMetadataRepository(context: PlatformContext) {
         withContext(Dispatchers.Default) { runCatching { AnimeDocumentCodec.detail(JSONObject(it.text)) }.getOrNull() }?.takeIf { detail -> detail.subject.id == subject.id }
     }
 
-    suspend fun detail(subject: AnimeSubject): AnimeMetadataDetailResult = withContext(Dispatchers.Default) {
+    suspend fun detail(
+        subject: AnimeSubject,
+        onEpisodesAvailable: suspend (List<AnimeEpisode>) -> Unit = {},
+    ): AnimeMetadataDetailResult = withContext(Dispatchers.Default) {
         require(subject.id.startsWith("bangumi:")) { "请选择有效的番剧条目。" }
         val id = animeNumericId(subject.id.removePrefix("bangumi:"))
         val key = "detail:${subject.id}"
@@ -156,7 +159,9 @@ class AnimeMetadataRepository(context: PlatformContext) {
                         )
                     }.sortedWith(compareBy<AnimeEpisode> { it.kind.ordinal }.thenBy { it.number }.thenBy { it.id })
                 } }
-                metadata.await() to catalogue.await()
+                val ready = catalogue.await()
+                ready.getOrNull()?.let { onEpisodesAvailable(it) }
+                metadata.await() to ready
             }
             if (canonical.isSuccess && episodes.isSuccess) {
                 val complete = AnimeDetail(canonical.getOrThrow(), episodes.getOrThrow())

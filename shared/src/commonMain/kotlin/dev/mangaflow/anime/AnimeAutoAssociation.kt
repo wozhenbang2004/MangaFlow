@@ -1,9 +1,36 @@
 package dev.mangaflow.anime
 
 import dev.mangaflow.anime.sources.isLmm85Source
+import dev.mangaflow.anime.sources.sourceEpisodeNumber
+import dev.mangaflow.data.bodySourceSearchTerms
+import dev.mangaflow.platform.normalizeNfkc
+import dev.mangaflow.platform.transliterate
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 
-/** Ignore cosmetic spacing and punctuation, never drop episode, sequel or season identity. */
-private fun autoTitleKey(value: String) = value.trim().lowercase().filter { it.isLetterOrDigit() }
+private val animeTitleTextLock = SynchronizedObject()
+private val animeTitleTexts = LinkedHashMap<String, String>()
+
+internal fun animeWorkTitleKey(value: String): String {
+    synchronized(animeTitleTextLock) { animeTitleTexts[value] }?.let { return it }
+    val normalized = normalizeNfkc(value)
+    val text = if (normalized.any { it in '\u3400'..'\u9fff' })
+        transliterate(normalized, "Traditional-Simplified").lowercase() else normalized.lowercase()
+    val result = buildString(text.length) {
+        text.forEachIndexed { index, char ->
+            val numericSeparator = char in ".-" && text.getOrNull(index - 1)?.isDigit() == true &&
+                text.getOrNull(index + 1)?.isDigit() == true
+            if (char.isLetterOrDigit() || char in "≡∞×+!?★☆♪" || numericSeparator) append(char)
+        }
+    }
+    synchronized(animeTitleTextLock) {
+        animeTitleTexts[value] = result
+        if (animeTitleTexts.size > 1200) animeTitleTexts.remove(animeTitleTexts.keys.first())
+    }
+    return result
+}
+
+private fun episodeLabelText(value: String) = animeWorkTitleKey(value).filter { it.isLetterOrDigit() }
 
 /** Only the explicitly written season suffix and a separated sequel number may be compared.
  * The base title and year must still agree. A bare series title never equals season two. */
@@ -14,20 +41,23 @@ private fun autoSeasonSignature(value: String): Pair<String, Int>? {
     val base = named?.groupValues?.get(1) ?: numbered?.groupValues?.get(1) ?: return null
     val label = named?.groupValues?.get(2) ?: numbered?.groupValues?.get(2) ?: return null
     val number = label.toIntOrNull() ?: "一二三四五六七八九十".indexOf(label).takeIf { it >= 0 }?.plus(1) ?: return null
-    return autoTitleKey(base).takeIf { it.length >= 2 }?.let { it to number }
+    return animeWorkTitleKey(base).takeIf { it.length >= 2 }?.let { it to number }
 }
 
 /** Presentation-only title hint. A conflicting year is a review candidate, not an automatic identity. */
 internal fun autoPlayTitleCandidate(subject: AnimeSubject, title: AnimeSourceTitle): Boolean {
     val names = listOf(subject.title, subject.originalTitle).filter(String::isNotBlank)
-    return names.any { autoTitleKey(it) == autoTitleKey(title.title) ||
-        (autoSeasonSignature(it) != null && autoSeasonSignature(it) == autoSeasonSignature(title.title)) }
+    val titleKey = animeWorkTitleKey(title.title)
+    val season = autoSeasonSignature(title.title)
+    return names.any { (titleKey.isNotBlank() && animeWorkTitleKey(it) == titleKey) ||
+        (season != null && autoSeasonSignature(it) == season) }
 }
 
 /** Search recall is wider than automatic binding. Search variants still must pass full identity checks. */
 internal fun autoPlaySearchKeywords(subject: AnimeSubject): List<String> {
     val ordinal = listOf("", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
-    val variants = listOf(subject.title, subject.originalTitle).flatMap { raw ->
+    val names = listOf(subject.title, subject.originalTitle).map(String::trim).filter(String::isNotBlank).distinct()
+    val variants = names.flatMap { raw ->
         val signature = autoSeasonSignature(raw)
         if (signature == null) listOf(raw) else {
             val numeric = Regex("""^(.+?)\s+([2-9])$""").matchEntire(raw.trim())
@@ -38,13 +68,14 @@ internal fun autoPlaySearchKeywords(subject: AnimeSubject): List<String> {
             else listOf(raw, "$base 第${ordinal[season]}季", "$base 第${season}季", base)
         }
     }
-    return variants.map(String::trim).filter { it.length >= 2 }.distinct().take(6)
+    return (names + names.flatMap { bodySourceSearchTerms(it) } + variants)
+        .map(String::trim).filter { it.length in 1..500 }.distinct().take(6)
 }
 
 /** AGE uses both 第02集 and 第2集 for the same regular episode across routes.
  * Only that complete numeric label is normalized; season/special/edition text survives. */
 private fun ageEpisodeLabelKey(value: String): String {
-    val literal = autoTitleKey(value)
+    val literal = episodeLabelText(value)
     if (literal.isBlank()) return ""
     val number = Regex("第([0-9]+)集").matchEntire(literal)?.groupValues?.get(1)?.toLongOrNull()
     return if (number != null) "regular-number:$number" else "literal:$literal"
@@ -60,9 +91,9 @@ internal fun autoPlaySubjectCandidate(subject: AnimeSubject, title: AnimeSourceT
 internal fun autoPlaySubjectHasSharedId(subject: AnimeSubject, title: AnimeSourceTitle): Boolean =
     autoPlaySubjectMatches(subject, title) && sharesAuthoritativeAnimeId(subject, title)
 
-private val authoritativeAnimeIdTypes = setOf("bangumi", "anilist", "mal", "douban")
+internal val authoritativeAnimeIdTypes = setOf("bangumi", "anilist", "mal", "douban")
 
-private fun animeSubjectIds(subject: AnimeSubject): Map<String, String> =
+internal fun animeSubjectIds(subject: AnimeSubject): Map<String, String> =
     subject.externalIds + if (subject.id.startsWith("bangumi:"))
         mapOf("bangumi" to subject.id.removePrefix("bangumi:")) else emptyMap()
 
@@ -77,8 +108,9 @@ private fun autoPlaySubjectEvidence(subject: AnimeSubject, title: AnimeSourceTit
     if (sharedKeys.any { key -> subjectIds[key]?.isNotBlank() == true &&
         title.externalIds[key]?.isNotBlank() == true && subjectIds[key] != title.externalIds[key] }) return false
     if (subject.year != null && title.year != null && subject.year != title.year) return false
-    val exactName = listOf(subject.title, subject.originalTitle).any {
-        it.isNotBlank() && autoTitleKey(it) == autoTitleKey(title.title)
+    val titleKey = animeWorkTitleKey(title.title)
+    val exactName = titleKey.isNotBlank() && listOf(subject.title, subject.originalTitle).any {
+        animeWorkTitleKey(it) == titleKey
     }
     val sourceSeason = autoSeasonSignature(title.title)
     val explicitSeasonAlias = sourceSeason != null && listOf(subject.title, subject.originalTitle).any { name ->
@@ -184,7 +216,10 @@ internal fun autoPlayGroup(detail: AnimeDetail, requested: AnimeEpisode, catalog
 internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog,
     selectedGroup: String? = null): List<String> {
     if (catalog.notice != null || catalog.episodes.isEmpty()) return emptyList()
-    val episodeNumber = autoPlayEpisodeNumber(detail, requested, catalog)
+    val subjectNumber = if (requested.kind == AnimeEpisodeKind.MAIN) subjectEpisodeNumber(detail, requested, catalog) else null
+    val seasonOffset = if (requested.kind == AnimeEpisodeKind.MAIN && subjectNumber == null)
+        autoSeasonCatalogOffset(detail, catalog) else null
+    val episodeNumber = subjectNumber ?: (requested.number - (seasonOffset ?: 0.0))
     val groups = catalog.episodes.groupBy { it.group }
     // An existing confirmed AGE line anchors this episode. An unrelated line's
     // missing episodes must not reject another line's exact matching current episode.
@@ -203,10 +238,16 @@ internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalo
                 return emptyList()
             val (name, rows) = automatic.entries.single()
             if (rows.first().edition.isBlank() || rows.any { it.number == null || !it.number.isFinite() } ||
-                rows.map { it.kind to it.number }.distinct().size != rows.size ||
-                rows.count { it.number == episodeNumber && it.kind == requested.kind } != 1)
-                return emptyList()
-            return listOf(name)
+                rows.map { it.kind to it.number }.distinct().size != rows.size) return emptyList()
+            val anchor = rows.singleOrNull { it.number == episodeNumber && it.kind == requested.kind } ?: return emptyList()
+            // The typed adapter embeds stations in this exact remote episode.
+            val stations = groups.filter { (group, lines) ->
+                group != name && lines.singleOrNull { it.kind == anchor.kind && it.number == anchor.number }?.let {
+                    it.edition == anchor.edition && it.id.startsWith(anchor.id.removeSuffix("auto")) &&
+                        it.url.substringBefore("&sourceId=") == anchor.url && it.url != anchor.url
+                } == true
+            }
+            return listOf(name) + stations.keys
         }
     }
     if (groups.size == 1) {
@@ -225,6 +266,14 @@ internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalo
         val target = if (selectedGroup == null) matches.map { identity(it.second) }.distinct().singleOrNull()
             else matches.firstOrNull { it.first == selectedGroup }?.let { identity(it.second) }
         return matches.filter { target != null && identity(it.second) == target }.map { it.first }
+    }
+    if (catalog.sameWorkRoutes && (seasonOffset != null || autoPlaySubjectMatches(detail.subject, catalog.title))) {
+        val firstNumber = seasonOffset?.let { offset ->
+            detail.episodes.filter { it.kind == AnimeEpisodeKind.MAIN && it.number.isFinite() && it.number > 0.0 }
+                .minOf { it.number } - offset
+        } ?: 1.0
+        val matching = appV7WorkRoutes(detail, requested, groups, selectedGroup, episodeNumber, firstNumber)
+        if (matching.isNotEmpty()) return matching
     }
     val eligible = groups.filterValues { rows ->
         rows.count { it.number == episodeNumber && it.kind == requested.kind } == 1 &&
@@ -245,7 +294,7 @@ internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalo
         eligible.keys.map { it.substringBefore(" [") }.toSet() == setOf("chs", "cht") &&
         eligible.keys.all { Regex("""^(chs|cht) \[\d+\]$""").matches(it) }) {
         val labels = eligible.values.map { rows -> rows.associate {
-            (it.kind to requireNotNull(it.number)) to autoTitleKey(it.title)
+            (it.kind to requireNotNull(it.number)) to episodeLabelText(it.title)
         } }
         if (labels.distinct().size == 1 && labels.first().values.all { it.isNotBlank() })
             return eligible.keys.sortedBy { if (it.startsWith("chs [")) 0 else 1 }
@@ -269,7 +318,7 @@ internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalo
     // equivalent number/kind and original episode labels can be rotated automatically.
     if (catalog.title.sourceId == "anime-native-yzx" && eligible.size == groups.size) {
         val labels = eligible.values.map { rows -> rows.associate {
-            (it.kind to requireNotNull(it.number)) to autoTitleKey(it.title)
+            (it.kind to requireNotNull(it.number)) to episodeLabelText(it.title)
         } }
         if (labels.distinct().size == 1 && labels.first().values.all { it.isNotBlank() })
             return eligible.keys.sorted()
@@ -281,6 +330,43 @@ internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalo
         "anime-native-ani" -> rows.all { it.group == "自动线路" }
         else -> false
     } }.singleOrNull()?.key)
+}
+
+private val appV7PlaybackRoute = Regex("独家[A-Z0-9]+|(?:备用|专线|追剧|超速)[0-9]+|西瓜|小官")
+
+private fun appV7WorkRoutes(detail: AnimeDetail, requested: AnimeEpisode,
+    groups: Map<String, List<AnimeSourceEpisode>>, selectedGroup: String?, episodeNumber: Double,
+    firstNumber: Double): List<String> {
+    if (requested.kind != AnimeEpisodeKind.MAIN || !episodeNumber.isFinite() || episodeNumber < 1.0) return emptyList()
+    val lastNumber = detail.subject.episodeCount?.takeIf { it > 0 }?.let { firstNumber + it - 1.0 }
+        ?: detail.episodes.filter { it.kind == AnimeEpisodeKind.MAIN && it.number.isFinite() }
+            .maxOfOrNull { it.number - (requested.number - episodeNumber) } ?: return emptyList()
+    val matches = groups.mapNotNull { (name, rows) ->
+        if (!appV7PlaybackRoute.matches(normalizeNfkc(name).trim()))
+            return@mapNotNull null
+        val regular = rows.filter { it.kind == AnimeEpisodeKind.MAIN }
+        if (regular.any { it.number == null || !it.number.isFinite() || it.number > lastNumber } ||
+            regular.map { it.edition }.distinct().size != 1)
+            return@mapNotNull null
+        val numbers = regular.mapNotNull { it.number }.sorted()
+        if (numbers != regular.indices.map { firstNumber + it }) return@mapNotNull null
+        val episode = regular.singleOrNull { it.number == episodeNumber } ?: return@mapNotNull null
+        // These same-work catalogues use both "2" and "第02集". A bare number
+        // is equivalent only when it agrees with the already verified episode number.
+        val label = if (sourceEpisodeNumber(episode.title, exactLabel = true) == episodeNumber)
+            "regular-number:${episodeNumber.toLong()}"
+            else ageEpisodeLabelKey(episode.title)
+        if (label.isBlank()) return@mapNotNull null
+        name to (label to episode.edition)
+    }
+    val anchor = if (selectedGroup != null) matches.firstOrNull { it.first == selectedGroup }?.second else {
+        val labels = matches.map { it.second }.distinct()
+        // A differently named episode can remain selectable without vetoing the
+        // routes whose numbering and edition already agree with the current episode.
+        labels.singleOrNull() ?: labels.singleOrNull { it.first == "regular-number:${episodeNumber.toLong()}" }
+            ?.takeIf { labels.map { it.second }.distinct().size == 1 }
+    }
+    return if (anchor == null) emptyList() else matches.filter { it.second == anchor }.map { it.first }
 }
 
 /** Only a confirmed AGE line may anchor a partial set of equivalent routes. */

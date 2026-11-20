@@ -617,22 +617,53 @@ class UnifiedMangaRepository(
         val retained = if (page > 0) synchronized(unifiedMangaRepositoryStateLock) {
             searchTerms[query]?.get(sourceId)
         } else null
-        val terms = retained?.let(::listOf) ?: bodySourceSearchTerms(query)
-        var result = MangaPage(emptyList(), false)
-        for (term in terms) {
+        if (page > 0) return searchSource(sourceId, retained ?: query, page, forceRefresh = forceRefresh)
+        val titleKey = normalizedBodySourceTitle(query)
+        var chosen: Pair<String, MangaPage>? = null
+        var empty: MangaPage? = null
+        var failure: Exception? = null
+        for ((index, term) in bodySourceSearchTerms(query).withIndex()) {
             currentCoroutineContext().ensureActive()
-            result = searchSource(sourceId, term, page, forceRefresh = forceRefresh)
-            if (result.items.isNotEmpty()) {
-                synchronized(unifiedMangaRepositoryStateLock) {
-                    val selected = searchTerms.remove(query) ?: mutableMapOf()
-                    selected[sourceId] = term
-                    searchTerms[query] = selected
-                    while (searchTerms.size > 32) searchTerms.remove(searchTerms.keys.first())
-                }
+            val result = try {
+                withTimeoutOrNull(if (index == 0) 8_000L else 2_000L) {
+                    searchSource(sourceId, term, page, forceRefresh = forceRefresh)
+                } ?: throw SourceException("该来源搜索超时，请重试。")
+            } catch (cancel: CancellationException) {
+                if (cancel !is kotlinx.coroutines.TimeoutCancellationException) throw cancel
+                currentCoroutineContext().ensureActive()
+                failure = cancel
+                continue
+            } catch (error: Exception) {
+                failure = error
+                continue
+            }
+            if (result.items.isEmpty()) {
+                empty = result
+                continue
+            }
+            val exact = titleKey.isNotBlank() && result.items.any { manga ->
+                normalizedBodySourceTitle(manga.title) == titleKey ||
+                    manga.alternativeTitles.any { normalizedBodySourceTitle(it) == titleKey }
+            }
+            if (exact) {
+                chosen = term to result.copy(items = (result.items + chosen?.second?.items.orEmpty())
+                    .distinctBy(::federatedMangaIdentity))
                 break
             }
+            if (chosen == null) chosen = term to result
         }
-        return result
+        val match = chosen ?: run {
+            empty?.let { return it }
+            failure?.let { throw it }
+            return MangaPage(emptyList(), false)
+        }
+        synchronized(unifiedMangaRepositoryStateLock) {
+            val selected = searchTerms.remove(query) ?: mutableMapOf()
+            selected[sourceId] = match.first
+            searchTerms[query] = selected
+            while (searchTerms.size > 32) searchTerms.remove(searchTerms.keys.first())
+        }
+        return match.second
     }
 
     fun configureSourceChecks(preferences: SourceCheckPreferences) {
@@ -1058,10 +1089,16 @@ class UnifiedMangaRepository(
             return
         }
         var results: List<Manga> = emptyList()
+        var searchFailure: Exception? = null
         for (query in bodySourceSearchTerms(work.title, aliases)) {
             currentCoroutineContext().ensureActive()
             ensureEligibility(eligibility, info.id)
-            val found = searchSource(info.id, query, forceRefresh = force).items
+            val found = try { searchSource(info.id, query, forceRefresh = force).items }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) {
+                searchFailure = failure
+                continue
+            }
             require(found.all { it.sourceId == info.id && validWorkIdentity(it) }) { "来源返回了不一致的作品编号。" }
             results = (results + found).distinctBy(Manga::id)
             ensureEligibility(eligibility, info.id)
@@ -1070,6 +1107,7 @@ class UnifiedMangaRepository(
             if (results.any { discoveryTitleMatches(work, it, aliases) }) break
         }
         if (results.isEmpty()) {
+            searchFailure?.let { throw it }
             report(SourceDiscoveryStatus.NO_MATCH, "该来源暂未找到这部作品。")
             return
         }
@@ -1083,10 +1121,17 @@ class UnifiedMangaRepository(
             return
         }
         val loadedCandidates = mutableListOf<MangaDetail>()
+        var catalogueIncomplete = false
         for (candidate in exact.sortedBy(Manga::id)) {
             ensureEligibility(eligibility, info.id)
-            loadedCandidates += detailSource(info.id, candidate.id, forceRefresh = force)
+            try { loadedCandidates += detailSource(info.id, candidate.id, forceRefresh = force) }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { catalogueIncomplete = true }
             ensureEligibility(eligibility, info.id)
+        }
+        if (catalogueIncomplete) {
+            report(SourceDiscoveryStatus.NEEDS_CONFIRMATION, "已找到作品候选，部分目录暂未读完，可重试或手动核对。", exact)
+            return
         }
         val identity = synchronized(unifiedMangaRepositoryStateLock) { discoveryIdentities[work.id] }
             ?: DiscoveryIdentity(work, aliases, emptySet())

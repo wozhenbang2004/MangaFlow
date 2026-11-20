@@ -144,7 +144,9 @@ internal fun AnimeSourcesPanel(
     val manualLine = manualTarget?.manualOption?.let { requested ->
         episodeLines.singleOrNull { controller.samePlaybackLine(it, requested) }
     }
-    val orderedBindings = if (focusEpisode == null) bindings.sortedBy { it.catalog.sourceId != state.preferredSourceId }
+    // Keep existing source buttons in place while sample results arrive.
+    val orderedBindings = remember(visible, subjectId, focusEpisode?.id, bindings) {
+        if (focusEpisode == null) bindings.sortedBy { it.catalog.sourceId != state.preferredSourceId }
         else bindings.sortedBy { binding ->
             val sourceId = binding.catalog.sourceId
             when {
@@ -152,6 +154,7 @@ internal fun AnimeSourcesPanel(
                 else -> sourceOrder[sourceId] ?: Int.MAX_VALUE
             }
         }
+    }
     val matchesBySource = remember(state.episodeOptions, linkedKeys) {
         state.episodeOptions.values.flatMap { lines ->
             lines.filter { it.confirmed && it.catalog.referenceKey() in linkedKeys }.map { it.sourceId }.distinct()
@@ -163,6 +166,14 @@ internal fun AnimeSourcesPanel(
     val canAutoPlay = focusEpisode != null && episodeLines.isNotEmpty() && controller.hasAutomaticPlaybackLine(focusEpisode.id)
     val measurementBatch = state.sourceMeasurements?.takeIf {
         it.subjectId == subjectId && it.episodeId == focusEpisode?.id
+    }
+    // A refreshed catalogue can replace a provider's line token during a batch.
+    // Use the current confirmed lines to associate a result with the visible row.
+    val currentLineMeasurements = remember(episodeLines, measurementBatch) {
+        episodeLines.mapNotNull { line ->
+            measurementBatch?.sources?.get(line.sourceId)?.lineMeasurements?.entries
+                ?.lastOrNull { controller.samePlaybackLine(it.key, line) }?.value?.let { line to it }
+        }.toMap()
     }
     val measuring = measurementBatch?.running == true
     val playerPhase by controller.playbackPhase.collectAsStateWithLifecycle()
@@ -208,7 +219,7 @@ internal fun AnimeSourcesPanel(
             searchDiagnosticsExpanded = false
             websiteError = null
             if (owner != null && owner == controller.state.value.detail?.subject?.id) {
-                controller.cancelEpisodeSourceMeasurements()
+                controller.cancelEpisodeSourceMeasurements(clearProgress = true)
                 closePreview()
                 if (requested != null && controller.currentVideoCandidates(listOf(requested)).isNotEmpty()) {
                     onOpenSourceWork?.invoke(requested)
@@ -236,7 +247,7 @@ internal fun AnimeSourcesPanel(
                             maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (!previewing && subjectId != null) {
-                        if (measuring) Box(Modifier.size(44.dp).semantics { contentDescription = "正在预探测来源画质与媒体网络" },
+                        if (measuring && measurementBatch?.manual == true) Box(Modifier.size(44.dp).semantics { contentDescription = "正在探测来源画质与媒体网络" },
                             contentAlignment = Alignment.Center) { MotionBusyIndicator(Modifier.size(17.dp), strokeWidth = 1.5.dp) }
                         else MotionIconButton(onClick = {
                             controller.verifyEpisodeSources(focusEpisode?.id, retryFailed = true)
@@ -246,9 +257,9 @@ internal fun AnimeSourcesPanel(
                             }.forEach { controller.refreshSource(it.catalog.sourceId) }
                             measureSources(force = true)
                         },
-                            enabled = visible && state.sourceMeasurements?.running != true,
-                            modifier = Modifier.size(44.dp), tooltip = "重新探测画质与网络") {
-                            Icon(Icons.Outlined.Speed, "重新探测画质与网络", Modifier.size(20.dp),
+                            enabled = visible,
+                            modifier = Modifier.size(44.dp), tooltip = if (focusEpisode != null) "探测本集全部已对应线路" else "重新探测画质与网络") {
+                            Icon(Icons.Outlined.Speed, if (focusEpisode != null) "探测本集全部已对应线路" else "重新探测画质与网络", Modifier.size(20.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
@@ -342,16 +353,41 @@ internal fun AnimeSourcesPanel(
                         verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (measurementBatch != null && measurementBatch.sources.isNotEmpty()) item(key = "probe-coverage") {
                             val progress = measurementBatch.sources.values
-                            val completed = progress.count { it.phase == AnimeSourceMeasurementPhase.COMPLETE }
-                            val unavailable = progress.count { it.phase == AnimeSourceMeasurementPhase.UNAVAILABLE }
-                            val stopped = progress.count { it.phase == AnimeSourceMeasurementPhase.CANCELLED }
-                            val finished = completed + unavailable + stopped
-                            AnimeQuietLabel((if (measuring) "测速 $finished/${progress.size} 个来源" else "已测 $completed 个来源") +
-                                if (focusEpisode == null) " · 各源采样一集" else if (state.sourceAggregationRunning) " · 正在找片源" else "",
+                            val counts = progress.groupingBy { it.phase }.eachCount()
+                            val hasLineBatch = progress.any { it.lineMeasurements.isNotEmpty() }
+                            val lineResults = currentLineMeasurements.values
+                            val lineCounts = lineResults.groupingBy { it.phase }.eachCount()
+                            val scope = if (focusEpisode == null) "各源采样一集" else "当前集"
+                            val testedLines = currentLineMeasurements.filterValues { it.phase.evidencePriority > 0 }
+                            val testedSources = if (hasLineBatch) testedLines.keys.map { it.sourceId }.distinct().size
+                                else progress.count { it.phase.evidencePriority > 0 }
+                            val summary = when {
+                                !hasLineBatch -> "$scope · 已测 $testedSources 个来源"
+                                lineResults.isEmpty() -> "$scope · 线路已更新，可重新探测"
+                                else -> "$scope · 已测 $testedSources 个来源 · ${testedLines.size}/${lineResults.size} 条线路"
+                            }
+                            val status = when {
+                                measuring -> " · 探测中"
+                                state.sourceAggregationRunning && focusEpisode != null -> " · 正在找片源"
+                                else -> ""
+                            }
+                            AnimeQuietLabel(summary + status,
                                 Modifier.padding(start = 8.dp, bottom = 2.dp))
-                            if (unavailable > 0 || stopped > 0) AnimeQuietLabel(listOfNotNull(
-                                "$unavailable 个待重试".takeIf { unavailable > 0 },
-                                "$stopped 个已停止".takeIf { stopped > 0 }).joinToString(" · "),
+                            val outcomes = listOf(
+                                AnimeSourceMeasurementPhase.COMPLETE to "媒体可读",
+                                AnimeSourceMeasurementPhase.MANIFEST_ONLY to "仅清单",
+                                AnimeSourceMeasurementPhase.ADDRESS_ONLY to "仅取址",
+                                AnimeSourceMeasurementPhase.FAILED to "失败",
+                                AnimeSourceMeasurementPhase.WAITING_CATALOG to "待目录",
+                                AnimeSourceMeasurementPhase.NO_EPISODE to "待对应",
+                                AnimeSourceMeasurementPhase.UNAVAILABLE to "待重试",
+                                AnimeSourceMeasurementPhase.CANCELLED to "已停止",
+                            ).mapNotNull { (phase, label) ->
+                                val count = if (!hasLineBatch || phase == AnimeSourceMeasurementPhase.WAITING_CATALOG ||
+                                    phase == AnimeSourceMeasurementPhase.NO_EPISODE) counts[phase] else lineCounts[phase]
+                                count?.let { "$label $it" }
+                            }
+                            if (outcomes.isNotEmpty()) AnimeQuietLabel(outcomes.joinToString(" · "),
                                 Modifier.padding(start = 8.dp, bottom = 2.dp))
                         }
                         if (focusEpisode != null) item(key = "automatic-play") {
@@ -426,7 +462,7 @@ internal fun AnimeSourcesPanel(
                                 current != null && recovering -> "上次使用"
                                 lines.isNotEmpty() && attemptable.isEmpty() -> "线路暂不可用"
                                 lines.isNotEmpty() && available.isEmpty() -> "本集线路近期失败"
-                                available.size > 1 -> "${available.size} 条线路"
+                                lines.size > 1 -> "${lines.size} 条线路"
                                 error != null -> if (catalog == null) "目录读取失败" else "目录更新失败"
                                 reading -> "读取目录中"
                                 association?.phase == AnimeAssociationPhase.QUEUED && catalog == null -> "等待目录"
@@ -446,11 +482,18 @@ internal fun AnimeSourcesPanel(
                             val measurementProgress = measurementBatch?.sources?.get(sourceId)
                             val probeLine = focusEpisode?.let { episode ->
                                 val primary = line?.let { controller.playbackMeasurements(episode.id, it) }
-                                if (primary?.mediaVerified == true || primary?.playbackObservedAt != null) line
-                                else measurementProgress?.lines?.firstOrNull { candidate ->
-                                    lines.any { controller.samePlaybackLine(it, candidate) } &&
-                                        controller.playbackMeasurements(episode.id, candidate)?.mediaVerified == true
-                                } ?: line
+                                if (primary?.playbackObservedAt != null ||
+                                    primary?.mediaVerified == true && primary.mediaFailure == null) line
+                                else {
+                                    val samples = measurementProgress?.lines.orEmpty().mapNotNull { candidate ->
+                                        if (lines.none { controller.samePlaybackLine(it, candidate) }) return@mapNotNull null
+                                        controller.playbackMeasurements(episode.id, candidate)
+                                            ?.takeIf { it.mediaVerified == true }?.let { candidate to it }
+                                    }
+                                    samples.firstOrNull { it.second.mediaFailure == null }?.first
+                                        ?: line.takeIf { primary?.mediaVerified == true }
+                                        ?: samples.firstOrNull()?.first ?: line
+                                }
                             }
                             val sampleEpisode = sample?.let { animeEpisodeLabel(it.episode) } ?: probeLine
                                 ?.takeIf { line != null && !controller.samePlaybackLine(it, line) }
@@ -473,7 +516,7 @@ internal fun AnimeSourcesPanel(
                                         episodeQuery = ""
                                     }, onPlay = if (focusEpisode != null && directPlay != null) ({ onPlay(focusEpisode.id, directPlay) }) else null,
                                     metrics = { AnimeSourceMetricsStrip(measurements, episodeLabel = sampleEpisode,
-                                        progress = measurementProgress) })
+                                        progress = measurementProgress?.let { AnimeSourceLineMeasurement(it.phase, it.reason) }) })
                                 AnimatedVisibility(expanded,
                                     enter = expandVertically(tween(if (motion) MangaMotion.Content else 0)) +
                                         fadeIn(tween(if (motion) MangaMotion.Quick else 0)),
@@ -498,9 +541,12 @@ internal fun AnimeSourcesPanel(
                                                 if (description.isNotBlank()) AnimeQuietLabel(description)
                                             }
                                             AnimeSourceMetricsDetails(sample?.measurements, episodeLabel = sampleEpisode,
-                                                routeLabel = routeLabel, progress = measurementProgress)
+                                                routeLabel = routeLabel,
+                                                progress = measurementProgress?.let { AnimeSourceLineMeasurement(it.phase, it.reason) })
                                         }
-                                        if (focusEpisode != null) measurementProgress?.reason?.let { AnimeQuietLabel(it) }
+                                        if (focusEpisode != null) measurementProgress?.reason
+                                            ?.takeUnless { lines.size == 1 && it == measurements?.mediaFailure }
+                                            ?.let { AnimeQuietLabel(it) }
                                         if (sourceDisabled) AnimeQuietLabel("启用此来源后可读取目录。")
                                         if (error != null) AnimeQuietLabel(error)
                                         if (!sourceDisabled && (error != null || catalog == null)) {
@@ -526,6 +572,7 @@ internal fun AnimeSourcesPanel(
                                                     if (!canPlay) "暂不可用" else null).distinct().joinToString(" · ")
                                                 val optionName = lineName ?: option.episode.title.ifBlank { "线路 ${index + 1}" }
                                                 val optionMeasurements = controller.playbackMeasurements(focusEpisode.id, option)
+                                                val lineProgress = currentLineMeasurements[option]
                                                 val action = if (failure == null) "播放${optionName}" else "重试${optionName}"
                                                 AnimeSourceProviderRow(sourceId, optionName, summary,
                                                     onClickLabel = if (singleLine) action else if (showDetails) "收起线路数据" else "查看线路数据",
@@ -535,7 +582,7 @@ internal fun AnimeSourcesPanel(
                                                         else lineDetails = if (showDetails) null else option
                                                     },
                                                     supporting = if (canPlay && !showDetails) ({
-                                                        AnimeSourceMetricsStrip(optionMeasurements)
+                                                        AnimeSourceMetricsStrip(optionMeasurements, progress = lineProgress)
                                                     }) else null,
                                                     trailing = if (canPlay) ({
                                                         MotionIconButton(onClick = { onPlay(focusEpisode.id, option) },
@@ -547,14 +594,17 @@ internal fun AnimeSourcesPanel(
                                                     signal = AnimeBoundSourceMark.AUTOMATIC.takeIf { option == recommendation && !showCurrent })
                                                 if (showDetails) {
                                                     AnimeSourceMetricsDetails(optionMeasurements, modifier = Modifier.padding(start = 8.dp),
-                                                        routeLabel = routeLabel)
+                                                        routeLabel = routeLabel, progress = lineProgress)
                                                     if (failure != null && failure != optionMeasurements?.mediaFailure)
                                                         AnimeQuietLabel(failure, Modifier.padding(start = 8.dp))
-                                                    if (!sourceDisabled && optionMeasurements?.mediaVerified != true)
+                                                    if (!sourceDisabled && (optionMeasurements?.mediaVerified != true ||
+                                                            optionMeasurements.mediaFailure != null))
                                                         MotionTextButton(onClick = {
                                                             controller.measureEpisodeSources(focusEpisode.id, force = true, onlyLine = option)
                                                         }, enabled = !measuring && !state.resolving,
-                                                            modifier = Modifier.heightIn(min = 44.dp)) { Text("重新探测此线路") }
+                                                            modifier = Modifier.heightIn(min = 44.dp)) {
+                                                            Text(if (optionMeasurements?.mediaObservedAt == null) "探测此线路" else "重新探测此线路")
+                                                        }
                                                 }
                                             }
                                         }

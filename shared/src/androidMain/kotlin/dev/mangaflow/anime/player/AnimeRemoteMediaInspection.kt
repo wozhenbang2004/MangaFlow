@@ -24,7 +24,7 @@ internal data class AnimeRemoteMediaInspection(
 internal suspend fun inspectAnimeRemoteMedia(client: OkHttpClient, url: String): AnimeRemoteMediaInspection? =
     withTimeoutOrNull(4_500L) {
         suspendCancellableCoroutine<AnimeRemoteMediaInspection?> { continuation ->
-            val call = client.newCall(Request.Builder().url(url).header("Range", "bytes=0-${ROOT_SAMPLE_BYTES - 1}").build())
+            val call = client.newCall(Request.Builder().url(url).build())
             call.timeout().timeout(4L, TimeUnit.SECONDS)
             continuation.invokeOnCancellation { call.cancel() }
             call.enqueue(object : Callback {
@@ -43,11 +43,9 @@ internal suspend fun inspectAnimeRemoteMedia(client: OkHttpClient, url: String):
 private const val ROOT_SAMPLE_BYTES = 4_096L
 
 private fun inspectResponse(response: Response): AnimeRemoteMediaInspection? {
-    // Rejection of the diagnostic range alone does not establish what a normal GET returns.
-    if (response.code == 416) return null
     if (response.code !in setOf(200, 206)) return AnimeRemoteMediaInspection(
         failure = when (response.code) {
-            401, 403 -> "来源拒绝了这条播放地址。"
+            401, 403 -> "来源拒绝了这条播放地址（HTTP ${response.code}）。"
             404, 410 -> "来源上的视频地址已不存在。"
             else -> "重新读取播放地址时，来源返回 HTTP ${response.code}。"
         },

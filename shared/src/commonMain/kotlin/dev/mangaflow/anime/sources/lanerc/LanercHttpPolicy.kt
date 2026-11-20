@@ -1,6 +1,8 @@
 package dev.mangaflow.anime.sources.lanerc
 
 import dev.mangaflow.anime.sources.animePublicUrl
+import dev.mangaflow.data.plugins.YUZU_HTTP_PLAYBACK_ENDPOINTS
+import dev.mangaflow.data.plugins.publicAppCleartextMethod
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 
@@ -15,16 +17,20 @@ private val REVIEWED_HTTP_ENDPOINTS = mapOf(
     "anime-lanerc-ain" to ("5b34560f7ffb4b17be9877bf21579a10afef75139c13cc56324b91f835044e8a" to "http://frontend-static.kurte.cn/server_list_v2.json"),
 )
 
-internal fun lanercCleartextEndpoints(id: String, digest: String): Set<String> =
-    REVIEWED_HTTP_ENDPOINTS[id]?.takeIf { it.first == digest }?.let { setOf(it.second) }.orEmpty()
+internal fun lanercCleartextEndpoints(id: String, digest: String, method: String): Set<String> {
+    val endpoint = REVIEWED_HTTP_ENDPOINTS[id]?.takeIf { it.first == digest }?.second ?: return emptySet()
+    return if (id == "anime-lanerc-gugu" && method == "play") setOf(endpoint) + YUZU_HTTP_PLAYBACK_ENDPOINTS
+    else setOf(endpoint)
+}
 
 internal fun lanercRequestUrl(value: String, cleartextEndpoints: Set<String>): HttpUrl {
     require(value.length <= 8192 && value.none { it.code < 32 || it.code == 127 }) { "来源请求地址无效。" }
     val url = value.toHttpUrlOrNull() ?: throw IllegalArgumentException("来源请求地址无效。")
     if (url.isHttps) return animePublicUrl(value)
-    require(url.scheme == "http" && url.username.isEmpty() && url.password.isEmpty() &&
-        url.fragment == null && url.query == null && url.toString() in cleartextEndpoints) {
-        "此来源使用了尚未审核的 HTTP 地址，请更新来源适配。"
+    if (url.scheme != "http" || url.username.isNotEmpty() || url.password.isNotEmpty() ||
+        url.fragment != null || publicAppCleartextMethod(url.toString(), cleartextEndpoints) == null
+    ) {
+        throw LanercCapabilityException("此来源返回了当前版本不支持的 HTTP 接口。")
     }
     // Reuse the same public-host checks; transport still pins an actually public DNS/IP address.
     animePublicUrl(url.newBuilder().scheme("https").build().toString())

@@ -6,7 +6,6 @@ import android.net.Uri
 import android.os.SystemClock
 import androidx.media3.common.C
 import androidx.media3.common.util.UriUtil
-import androidx.media3.common.util.Util
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSourceInputStream
 import androidx.media3.datasource.DataSpec
@@ -41,11 +40,11 @@ internal suspend fun cacheAndroidAnimeStartup(
     if (request.validUntil <= SystemClock.elapsedRealtime())
         return@coroutineScope AnimeStartupCacheResult(0L, detail = "下一集准备已过期")
     val client = animeMediaHttpClient(request.asset, forPrefetch = true)
-    val cancelRequests = launch {
+    val cancelRequests = launch(Dispatchers.IO) {
         try { awaitCancellation() }
         finally { client.dispatcher.cancelAll() }
     }
-    val expiry = launch {
+    val expiry = launch(Dispatchers.IO) {
         delay((request.validUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
         client.dispatcher.cancelAll()
     }
@@ -59,8 +58,7 @@ internal suspend fun cacheAndroidAnimeStartup(
     } finally {
         cancelRequests.cancel()
         expiry.cancel()
-        client.dispatcher.cancelAll()
-        client.connectionPool.evictAll()
+        closeAnimeMediaHttpClient(client)
     }
 }
 
@@ -97,7 +95,7 @@ private class StartupCacheReader(
         val detail = try {
             checkActive()
             val root = checkedUri(Uri.parse(asset.url))
-            when (Util.inferContentTypeForUriAndMimeType(root, asset.mimeType)) {
+            when (inferAnimeMediaContentType(root, asset.mimeType)) {
                 C.CONTENT_TYPE_HLS -> prepareHls(root)
                 C.CONTENT_TYPE_OTHER -> {
                     // A byte prefix contains no verified timestamp-to-byte mapping. The

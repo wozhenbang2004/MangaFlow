@@ -1,5 +1,39 @@
 # Lanerc feature transfer into MangaFlow
 
+## Android 来源面板真实体验 · 2026-11-20
+
+用户附 1000122244、1000122243 并反馈「怎么都测不到啊连模拟器去实际测一遍体验一遍我们的漫画 apk 啊一堆问题」。v0.1.446 在独立 Android 14 模拟器打开《学生会也有洞！》第 2 集，GiriGiriLove 有实际播放画面。11:46 香港时间手动探测显示「已测 6/6」，当时包含仅有取址耗时、未验证及 TvTFun HTTP 403 的来源。LMM 等候选虽显示相同第 2 集，仍须确认季或线路，保留现有对应校验。普通漫画《火影忍者》第 01 卷在拷贝源加载并滑到 4/193。
+
+旧汇总把返回错误的探测也算作已测。新版按本次来源逐项归纳媒体样本可读、仅清单、仅取址、失败及待对应，单次批量探测每源最多采样两条已确认的同集线路。媒体小样本速率、取址耗时和实播传输分别标注。详情保留 HTTP 状态，并给标签与长结果各留足换行宽度。仅清单或探测失败的线路可单独重测。
+
+本地构建 `0.1.446-local.probe-detail` 基于 `0621bcc`，`:app:assembleDebug` 成功。12:22 在独立 Android 14 模拟器对同一集完成手动探测，6 个来源中 GiriGiriLove、AniCh、瓜子取得媒体样本，金牌只读到清单，闪电和 TvTFun 探测失败。金牌详情保留片段 HTTP 403，TvTFun 行保留 HTTP 403。金牌详情标签横向完整，单独重测入口可见。GiriGiriLove 实际播放至 2:12。开播时播放器曾报告输出 8.6 fps、近 5 秒丢帧 62.5%，Android 真机帧率未验收。
+
+## Android 本集逐线路探测与播放恢复 · 2026-11-20
+
+用户补充「明明那些源都有线路然后这么多待试播未测什么的」并要求修复实际探测和播放失败。原手动探测只保留每源前两条线路，第一条取得媒体指标后会提前结束。12:38–12:41 用上一调试包重新实际点播。闪电未返回播放地址，点播后仍由 GiriGiriLove 播放。金牌切换后黑屏，播放器报告资源未能打开。TvTFun 显示 HTTP 403，未呈现该来源首帧。
+
+手动探测覆盖本集全部已确认线路，每条线路有独立进度和结果，并在本次有晚到的同集线路时继续排队。代码沿用原有并发许可、来源与剧集对应和路由归属校验。取样用限量读取正常媒体请求，按 HLS 明示的字节范围取片段。Android 使用平台提取器读取可识别的样本尺寸。起播解析错误按实际内容重新判断媒体格式，启用恢复时优先尝试近期已播出的同集线路。TvTFun 只加入目录中和自动线路有同一远端集身份的电台。闪电保留脚本的已知取址原因，访问验证仍由来源控制。
+
+`0.1.446-local.source-coverage` 实际显示九条线路进入批次。GiriGiriLove 的简体和繁体两条都读到了样本。手动报告一度被后到的后台采样覆盖，已限定后台任务的更新范围，手动结果留在当前来源面板。
+
+金牌在 Android 上仍发生黑屏，换源时用 JDWP 在 `SessionAnimePlayer.fail` 命中主线程异常。堆栈为 `StrictMode.AndroidBlockGuardPolicy.onNetwork → ConscryptEngineSocket.close → OkHttp ConnectionPool.evictAll → AndroidAnimePlayer.releaseNative → SessionAnimePlayer.openNow`，异常类型为 `NetworkOnMainThreadException`。旧会话的 TLS 套接字清理由 I/O 线程执行，新会话可完整建立并进入正常的媒体加载或同集恢复。
+
+`0.1.446-local.source-switch-fix` 本地构建成功。13:23 在同一独立 Android 14 模拟器从 GiriGiriLove 切到金牌第 2 集并从头播放。金牌在 0:08 已呈现画面，播放器显示 24.1 fps、近 5 秒丢帧 0%。13:24 手动探测完成后保持 9/9 条，媒体可读 4、仅清单 1、失败 4。金牌在播放到 1:26 时仍只有清单探测回执，实播画质为 1080p。TvTFun 仍有 HTTP 403，闪电仍探测失败。见本地 `20261120-android-source-switch-fix` 的 `07-gold-12s.png` 和 `10-probe-result.png`。
+
+## 来源画质补测与取址失败复核 · 2026-11-20
+
+用户要求剩余失败继续排查，并补充「不只是失败啊还有很多是未知怎么能行呢」。13:34–13:41 实测同一集。TvTFun 自动线路、线路 1 和线路 2 都在请求播放地址阶段收到 HTTP 403。闪电线路 02 没有返回播放地址，脚本显示需要滑块校验。未见原因可确认是缺少账号。AniCh 和瓜子在探测后曾显示未知，各自真正起播后均测得 1920×1080。Android 的 MPEG-TS 提取日志在旧限量样本上未识别出视频轨道。
+
+未知画质的 HLS 片段可在原时限内读至 256 KiB，并保留期限内已收到的字节。Android 复用 Media3 的 TS 轨道解析，播放器后续收到真实尺寸时也会更新同集线路的回执。TvTFun 接纳已声明可直接播放的合法 HTTPS 相对地址和标准 MIME 类型，并核对解析结果的远端集身份。
+
+`0.1.446-local.source-quality` 在无旧播放数据的 Android 14 模拟器完成 10/10 条探测。瓜子未实播即取得视频轨道标注 1080p。AniCh 仍只取得媒体样本速率。用 JDWP 在 AniCh 正常起播处确认媒体类型为 `video/mp4`，随后补充按盒长度在同一 MP4 文件中定位并限量读取视频轨道头。
+
+`0.1.446-local.source-track-info` 本地构建成功。14:13 最新复验使用另一套无旧播放数据的 Android 14 模拟器，只实际播放了 GiriGiriLove。手动 10/10 条探测完成，AniCh 和瓜子均在点播前显示 1080p。AniCh 详情为视频轨道标注 1080p、样本 333 KiB/s、取址 666 ms、实播首帧为空。截图保存在本地 `20261120-anime-source-track-info` 的 `05-manual-result.png` 和 `06-anich-detail.png`。
+
+收尾比对发现该批次的失败 5 条中，TvTFun 记录 3 条 403，闪电记录 2 条失败，而当前面板只存在一条闪电线路。JDWP 确认两条闪电回执的目录、线路组、集数、标题都相同，远端线路标识不同。面板按当前确认的线路关联最近一次有效结果，废弃的线路记录退出当前汇总。来源行线路数与展开的当前线路数一致。
+
+`0.1.446-local.source-line-count` 本地构建成功。14:30 在同一隔离 Android 14 模拟器继续观看并手动探测，第 2 集完成 9/9 条，恰好对应当前线路。媒体可读 4、仅清单 1、失败 4。AniCh 与瓜子仍在未点播时读出 1080p。TvTFun 的来源行显示 3 条，闪电只有当前一条。结果见本地 `20261120-anime-source-line-count/04-manual-result.png`。
+
 ## 片源探测、换线路与评论 · 2026-11-20
 
 - 取址和媒体探测分开更新。探测能读取忽略 Range 的服务器返回的限量视频前缀、HLS 子清单和片段、DASH 清单及样本内完整的 MP4 视频轨道。来源面板区分等待目录、本集未对应、HTTP 错误、媒体采样和实播数据。
@@ -200,7 +234,11 @@ Only the following static public protocol requests gain cleartext support on And
 | 23 | http://118.184.173.5:19987/app/bn/v2 | POST |
 | Cain static bootstrap | http://frontend-static.kurte.cn/server_list_v2.json | GET |
 
-No query, fragment or embedded credentials are accepted on these HTTP requests. The JVM and iOS transports snapshot the host-granted list, check every hop, retain actual public DNS/IP and route ownership, reject generic Cookie/Authorization on HTTP, reject cross-origin body redirects and HTTPS→HTTP downgrade. Android network security remains closed by default with only the seven exact hosts admitted. Dynamic HTTP parser hosts, HTTP media and data-URL manifests still require separate support.
+The static endpoints above require their exact URL. The JVM and iOS transports snapshot the host-granted list, check every hop, retain public DNS/IP and route ownership, reject generic Cookie/Authorization on HTTP, and reject cross-origin body redirects and HTTPS→HTTP downgrade. Android network security admits the same seven hosts. Dynamic HTTP parser hosts, HTTP media and data-URL manifests still require separate support.
+
+The pinned Yuzu script also requests two fixed playback resolver paths on the already admitted catalogue origin. The Android 14 trace for 《学生会也有洞！》 episode 2, 独家T, showed an HTTP 200 AppV7 response followed by both resolver requests failing the host URL check before transmission. The two observed paths are granted only to that script revision during `play`. The host and transport require GET with exactly one nonempty `url` parameter. Unsupported HTTP endpoints report a capability error through the existing source diagnostics. On Android 14, local build `0.1.447-local.yuzu` switched the same episode to Yuzu and rendered video as playback advanced from 0:40 to 0:49.
+
+The later same-source comparison for 《鬼灭之刃》 first season episode 2 found a third same-origin Yuzu parser path on 独家N. The host applies the same pinned-script, GET and single-parameter checks to that path. On 07 超速⑤, a raw pipe character in the HTTPS query reached the JVM URI validator and was rejected before transmission. The pinned 07 playback GET now encodes literal query pipes while preserving the existing request destination and URL checks. In Android build `0.1.448-local.sources`, Yuzu completed the resolver call and returned HTTP media. A later 07 retry passed URI validation and returned HTTP media after HTTPS resolution. The media entrance rejected both URLs, and both manual source changes stayed on the active GiriGiriLove playback.
 
 [Guazi original](https://js.z1i.cn/js/guazi.js), digest b1de6ca1f34b47d11d351ee540445da321d547902b08502edfe062fa501e2be9, keeps device/token/node/cooldown in top-level globals. Creating a new JS context per operation previously lost that anonymous session. LanercSessionBridge saves only those validated fields through the existing private getItem/setItem owner, capped at 16 KiB and scoped to source, digest, revision and route. It skips explicit ext overrides, preserves a real recent registration failure even with an empty token, clears stale/future cooldown, and cannot save a cancelled or superseded invocation. It does not persist detail caches or copy original crypto constants.
 

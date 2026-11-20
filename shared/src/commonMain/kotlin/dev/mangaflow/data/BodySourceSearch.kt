@@ -9,12 +9,15 @@ private fun convertBodyTitle(value: String, transform: String): String = transli
 internal fun bodySourceSearchTerms(query: String, aliases: List<String> = emptyList()): List<String> =
     buildList {
         val primary = query.trim()
+        val cleanAliases = aliases.map(String::trim).filter(String::isNotBlank).distinct()
+        if (primary.isNotEmpty()) add(primary)
+        // Keep confirmed alternate titles ahead of cosmetic spelling changes.
+        addAll(cleanAliases.take(2))
         if (primary.isNotEmpty()) {
-            add(primary)
             add(convertBodyTitle(primary, "Traditional-Simplified"))
             add(convertBodyTitle(primary, "Simplified-Traditional"))
         }
-        aliases.filter(String::isNotBlank).forEach { add(it.trim()) }
+        addAll(cleanAliases.drop(2))
         if (primary.isNotEmpty()) add(normalizeNfkc(primary))
     }.filter { it.length in 1..120 }.distinct().take(4)
 

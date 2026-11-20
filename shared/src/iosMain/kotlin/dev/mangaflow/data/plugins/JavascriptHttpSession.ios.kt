@@ -56,8 +56,8 @@ internal actual class JavascriptHttpSession actual constructor(
     private val observeRelayTraffic: Boolean,
     cleartextEndpoints: Set<String>,
 ) {
-    private val permittedCleartext = cleartextEndpoints.associateWith { address ->
-        requireNotNull(PUBLIC_APP_CLEARTEXT_METHODS[address]) { "来源 HTTP 端点未获宿主授权。" }
+    private val permittedCleartext = cleartextEndpoints.toSet().also { endpoints ->
+        require(endpoints.all(PUBLIC_APP_CLEARTEXT_METHODS::containsKey)) { "来源 HTTP 端点未获宿主授权。" }
     }
     private val operations = atomic(0)
     private val slots = Semaphore(2)
@@ -86,7 +86,9 @@ internal actual class JavascriptHttpSession actual constructor(
         repeat(4) { redirects ->
             currentCoroutineContext().ensureActive()
             if (!url.isHttps) {
-                require(permittedCleartext[url.toString()] == method) { "来源 HTTP 端点不支持此请求方法。" }
+                require(publicAppCleartextMethod(url.toString(), permittedCleartext) == method) {
+                    "来源 HTTP 端点不支持此请求方法。"
+                }
                 require(headers.keys.none { it.lowercase() in CLEARTEXT_CREDENTIAL_HEADERS }) {
                     "公开 HTTP 来源接口不能携带 Cookie 或通用认证信息。"
                 }
@@ -130,7 +132,7 @@ internal actual class JavascriptHttpSession actual constructor(
             "来源请求 URL 无效或包含内嵌凭据、片段。"
         }
         if (url.isHttps) return publicPluginUrl(address)
-        require(url.query == null && url.toString() in permittedCleartext) {
+        require(publicAppCleartextMethod(url.toString(), permittedCleartext) != null) {
             "来源仅支持 HTTPS 或宿主为此脚本授权的精确 HTTP 接口。"
         }
         publicPluginUrl(url.newBuilder().scheme("https").build().toString())

@@ -94,12 +94,19 @@ internal fun AnimePlayerPane(
     val target = state.playbackTarget
     val episode = target?.episode ?: activeEpisode
     val resolutionError = target?.error
+    val awaitingVideo = playback.firstFrameRendered == false && playback.hasVideoTracks != false
+    val keepingCurrentVideo = (state.resolving || state.pendingPlayback != null) && target?.manualOption != null &&
+        target.episode.id == state.selectedEpisodeId && playback.phase == AnimePlayerPhase.READY &&
+        !playback.isBuffering && !awaitingVideo
+    val blockingResolution = state.resolving && !keepingCurrentVideo
+    val showingCurrentPlayback = (target == null || keepingCurrentVideo) && playback.assetKey != null &&
+        playback.episodeId == state.selectedEpisodeId
     val confirmedOptions = remember(episode?.id, state.detail, state.episodeOptions, state.sourceCatalogs,
         state.sourceBindings, state.sourceExtensions) {
         episode?.let { controller.confirmedPlaybackLines(it.id, state) }.orEmpty()
     }
     val currentOption = state.selectedPlaybackOption.takeIf {
-        target == null && episode != null && state.selectedEpisodeId == episode.id
+        showingCurrentPlayback && episode != null && state.selectedEpisodeId == episode.id
     }
     val usableOptions = remember(episode?.id, confirmedOptions, state.sourceRoutes, target, playback.phase) {
         confirmedOptions.filter { episode != null && controller.canAttemptPlaybackLine(episode.id, it, state) }
@@ -143,8 +150,7 @@ internal fun AnimePlayerPane(
     var settingsSection by remember { mutableStateOf(AnimePlayerPanel.GENERAL) }
     var settingsEnhancementPage by remember { mutableStateOf(EnhancementPage.QUALITY) }
     var interactionEpoch by remember { mutableIntStateOf(0) }
-    val awaitingVideo = playback.firstFrameRendered == false && playback.hasVideoTracks != false
-    val requiredControls = state.resolving || failure != null || awaitingVideo ||
+    val requiredControls = blockingResolution || failure != null || awaitingVideo ||
         playback.phase != AnimePlayerPhase.READY || !playback.playWhenReady || obscured || settingsPresent || discussionVisible ||
         state.notice != null || touchExploration
     val forceControls = requiredControls || headerFocused || transportFocused || centerFocused
@@ -163,7 +169,7 @@ internal fun AnimePlayerPane(
     var headerHeight by remember(density, topInset) { mutableStateOf(56.dp + topInset) }
     var controlsHeight by remember(density) { mutableStateOf(140.dp) }
     var footerHeight by remember(density) { mutableStateOf(44.dp) }
-    val canControl = !state.resolving && failure == null &&
+    val canControl = !blockingResolution && failure == null &&
         (playback.phase == AnimePlayerPhase.READY || playback.ended)
     fun interact() { controlsVisible = true; interactionEpoch++ }
     fun showSources() { interact(); onSources(episode) }
@@ -351,9 +357,9 @@ internal fun AnimePlayerPane(
                 }, contentAlignment = Alignment.Center) {
                 AnimePlayerSurface(controller.player, Modifier.fillMaxSize())
                 AnimeDanmakuOverlay(controller, playback,
-                    visible = active && !obscured && !settingsPresent && !state.resolving && failure == null,
+                    visible = active && !obscured && !settingsPresent && !blockingResolution && failure == null,
                     modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 12.dp))
-                if (!playback.inPictureInPicture && (state.resolving || failure != null)) Box(Modifier.fillMaxSize().background(Color.Black.copy(
+                if (!playback.inPictureInPicture && (blockingResolution || failure != null)) Box(Modifier.fillMaxSize().background(Color.Black.copy(
                     alpha = if (playback.firstFrameRendered == true || playback.phase == AnimePlayerPhase.READY) .45f else 1f)))
                 val statusTop = if (headerOverVideo && chromeReveal > 0f) headerHeight else 0.dp
                 val statusBottom = if (overlayTransport) footerHeight else 0.dp
@@ -364,7 +370,7 @@ internal fun AnimePlayerPane(
                     MaterialTheme(colorScheme = videoColors) {
                       CompositionLocalProvider(LocalContentColor provides videoColors.onSurface) {
                         AnimeVideoStatus(
-                            resolving = state.resolving, autoMatching = state.autoMatching,
+                            resolving = blockingResolution, autoMatching = state.autoMatching,
                             sourceName = if (target == null) playbackSource else target.sourceName,
                             failure = failure, incident = incident, playback = playback,
                             optionsAvailable = optionCount, hasAlternative = hasAlternative,
@@ -437,7 +443,8 @@ internal fun AnimePlayerPane(
                             Text(detail?.subject?.title ?: "播放", style = MaterialTheme.typography.titleSmall,
                                 modifier = Modifier.semantics { heading() }, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             val caption = listOfNotNull(episode?.let(::animeEpisodeLabel),
-                                (target?.sourceName ?: currentOption?.sourceName)?.takeIf { it.isNotBlank() }).joinToString(" · ")
+                                (if (keepingCurrentVideo) currentOption?.sourceName else target?.sourceName ?: currentOption?.sourceName)
+                                    ?.takeIf { it.isNotBlank() }).joinToString(" · ")
                             if (caption.isNotBlank()) Text(caption, style = MaterialTheme.typography.labelSmall,
                                 color = headerColors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
@@ -512,8 +519,7 @@ internal fun AnimePlayerPane(
                                         .motionInputGate(active && showChrome && !obscured && !settingsPresent))
                             }
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                AnimePlaybackStatus(playback.takeIf { target == null && it.assetKey != null &&
-                                    it.episodeId == state.selectedEpisodeId }, quiet = !showChrome,
+                                AnimePlaybackStatus(playback.takeIf { showingCurrentPlayback }, quiet = !showChrome,
                                     observing = active && !obscured && !settingsPresent, modifier = Modifier.weight(1f),
                                     nextPreparation = state.nextEpisodePreparation,
                                     nextPreparationEnabled = state.settings.prepareNextEpisode)
@@ -974,7 +980,7 @@ private fun WatchEpisodeCell(
                 Text(animeEpisodeLabel(episode), style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
                     maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, color = color)
             }
-            if (lineLabel != null) Text(lineLabel, style = MaterialTheme.typography.labelSmall,
+            if (lineLabel != null && availability != AnimeEpisodeAvailability.CHECKING) Text(lineLabel, style = MaterialTheme.typography.labelSmall,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, color = color.copy(alpha = .8f))
         }
     }

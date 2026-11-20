@@ -32,9 +32,8 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
     // Enable pagination only where the audited search actually sends a page or offset:
     // ani skip, yzx path, sd pn, AppV7 pg, Cain page, 23 protobuf field 2, LMM85 page path.
     // LMM85's bounded client fallback explicitly ends after page one.
-    override val supportsSearchPagination: Boolean get() = id in setOf(
+    override val supportsSearchPagination: Boolean get() = id in APP_V7_SOURCE_IDS || id in setOf(
         "anime-lanerc-ani", "anime-lanerc-yzx", "anime-lanerc-sd",
-        "anime-lanerc-sx", "anime-lanerc-gugu", "anime-lanerc-manguo", "anime-lanerc-nmeng", "anime-lanerc-07",
         "anime-lanerc-ain", "anime-lanerc-23", "anime-lanerc-lmm85",
     )
 
@@ -54,6 +53,8 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
         val episodes = detail.optJSONArray("episodes") ?: JSONArray()
         require(episodes.length() <= 20_000) { "来源剧集数量超出范围。" }
         var lmm85NumericCatalogue = id == "anime-lanerc-lmm85" && reply.digest == descriptor.observedDigest
+        var sameWorkRoutes = id in APP_V7_SOURCE_IDS && reply.digest == descriptor.observedDigest &&
+            detail.optString("id") == title.id
         val mapped = (0 until episodes.length()).mapNotNull { index ->
             val item = episodes.optJSONObject(index) ?: return@mapNotNull null
             val flag = item.optString("url")
@@ -62,6 +63,8 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
             require(flag.length <= 262_144 && label.length <= 1000) { "来源剧集参数过大。" }
             if (lmm85NumericCatalogue && (!LMM85_EPISODE_FLAG.matches(flag) || flag.substringBefore('_') != title.id))
                 lmm85NumericCatalogue = false
+            if (sameWorkRoutes && !flag.startsWith("av7:") && !flag.startsWith("av7u:"))
+                sameWorkRoutes = false
             val group = item.optString("route").trim().ifBlank { "默认线路" }
             val number = item.optDouble("number").takeIf { it.isFinite() && it >= 0 } ?: sourceEpisodeNumber(label)
             val ticket = JSONObject().put("flag", flag).put("revision", reply.revision)
@@ -87,7 +90,8 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
             externalIds = if (lmm85NumericCatalogue && mapped.isNotEmpty()) title.externalIds + ("lmm85" to title.id) else title.externalIds,
             sourceRevision = reply.revision), mapped,
             notice = if (mapped.isEmpty()) "已读取作品资料，来源暂未返回可选剧集。" else null,
-            description = if ('<' in description || '&' in description) Ksoup.parse(description).text() else description)
+            description = if ('<' in description || '&' in description) Ksoup.parse(description).text() else description,
+            sameWorkRoutes = sameWorkRoutes && mapped.isNotEmpty())
     }
 
     override suspend fun resolve(catalog: AnimeSourceCatalog, episode: AnimeSourceEpisode): AnimePlaybackAsset {
@@ -109,25 +113,43 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
         // The pinned Youke script explicitly requests no Referer with this protocol sentinel.
         if (id == "anime-lanerc-yzx" && reply.digest == "6056afbb33ffbc7bbb71e2632a31c66fe6d575389983b4f2076dcae599a14e16" &&
             result.optString("referer") == "never") result.remove("referer")
-        val sharedHeaders = lanercHeaders(result)
+        val primary = result.optString("url").takeIf(String::isNotBlank)
+        val checkedPrimary = primary?.let { runCatching { checkedMedia(it) } }
+        val primaryUrl = checkedPrimary?.getOrNull()
+        val primaryAddress = primaryUrl?.toHttpUrlOrNull()
+        val checkedSharedHeaders = runCatching { lanercHeaders(result) }
+        val sharedHeaders = checkedSharedHeaders.getOrNull().orEmpty()
+        val portableHeaders = sharedHeaders.filterKeys { it.lowercase() in LANERC_PORTABLE_MEDIA_HEADERS }
         val resolutions = result.optJSONArray("resolutions")?.let { list ->
             (0 until minOf(list.length(), 100)).mapNotNull { index ->
                 val item = list.optJSONObject(index) ?: return@mapNotNull null
                 val url = item.optString("url").takeIf(String::isNotBlank) ?: return@mapNotNull null
                 val checked = runCatching { checkedMedia(url) }.getOrNull() ?: return@mapNotNull null
                 val variantHeaders = runCatching { lanercHeaders(item) }.getOrNull() ?: return@mapNotNull null
+                val address = checked.toHttpUrlOrNull() ?: return@mapNotNull null
+                val sameOrigin = primaryAddress?.let {
+                    it.scheme == address.scheme && it.host == address.host && it.port == address.port
+                } == true
+                val inherited = if (sameOrigin) sharedHeaders else portableHeaders
                 val overrides = variantHeaders.keys.map { it.lowercase() }.toSet()
-                val headers = sharedHeaders.filterKeys { it.lowercase() !in overrides } + variantHeaders
+                val headers = inherited.filterKeys { it.lowercase() !in overrides } + variantHeaders
                 val label = item.optString("name").ifBlank { "清晰度 ${index + 1}" }
                 AnimeResolution(animeHash(label + "\n" + animeContentIdentity(checked)), label, checked,
                     lanercMediaType(item.optString("type"), checked), headers)
             }.distinctBy { it.url }
         }.orEmpty()
-        val primary = result.optString("url").takeIf(String::isNotBlank)
-        val primaryUrl = primary?.let { runCatching { checkedMedia(it) }.getOrNull() }
+        if (primary == null && resolutions.isEmpty() && id == "anime-lanerc-sd" && reply.digest == descriptor.observedDigest) {
+            val error = when (result.optString("error")) {
+                "闪电接口要求滑块校验，本集暂时没有可用线路，请换源" -> "闪电需要站点验证，当前无可用线路。"
+                "闪电播放地址不可用" -> "闪电返回的本集地址无法读取。"
+                "闪电播放地址为空" -> "闪电目录里有本集，但播放接口没有提供地址。"
+                else -> null
+            }
+            if (error != null) throw LanercCapabilityException(error)
+        }
         val resolvedVariant = resolutions.firstOrNull { it.url == primaryUrl }
-            ?: resolutions.firstOrNull().takeIf { primaryUrl == null }
-        val url = primaryUrl ?: resolvedVariant?.url ?: primary?.let(::checkedMedia)
+            ?: resolutions.firstOrNull().takeIf { primaryUrl == null || checkedSharedHeaders.isFailure }
+        val url = resolvedVariant?.url ?: checkedPrimary?.getOrThrow()
             ?: throw LanercCapabilityException("来源没有提供可播放地址，可重试或选择其他线路。")
         val subtitles = result.optJSONArray("subtitles")?.let { list ->
             (0 until minOf(list.length(), 64)).mapNotNull { index ->
@@ -145,8 +167,8 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
         return AnimePlaybackAsset(
             id = "$id:" + animeHash(episode.id + "\n" + episode.edition + "\n" + animeContentIdentity(url)),
             sourceId = id, sourceEpisodeId = episode.id, url = url, route = reply.route,
-            title = episode.title, headers = resolvedVariant?.headers ?: sharedHeaders,
-            mimeType = resolvedVariant?.mimeType ?: lanercMediaType(result.optString("type").takeIf { primaryUrl != null }.orEmpty(), url),
+            title = episode.title, headers = resolvedVariant?.headers ?: checkedSharedHeaders.getOrThrow(),
+            mimeType = resolvedVariant?.mimeType ?: lanercMediaType(result.optString("type").takeIf { url == primaryUrl }.orEmpty(), url),
             edition = episode.edition, subtitles = subtitles,
             sourceRevision = reply.revision, resolutions = resolutions,
             startPositionMs = start?.takeIf { it.isFinite() && it <= Long.MAX_VALUE.toDouble() }?.toLong(),
@@ -181,6 +203,9 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
 }
 
 private val LMM85_EPISODE_FLAG = Regex("[0-9]{1,24}_[0-9]{1,8}_[0-9]{1,8}")
+private val APP_V7_SOURCE_IDS = setOf(
+    "anime-lanerc-sx", "anime-lanerc-gugu", "anime-lanerc-manguo", "anime-lanerc-nmeng", "anime-lanerc-07",
+)
 
 /** The Lanerc script appends its image request options to its display URL. */
 internal fun lanercArtworkUrl(sourceId: String?, value: String): String = if (sourceId == "anime-lanerc-lanerc")
@@ -245,6 +270,8 @@ private fun lanercMediaType(type: String, url: String): String? = when (type.low
     "flv", "video/x-flv" -> "video/x-flv"
     else -> animeMediaType(url)
 }
+private val LANERC_PORTABLE_MEDIA_HEADERS = setOf("user-agent", "accept", "accept-language")
+
 private fun lanercHeaders(value: JSONObject): Map<String, String> {
     val raw = value.opt("headers")
     val objectValue = when (raw) {

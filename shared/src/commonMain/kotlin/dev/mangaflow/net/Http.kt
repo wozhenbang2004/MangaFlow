@@ -181,14 +181,20 @@ class NetworkClient(
         }
         return NetworkResponse(response.first, response.second, ByteArray(0))
     }
-    /** Read at most the requested prefix even when a server ignores Range. */
-    internal suspend fun readPrefix(request: Request, maximumBytes: Int,
-        accept: (NetworkResponse) -> Boolean): NetworkResponse {
+    /** Read at most the requested prefix and preserve bytes received before this read's deadline. */
+    internal suspend fun readPrefix(request: Request, maximumBytes: Int, timeoutMs: Long,
+        accept: (NetworkResponse) -> Boolean): NetworkResponse? {
         val body = Buffer()
-        val (code, headers) = transfer(request, maximumBytes.toLong(), { _, _ -> },
-            { bytes, count -> body.write(bytes, 0, count) }, prefixOnly = true) { status, values ->
-            accept(NetworkResponse(status, values, ByteArray(0)))
+        var accepted: Pair<Int, Map<String, String>>? = null
+        val response = withTimeoutOrNull(timeoutMs) {
+            transfer(request, maximumBytes.toLong(), { _, _ -> },
+                { bytes, count -> body.write(bytes, 0, count) }, prefixOnly = true) { status, values ->
+                accept(NetworkResponse(status, values, ByteArray(0))).also { read ->
+                    if (read) accepted = status to values
+                }
+            }
         }
+        val (code, headers) = response ?: accepted?.takeIf { body.size > 0L } ?: return null
         return NetworkResponse(code, headers, body.readByteArray())
     }
     private suspend fun transfer(

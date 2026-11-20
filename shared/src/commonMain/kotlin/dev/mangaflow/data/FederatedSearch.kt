@@ -32,7 +32,11 @@ internal fun federatedMangaIdentity(manga: Manga): Pair<String, String> {
 }
 
 /** One serialized search load owns these bounded derivatives; no shared ICU instance is retained. */
-internal class FederatedSearchGrouper(query: String, private val adult: Boolean = false) {
+internal class FederatedSearchGrouper(
+    query: String,
+    private val adult: Boolean = false,
+    private val exactTitleFirst: Boolean = true,
+) {
     private data class AuthorSignature(val names: Set<String>)
     private val titles = LinkedHashMap<String, String>()
     private val authors = LinkedHashMap<List<String>, AuthorSignature>()
@@ -100,9 +104,12 @@ internal class FederatedSearchGrouper(query: String, private val adult: Boolean 
                 adult || ordered.groupBy { federatedMangaIdentity(it).first }.any { it.value.size > 1 } || unverifiedAuthors
                 )
             FederatedSearchGroup(canonical, ordered, needsChoice)
-        }.sortedWith(compareByDescending<FederatedSearchGroup> { group -> group.matches.any(::isCopy) }
-            // Copy's search endpoint already orders by heat. Do not let title relevance
-            // override that order, including responses without explicit popularity fields.
+        }.sortedWith(compareByDescending<FederatedSearchGroup> { group ->
+            !adult && exactTitleFirst && group.matches.any {
+                relevance(it.title) == 3 || it.alternativeTitles.any { alias -> relevance(alias) == 3 }
+            }
+        }.thenByDescending { group -> group.matches.any(::isCopy) }
+            // Keep Copy's popularity order within each exact-match tier.
             .thenByDescending { group -> group.matches.firstOrNull(::isCopy)
                 ?.let { it.totalPopularity ?: it.popularity ?: -1L } ?: -1L }
             .thenByDescending { group -> if (group.matches.any(::isCopy)) 0

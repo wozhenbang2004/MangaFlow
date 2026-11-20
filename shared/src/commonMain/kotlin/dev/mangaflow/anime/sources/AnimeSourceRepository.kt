@@ -18,6 +18,7 @@ import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.decodeUrlComponent
+import dev.mangaflow.platform.normalizeNfkc
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
@@ -283,6 +284,8 @@ private class TvtFunProvider : RoutedAnimeProvider() {
                 referer = episode.url), AnimeSourceStage.RESOLVE).requiredObject("data", id, AnimeSourceStage.RESOLVE)
             if (resolved.text("sourceId").isNotEmpty() && resolved.text("sourceId") != sourceId)
                 throw AnimeSourceException(id, AnimeSourceStage.RESOLVE, "来源返回了另一条线路，已停止播放以避免串集。")
+            if (resolved.text("episodeId").isNotEmpty() && resolved.text("episodeId") != episodeId)
+                throw AnimeSourceException(id, AnimeSourceStage.RESOLVE, "来源返回了另一集的播放地址，请刷新目录。")
             subtitles = resolved.optJSONArray("subtitles")?.objects().orEmpty().mapIndexedNotNull { index, subtitle ->
                 val url = runCatching { animeAbsolute(homeUrl, subtitle.text("url")) }.getOrNull()
                     ?: return@mapIndexedNotNull null
@@ -297,7 +300,7 @@ private class TvtFunProvider : RoutedAnimeProvider() {
                     "该线路尚未提供播放地址，请选择另一条线路。")
         }
         return duringPlaybackPhase(TvtFunPlaybackPhase.MEDIA) {
-            val url = playback.text("url")
+            val url = animeAbsolute(homeUrl, playback.text("url"))
             val mediaType = playbackMediaType(playback, url)
             if (mediaType == null) {
                 val stream = AnimeStreamResolver(http).resolve(url, homeUrl)
@@ -312,15 +315,15 @@ private class TvtFunProvider : RoutedAnimeProvider() {
 
     private fun hasDirectPlayback(line: JSONObject): Boolean {
         val playback = declaredPlayback(line) ?: return false
-        val url = playback.text("url")
-        return playbackMediaType(playback, url) != null && runCatching { animePublicUrl(url) }.isSuccess
+        val url = runCatching { animeAbsolute(homeUrl, playback.text("url")) }.getOrNull() ?: return false
+        return playbackMediaType(playback, url) != null
     }
 
     private fun playbackMediaType(playback: JSONObject, url: String): String? =
-        when (playback.text("mediaType").lowercase()) {
-            "hls", "m3u8" -> "application/vnd.apple.mpegurl"
-            "mp4" -> "video/mp4"
-            "dash", "mpd" -> "application/dash+xml"
+        when (playback.text("mediaType").substringBefore(';').trim().lowercase()) {
+            "hls", "m3u8", "application/vnd.apple.mpegurl", "application/x-mpegurl" -> "application/vnd.apple.mpegurl"
+            "mp4", "video/mp4" -> "video/mp4"
+            "dash", "mpd", "application/dash+xml" -> "application/dash+xml"
             else -> animeMediaType(url)
         }
 
@@ -585,23 +588,31 @@ private class LmmProvider : RoutedAnimeProvider() {
 internal fun sourceCover(base: String, raw: String): String =
     if (raw.isBlank()) "" else runCatching { animeAbsolute(base, raw) }.getOrDefault("")
 
+private val sourceTrailerLabel = Regex("""(?<![a-z0-9])(?:pv|trailer)(?![a-z])""")
+private val sourceSpecialLabel = Regex("""(?<![a-z0-9])(?:sp|ova|oad)(?![a-z])|^special(?:\s*[0-9]+|\s*$)""")
+private val numericSourceEpisode = Regex("""^(?:第\s*)?([0-9]+(?:\.[0-9]+)?)(?:\s*[集话話回])?(?=$|\s|[:_]|[.-](?![0-9]))""")
+private val englishSourceEpisode = Regex("""^(?:EP|Episode)\s*([0-9]+(?:\.[0-9]+)?)(?=$|\s|[:_]|[.-](?![0-9]))""",
+    RegexOption.IGNORE_CASE)
+
 internal fun sourceEpisodeKind(label: String): AnimeEpisodeKind {
-    val text = label.trim().lowercase()
+    val text = normalizeNfkc(label).trim().lowercase()
     return when {
-        text.contains("预告") || text.startsWith("pv") || text.contains("trailer") -> AnimeEpisodeKind.TRAILER
-        text.contains("片头") || Regex("""^(?:op|opening)(?:\d|\s|$)""").containsMatchIn(text) -> AnimeEpisodeKind.OPENING
+        text.contains("预告") || text.contains("預告") || sourceTrailerLabel.containsMatchIn(text) -> AnimeEpisodeKind.TRAILER
+        text.contains("片头") || text.contains("片頭") ||
+            Regex("""^(?:op|opening)(?:\d|\s|$)""").containsMatchIn(text) -> AnimeEpisodeKind.OPENING
         text.contains("片尾") || Regex("""^(?:ed|ending)(?:\d|\s|$)""").containsMatchIn(text) -> AnimeEpisodeKind.ENDING
-        text.contains("特别") || text.contains("特典") || text.contains("总集") || text.contains("sp") ||
-            text.contains("ova") || text.contains("oad") -> AnimeEpisodeKind.SPECIAL
+        text.contains("特别") || text.contains("特別") || text.contains("特典") ||
+            text.contains("总集") || text.contains("總集") ||
+            sourceSpecialLabel.containsMatchIn(text) -> AnimeEpisodeKind.SPECIAL
         else -> AnimeEpisodeKind.MAIN
     }
 }
 
 /** No ordinal fallback: an unparseable label stays unresolved for the mapping UI. */
-internal fun sourceEpisodeNumber(label: String): Double? {
-    val text = label.trim()
-    val match = Regex("""^(?:第\s*)?(\d+(?:\.\d+)?)\s*(?:集|话|話|回)?(?:\s|$|[：:._-])""").find(text)
-        ?: Regex("""^(?:EP|Episode)\s*(\d+(?:\.\d+)?)(?:\s|$|[：:._-])""", RegexOption.IGNORE_CASE).find(text)
+internal fun sourceEpisodeNumber(label: String, exactLabel: Boolean = false): Double? {
+    val text = normalizeNfkc(label).trim()
+    val match = if (exactLabel) numericSourceEpisode.matchEntire(text) ?: englishSourceEpisode.matchEntire(text)
+        else numericSourceEpisode.find(text) ?: englishSourceEpisode.find(text)
     return match?.groupValues?.get(1)?.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0 }
 }
 
