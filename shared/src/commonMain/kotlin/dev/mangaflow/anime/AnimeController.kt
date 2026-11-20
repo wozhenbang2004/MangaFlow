@@ -179,7 +179,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val revision: String?,
         val route: DownloadRouteSnapshot?,
         val episodeId: String?,
-        val preferredHeight: Int?,
     )
     private val associationSignatures = mutableMapOf<String, AssociationSignature>()
     private val associationCandidates = mutableMapOf<String, Pair<String?, List<AnimeSourceTitle>>>()
@@ -295,7 +294,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         var cacheAsset: AnimePlaybackAsset? = null,
     )
     private data class ResolvedPlaybackOption(val option: AnimeEpisodeOption, val asset: AnimePlaybackAsset,
-        val revision: String?, val mediaVerified: Boolean? = null)
+        val revision: String?)
 
     private data class PlaybackReceipt(val playback: ActivePlayback, val positionMs: Long, val playWhenReady: Boolean)
     private data class ReviewContext(val detail: AnimeDetail, val remote: AnimeTrackingSnapshot)
@@ -656,10 +655,16 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private fun nativeEpisodeId(subject: AnimeSubject, episode: AnimeSourceEpisode): String =
         "${subject.id}:episode:${dev.mangaflow.anime.sources.animeHash(episode.group + "\n" + episode.id)}"
 
-    private fun nativeDetail(subject: AnimeSubject, catalog: AnimeSourceCatalog, group: String): AnimeDetail =
-        AnimeDetail(subject.copy(title = catalog.title.title, year = catalog.title.year ?: subject.year,
+    private fun nativeDetailSubject(subject: AnimeSubject, catalog: AnimeSourceCatalog): AnimeSubject =
+        subject.copy(title = catalog.title.title, year = catalog.title.year ?: subject.year,
+            coverUrl = catalog.title.coverUrl.ifBlank { subject.coverUrl },
+            description = catalog.description.ifBlank { subject.description },
+            episodeCount = catalog.title.episodeCount ?: subject.episodeCount,
             externalIds = subject.externalIds + catalog.title.externalIds +
-                mapOf("native-source" to catalog.title.sourceId)), catalog.episodes.filter { it.group == group }.map { episode ->
+                mapOf("native-source" to catalog.title.sourceId))
+
+    private fun nativeDetail(subject: AnimeSubject, catalog: AnimeSourceCatalog, group: String): AnimeDetail =
+        AnimeDetail(nativeDetailSubject(subject, catalog), catalog.episodes.filter { it.group == group }.map { episode ->
             AnimeEpisode(nativeEpisodeId(subject, episode), subject.id, episode.title,
                 episode.number ?: 0.0, if (episode.number == null) AnimeEpisodeKind.OTHER else episode.kind)
         })
@@ -751,12 +756,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         else -> resumeGroup ?: saved?.selectedGroup?.takeIf { it in groups } ?: groups.firstOrNull()
                     }
                     check(group != null || catalog.notice != null) { "这个来源暂无剧集。" }
+                    val catalogSubject = nativeDetailSubject(subject, catalog)
                     val binding = if (preserveSaved) requireNotNull(saved)
                         else saved?.copy(catalog = reference.copy(sourceRevision = revision), selectedGroup = group)
                             ?: AnimeSourceBinding(subject.id, reference.copy(sourceRevision = revision), preferred = true, selectedGroup = group, automatic = true)
                     if (!preserveSaved) {
                         // Intrinsic native ownership only, never a guessed Bangumi/cross-source association.
-                        library.editPlaybackAssociation(subject, editBindings = {
+                        library.editPlaybackAssociation(catalogSubject, editBindings = {
                             check(currentDetail(generation, subject.id) && library.state.value.restoreEpoch == openingRestoreEpoch &&
                                 discoverySourceRevision(sourceId) == revision && sources.provider(sourceId) != null) {
                                 "来源或页面已经变化，请重新打开。"
@@ -777,7 +783,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         else -> catalog
                     }
                     mutableState.update { it.copy(detail = group?.let { selected -> nativeDetail(subject, shownCatalog, selected) }
-                        ?: AnimeDetail(subject, emptyList()), detailLoading = false,
+                        ?: AnimeDetail(catalogSubject, emptyList()), detailLoading = false,
                         sourceBindings = listOf(binding), sourceCatalogs = listOf(shownCatalog)) }
                     rebuildOptions()
                     if (catalog.notice == null && !changedSavedGroup && resumeRequest?.takeIf { it.first == subject.id }
@@ -1406,18 +1412,16 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             if (onlySourceId != null && sourceId != onlySourceId) continue
             val revision = discoverySourceRevision(sourceId)
             val route = playbackHistoryRoute(sourceId)
-            val preferredHeight = mutableState.value.settings.preferredSourceHeight
             val bound = library.state.value.bindings.any { it.subjectId == detail.subject.id && it.catalog.sourceId == sourceId }
             val oldSignature = associationSignatures[sourceId]
             val signature = with(detail.subject) {
                 AssociationSignature(id, title, originalTitle, year, externalIds, revision, route,
-                    focus?.id.takeUnless { bound }, preferredHeight.takeUnless { bound })
+                    focus?.id.takeUnless { bound })
             }
-            if (!force && !retryFailed && bound && oldSignature?.copy(episodeId = null, preferredHeight = null) == signature &&
+            if (!force && !retryFailed && bound && oldSignature?.copy(episodeId = null) == signature &&
                 mutableState.value.sourceAggregation[sourceId]?.phase == AnimeAssociationPhase.LINKED) continue
             if (!force && associationSignatures[sourceId] == signature &&
-                !(retryFailed && mutableState.value.sourceAggregation[sourceId]?.phase in setOf(
-                    AnimeAssociationPhase.UNAVAILABLE, AnimeAssociationPhase.MEDIA_RETRY))) continue
+                !(retryFailed && mutableState.value.sourceAggregation[sourceId]?.phase == AnimeAssociationPhase.UNAVAILABLE)) continue
             associationJobs.remove(sourceId)?.cancel()
             associationSignatures[sourceId] = signature
             val attempt = ++associationSequence
@@ -1431,8 +1435,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 associationAttempts[sourceId] == attempt &&
                 catalogRequests[sourceId] == catalogRequest &&
                 sources.provider(sourceId) != null && discoverySourceRevision(sourceId) == revision &&
-                playbackHistoryRoute(sourceId) == route &&
-                (signature.preferredHeight == null || mutableState.value.settings.preferredSourceHeight == preferredHeight)
+                playbackHistoryRoute(sourceId) == route
             fun report(phase: AnimeAssociationPhase, message: String? = null,
                 checks: List<AnimeAssociationCandidateCheck> = emptyList()) {
                 if (!current()) return
@@ -1599,59 +1602,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                     AnimeAssociationCandidateCheck(catalog.title, AnimeAssociationPhase.UNAVAILABLE, catalogNotice))
                                 return@aggregation true
                             }
-                            val lines = focus?.let { canonical ->
-                                autoPlayGroups(detail, canonical, catalog).mapNotNull { group ->
-                                    catalog.episodes.singleOrNull { episode ->
-                                        episode.group == group && episode.kind == canonical.kind &&
-                                            episode.number == autoPlayEpisodeNumber(detail, canonical, catalog)
-                                    }
-                                }
-                            }.orEmpty()
-                            val authoritativeIdentity = autoPlaySubjectHasSharedId(detail.subject, catalog.title)
-                            if ((focus == null || lines.isEmpty()) && !authoritativeIdentity) {
+                            val groups = focus?.let { autoPlayGroups(detail, it, catalog) }.orEmpty()
+                            if (groups.isEmpty() && !autoPlaySubjectHasSharedId(detail.subject, catalog.title)) {
                                 val exists = focus != null && catalog.episodes.any { it.kind == focus.kind && it.number == focus.number }
                                 val phase = if (exists) AnimeAssociationPhase.NEEDS_SELECTION else AnimeAssociationPhase.EPISODE_UNMATCHED
                                 val reason = if (exists) "目录中有相同集数，季或线路仍需确认。"
                                     else if (focus == null) "当前作品没有可确认的剧集编号。" else "作品身份已核对，目录中暂无本集。"
                                 report(phase, checks = candidateChecks + AnimeAssociationCandidateCheck(catalog.title, phase, reason))
-                                return@aggregation true
-                            }
-                            if ((revision == null || route == null) && !authoritativeIdentity) {
-                                report(AnimeAssociationPhase.MEDIA_RETRY, checks = candidateChecks +
-                                    AnimeAssociationCandidateCheck(catalog.title, AnimeAssociationPhase.MEDIA_RETRY,
-                                        "作品与本集已核对，网络线路配置暂不可用。"))
-                                return@aggregation true
-                            }
-                            val probes = mutableListOf<Pair<AnimeEpisodeOption, PlaybackProbe>>()
-                            if (revision != null && route != null) {
-                                for (line in lines.take(2)) {
-                                    val option = AnimeEpisodeOption(sourceId, provider.name, catalog.title, line, confirmed = true)
-                                    val probe = probePlaybackLine(provider, catalog, option, revision, route, ::current)
-                                        ?: return@aggregation false
-                                    probes += option to probe
-                                    if (probe.media.verified == true) break
-                                }
-                            }
-                            val verifiedMedia = probes.any { it.second.media.verified == true }
-                            val resolvedWithoutVerdict = probes.any { (_, probe) ->
-                                probe.addressMs != null && probe.media.verified == null
-                            }
-                            // Share this episode's exact receipts with existing and later-confirmed mappings.
-                            if (focus != null && route != null) {
-                                for ((option, probe) in probes) {
-                                    val key = PlaybackHistoryKey(detail.subject.id, focus.id, optionKey(option), route)
-                                    storePlaybackProbe(key, option, probe)
-                                }
-                            }
-                            if ((!verifiedMedia && !resolvedWithoutVerdict && !authoritativeIdentity) ||
-                                (!autoPlaySubjectMatches(detail.subject, catalog.title) && !verifiedMedia)) {
-                                val checks = probes.map { (option, probe) ->
-                                    AnimeAssociationLineCheck(option.episode.group,
-                                        probe.media.failure ?: "媒体尚未验证", probe.media.observedAt)
-                                }
-                                report(AnimeAssociationPhase.MEDIA_RETRY, checks = candidateChecks +
-                                    AnimeAssociationCandidateCheck(catalog.title, AnimeAssociationPhase.MEDIA_RETRY,
-                                        "作品与本集已核对，取址或媒体请求未完成，可重试。", checks))
                                 return@aggregation true
                             }
                             library.editPlaybackAssociation(detail.subject, editBindings = { bindings ->
@@ -1714,7 +1671,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 it.title.sourceId == base.sourceId && it.title.id == base.catalog.id && it.title.url == base.catalog.url
             } ?: return@flatMap emptyList()
             if (base.episode !in catalog.episodes) return@flatMap emptyList()
-            if (base.sourceId != "anime-age" || base.episode.kind != episode.kind ||
+            if ((base.sourceId != "anime-age" && base.sourceId != "anime-lanerc-lmm85") || base.episode.kind != episode.kind ||
                 base.episode.number != autoPlayEpisodeNumber(detail, episode, catalog)) return@flatMap listOf(base)
             val groups = autoPlayGroups(detail, episode, catalog, base.episode.group)
             if (groups.size < 2 || base.episode.group !in groups) return@flatMap listOf(base)
@@ -1757,7 +1714,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         snapshot: AnimeScreenState = mutableState.value): String? {
         val subjectId = snapshot.detail?.subject?.id ?: return null
         val key = playbackHistoryKey(subjectId, episodeId, option) ?: return "线路配置暂不可用"
-        return currentPlaybackFailure(key)?.reason ?: recentProbeFailure(key, option)
+        return currentPlaybackFailure(key)?.reason
     }
 
     private fun recentProbeFailure(key: PlaybackHistoryKey, option: AnimeEpisodeOption): String? {
@@ -2271,7 +2228,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 startSourceAggregation(detail, episodeId = episodeId)
                 var ready = awaitLines()
                 if (generation != autoPlayGeneration || !currentDetail(owner, detail.subject.id)) return@launch
-                if (ready != null && !nextLineAvailable(ready) && canRetryPlaybackDiscovery(ready, episodeId)) {
+                if (ready != null && !nextLineAvailable(ready) && canRetryPlaybackDiscovery(ready)) {
                     playbackDiscoveryRetried = true
                     startSourceAggregation(detail, retryFailed = true, episodeId = episodeId)
                     ready = awaitLines()
@@ -2282,7 +2239,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 } else {
                     val reason = when {
                         ready == null -> "本轮查找已到时限，可重试本集或查看线路。"
-                        hasRetryableAssociation(ready, episodeId) -> "本集有来源尚未完成核对，可在来源面板查看并重试。"
+                        hasRetryableAssociation(ready) -> "本集有来源尚未完成核对，可在来源面板查看并重试。"
                         else -> "暂未找到其他可确认的本集线路。"
                     }
                     failPlaybackTarget(lastFailure?.description ?: reason,
@@ -2431,38 +2388,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             storePlaybackMeasurements(historyKey, confirmed) { it.copy(addressMs = elapsed,
                                 declaredQuality = declaredPlaybackQuality(resolved), addressObservedAt = wallTimeMillis()) }
                         }
-                        // A fresh, matching decoder already produced the startup frame. Do not
-                        // delay its adoption with another request or fabricate a network sample.
-                        if (available != null && freshPreparation(available) &&
-                            available.decoderAsset?.copy(title = asset.title, resolutions = asset.resolutions) == asset) {
-                            check(admissionStillCurrent?.invoke() == true) { "播放请求、画质或来源已变化。" }
-                            return ResolvedPlaybackOption(confirmed, asset, revision, mediaVerified = true)
-                        }
-                        // Desktop opens a deliberately chosen line through the routed player
-                        // immediately. Automatic selection can still prefer a quick sample.
-                        val media = if (platformKind == PlatformKind.DESKTOP) {
-                            if (manualOption != null && samePlaybackLine(candidate, manualOption)) null
-                            else withTimeoutOrNull(750L) { inspectAnimeMediaBeforePlayback(asset) }
-                        } else inspectAnimeMediaBeforePlayback(asset)
                         check(admissionStillCurrent?.invoke() == true) { "播放请求、画质或来源已变化。" }
-                        // A CDN can reject the sample's Range request and still serve the
-                        // same media to the player. Let the ordinary playback path decide.
-                        val rangeRejected = platformKind == PlatformKind.DESKTOP && media?.httpStatus == 403
-                        val mediaVerified = if (rangeRejected) null else media?.verified
-                        if (media != null && (!refreshing || refreshResolutionId == null)) {
-                            storePlaybackMeasurements(historyKey, confirmed) { it.copy(
-                                mediaObservedAt = media.observedAt, mediaPreferredHeight = preferredHeight,
-                                mediaHttpStatus = media.httpStatus, mediaVerified = mediaVerified,
-                                mediaFailure = if (rangeRejected) "限量读取被拒绝，等待实际播放确认" else media.failure,
-                                mediaQuality = media.quality,
-                                mediaSampleBytesPerSecond = media.sampleBytesPerSecond, mediaSampleMs = media.elapsedMs) }
-                        }
-                        if (media != null && mediaVerified == false) {
-                            val incident = AnimePlaybackFailure(candidate.sourceId, candidate.sourceName,
-                                "检查媒体", media.failure ?: "当前地址未提供可读取的视频。")
-                            throw PlaybackResolutionException(incident, IllegalStateException(incident.reason))
-                        }
-                        return ResolvedPlaybackOption(confirmed, asset, revision, mediaVerified)
+                        return ResolvedPlaybackOption(confirmed, asset, revision)
                     }
                     suspend fun resolveOnCurrentRoute(): ResolvedPlaybackOption {
                         try { return resolveOption() }
@@ -2519,8 +2446,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     val runningSources = mutableSetOf<String>()
                     val manualFirst = manualOption != null && startupRefresh == null || available != null
                     var lastFailure: Result<ResolvedPlaybackOption>? = null
-                    var unchecked: ResolvedPlaybackOption? = null
-                    var uncheckedUntil = 0L
                     fun enqueue(candidate: AnimeEpisodeOption, retry: Boolean = false) {
                         if (retry || scheduled.add(optionKey(candidate))) queued += candidate
                     }
@@ -2545,7 +2470,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     }
                     fun retryable(failure: Throwable?): Boolean {
                         val incident = failure as? PlaybackResolutionException ?: return false
-                        if (incident.failure.unsupported || incident.failure.stage == "检查媒体") return false
+                        if (incident.failure.unsupported) return false
                         val cause = incident.cause
                         if (cause is DownloadRouteException || cause is LanercCapabilityException ||
                             cause is CancellationException) return false
@@ -2561,35 +2486,23 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         while (runningSources.isNotEmpty() && current()) {
                             val now = monotonicTimeMillis()
                             val remaining = if (bounded) autoPlaybackDeadline - now else Long.MAX_VALUE
-                            val wait = if (unchecked != null) minOf(remaining, uncheckedUntil - now) else remaining
-                            if (wait <= 0L) break
-                            val completed = if (wait == Long.MAX_VALUE) results.receive()
-                                else withTimeoutOrNull(wait) { results.receive() } ?: break
+                            if (remaining <= 0L) break
+                            val completed = if (remaining == Long.MAX_VALUE) results.receive()
+                                else withTimeoutOrNull(remaining) { results.receive() } ?: break
                             val (candidate, result) = completed
                             runningSources -= candidate.sourceId
-                            val value = result.getOrNull()
-                            if (value != null) {
-                                if (value.mediaVerified == true || manualFirst && !manualFailed) return@coroutineScope result
-                                // Servers which do not expose a bounded range remain eligible.
-                                // Briefly prefer a readable media sample, never wait for the slowest site.
-                                if (unchecked == null) {
-                                    unchecked = value
-                                    uncheckedUntil = monotonicTimeMillis() + 600L
-                                }
-                            } else {
-                                lastFailure = result
-                                if (manualFirst && samePlaybackLine(candidate, selected)) manualFailed = true
-                            }
+                            if (result.isSuccess) return@coroutineScope result
+                            lastFailure = result
+                            if (manualFirst && samePlaybackLine(candidate, selected)) manualFailed = true
                             addAvailableSources()
-                            if (value == null && canFallback && recoveryEnabled() && startupRefresh == null &&
+                            if (canFallback && recoveryEnabled() && startupRefresh == null &&
                                 retryable(result.exceptionOrNull())) {
                                 val key = playbackHistoryKey(detail.subject.id, episodeId, candidate)
                                 if (key != null && playbackAddressRetries.add(key)) enqueue(candidate, retry = true)
                             }
                             startAvailable()
                         }
-                        unchecked?.let { Result.success(it) } ?: lastFailure
-                            ?: Result.failure(IllegalStateException("对应片源暂不可用。"))
+                        lastFailure ?: Result.failure(IllegalStateException("对应片源暂不可用。"))
                     } finally {
                         jobs.forEach { it.cancel() }
                         results.cancel()
@@ -2618,7 +2531,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     preferredHeight = preferredHeight)
                 // Default same-episode candidates have already passed work/edition/episode checks.
                 // Keep the logical episode position on a best-effort basis; only an explicit line change needs a choice.
-                if (manualOption != null && !manualFailed && startupRefresh == null && position > 0L && previousAsset != null && previousAsset != resolved.id) {
+                if (manualOption != null && !manualFailed && startupRefresh == null && position > 0L &&
+                    previousAsset != null && previousAsset != resolved.id && (live == null || !samePlaybackLine(live.option, resolvedOption))) {
                     pending = choice
                     mutableState.update { it.copy(resolving = false, pendingPlayback = AnimePlaybackChoice(
                         episode, resolvedOption, position, live?.asset?.sourceId ?: previous?.sourceId.orEmpty())) }
@@ -2834,8 +2748,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         asset.copy(id = asset.sourceId + ":quality:" +
             dev.mangaflow.anime.sources.animeHash(episode.id + "\n" + resolution.id + "\n" +
                 dev.mangaflow.anime.sources.animeContentIdentity(resolution.url)),
-            url = resolution.url, mimeType = resolution.mimeType ?: asset.mimeType,
-            headers = asset.headers + resolution.headers)
+            url = resolution.url, mimeType = resolution.mimeType, headers = resolution.headers)
 
     private fun preferredSourceAsset(asset: AnimePlaybackAsset, episode: AnimeSourceEpisode, targetHeight: Int): AnimePlaybackAsset {
         if (targetHeight == 0) return asset
@@ -3272,12 +3185,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         job?.cancel()
     }
 
-    private fun hasRetryableAssociation(snapshot: AnimeScreenState, episodeId: String) =
-        snapshot.sourceAggregation.values.any { it.phase == AnimeAssociationPhase.UNAVAILABLE ||
-            it.phase == AnimeAssociationPhase.MEDIA_RETRY && it.episodeId == episodeId }
+    private fun hasRetryableAssociation(snapshot: AnimeScreenState) =
+        snapshot.sourceAggregation.values.any { it.phase == AnimeAssociationPhase.UNAVAILABLE }
 
-    private fun canRetryPlaybackDiscovery(snapshot: AnimeScreenState, episodeId: String) =
-        !playbackDiscoveryRetried && hasRetryableAssociation(snapshot, episodeId)
+    private fun canRetryPlaybackDiscovery(snapshot: AnimeScreenState) =
+        !playbackDiscoveryRetried && hasRetryableAssociation(snapshot)
 
     private fun recoverPlayback(owner: ActivePlayback) {
         val playback = playerInstance?.state?.value
@@ -3318,8 +3230,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val hasAlternative = automaticPlaybackLines(owner.episode.id).any { optionKey(it) !in recoveryOptions }
         val discovery = mutableState.value
         if (!hasAlternative && associationEpisodeId == owner.episode.id && !discovery.sourceAggregationRunning &&
-            !canRetryPlaybackDiscovery(discovery, owner.episode.id)) {
-            val reason = if (hasRetryableAssociation(discovery, owner.episode.id))
+            !canRetryPlaybackDiscovery(discovery)) {
+            val reason = if (hasRetryableAssociation(discovery))
                 "本集有来源尚未完成核对，可在来源面板查看并重试。"
             else "当前已确认的本集线路暂不可用，可选择线路重试。"
             mutableState.update { it.copy(playbackRecoveryStopReason = reason) }

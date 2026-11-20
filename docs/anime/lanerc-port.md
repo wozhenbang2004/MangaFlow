@@ -1,5 +1,15 @@
 # Lanerc feature transfer into MangaFlow
 
+## 片源入口及失败恢复 · 2026-11-20
+
+来源管理可以从内置来源打开对应的固定脚本版入口。AkiAnime、动漫巴士等脚本版提供原有的推荐、分类和筛选。继续用固定摘要和版本校验安装，保留两种实现各自的来源、作品和剧集身份。
+
+原生片源详情接入脚本返回的简介、封面、年份及已声明的集数。只收到作品资料时，保留可读详情和重试入口。播放保留有效的清晰度和字幕选项，所选清晰度使用对应的格式和请求头。对公开接口明确返回的拒绝、限流和服务故障，取址诊断保留 HTTP 状态。
+
+作品自动关联按作品、季、目录以及本集对应关系判断。正常播放取得地址后直接交给播放器，限量探测用于选线排序和诊断。实播失败继续沿原集执行同源重试或切换已确认线路。LMM85 固定脚本的数字标记能确认同作品的线路，本集标题、集数和版本一致时可在这些线路间切换。脚本直链失败时可在应用内读取已声明的静态媒体，依赖验证或执行网页播放器脚本的线路仍需要兼容能力。
+
+iOS 复用通用脚本传输对七条已审核的匿名公开 HTTP 入口做精确地址、请求方法和公共 IP 校验。HTTPS 校验保持生效，明文接口拒绝通用认证头。来源实际响应与设备端播放未验证。
+
 ## 调用分层及来源可用性 · 2026-11-20
 
 本轮以原 APK 1.1.6 对应的固定来源清单及下载字节为准。22 份可读脚本提供 154 个宿主操作，其中 151 个为内容、配置与菜单，3 个为会话。可静态追踪到 54 个不同 HTTP 调用点和 4 个媒体嗅探点。七份脚本还验证到 44 个应用层业务分发或相对路径模板，此计数与 HTTP 模板有重叠。网络实际调用次数取决于来源、分页、缓存和重试。
@@ -158,7 +168,7 @@ Only the following static public protocol requests gain cleartext support on And
 | 23 | http://118.184.173.5:19987/app/bn/v2 | POST |
 | Cain static bootstrap | http://frontend-static.kurte.cn/server_list_v2.json | GET |
 
-No query, fragment or embedded credentials are accepted on these HTTP requests. The JVM transport snapshots the host-granted list, checks every hop, retains actual public DNS/IP and route ownership, rejects generic Cookie/Authorization on HTTP, rejects cross-origin body redirects and HTTPS→HTTP downgrade. Android network security remains closed by default with only the seven exact hosts admitted; it is not a blanket cleartext switch. Dynamic HTTP parser hosts, HTTP media and data-URL manifests are not silently admitted. iOS retains HTTPS-only transport and a truthful unsupported error for these protocols.
+No query, fragment or embedded credentials are accepted on these HTTP requests. The JVM and iOS transports snapshot the host-granted list, check every hop, retain actual public DNS/IP and route ownership, reject generic Cookie/Authorization on HTTP, reject cross-origin body redirects and HTTPS→HTTP downgrade. Android network security remains closed by default with only the seven exact hosts admitted. Dynamic HTTP parser hosts, HTTP media and data-URL manifests still require separate support.
 
 [Guazi original](https://js.z1i.cn/js/guazi.js), digest b1de6ca1f34b47d11d351ee540445da321d547902b08502edfe062fa501e2be9, keeps device/token/node/cooldown in top-level globals. Creating a new JS context per operation previously lost that anonymous session. LanercSessionBridge saves only those validated fields through the existing private getItem/setItem owner, capped at 16 KiB and scoped to source, digest, revision and route. It skips explicit ext overrides, preserves a real recent registration failure even with an empty token, clears stale/future cooldown, and cannot save a cancelled or superseded invocation. It does not persist detail caches or copy original crypto constants.
 

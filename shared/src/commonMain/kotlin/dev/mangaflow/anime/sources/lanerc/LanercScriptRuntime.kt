@@ -2,12 +2,16 @@ package dev.mangaflow.anime.sources.lanerc
 
 import com.dokar.quickjs.QuickJs
 import com.dokar.quickjs.binding.FunctionBinding
+import dev.mangaflow.anime.sources.AnimeSourceException
+import dev.mangaflow.anime.sources.AnimeSourceStage
 import dev.mangaflow.anime.sources.animeHash
+import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.plugins.JavascriptHttpSession
 import dev.mangaflow.data.plugins.prepareJavascriptEngine
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.platform.PlatformContext
@@ -116,6 +120,9 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                             }
                         } catch (failure: Exception) {
                             hostFailure = failure
+                            (failure as? SourceException)?.httpStatus?.let {
+                                responseStatus = lanercResponseFailure(responseStatus, it)
+                            }
                             throw IllegalStateException("来源网络请求未完成。")
                         }
                     })
@@ -172,8 +179,8 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                         throw LanercCapabilityException("脚本缺少此类来源必需的方法，未启用该包。")
                     if (emptyResult(method, result) && (hostFailure != null || responseStatus != null)) {
                         val failure = hostFailure
-                        if (failure is LanercCapabilityException) throw failure
-                        serviceFailure(responseStatus)?.let { throw it }
+                        serviceFailure(bundle.id, method, responseStatus, failure)?.let { throw it }
+                        if (failure is LanercCapabilityException || failure is DownloadRouteException) throw failure
                         throw IllegalStateException("来源请求或解析未完成，请检查网络路由与来源版本。")
                     }
                     if (result is JSONArray && result.length() == 0 && sdEvidence?.twoUnresolvedMainAttempts() == true)
@@ -184,9 +191,11 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                 catch (failure: Exception) {
                     operationContext.ensureActive()
                     if (changed) throw LanercCapabilityException("来源或网络路由已改变，请刷新后重试。")
+                    if (failure is AnimeSourceException) throw failure
+                    serviceFailure(bundle.id, method, responseStatus, hostFailure)?.let { throw it }
                     if (failure is LanercCapabilityException) throw failure
                     if (hostFailure is LanercCapabilityException) throw hostFailure as LanercCapabilityException
-                    serviceFailure(responseStatus)?.let { throw it }
+                    if (hostFailure is DownloadRouteException) throw hostFailure as DownloadRouteException
                     // Never surface a JS exception, response body, signed URL or credential in UI/logs.
                     throw IllegalStateException(if (hostFailure != null)
                         "来源请求、会话或编解码未完成，请检查网络路由、来源版本及兼容能力。"
@@ -211,6 +220,8 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
         } catch (_: TimeoutCancellationException) {
             throw LanercCapabilityException("来源响应超时，已停止本次请求，可重试或切换来源。")
         } catch (cancelled: CancellationException) { throw cancelled }
+        catch (known: AnimeSourceException) { throw known }
+        catch (known: DownloadRouteException) { throw known }
         catch (known: LanercCapabilityException) { throw known }
         catch (_: Throwable) { throw IllegalStateException("来源运行环境或脚本解析未完成，请检查组件、来源版本与网络设置。") }
     }
@@ -271,22 +282,30 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
         null, JSONObject.NULL -> true
         is JSONArray -> result.length() == 0
         is JSONObject -> when (method) {
-            "play" -> result.optString("url").isBlank() && (result.optJSONArray("resolutions")?.length() ?: 0) == 0
+            "play" -> !result.optBoolean("needLogin") && !result.optBoolean("needBind") &&
+                result.optString("url").isBlank() && (result.optJSONArray("resolutions")?.length() ?: 0) == 0
             "detail" -> (result.optJSONArray("episodes")?.length() ?: 0) == 0
             else -> result.length() == 0
         }
         else -> false
     }
 
-    private fun serviceFailure(status: Int?): LanercCapabilityException? {
+    private fun serviceFailure(sourceId: String, method: String, status: Int?, cause: Exception?): AnimeSourceException? {
         val code = status ?: return null
         val message = when (code) {
-            401, 403 -> "来源要求验证或拒绝了访问，请检查来源账号与设置。"
-            429 -> "来源暂时限制了请求，请稍后再试。"
+            401, 403 -> "来源拒绝了这次请求（HTTP $code），请检查当前线路或来源访问条件。"
+            429 -> "来源暂时限制了请求（HTTP 429），请稍后再试。"
             in 500..599 -> "来源服务暂时不可用（HTTP $code），请稍后再试。"
             else -> return null
         }
-        return LanercCapabilityException(message)
+        val stage = when (method) {
+            "play" -> AnimeSourceStage.RESOLVE
+            "search", "searchFiltered" -> AnimeSourceStage.SEARCH
+            "danmu" -> AnimeSourceStage.METADATA
+            else -> AnimeSourceStage.CATALOG
+        }
+        return AnimeSourceException(sourceId, stage, message, code,
+            (cause as? SourceException)?.takeIf { it.httpStatus == code }?.retryAfterSeconds ?: 0)
     }
 
     private companion object {

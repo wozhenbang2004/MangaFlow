@@ -226,18 +226,6 @@ internal actual class JavascriptHttpSession actual constructor(
     }
 
 
-// These are anonymous public App protocols, not an arbitrary cleartext host permission.
-private val PUBLIC_APP_CLEARTEXT_METHODS = mapOf(
-    "http://app2.dsx.ac/ndsx.php/v7/logs" to "POST",
-    "http://91.110.236.125:38569/nxyz.php/v7/logs" to "POST",
-    "http://23.224.111.70:7788/nzdr.php/v7/logs" to "POST",
-    "http://198.16.32.138:12345/nxnm.php/v7/logs" to "POST",
-    "http://23.224.53.35:2345/nllq.php/v7/logs" to "POST",
-    "http://118.184.173.5:19987/app/bn/v2" to "POST",
-    "http://frontend-static.kurte.cn/server_list_v2.json" to "GET",
-)
-private val CLEARTEXT_CREDENTIAL_HEADERS = setOf("cookie", "authorization", "proxy-authorization")
-
 private data class HttpResult(val status: Int, val headers: Map<String, String>, val body: String)
 
 internal object JvmScriptNetwork {

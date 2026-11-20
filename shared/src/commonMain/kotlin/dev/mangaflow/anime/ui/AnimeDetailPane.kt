@@ -225,7 +225,7 @@ internal fun AnimeDetailPane(
             }
             if (detailTab == 1) {
                 item(key = "description") {
-                    val info = canonicalInfo ?: subject
+                    val info = canonicalInfo?.copy(description = canonicalInfo.description.ifBlank { subject.description }) ?: subject
                     if (info.description.isNotBlank() || info.tags.isNotEmpty()) AnimeDetailDescription(info)
                     else AnimeMessage("暂无简介", subject.originalTitle.takeIf { it != subject.title && it.isNotBlank() })
                 }

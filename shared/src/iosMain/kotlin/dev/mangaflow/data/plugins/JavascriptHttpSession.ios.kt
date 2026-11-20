@@ -12,6 +12,7 @@ import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.HttpUrl
+import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.net.checked
 import dev.mangaflow.net.NetworkFailureKind
 import dev.mangaflow.net.NetworkTransferException
@@ -46,15 +47,18 @@ import platform.darwin.dispatch_get_global_queue
 import platform.posix.*
 import kotlin.math.ceil
 
-/** Public-IP socket + original TLS peer name; the proxy never resolves the destination. */
+/** Public-IP socket and validated TLS peer name for HTTPS; the proxy never resolves the destination. */
 internal actual class JavascriptHttpSession actual constructor(
     private val enabled: Boolean,
     private val route: DownloadRouteSnapshot?,
     private val maximumBytes: Int,
     private val allowRedirects: Boolean,
     private val observeRelayTraffic: Boolean,
-    private val cleartextEndpoints: Set<String>,
+    cleartextEndpoints: Set<String>,
 ) {
+    private val permittedCleartext = cleartextEndpoints.associateWith { address ->
+        requireNotNull(PUBLIC_APP_CLEARTEXT_METHODS[address]) { "来源 HTTP 端点未获宿主授权。" }
+    }
     private val operations = atomic(0)
     private val slots = Semaphore(2)
     private val lock = SynchronizedObject()
@@ -72,11 +76,7 @@ internal actual class JavascriptHttpSession actual constructor(
         val input = JSONObject(raw)
         var method = input.getString("method")
         require(method in setOf("GET", "POST", "HEAD", "PUT", "DELETE", "PATCH")) { "漫画源 HTTP 方法暂不支持。" }
-        val address = input.getString("url")
-        require(cleartextEndpoints.isEmpty() || !address.startsWith("http://", ignoreCase = true)) {
-            "此来源的公开 HTTP App 接口暂不支持 iOS，请使用其他来源。"
-        }
-        var url = publicPluginUrl(address)
+        var url = checkedRequestUrl(input.getString("url"))
         var headers = nativeScriptHeaders(input.optJSONObject("headers") ?: JSONObject())
         val bodyValue = input.opt("body")
         if (bodyValue != null && bodyValue != JSONObject.NULL && headers.keys.none { it.equals("Content-Type", true) })
@@ -85,6 +85,12 @@ internal actual class JavascriptHttpSession actual constructor(
         if (method in setOf("GET", "HEAD")) body = ByteArray(0)
         repeat(4) { redirects ->
             currentCoroutineContext().ensureActive()
+            if (!url.isHttps) {
+                require(permittedCleartext[url.toString()] == method) { "来源 HTTP 端点不支持此请求方法。" }
+                require(headers.keys.none { it.lowercase() in CLEARTEXT_CREDENTIAL_HEADERS }) {
+                    "公开 HTTP 来源接口不能携带 Cookie 或通用认证信息。"
+                }
+            }
             val pause = synchronized(nativePauseLock) { (nativePauses[url.origin()] ?: 0L) - wallTimeMillis() }
             if (pause > 0) throw SourceException("漫画源请求暂时受限，请稍后重试。", retryAfterSeconds = ceil(pause / 1000.0).toLong())
             reserveNativeOrigin(url)
@@ -102,10 +108,11 @@ internal actual class JavascriptHttpSession actual constructor(
                 require(!input.optBoolean("rejectRedirects", false)) { "源文件地址发生重定向，请使用最终 HTTPS 直链。" }
                 require(redirects < 3) { "漫画源重定向次数过多。" }
                 val location = result.headers.entries.firstOrNull { it.key.equals("Location", true) }?.value ?: error("漫画源重定向缺少目标。")
-                val target = url.resolve(location)?.let { publicPluginUrl(it.toString()) } ?: error("漫画源重定向地址无效。")
+                val target = url.resolve(location)?.let { checkedRequestUrl(it.toString()) } ?: error("漫画源重定向地址无效。")
+                require(!url.isHttps || target.isHttps) { "来源请求不允许从 HTTPS 重定向降级到 HTTP。" }
                 if (url.origin() != target.origin()) {
                     require(body.isEmpty()) { "不允许跨站点重定向请求正文，请更新来源地址后重试。" }
-                    headers = headers.filterKeys { !it.equals("Authorization", true) && !it.equals("Cookie", true) }
+                    headers = headers.filterKeys { it.lowercase() !in CLEARTEXT_CREDENTIAL_HEADERS }
                 }
                 if (result.status == 303 || method == "POST" && result.status in setOf(301, 302)) { method = "GET"; body = ByteArray(0) }
                 url = target
@@ -114,6 +121,20 @@ internal actual class JavascriptHttpSession actual constructor(
                 .put("headers", JSONObject(result.headers)).put("url", url.toString()).toString()
         }
         error("漫画源重定向次数过多。")
+    }
+
+    private fun checkedRequestUrl(address: String): HttpUrl {
+        val url = address.toHttpUrlOrNull() ?: error("来源请求 URL 无效。")
+        require(address.length <= 8192 && url.fragment == null &&
+            '@' !in address.substringAfter("://").substringBefore('/').substringBefore('?')) {
+            "来源请求 URL 无效或包含内嵌凭据、片段。"
+        }
+        if (url.isHttps) return publicPluginUrl(address)
+        require(url.query == null && url.toString() in permittedCleartext) {
+            "来源仅支持 HTTPS 或宿主为此脚本授权的精确 HTTP 接口。"
+        }
+        publicPluginUrl(url.newBuilder().scheme("https").build().toString())
+        return url
     }
 
     internal suspend fun imageBytes(value: String, imageHeaders: Map<String, String>, onBytes: ((Long) -> Unit)?,
@@ -181,14 +202,16 @@ internal actual class JavascriptHttpSession actual constructor(
             val read = reader.value ?: error("无法创建漫画源读取连接。")
             val write = writer.value ?: run { CFRelease(read); error("无法创建漫画源写入连接。") }
             try {
-                val ssl = CFDictionaryCreateMutable(null, 0, kCFTypeDictionaryKeyCallBacks.ptr, kCFTypeDictionaryValueCallBacks.ptr)!!
-                val peer = nativeCfString(url.host)
-                try {
-                    CFDictionarySetValue(ssl, kCFStreamSSLPeerName, peer)
-                    CFDictionarySetValue(ssl, kCFStreamSSLValidatesCertificateChain, kCFBooleanTrue)
-                    CFDictionarySetValue(ssl, kCFStreamSSLLevel, kCFStreamSocketSecurityLevelNegotiatedSSL)
-                    check(CFReadStreamSetProperty(read, kCFStreamPropertySSLSettings, ssl) && CFWriteStreamSetProperty(write, kCFStreamPropertySSLSettings, ssl)) { "无法启用漫画源 TLS 校验。" }
-                } finally { CFRelease(ssl); CFRelease(peer) }
+                if (url.isHttps) {
+                    val ssl = CFDictionaryCreateMutable(null, 0, kCFTypeDictionaryKeyCallBacks.ptr, kCFTypeDictionaryValueCallBacks.ptr)!!
+                    val peer = nativeCfString(url.host)
+                    try {
+                        CFDictionarySetValue(ssl, kCFStreamSSLPeerName, peer)
+                        CFDictionarySetValue(ssl, kCFStreamSSLValidatesCertificateChain, kCFBooleanTrue)
+                        CFDictionarySetValue(ssl, kCFStreamSSLLevel, kCFStreamSocketSecurityLevelNegotiatedSSL)
+                        check(CFReadStreamSetProperty(read, kCFStreamPropertySSLSettings, ssl) && CFWriteStreamSetProperty(write, kCFStreamPropertySSLSettings, ssl)) { "无法启用漫画源 TLS 校验。" }
+                    } finally { CFRelease(ssl); CFRelease(peer) }
+                }
                 if (selected?.mode == DownloadRouteMode.PROXY) {
                     val endpoint = selected.proxy ?: error("代理未配置。")
                     val proxy = CFDictionaryCreateMutable(null, 0, kCFTypeDictionaryKeyCallBacks.ptr, kCFTypeDictionaryValueCallBacks.ptr)!!
@@ -206,11 +229,12 @@ internal actual class JavascriptHttpSession actual constructor(
                 // Let Core Foundation advance TLS/socket state while coroutines poll bounded reads.
                 val queue = dispatch_get_global_queue(0, 0uL)
                 CFReadStreamSetDispatchQueue(read, queue); CFWriteStreamSetDispatchQueue(write, queue)
-                check(CFReadStreamOpen(read) && CFWriteStreamOpen(write)) { "漫画源 TLS 连接失败。" }
+                check(CFReadStreamOpen(read) && CFWriteStreamOpen(write)) { "来源连接失败。" }
                 val started = monotonicTimeMillis()
                 val deadline = started + timeoutMillis
                 val responseDeadline = started + if (imageTransfer) imageIdleMillis else timeoutMillis
-                val authority = url.host + if (url.port == 443) "" else ":${url.port}"
+                val defaultPort = if (url.isHttps) 443 else 80
+                val authority = url.host + if (url.port == defaultPort) "" else ":${url.port}"
                 val requestHead = buildString {
                     append(method).append(' ').append(url.encodedPath).append(url.query?.let { "?$it" }.orEmpty()).append(" HTTP/1.1\r\n")
                     append("Host: ").append(authority).append("\r\nConnection: close\r\nAccept-Encoding: ")

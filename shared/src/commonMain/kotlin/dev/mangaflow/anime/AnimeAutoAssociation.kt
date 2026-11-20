@@ -180,6 +180,17 @@ internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalo
             episodeNumber.isFinite()) return listOf(name)
         return emptyList()
     }
+    // In LMM85's pinned catalogue, each numeric flag carries the same work ID
+    // and a stable route ID. Unequal coverage in other episodes does not affect this episode.
+    if (catalog.title.sourceId == "anime-lanerc-lmm85" && catalog.title.externalIds["lmm85"] == catalog.title.id) {
+        val matches = groups.mapNotNull { (name, rows) ->
+            rows.singleOrNull { it.kind == requested.kind && it.number == episodeNumber }?.let { name to it }
+        }
+        fun identity(row: AnimeSourceEpisode) = ageEpisodeLabelKey(row.title) to row.edition
+        val target = if (selectedGroup == null) matches.map { identity(it.second) }.distinct().singleOrNull()
+            else matches.firstOrNull { it.first == selectedGroup }?.let { identity(it.second) }
+        return matches.filter { target != null && identity(it.second) == target }.map { it.first }
+    }
     val eligible = groups.filterValues { rows ->
         rows.count { it.number == episodeNumber && it.kind == requested.kind } == 1 &&
             rows.all { it.number != null && it.number.isFinite() } &&

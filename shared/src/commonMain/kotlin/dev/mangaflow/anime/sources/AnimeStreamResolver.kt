@@ -27,7 +27,7 @@ internal data class ResolvedAnimeStream(
  * bounded player frames. Reuses the application's attributed Packer decoder; no arbitrary
  * remote JavaScript, browser session, cookies or filesystem bridge is exposed.
  */
-internal class AnimeStreamResolver(private val http: AnimeHttp) {
+internal class AnimeStreamResolver(private val http: AnimeHttp, private val sameOriginPages: Boolean = false) {
     private val anonymousPages = AnonymousPlayerPages(http)
     private fun mediaReferer(value: String): String =
         if (http.sourceId in setOf("anime-native-akianime", "anime-native-dmbus")) anonymousMediaReferer(value) else value
@@ -53,7 +53,8 @@ internal class AnimeStreamResolver(private val http: AnimeHttp) {
                 return ResolvedAnimeStream(direct.toString(), animeMediaType(direct.toString()), mediaReferer(referer))
         }
         if (depth > 3 || !visited.add(url.toString())) return null
-        val response = http.request(url, AnimeSourceStage.RESOLVE, referer = mediaReferer(referer), sameOriginRedirects = akiDeclaredPage)
+        val response = http.request(url, AnimeSourceStage.RESOLVE, referer = mediaReferer(referer),
+            sameOriginRedirects = akiDeclaredPage || sameOriginPages)
         if (http.sourceId in setOf("anime-native-akianime", "anime-native-dmbus"))
             anonymousPages.rejectAccessPage(response.text)
         val document = withContext(Dispatchers.Default) { Ksoup.parse(response.text, response.url.toString()) }
@@ -123,6 +124,7 @@ internal class AnimeStreamResolver(private val http: AnimeHttp) {
         var frameFailure: AnimeSourceException? = null
         for (raw in frames.distinct().take(8)) {
             val next = runCatching { animePublicUrl(animeAbsolute(pageUrl, raw)) }.getOrNull() ?: continue
+            if (sameOriginPages && (next.host != response.url.host || next.port != response.url.port)) continue
             try {
                 resolvePage(next, pageUrl, visited, depth + 1)?.let { return it }
             } catch (cancel: CancellationException) {

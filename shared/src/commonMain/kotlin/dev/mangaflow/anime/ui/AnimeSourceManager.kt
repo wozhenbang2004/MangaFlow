@@ -94,7 +94,7 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                 }
                 if (selected != null) {
                     val alternatives = videoGroups.firstOrNull { selected in it.sources }?.sources.orEmpty()
-                        .filter { it.id != selected.id && (it.installed || it.id in BUNDLED_ANIME_SOURCE_IDS) }
+                        .filter { it.id != selected.id && it.installable }
                     key(selected.id) {
                         AnimeSourceManagerDetail(selected, alternatives, selected.id in fixedBuiltIns, state, controller,
                             Modifier.weight(1f, fill = false),
@@ -334,10 +334,10 @@ private fun AnimeSourceManagerDetail(
                 }
                 else -> Unit
             }
-            source.installable && source.bundledAlternativeId == null -> item {
+            source.installable -> item {
                 MotionButton(onClick = { controller.installSource(source.id) }, enabled = !busy,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Text(if (busy) "正在添加" else "添加来源")
+                    Text(if (busy) "正在添加" else if (source.bundledAlternativeId != null) "添加脚本版" else "添加来源")
                 }
             }
             else -> Unit
@@ -346,8 +346,12 @@ private fun AnimeSourceManagerDetail(
             item(key = "alternatives-heading") { AnimeSectionTitle("同一来源的其他实现") }
             items(alternatives, key = { "alternative:" + it.id }) { alternative ->
                 val altNative = alternative.id in BUNDLED_ANIME_SOURCE_IDS
-                AnimeSelection(if (altNative) "内置实现" else "原有扩展脚本",
-                    animeSourceManagerLabel(alternative, state, altNative), selected = alternative.active,
+                val label = when {
+                    altNative -> "内置实现"
+                    "homeSections" in alternative.capabilities && "searchFiltered" in alternative.capabilities -> "脚本版 · 推荐与分类"
+                    else -> "脚本版"
+                }
+                AnimeSelection(label, animeSourceManagerLabel(alternative, state, altNative), selected = alternative.active,
                     onClick = { onSelectAlternative(alternative) })
             }
         }

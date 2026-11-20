@@ -36,7 +36,6 @@ import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.net.DownloadRouteMode
-import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 
@@ -634,7 +633,7 @@ internal fun AnimeSourcesPanel(
                                 val progress = state.sourceAggregation[title.sourceId]
                                 val check = progress?.candidateChecks?.firstOrNull { it.title.referenceKey() == title.referenceKey() }
                                 val checkedEpisode = state.detail?.episodes?.firstOrNull { it.id == progress?.episodeId }
-                                val retryable = check?.phase in setOf(AnimeAssociationPhase.UNAVAILABLE, AnimeAssociationPhase.MEDIA_RETRY)
+                                val retryable = check?.phase == AnimeAssociationPhase.UNAVAILABLE
                                 AnimeSourceProviderRow(title.sourceId, name,
                                     listOfNotNull(title.title, title.year?.toString()).joinToString(" · "),
                                     onClickLabel = "核对${name}的目录", onClick = { openPreview(title) },
@@ -642,10 +641,6 @@ internal fun AnimeSourcesPanel(
                                         if (check != null) {
                                             val scope = checkedEpisode?.let(::animeEpisodeLabel)
                                             AnimeQuietLabel(listOfNotNull(scope, check.message).joinToString(" · "))
-                                            check.lines.forEach { line ->
-                                                AnimeQuietLabel(listOf(animeSourceGroupLabel(line.group), line.message,
-                                                    formatInstantMillis(line.observedAt, "MM-dd HH:mm")).joinToString(" · "))
-                                            }
                                         }
                                     },
                                     trailing = {
@@ -662,7 +657,7 @@ internal fun AnimeSourcesPanel(
                         if (canInspect && aggregationExpanded) {
                             if (state.sourceAggregationTotal > 0 && !state.sourceAggregationRunning) item(key = "aggregation-summary") {
                                 val unfinished = state.sourceAggregation.values.count { it.phase in setOf(
-                                    AnimeAssociationPhase.UNAVAILABLE, AnimeAssociationPhase.MEDIA_RETRY,
+                                    AnimeAssociationPhase.UNAVAILABLE,
                                     AnimeAssociationPhase.QUEUED, AnimeAssociationPhase.SEARCHING) }
                                 AnimeQuietLabel(if (unfinished > 0) "本轮已结束 · $unfinished 个未完成" else "本轮核对已结束",
                                     Modifier.padding(start = 8.dp))
@@ -910,7 +905,6 @@ private fun animeAssociationPhaseLabel(phase: AnimeAssociationPhase): String = w
     AnimeAssociationPhase.NO_MATCH -> "未找到可靠候选"
     AnimeAssociationPhase.NEEDS_SELECTION -> "待确认作品或版本"
     AnimeAssociationPhase.EPISODE_UNMATCHED -> "目录中暂无本集"
-    AnimeAssociationPhase.MEDIA_RETRY -> "本集媒体需重试"
     AnimeAssociationPhase.UNAVAILABLE -> "搜索或目录读取未完成"
     AnimeAssociationPhase.EXCLUDED -> "已排除自动关联"
 }

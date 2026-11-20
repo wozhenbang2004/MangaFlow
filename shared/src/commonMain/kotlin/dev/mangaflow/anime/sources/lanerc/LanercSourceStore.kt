@@ -439,7 +439,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
                 automaticPreparation = listing.id in AUTOMATIC_ANIME_SOURCE_IDS,
                 bundledAlternativeId = ANIME_BUNDLED_ALTERNATIVES[listing.id],
                 preparationUnavailableReason = when (listing.id) {
-                    "anime-lanerc-lmm85" -> "已接入公开直链；需要网页验证或媒体嗅探的线路仍不可用。"
+                    "anime-lanerc-lmm85" -> "支持公开直链和网页声明的媒体；需要网页验证或运行播放器脚本的线路仍待适配。"
                     else -> null
                 },
             )

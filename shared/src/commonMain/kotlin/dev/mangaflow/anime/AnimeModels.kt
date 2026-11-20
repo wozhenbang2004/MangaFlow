@@ -67,6 +67,7 @@ data class AnimeSourceCatalog(
     val episodes: List<AnimeSourceEpisode>,
     /** Actual partial-read status, not a claim that unavailable entries were deleted. */
     val notice: String? = null,
+    val description: String = "",
 )
 
 data class AnimeSubtitle(
@@ -83,6 +84,7 @@ data class AnimeResolution(
     val label: String,
     val url: String,
     val mimeType: String? = null,
+    /** Complete request headers for this variant, independent of the currently playing variant. */
     val headers: Map<String, String> = emptyMap(),
 )
 
