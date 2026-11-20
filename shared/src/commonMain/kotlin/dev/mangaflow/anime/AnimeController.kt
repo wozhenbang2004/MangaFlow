@@ -21,10 +21,9 @@ import dev.mangaflow.anime.sources.AnimeSourceException
 import dev.mangaflow.anime.sources.AnimeSourceRepository
 import dev.mangaflow.anime.sources.AnimeSourceStage
 import dev.mangaflow.anime.sources.AnimeTrackingRepository
-import dev.mangaflow.anime.sources.CYCITY_SIGN_IN_REQUIRED
-import dev.mangaflow.anime.sources.CYCITY_SOURCE_ID
 import dev.mangaflow.anime.sources.TvtFunPlaybackException
 import dev.mangaflow.anime.sources.animeContentIdentity
+import dev.mangaflow.anime.sources.isLmm85Source
 import dev.mangaflow.anime.sources.lanerc.LanercCapabilityException
 import dev.mangaflow.anime.sources.lanerc.LanercMediaSniffingUnsupported
 import dev.mangaflow.net.DownloadCategory
@@ -119,7 +118,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         } })
     val extensions get() = sources.extensions
     internal val builtInVideoSources get() = sources.builtInVideoSources
-    val danmaku by lazy { dev.mangaflow.anime.danmaku.AnimeDanmakuController(context, scope, sources.extensions) }
+    val danmaku by lazy { dev.mangaflow.anime.danmaku.AnimeDanmakuController(context, scope, sources) }
     private val downloadsOwner = lazy { downloadStore().also {
         it.setPlaybackBusy(playbackBusy())
     } }
@@ -302,16 +301,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private data class ReviewContext(val detail: AnimeDetail, val remote: AnimeTrackingSnapshot)
 
     init {
-        scope.launch {
-            try { sources.cycityAccount.restore() }
-            catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) {
-                mutableState.update { it.copy(cycityAccountError = "次元城会话未能读取，请重新登录。") }
-            }
-            sources.cycityAccount.account.collect { name ->
-                mutableState.update { it.copy(cycityAccount = name) }
-            }
-        }
         scope.launch {
             combine(enhancementCenter.settings.state, enhancementCenter.settings.sessions,
                 enhancementCenter.resources.usage, enhancementCenter.inventory,
@@ -1349,11 +1338,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     fun play(episodeId: String, option: AnimeEpisodeOption? = null) {
         val episode = mutableState.value.detail?.episodes?.firstOrNull { it.id == episodeId } ?: return
-        val access = option?.let { sourcePlaybackAccessMessage(it.sourceId) }
-        if (access != null) {
-            notice(access)
-            return
-        }
         cancelEpisodeSourceMeasurements()
         ++autoPlayGeneration
         resetPlaybackRecoveryWindow()
@@ -1688,7 +1672,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 it.title.sourceId == base.sourceId && it.title.id == base.catalog.id && it.title.url == base.catalog.url
             } ?: return@flatMap emptyList()
             if (base.episode !in catalog.episodes) return@flatMap emptyList()
-            if ((base.sourceId != "anime-age" && base.sourceId != "anime-lanerc-lmm85") || base.episode.kind != episode.kind ||
+            if ((base.sourceId != "anime-age" && !isLmm85Source(base.sourceId)) || base.episode.kind != episode.kind ||
                 base.episode.number != autoPlayEpisodeNumber(detail, episode, catalog)) return@flatMap listOf(base)
             val groups = autoPlayGroups(detail, episode, catalog, base.episode.group)
             if (groups.size < 2 || base.episode.group !in groups) return@flatMap listOf(base)
@@ -1715,16 +1699,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     internal fun canAttemptPlaybackLine(episodeId: String, option: AnimeEpisodeOption,
         snapshot: AnimeScreenState = mutableState.value): Boolean {
-        if (sourcePlaybackAccessMessage(option.sourceId) != null) return false
         val subjectId = snapshot.detail?.subject?.id ?: return false
         val key = playbackHistoryKey(subjectId, episodeId, option) ?: return false
         return currentPlaybackFailure(key)?.unsupported != true
     }
 
     internal fun hasAutomaticPlaybackLine(episodeId: String): Boolean = automaticPlaybackLines(episodeId).isNotEmpty()
-
-    internal fun sourcePlaybackAccessMessage(sourceId: String): String? =
-        CYCITY_SIGN_IN_REQUIRED.takeIf { sourceId == CYCITY_SOURCE_ID && sources.cycityAccount.account.value == null }
 
     private fun automaticPlaybackLines(episodeId: String, snapshot: AnimeScreenState = mutableState.value) =
         confirmedPlaybackLines(episodeId, snapshot).filter {
@@ -1961,7 +1941,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 }
             }
             suspend fun measureLine(target: SourceMeasurementTarget, option: AnimeEpisodeOption): Pair<PlaybackProbe?, String?> {
-                sourcePlaybackAccessMessage(option.sourceId)?.let { return null to it }
                 val line = currentPlaybackLine(target.episodeId, option) ?: return null to "对应线路已变化，请重新测速。"
                 val provider = sources.provider(line.sourceId) ?: return null to "来源已停用或移除。"
                 val revision = discoverySourceRevision(line.sourceId) ?: return null to "来源版本已变化，请重新测速。"
@@ -2454,8 +2433,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             if (admitted != null && admissionStillCurrent?.invoke() == true) {
                                 tried += key
                                 recoveryOptions += key
-                                if (failure !is AnimeSourceException || failure.stage != AnimeSourceStage.AUTH)
-                                    rememberPlaybackFailure(admitted, incident)
+                                rememberPlaybackFailure(admitted, incident)
                             } else rejected += key
                         }
                         Result.failure(PlaybackResolutionException(incident, failure))
@@ -2642,7 +2620,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     private fun validCandidate(choice: PendingPlayback): Boolean =
         choice.localMedia != null || sources.provider(choice.option.sourceId) != null && sourceRevision(choice.option.sourceId) == choice.sourceRevision &&
-            sourcePlaybackAccessMessage(choice.option.sourceId) == null &&
             (!choice.bypassMediaCache || library.state.value.settings.automaticRecoveryAttempts > 0) &&
             (choice.preferredHeight == null || choice.preferredHeight == library.state.value.settings.preferredSourceHeight) &&
             choice.asset.sourceRevision == discoverySourceRevision(choice.option.sourceId) &&
@@ -3823,29 +3800,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     fun enableSource(id: String, enabled: Boolean) = sourceOperation(id) { sources.extensions.setEnabled(id, enabled) }
     fun removeSource(id: String) = sourceOperation(id) { sources.extensions.remove(id) }
     fun setSourceOptions(id: String, optionsJson: String) = sourceOperation(id) { sources.extensions.setOptions(id, optionsJson) }
-
-    internal fun signInCycity(username: String, password: String) = sourceOperation(CYCITY_SOURCE_ID) {
-        mutableState.update { it.copy(cycityAccountError = null) }
-        try { sources.cycityAccount.signIn(username.trim(), password) }
-        catch (cancel: CancellationException) { throw cancel }
-        catch (failure: Exception) {
-            val message = (failure as? AnimeSourceException)?.message ?: "次元城登录未完成，请重试。"
-            mutableState.update { it.copy(cycityAccountError = message) }
-        }
-    }
-
-    internal fun signOutCycity() = sourceOperation(CYCITY_SOURCE_ID) {
-        sources.cycityAccount.signOut()
-        mutableState.update { it.copy(cycityAccountError = null) }
-        cancelEpisodeSourceMeasurements()
-        val playing = active
-        if (playing != null && playing.option.sourceId == CYCITY_SOURCE_ID && playing.localMedia == null) closePlayback()
-        else {
-            if (resolvingSourceId == CYCITY_SOURCE_ID || pending?.option?.sourceId == CYCITY_SOURCE_ID)
-                cancelPlaybackResolution()
-            if (prepared?.target?.option?.sourceId == CYCITY_SOURCE_ID) clearPreparation()
-        }
-    }
 
     fun installVideoSources() = sourceOperation("all-video") {
         val failures = sources.extensions.installAllVideo()

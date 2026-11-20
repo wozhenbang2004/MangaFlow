@@ -59,7 +59,6 @@ internal fun AnimeSourcesPanel(
     onPlay: (String, AnimeEpisodeOption) -> Unit,
     onAutomaticPlay: (AnimeEpisode) -> Unit,
     onOpenSourceWork: ((AnimeSourceTitle) -> Unit)? = null,
-    onOpenSourceAccount: (String) -> Unit,
 ) {
     val subject = state.detail?.subject
     val uriHandler = LocalUriHandler.current
@@ -409,7 +408,6 @@ internal fun AnimeSourcesPanel(
                             val association = state.sourceAggregation[sourceId]
                             val extension = state.sourceExtensions.firstOrNull { it.id == sourceId }
                             val sourceDisabled = extension != null && (!extension.installed || !extension.enabled)
-                            val access = controller.sourcePlaybackAccessMessage(sourceId)
                             val showManual = manual != null && manual != current
                             val showCurrent = current != null && !showManual && !recovering && !sourceDisabled &&
                                 current in available
@@ -420,7 +418,6 @@ internal fun AnimeSourcesPanel(
                             val stateLabel = when {
                                 extension != null && !extension.installed -> "来源已移除"
                                 sourceDisabled -> "来源已停用"
-                                access != null -> "播放需登录"
                                 showManual && (recovering || manualTarget?.error != null) -> "上次手动指定"
                                 current != null && recovering -> "上次使用"
                                 lines.isNotEmpty() && attemptable.isEmpty() -> "线路暂不可用"
@@ -491,11 +488,6 @@ internal fun AnimeSourcesPanel(
                                         }
                                         if (focusEpisode != null) measurementProgress?.reason?.let { AnimeQuietLabel(it) }
                                         if (sourceDisabled) AnimeQuietLabel("启用此来源后可读取目录。")
-                                        if (!sourceDisabled && access != null) {
-                                            AnimeQuietLabel(access)
-                                            MotionTextButton(onClick = { onOpenSourceAccount(sourceId) },
-                                                modifier = Modifier.heightIn(min = 44.dp)) { Text("登录 $name") }
-                                        }
                                         if (error != null) AnimeQuietLabel(error)
                                         if (!sourceDisabled && (error != null || catalog == null)) {
                                             MotionTextButton(onClick = { controller.refreshSource(sourceId) },
@@ -517,7 +509,7 @@ internal fun AnimeSourcesPanel(
                                                     if (option == manual && recovering && option != current) "上次手动指定" else null,
                                                     if (option == current && recovering) "上次使用" else null,
                                                     if (failure != null && canPlay) "近期失败" else null,
-                                                    if (!canPlay && access == null) "暂不可用" else null).distinct().joinToString(" · ")
+                                                    if (!canPlay) "暂不可用" else null).distinct().joinToString(" · ")
                                                 val optionName = lineName ?: option.episode.title.ifBlank { "线路 ${index + 1}" }
                                                 val optionMeasurements = controller.playbackMeasurements(focusEpisode.id, option)
                                                 val action = if (failure == null) "播放${optionName}" else "重试${optionName}"
@@ -544,7 +536,7 @@ internal fun AnimeSourcesPanel(
                                                         routeLabel = routeLabel)
                                                     if (failure != null && failure != optionMeasurements?.mediaFailure)
                                                         AnimeQuietLabel(failure, Modifier.padding(start = 8.dp))
-                                                    if (!sourceDisabled && access == null && optionMeasurements?.mediaVerified != true)
+                                                    if (!sourceDisabled && optionMeasurements?.mediaVerified != true)
                                                         MotionTextButton(onClick = {
                                                             controller.measureEpisodeSources(focusEpisode.id, force = true, onlyLine = option)
                                                         }, enabled = !measuring && !state.resolving,

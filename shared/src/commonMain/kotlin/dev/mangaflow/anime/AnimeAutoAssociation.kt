@@ -1,5 +1,7 @@
 package dev.mangaflow.anime
 
+import dev.mangaflow.anime.sources.isLmm85Source
+
 /** Ignore cosmetic spacing and punctuation, never drop episode, sequel or season identity. */
 private fun autoTitleKey(value: String) = value.trim().lowercase().filter { it.isLetterOrDigit() }
 
@@ -182,7 +184,7 @@ internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalo
     }
     // In LMM85's pinned catalogue, each numeric flag carries the same work ID
     // and a stable route ID. Unequal coverage in other episodes does not affect this episode.
-    if (catalog.title.sourceId == "anime-lanerc-lmm85" && catalog.title.externalIds["lmm85"] == catalog.title.id) {
+    if (isLmm85Source(catalog.title.sourceId) && catalog.title.externalIds["lmm85"] == catalog.title.id) {
         val matches = groups.mapNotNull { (name, rows) ->
             rows.singleOrNull { it.kind == requested.kind && it.number == episodeNumber }?.let { name to it }
         }

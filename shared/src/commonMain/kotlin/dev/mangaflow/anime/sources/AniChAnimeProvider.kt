@@ -4,6 +4,8 @@ import dev.mangaflow.anime.AnimePlaybackAsset
 import dev.mangaflow.anime.AnimeSourceCatalog
 import dev.mangaflow.anime.AnimeSourceEpisode
 import dev.mangaflow.anime.AnimeSourceTitle
+import dev.mangaflow.anime.danmaku.AnimeDanmakuComment
+import dev.mangaflow.anime.danmaku.AnimeDanmakuMode
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadCategory
@@ -27,6 +29,31 @@ internal class AniChAnimeProvider(override val revision: String) : AnimeProvider
     override val id = "anime-native-ani"
     override val name = "AniCh"
     override val homeUrl = "https://anich.sends.eu.org/"
+    override val supportsLatest = true
+    override val supportsLatestPagination = false
+
+    override suspend fun latest(page: Int): List<AnimeSourceTitle> {
+        require(page >= 1)
+        if (page > 1) return emptyList()
+        val stage = AnimeSourceStage.CATALOG
+        val http = AnimeHttp(id)
+        try {
+            val url = animePublicUrl(homeUrl).newBuilder().addPathSegments("bangumi/latest")
+                .addQueryParameter("nsfw", "false").addQueryParameter("res", "true").build()
+            val response = http.request(url, stage, referer = homeUrl)
+            val titles = withContext(Dispatchers.Default) {
+                AniChWire(response.bytes).messages(1).mapNotNull { row ->
+                    val remoteId = row.number(2).takeIf { it > 0 }?.toString() ?: return@mapNotNull null
+                    val label = row.string(7).ifBlank { row.string(8) }.ifBlank { return@mapNotNull null }
+                    AnimeSourceTitle(id, remoteId, label, detailUrl(remoteId), sourceCover(homeUrl, row.string(6)),
+                        updateText = row.number(3).takeIf { it > 0 }?.let { "更新至第 $it 集" }.orEmpty(),
+                        sourceRevision = revision)
+                }.distinctBy { it.id }
+            }
+            checkRoute(http, stage)
+            return titles
+        } finally { http.close() }
+    }
 
     override suspend fun search(query: String, page: Int): List<AnimeSourceTitle> {
         require(query.isNotBlank() && page >= 1)
@@ -51,6 +78,48 @@ internal class AniChAnimeProvider(override val revision: String) : AnimeProvider
     private fun remoteId(value: String): String = value.also { require(it.matches(Regex("[1-9][0-9]{0,18}"))) }
     private fun detailUrl(value: String): String = homeUrl + "bangumi/detail/" + remoteId(value)
     private fun vodUrl(value: String, sort: Long): String = homeUrl + "vod/" + remoteId(value) + "/" + sort.also { require(it > 0) }
+
+    suspend fun danmaku(catalog: AnimeSourceCatalog, episode: AnimeSourceEpisode): List<AnimeDanmakuComment> {
+        require(catalog.title.sourceId == id && catalog.title.url == detailUrl(catalog.title.id) && episode in catalog.episodes)
+        val ticket = JSONObject(requireNotNull(episode.playbackData))
+        val sort = ticket.getLong("sort")
+        require(ticket.getString("work") == catalog.title.id && episode.url == vodUrl(catalog.title.id, sort))
+        val stage = AnimeSourceStage.CATALOG
+        val http = AnimeHttp(id)
+        try {
+            val comments = mutableListOf<AnimeDanmakuComment>()
+            var skip = 0L
+            repeat(20) {
+                checkRoute(http, stage)
+                val url = animePublicUrl(homeUrl).newBuilder().addPathSegment("danmaku")
+                    .addQueryParameter("bangumi", catalog.title.id).addQueryParameter("episode", sort.toString())
+                    .addQueryParameter("skip", skip.toString()).build()
+                val response = http.request(url, stage, referer = homeUrl)
+                val (next, rows) = withContext(Dispatchers.Default) {
+                    val batch = AniChWire(response.bytes)
+                    batch.number(2) to batch.messages(1).mapNotNull { row -> runCatching { aniChComment(row) }.getOrNull() }
+                }
+                checkRoute(http, stage)
+                comments.addAll(rows.take(150_000 - comments.size))
+                if (next <= skip || comments.size == 150_000) return comments.distinctBy { it.id }.sortedBy { it.timeMs }
+                skip = next
+            }
+            return comments.distinctBy { it.id }.sortedBy { it.timeMs }
+        } finally { http.close() }
+    }
+
+    private fun aniChComment(row: AniChWire): AnimeDanmakuComment? {
+        val seconds = row.decimal(6)?.takeIf { it.isFinite() && it >= 0 && it < Long.MAX_VALUE.toDouble() / 1000 } ?: return null
+        val text = row.string(4).trim().take(500).ifBlank { return null }
+        val time = (seconds * 1000).toLong()
+        val color = row.string(2).removePrefix("#").takeLast(6).toIntOrNull(16)?.takeIf { it in 0..0xffffff } ?: 0xffffff
+        val mode = when (row.number(7)) {
+            2L -> AnimeDanmakuMode.TOP
+            3L -> AnimeDanmakuMode.BOTTOM
+            else -> AnimeDanmakuMode.SCROLL
+        }
+        return AnimeDanmakuComment(animeHash("$time\n$color\n$mode\n$text"), time, text, color, mode)
+    }
 
     override suspend fun catalog(title: AnimeSourceTitle): AnimeSourceCatalog {
         require(title.sourceId == id && title.url == detailUrl(title.id))
@@ -177,7 +246,7 @@ internal class AniChAnimeProvider(override val revision: String) : AnimeProvider
 
 /** Strict, bounded protobuf wire reader. Field meanings stay at the call sites above. */
 private class AniChWire(private val bytes: ByteArray) {
-    private data class Field(val number: Int, val integer: Long? = null, val data: ByteArray? = null)
+    private data class Field(val number: Int, val integer: Long? = null, val data: ByteArray? = null, val fixed64: Long? = null)
     private val fields: List<Field> = buildList {
         var position = 0
         fun varint(): Long {
@@ -201,7 +270,13 @@ private class AniChWire(private val bytes: ByteArray) {
                     add(Field(number, data = bytes.copyOfRange(position, position + count)))
                     position += count
                 }
-                1, 5 -> { val count = if ((tag and 7) == 1L) 8 else 4; require(count <= bytes.size - position); position += count; add(Field(number)) }
+                1 -> {
+                    require(bytes.size - position >= 8)
+                    var bits = 0L
+                    for (shift in 0..56 step 8) bits = bits or ((bytes[position++].toLong() and 255L) shl shift)
+                    add(Field(number, fixed64 = bits))
+                }
+                5 -> { require(bytes.size - position >= 4); position += 4; add(Field(number)) }
                 else -> error("AniCh 返回不支持的数据格式。")
             }
         }
@@ -209,6 +284,7 @@ private class AniChWire(private val bytes: ByteArray) {
     private fun field(number: Int): Field? = fields.filter { it.number == number }
         .also { require(it.size <= 1) { "AniCh 返回重复标量字段。" } }.firstOrNull()
     fun number(number: Int): Long = field(number)?.let { requireNotNull(it.integer) } ?: 0L
+    fun decimal(number: Int): Double? = field(number)?.fixed64?.let { Double.fromBits(it) }
     fun string(number: Int): String = field(number)?.let { requireNotNull(it.data).decodeToString(throwOnInvalidSequence = true) }.orEmpty()
     fun messages(number: Int): List<AniChWire> = fields.filter { it.number == number }.map { AniChWire(requireNotNull(it.data)) }
 }

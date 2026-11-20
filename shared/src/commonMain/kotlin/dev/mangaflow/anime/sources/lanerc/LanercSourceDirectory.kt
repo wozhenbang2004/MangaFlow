@@ -1,7 +1,7 @@
 package dev.mangaflow.anime.sources.lanerc
 
-import dev.mangaflow.anime.sources.CYCITY_HOME
-import dev.mangaflow.anime.sources.CYCITY_SOURCE_ID
+import dev.mangaflow.anime.sources.LMM85_HOME
+import dev.mangaflow.anime.sources.NATIVE_LMM85_SOURCE
 
 /** Reference directory observed in the public config v8 (2026-11-05); never a playability claim. */
 enum class LanercSourceKind { VIDEO, BROWSE, COMIC, DANMAKU, UNKNOWN }
@@ -65,11 +65,11 @@ internal data class LanercInstalledPackage(
 
 /** Only public script URLs and semantic metadata are packaged; third-party script code is not bundled. */
 val LANERC_SOURCE_DIRECTORY: List<LanercSourceDescriptor> = listOf(
-    LanercSourceDescriptor(CYCITY_SOURCE_ID, "次元城 · 内建", LanercSourceKind.VIDEO, CYCITY_HOME, CYCITY_HOME,
-        emptyList(), setOf("search", "detail", "play", "latest", "login"), "", "公开目录和剧集；播放需要本人次元城账号"),
+    LanercSourceDescriptor(NATIVE_LMM85_SOURCE, "LMM85 · 路漫漫 · 内建", LanercSourceKind.VIDEO, LMM85_HOME, LMM85_HOME,
+        emptyList(), setOf("latest", "search", "detail", "play"), "", "直接读取公开目录和剧集，解析已声明的媒体"),
     LanercSourceDescriptor("anime-native-jinpai", "金牌 · 内建", LanercSourceKind.VIDEO, "https://y2s52n7.com/", "https://y2s52n7.com/", emptyList(), setOf("search", "detail", "play", "latest"), "", "匿名签名协议；真实动漫更新、剧集 ID 与清晰度；关键词仅第一页"),
     LanercSourceDescriptor("anime-native-yzx", "yzx · 内建", LanercSourceKind.VIDEO, "https://js.trgfd.cn/", "https://js.trgfd.cn/", emptyList(), setOf("search", "detail", "play", "latest"), "", "优可 3.0 公开协议；实际分页、独立设备会话与真实线路；平台解码能力以实际结果为准"),
-    LanercSourceDescriptor("anime-native-ani", "AniCh · 内建", LanercSourceKind.VIDEO, "https://anich.sends.eu.org/", "https://anich.sends.eu.org/", emptyList(), setOf("search", "detail", "play"), "", "匿名原生协议；逐集实际线路，不推断未返回的集数或替换选定线路"),
+    LanercSourceDescriptor("anime-native-ani", "AniCh · 内建", LanercSourceKind.VIDEO, "https://anich.sends.eu.org/", "https://anich.sends.eu.org/", emptyList(), setOf("search", "detail", "play", "latest", "danmu"), "", "匿名原生协议；最近更新、逐集线路和站内弹幕"),
     // Original native adapters. Distinct IDs retain legacy script title/group/episode ownership.
     LanercSourceDescriptor("anime-native-akianime", "AkiAnime · 内建", LanercSourceKind.VIDEO, "https://www.akianime.com/", "https://www.akianime.com/", emptyList(), setOf("search", "detail", "play"), "", "仅第一页关键词搜索；匿名公开线路，验证或加密线路不保证可用"),
     LanercSourceDescriptor("anime-native-dmbus", "动漫巴士 · 内建", LanercSourceKind.VIDEO, "https://dmbus.cc/", "https://dmbus.cc/", emptyList(), setOf("search", "detail", "play"), "", "关键词 page 分页；匿名公开线路，动态加密线路不保证可用"),

@@ -95,7 +95,9 @@ internal class AnimeStreamResolver(private val http: AnimeHttp, private val same
                 val config = runCatching { JSONTokener(objectText).nextValue() as? JSONObject }.getOrNull() ?: continue
                 val raw = config.text("url", "src", "file")
                 if (raw.isBlank()) continue
-                val decoded = decodePlayerUrl(raw, config.optInt("encrypt")) ?: continue
+                val playerUrl = decodePlayerUrl(raw, config.optInt("encrypt")) ?: continue
+                val decoded = if (isLmm85Source(http.sourceId))
+                    LMM85_PLAY_HINT.matchEntire(playerUrl)?.groupValues?.get(1) ?: playerUrl else playerUrl
                 if (http.sourceId == "anime-native-akianime" && response.url.host == "www.akianime.com" &&
                     !decoded.startsWith("https://") && !decoded.startsWith("//") && !decoded.startsWith("/")) {
                     val parser = anonymousPages.akiParser(config.optString("from"), decoded, response.url)
@@ -180,6 +182,7 @@ internal class AnimeStreamResolver(private val http: AnimeHttp, private val same
     private companion object {
         val PLAYER_START = Regex("""(?:\bplayer_[A-Za-z0-9_]+\s*=|\b(?:playerConfig|videoConfig)\s*=)\s*\{""")
         val MEDIA_ASSIGNMENT = Regex("""(?:\bVurl\b|\b(?:video_url|videoUrl|playUrl)\b)\s*[:=]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')""")
+        val LMM85_PLAY_HINT = Regex("""([^?#]+\.m3u8)&t=hls(?:&ct=\d+)?""", RegexOption.IGNORE_CASE)
         val MEDIA_TYPES = setOf("video/mp4", "video/webm", "application/vnd.apple.mpegurl",
             "application/x-mpegURL", "application/dash+xml", "video/x-matroska")
     }

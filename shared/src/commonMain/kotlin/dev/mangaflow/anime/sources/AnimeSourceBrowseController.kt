@@ -440,20 +440,23 @@ class AnimeSourceBrowseController(
                 mutableState.value.categoryKey == category && mutableState.value.filters == filters
             try {
                 requireRoute(selection)
-                val cards = if (native) {
+                val latestProvider = if (native) {
+                    sources.provider(selection.source.id)
+                        ?.takeIf { it.supportsLatest && it.revision == selection.source.revision }
+                        ?: throw LanercCapabilityException("所选来源已改变，请重新选择来源。")
+                } else null
+                val morePages = latestProvider?.supportsLatestPagination ?: true
+                val cards = if (latestProvider != null) {
                     if (page == 1) {
                         awaitHomeFeed(selection.source, force) { cached ->
                             if (ownsPage() && before.page <= 1) {
                                 val initial = cached.single().items
                                 mutableState.value = mutableState.value.copy(
-                                    items = initial, page = 1, hasMore = initial.isNotEmpty())
+                                    items = initial, page = 1, hasMore = morePages && initial.isNotEmpty())
                             }
                         }.single().items
                     } else {
-                        val provider = sources.provider(selection.source.id)
-                            ?.takeIf { it.supportsLatest && it.revision == selection.source.revision }
-                            ?: throw LanercCapabilityException("所选来源已改变，请重新选择来源。")
-                        provider.latest(page)
+                        latestProvider.latest(page)
                     }
                 } else {
                     val encoded = JSONObject().also { json -> filters.forEach { (key, value) -> json.put(key, value) } }.toString()
@@ -467,7 +470,7 @@ class AnimeSourceBrowseController(
                     mutableState.value = mutableState.value.copy(items = merged, page = page,
                         // These source contracts expose a page list, not an authoritative total.
                         // A changing catalogue can repeat IDs without exhausting later pages.
-                        hasMore = cards.isNotEmpty(),
+                        hasMore = morePages && cards.isNotEmpty(),
                         loading = false, loadingMore = false, error = null, moreError = null)
                 }
             } catch (cancelled: CancellationException) {

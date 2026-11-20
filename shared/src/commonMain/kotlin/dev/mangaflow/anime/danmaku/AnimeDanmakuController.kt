@@ -2,7 +2,8 @@ package dev.mangaflow.anime.danmaku
 
 import dev.mangaflow.anime.AnimeSourceCatalog
 import dev.mangaflow.anime.AnimeSourceEpisode
-import dev.mangaflow.anime.sources.lanerc.LanercSourceStore
+import dev.mangaflow.anime.sources.AniChAnimeProvider
+import dev.mangaflow.anime.sources.AnimeSourceRepository
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.platform.PlatformContext
@@ -32,7 +33,7 @@ import kotlinx.coroutines.withContext
 private val LANERC_CONTENT_ID = Regex("[A-Za-z0-9_-]{1,256}")
 
 /** Current playback owns every search, selection and rendered frame. No title-to-episode guesswork. */
-class AnimeDanmakuController(context: PlatformContext, scope: CoroutineScope, private val extensions: LanercSourceStore) {
+class AnimeDanmakuController(context: PlatformContext, scope: CoroutineScope, private val sources: AnimeSourceRepository) {
     private val application = context.applicationContext
     private val owned = CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
     private val repository = DandanplayRepository(application)
@@ -170,9 +171,7 @@ class AnimeDanmakuController(context: PlatformContext, scope: CoroutineScope, pr
             owned.launch(start = CoroutineStart.LAZY) {
                 try {
                     ready.await()
-                    val raw = extensions.danmaku(catalog.title.sourceId, request.payload, request.revision)
-                    val values = withContext(Dispatchers.Default) { parseLanercComments(raw) }
-                    acceptComments(owner, epoch, sequence, values)
+                    acceptComments(owner, epoch, sequence, request.load())
                 } catch (failure: Exception) { finishFailure(owner, epoch, sequence, false, failure) }
                 finally { synchronized(lock) {
                     if (current(owner, epoch) && sequence == loadSequence) mutableState.value = mutableState.value.copy(loading = false)
@@ -182,24 +181,32 @@ class AnimeDanmakuController(context: PlatformContext, scope: CoroutineScope, pr
         job.start()
     }
 
-    private data class SourceDanmakuRequest(val sourceName: String, val payload: String, val revision: String)
+    private data class SourceDanmakuRequest(val sourceName: String, val load: suspend () -> List<AnimeDanmakuComment>)
 
     private fun sourceDanmakuRequest(catalog: AnimeSourceCatalog, episode: AnimeSourceEpisode): SourceDanmakuRequest? {
         val source = catalog.title.sourceId
-        if ((source != "anime-lanerc-ani" && source != "anime-lanerc-lanerc") || episode !in catalog.episodes) return null
+        if (episode !in catalog.episodes) return null
+        if (source == "anime-native-ani") {
+            val provider = sources.provider(source) as? AniChAnimeProvider ?: return null
+            return SourceDanmakuRequest(provider.name) { provider.danmaku(catalog, episode) }
+        }
+        if (source != "anime-lanerc-ani" && source != "anime-lanerc-lanerc") return null
         val ticket = episode.playbackData?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return null
         if (ticket.optString("catalogId") != catalog.title.id || ticket.optString("group") != episode.group) return null
         val revision = ticket.optString("revision").takeIf(String::isNotBlank) ?: return null
         val flag = ticket.optString("flag").takeIf(String::isNotBlank) ?: return null
+        fun script(name: String, payload: JSONObject) = SourceDanmakuRequest(name) {
+            val raw = sources.extensions.danmaku(source, payload.toString(), revision)
+            withContext(Dispatchers.Default) { parseLanercComments(raw) }
+        }
         if (source == "anime-lanerc-ani")
-            return SourceDanmakuRequest("AniCh", JSONObject().put("flag", flag).toString(), revision)
+            return script("AniCh", JSONObject().put("flag", flag))
         val native = runCatching { JSONObject(flag) }.getOrNull() ?: return null
         val contentId = native.optString("contentId")
         val index = native.optDouble("episodeIndex")
         if (contentId != catalog.title.id || !LANERC_CONTENT_ID.matches(contentId) ||
             !index.isFinite() || index !in 0.0..20_000.0 || index != index.toInt().toDouble()) return null
-        return SourceDanmakuRequest("Lanerc", JSONObject().put("contentId", contentId)
-            .put("episodeIndex", index.toInt()).toString(), revision)
+        return script("Lanerc", JSONObject().put("contentId", contentId).put("episodeIndex", index.toInt()))
     }
 
     fun updateViewport(availableRows: Int) {

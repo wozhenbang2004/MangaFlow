@@ -773,17 +773,25 @@ private fun AnimePlayerEpisodes(
         if (native) episodes to emptyList() else episodes.partition { it.kind == AnimeEpisodeKind.MAIN }
     }
     val selectedGroup = if (main.isEmpty() && extra.isNotEmpty()) 1 else if (extra.isEmpty()) 0 else group
+    var rangeChoice by rememberSaveable(subjectId, selectedGroup) { mutableIntStateOf(-1) }
     LaunchedEffect(currentId, episodes) {
         if (currentId == lastSelectedEpisodeId) return@LaunchedEffect
         episodes.firstOrNull { it.id == currentId }?.let {
             group = if (native || it.kind == AnimeEpisodeKind.MAIN) 0 else 1
+            rangeChoice = -1
             lastSelectedEpisodeId = it.id
         }
     }
     val selected = if (selectedGroup == 1) extra else main
     val term = query.trim()
-    val shown = remember(selected, reversed, term) {
-        val ordered = if (reversed) selected.asReversed() else selected
+    val ranges = remember(selected) { if (selected.size > 30) selected.chunked(30) else emptyList() }
+    val currentRange = remember(ranges, currentId) {
+        ranges.indexOfFirst { range -> range.any { it.id == currentId } }.coerceAtLeast(0)
+    }
+    val shownRange = rangeChoice.takeIf { it in ranges.indices } ?: currentRange
+    val visibleEpisodes = if (term.isBlank()) ranges.getOrNull(shownRange) ?: selected else selected
+    val shown = remember(visibleEpisodes, reversed, term) {
+        val ordered = if (reversed) visibleEpisodes.asReversed() else visibleEpisodes
         if (term.isBlank()) ordered else ordered.filter {
             animeEpisodeLabel(it).contains(term, ignoreCase = true) || it.title.contains(term, ignoreCase = true)
         }
@@ -828,6 +836,22 @@ private fun AnimePlayerEpisodes(
             controlHeight = 44.dp, compact = true, treatment = MotionTabTreatment.Soft)
         if (searchVisible) AnimeTextField(query, { query = it }, "集号或标题",
             Modifier.padding(horizontal = panelPadding, vertical = 4.dp))
+        if (term.isBlank() && ranges.size > 1) {
+            val displayOrder = if (reversed) ranges.indices.reversed() else ranges.indices
+            AnimeChoiceStrip(displayOrder.map { index ->
+                val range = ranges[index]
+                val first = range.first().number
+                val last = range.last().number
+                when {
+                    first <= 0 || last <= 0 || !first.isFinite() || !last.isFinite() || first > last -> "第 ${index + 1} 组"
+                    first == last -> animeEpisodeNumber(first)
+                    else -> "${animeEpisodeNumber(first)}–${animeEpisodeNumber(last)}"
+                }
+            }, displayOrder.indexOf(shownRange), onSelect = { index ->
+                rangeChoice = displayOrder.elementAt(index)
+                scroll.requestScrollToItem(0)
+            }, modifier = Modifier.padding(horizontal = panelPadding, vertical = 4.dp), active = active)
+        }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyVerticalGrid(if (desktopRail) GridCells.Fixed(1) else GridCells.Adaptive(cellWidth),
                 modifier = Modifier.fillMaxSize(), state = scroll, userScrollEnabled = active,

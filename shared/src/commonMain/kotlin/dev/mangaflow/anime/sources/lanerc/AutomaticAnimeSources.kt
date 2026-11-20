@@ -1,5 +1,6 @@
 package dev.mangaflow.anime.sources.lanerc
 
+import dev.mangaflow.anime.sources.NATIVE_LMM85_SOURCE
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.storage.preferences
 import kotlinx.coroutines.CancellationException
@@ -152,7 +153,7 @@ internal class AutomaticAnimeSources(
 // Each pinned public script is prepared automatically with the bundled Android engine.
 // Native alternatives do not require a script download. Removed/disabled choices remain authoritative.
 internal val AUTOMATIC_ANIME_SOURCE_IDS = setOf(
-    "anime-lanerc-lanerc", "anime-lanerc-guazi", "anime-lanerc-sx", "anime-lanerc-lmm85",
+    "anime-lanerc-lanerc", "anime-lanerc-guazi", "anime-lanerc-sx",
     "anime-lanerc-gugu", "anime-lanerc-manguo", "anime-lanerc-23", "anime-lanerc-ain",
     "anime-lanerc-nmeng", "anime-lanerc-sd", "anime-lanerc-07",
     "anime-lanerc-douban", "anime-lanerc-danmu_b61mt3",
@@ -166,4 +167,5 @@ internal val ANIME_BUNDLED_ALTERNATIVES = mapOf(
     "anime-lanerc-dmbus" to "anime-native-dmbus",
     "anime-lanerc-jinpai" to "anime-native-jinpai",
     "anime-lanerc-yzx" to "anime-native-yzx",
+    "anime-lanerc-lmm85" to NATIVE_LMM85_SOURCE,
 )

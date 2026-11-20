@@ -31,6 +31,7 @@ interface AnimeProvider {
     val revision: String
     val supportsSearchPagination: Boolean get() = true
     val supportsLatest: Boolean get() = false
+    val supportsLatestPagination: Boolean get() = true
     suspend fun latest(page: Int = 1): List<AnimeSourceTitle> =
         throw AnimeSourceException(id, AnimeSourceStage.CATALOG, "此来源尚未提供最近更新目录。")
     suspend fun search(query: String, page: Int = 1): List<AnimeSourceTitle>
@@ -41,7 +42,6 @@ interface AnimeProvider {
 class AnimeSourceRepository(context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
     val extensions = LanercSourceStore.get(context)
-    internal val cycityAccount = CycityAccount(context)
     private val nativeProviders: List<AnimeProvider> = listOf(TvtFunProvider(), AgeProvider(), GiriGiriProvider(), LmmProvider())
     internal val builtInVideoSources = nativeProviders.associate { it.id to it.name }
     val providers: List<AnimeProvider> get() = nativeProviders + extensions.state.value.mapNotNull(::extensionProvider)
@@ -54,8 +54,8 @@ class AnimeSourceRepository(context: PlatformContext) {
         return when (listing.id) {
             "anime-native-jinpai" -> NativeJinpaiProvider(requireNotNull(listing.revision))
             "anime-native-yzx" -> NativeYzxProvider(requireNotNull(listing.revision))
-            CYCITY_SOURCE_ID -> CycityAnimeProvider(requireNotNull(listing.revision), cycityAccount)
             "anime-native-ani" -> AniChAnimeProvider(requireNotNull(listing.revision))
+            NATIVE_LMM85_SOURCE -> NativeLmm85Provider(requireNotNull(listing.revision))
             in BUNDLED_HTML_ANIME_IDS -> BundledHtmlAnimeProvider(listing.id, requireNotNull(listing.revision))
             else -> LanercProvider(extensions, extensions.descriptor(listing.id))
         }

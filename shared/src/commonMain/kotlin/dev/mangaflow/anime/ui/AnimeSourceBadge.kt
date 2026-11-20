@@ -126,7 +126,7 @@ private fun animeSourceWordmark(id: String, name: String): String = when (id) {
     "anime-native-akianime", "anime-lanerc-akianime" -> "AKI"
     "anime-native-ani", "anime-lanerc-ani" -> "Ani"
     "anime-lmm" -> "LMM"
-    "anime-lanerc-lmm85" -> "L85"
+    "anime-lanerc-lmm85", "anime-native-lmm85" -> "L85"
     "anime-tvtfun" -> "TvT"
     "anime-girigiri" -> "GGL"
     "anime-lanerc-lanerc" -> "Lr"

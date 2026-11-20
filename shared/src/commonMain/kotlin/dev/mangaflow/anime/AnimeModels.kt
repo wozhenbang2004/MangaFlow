@@ -371,8 +371,6 @@ data class AnimeScreenState(
     val autoMatching: Boolean = false,
     val pendingPlayback: AnimePlaybackChoice? = null,
     val accounts: List<AnimeTrackingAccount> = emptyList(),
-    val cycityAccount: String? = null,
-    val cycityAccountError: String? = null,
     val reviews: List<AnimeTrackingReview> = emptyList(),
     val syncing: Boolean = false,
     val notice: String? = null,

@@ -19,7 +19,6 @@ import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.sources.BUNDLED_ANIME_SOURCE_IDS
-import dev.mangaflow.anime.sources.CYCITY_SOURCE_ID
 import dev.mangaflow.anime.sources.lanerc.LanercSourceKind
 import dev.mangaflow.anime.sources.lanerc.LanercSourceListing
 import dev.mangaflow.anime.sources.lanerc.SourcePreparationPhase
@@ -39,7 +38,7 @@ private enum class AnimeSourceManagerTab(val label: String) {
 @Composable
 internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, controller: AnimeController,
     backdrop: HazeState, onDismiss: () -> Unit,
-    onBrowse: (AnimeDiscoveryProvider) -> Unit, initialSourceId: String? = null) {
+    onBrowse: (AnimeDiscoveryProvider) -> Unit) {
     var tab by remember { mutableStateOf(AnimeSourceManagerTab.VIDEO) }
     var moreVideoSources by remember { mutableStateOf(false) }
     var referenceExpanded by remember { mutableStateOf(false) }
@@ -56,13 +55,6 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
     val selected = videoGroups.asSequence().flatMap { it.sources.asSequence() }.firstOrNull { it.id == selectedId }
         ?: extensions.firstOrNull { it.id == selectedId }
     val references = extensions.filter { !it.installable && it.kind in setOf(LanercSourceKind.COMIC, LanercSourceKind.UNKNOWN) }
-
-    LaunchedEffect(visible, initialSourceId) {
-        if (visible && initialSourceId != null) {
-            selectedId = initialSourceId
-            returnSourceId = null
-        }
-    }
 
     fun openSource(source: LanercSourceListing) {
         returnSourceId = null
@@ -271,10 +263,6 @@ private fun AnimeSourceManagerDetail(
         item {
             AnimeSectionTitle(animeExtensionKind(source.kind), subtitle = animeSourceManagerLabel(source, state, native))
         }
-        if (source.id == CYCITY_SOURCE_ID) item(key = "cycity-account") {
-            CycityAccountControls(state.cycityAccount, state.cycityAccountError, busy,
-                controller::signInCycity, controller::signOutCycity)
-        }
         if (source.preparationUnavailableReason != null) item {
             Text(source.preparationUnavailableReason, style = MaterialTheme.typography.bodySmall)
         }
@@ -384,35 +372,6 @@ private fun AnimeSourceManagerDetail(
                 if (sourceUrl.isNotBlank()) AnimeQuietLabel(sourceUrl)
             }
         }
-    }
-}
-
-@Composable
-private fun CycityAccountControls(account: String?, error: String?, busy: Boolean,
-    onSignIn: (String, String) -> Unit, onSignOut: () -> Unit) {
-    var username by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        AnimeSectionTitle("次元城账号")
-        if (account == null) {
-            AnimeQuietLabel("浏览和选集可直接使用。播放时，次元城要求登录本人账号。")
-            AnimeTextField(username, { username = it }, "用户名", enabled = !busy)
-            AnimeTextField(password, { password = it }, "密码", secret = true, enabled = !busy)
-            MotionButton(onClick = {
-                onSignIn(username, password)
-                password = ""
-            }, enabled = username.isNotBlank() && password.isNotEmpty() && !busy,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
-                Text(if (busy) "正在登录" else "登录次元城")
-            }
-        } else {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(account, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
-                MotionTextButton(onClick = onSignOut, enabled = !busy,
-                    modifier = Modifier.heightIn(min = 44.dp)) { Text("断开账号") }
-            }
-        }
-        error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
     }
 }
 
