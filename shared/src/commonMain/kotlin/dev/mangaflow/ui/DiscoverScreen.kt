@@ -434,11 +434,14 @@ internal fun DiscoverySearchResults(
             (if (search.selectedTags.isEmpty()) 0.dp else 42.dp) +
             if (showSummary) if (showCacheStatus) 44.dp else 28.dp else 0.dp
         val choicesRoom = (controlsRoom - fixedScope).coerceIn(0.dp, 200.dp)
+        val resultSurface = if (platformKind == PlatformKind.ANDROID && !adultProfile && scopeInToolbar)
+            Modifier.background(MaterialTheme.colorScheme.surface.copy(alpha = .62f)) else Modifier
         Column(Modifier.then(if (desktopMainContent)
                 Modifier.align(Alignment.TopCenter).widthIn(max = 1040.dp).fillMaxHeight()
                     .semantics { paneTitle = "搜索结果" }.focusGroup()
                 else Modifier)
-            .fillMaxWidth().heightIn(max = this.maxHeight).padding(if (tagsOnly) 0.dp else 8.dp)
+            .fillMaxWidth().heightIn(max = this.maxHeight).then(resultSurface)
+            .padding(if (tagsOnly) 0.dp else 8.dp)
             .motionInputGate(active && expanded && sourceChoices == null)) {
             // Chrome receives a finite share before the result list is measured. Even the
             // expanded tag/source directory can scroll here instead of measuring the list to zero.

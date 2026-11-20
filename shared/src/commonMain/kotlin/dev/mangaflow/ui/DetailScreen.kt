@@ -745,8 +745,10 @@ fun DetailScreen(
                     .mangaHazeSource(artworkBackdrop).background(atmosphereColor),
                 contentAlignment = Alignment.TopCenter,
             ) {
-                Icon(Icons.AutoMirrored.Outlined.MenuBook, null, tint = DetailMuted.copy(alpha = .3f),
-                    modifier = Modifier.align(Alignment.Center).size(48.dp))
+                if (!androidEditorial || coverBitmap == null) {
+                    Icon(Icons.AutoMirrored.Outlined.MenuBook, null, tint = DetailMuted.copy(alpha = .3f),
+                        modifier = Modifier.align(Alignment.Center).size(48.dp))
+                }
                 if (current.coverUrl.isNotBlank()) Image(
                     painter = coverPainter, contentDescription = null,
                     modifier = Modifier.fillMaxSize().graphicsLayer {

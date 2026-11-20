@@ -4402,6 +4402,7 @@ private fun ReaderChaptersDialog(
     val panel: @Composable () -> Unit = {
         val focus = LocalFocusManager.current
         val keyboard = LocalSoftwareKeyboardController.current
+        val stackHeading = android && (LocalMangaWindow.current.width < 390.dp || fontScale > 1.2f)
         var selectedGroup by rememberSaveable(manga.id, currentId) { mutableStateOf<String?>(null) }
         var locateCurrent by remember(manga.id, currentId) { mutableStateOf(false) }
         val group = selectedGroup?.takeIf { it in groups } ?: currentGroup ?: groups.firstOrNull().orEmpty()
@@ -4419,14 +4420,20 @@ private fun ReaderChaptersDialog(
             Column((if (embedded) Modifier.fillMaxSize() else Modifier.heightIn(max = LocalMangaWindow.current.panelHeight))
                 .padding(horizontal = if (embedded) 12.dp else 16.dp, vertical = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("章节", fontSize = 17.sp, fontWeight = FontWeight.Medium)
                     val countLabel = when {
                         android && searching -> "找到 ${results.size} 章"
                         searching -> "${results.size} 章"
                         else -> "$visibleCount 章"
                     }
-                    Text(countLabel, Modifier.weight(1f).padding(start = 8.dp),
-                        color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (stackHeading) Column(Modifier.weight(1f).padding(end = 4.dp)) {
+                        Text("章节", fontSize = 17.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                        Text(countLabel, color = colors.onSurfaceVariant, fontSize = 11.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    } else {
+                        Text("章节", fontSize = 17.sp, fontWeight = FontWeight.Medium)
+                        Text(countLabel, Modifier.weight(1f).padding(start = 8.dp),
+                            color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                     if (!android || catalogBusy) Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
                         if (catalogBusy) CircularProgressIndicator(Modifier.size(13.dp)
                             .semantics { contentDescription = "正在补全章节目录" }, color = colors.onSurfaceVariant, strokeWidth = 1.5.dp)

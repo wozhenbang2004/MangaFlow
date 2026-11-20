@@ -97,6 +97,7 @@ internal fun VolumeBookTile(
     val context = LocalContext.current
     val motion = LocalMotionEnabled.current
     val desktop = platformKind == PlatformKind.DESKTOP
+    val quietLoading = platformKind == PlatformKind.ANDROID
     val desktopActions = listOf(
         DesktopMenuAction("阅读这一卷", enabled = enabled, onClick = onRead),
         DesktopMenuAction("选择来源下载", enabled = enabled, onClick = onDownload),
@@ -148,8 +149,11 @@ internal fun VolumeBookTile(
                     onLongClick = if (desktop) null else onActions,
                 ).motionPress(interaction, enabled = enabled).semantics {
                     contentDescription = chapter.title + "，" + chapter.group
-                    stateDescription = listOf(chapterReadingStatus(progress, progressKnown), chapterStatus(entry, null))
-                        .filter(String::isNotBlank).joinToString("，")
+                    stateDescription = listOfNotNull(
+                        chapterReadingStatus(progress, progressKnown),
+                        chapterStatus(entry, null),
+                        "封面加载中".takeIf { quietLoading && busy && cover.error == null },
+                    ).filter(String::isNotBlank).joinToString("，")
                 },
                 verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
@@ -157,7 +161,7 @@ internal fun VolumeBookTile(
                 Box(Modifier.fillMaxWidth().aspectRatio(.70f).mangaCoverCard()
                     .then(if (!imageReady) Modifier.background(DetailSurface) else Modifier),
                     contentAlignment = Alignment.Center) {
-                    if (!imageReady && !busy && cover.error == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
+                    if (!imageReady && (quietLoading || !busy) && cover.error == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
                         Modifier.size(25.dp), tint = DetailMuted.copy(alpha = .35f))
                     if (request != null && cover.error == null) AsyncImage(
                         model = request, contentDescription = null, contentScale = ContentScale.Crop,
@@ -167,7 +171,8 @@ internal fun VolumeBookTile(
                         onError = { imageLoading = false; onCoverError() },
                     )
                     if (cover.error != null) DetailAction(Icons.Outlined.Refresh, "重试这一卷封面", onClick = onRetryCover)
-                    else if (busy) CircularProgressIndicator(Modifier.size(18.dp), color = DetailMuted, strokeWidth = 1.5.dp)
+                    else if (busy && !quietLoading) CircularProgressIndicator(Modifier.size(18.dp),
+                        color = DetailMuted, strokeWidth = 1.5.dp)
                 }
                 Text(chapter.title, color = if (current) DetailForeground else DetailSecondary,
                     fontSize = 12.sp, lineHeight = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,

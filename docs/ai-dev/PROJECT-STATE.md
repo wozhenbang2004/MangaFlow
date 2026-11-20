@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Android UI/UX 的本机验收与合并安排 · 2026-11-20
+
+用户纠正「不是哥们你那么频繁的 commi 干嘛呢？把问题都弄出来后本机 fix 好后再提一个大 commi 啊」。本轮据此先把 Android 真实旅程的问题收齐，在本机做增量修改、构建和模拟器对照，所有剩余差异验收后作为一个完整批次提交。已发布的主线提交是当前基线。本机构建授权适用于这批 Android UI 工作。
+
+从 `92b16df` 开始收齐 ANDROID-EDITORIAL-06 四项问题并在本机完成修补。最终包 `0.1.450-local.92b16df.review` 已用 Android 14 模拟器复验发现、搜索回退、作品与卷封面、360dp 大字目录和书架续读，覆盖安装后确认第179话进度与收藏样本。详见 [Android 漫画视觉与交互升级](../design/reading-and-discovery-redesign-20261119.md#android-漫画视觉与交互升级--2026-11-20) 的本机证据。完成本机复验后，剩余修改合在一个主线提交。
+
 ## Android 漫画视觉与交互升级 · 2026-11-20
 
 本轮补充原话和 15 个系统落点已固化至 [ANDROID-EDITORIAL-01–05](../design/reading-and-discovery-redesign-20261119.md#android-漫画视觉与交互升级--2026-11-20)。以模拟器观察到的发现首屏、真实作品详情、书架续读、搜索返回和沉浸阅读为一条旅程。先完成现有组件改造，再用正式 Android APK 复看布局、交互和真实进度。
