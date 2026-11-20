@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Search
@@ -36,8 +38,10 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.data.Chapter
@@ -48,19 +52,25 @@ private val chapterSearchNumbers = Regex("""\d+(?:\.\d+)?""")
 private val chapterSearchSpaces = Regex("""\s+""")
 private data class SearchableChapter(val chapter: Chapter, val title: String, val group: String, val numbers: Set<String>)
 
+private fun String.chapterNumberKey(): String {
+    val integer = substringBefore('.').trimStart('0').ifEmpty { "0" }
+    val decimal = substringAfter('.', "")
+    return if (decimal.isEmpty()) integer else "$integer.$decimal"
+}
+
 @Composable
-internal fun rememberMatchingDesktopChapters(chapters: List<Chapter>, query: String): List<Chapter> {
+internal fun rememberMatchingChapters(chapters: List<Chapter>, query: String): List<Chapter> {
     if (query.isBlank()) return emptyList()
     val index = remember(chapters) {
         chapters.map { chapter ->
             val title = normalizeNfkc(chapter.title).lowercase()
             SearchableChapter(chapter, title, normalizeNfkc(chapterGroupLabel(chapter.group)).lowercase(),
-                chapterSearchNumbers.findAll(title).map { it.value }.toSet())
+                chapterSearchNumbers.findAll(title).map { it.value.chapterNumberKey() }.toSet())
         }
     }
     return remember(index, query) {
         val terms = normalizeNfkc(query).lowercase().split(chapterSearchSpaces).filter(String::isNotBlank)
-        val numbers = terms.filter(chapterSearchNumbers::matches)
+        val numbers = terms.filter(chapterSearchNumbers::matches).map { it.chapterNumberKey() }
         val words = terms.filterNot(chapterSearchNumbers::matches)
         index.filter { entry -> entry.numbers.containsAll(numbers) && words.all { it in entry.title || it in entry.group } }
             .map(SearchableChapter::chapter)
@@ -68,16 +78,18 @@ internal fun rememberMatchingDesktopChapters(chapters: List<Chapter>, query: Str
 }
 
 @Composable
-internal fun DesktopChapterSearchField(
+internal fun ChapterSearchField(
     query: String,
     onQuery: (String) -> Unit,
     focusRequest: Int,
     active: Boolean,
     modifier: Modifier = Modifier,
     onOpenMatch: (() -> Unit)? = null,
+    showKeyboardOnOpen: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
-    val style = MaterialTheme.typography.bodySmall
+    val keyboard = LocalSoftwareKeyboardController.current
+    val style = if (showKeyboardOnOpen) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodySmall
     val requester = remember { FocusRequester() }
     var focused by remember { mutableStateOf(false) }
     var appliedRequest by rememberSaveable { mutableIntStateOf(0) }
@@ -85,18 +97,24 @@ internal fun DesktopChapterSearchField(
         if (active && focusRequest > 0 && appliedRequest != focusRequest) {
             withFrameNanos { }
             requester.requestFocus()
+            if (showKeyboardOnOpen) keyboard?.show()
             appliedRequest = focusRequest
         }
     }
     val shape = RoundedCornerShape(10.dp)
-    Row(modifier.heightIn(min = 36.dp)
+    Row(modifier.heightIn(min = if (showKeyboardOnOpen) 48.dp else 36.dp)
         .background(colors.onSurface.copy(alpha = .045f), shape)
         .border(1.dp, if (focused) colors.primary.copy(alpha = .70f) else colors.onSurface.copy(alpha = .10f), shape)
         .padding(start = 10.dp, end = 3.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(Icons.Outlined.Search, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
         BasicTextField(query, onValueChange = onQuery, enabled = active, singleLine = true,
             textStyle = style.copy(color = colors.onSurface), cursorBrush = SolidColor(colors.primary),
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp, vertical = 8.dp)
+            keyboardOptions = if (showKeyboardOnOpen) KeyboardOptions(imeAction = ImeAction.Search)
+                else KeyboardOptions.Default,
+            keyboardActions = if (showKeyboardOnOpen) KeyboardActions(onSearch = { keyboard?.hide() })
+                else KeyboardActions.Default,
+            modifier = Modifier.weight(1f).heightIn(min = if (showKeyboardOnOpen) 48.dp else 0.dp)
+                .padding(horizontal = 8.dp, vertical = 8.dp)
                 .focusRequester(requester).onFocusChanged { focused = it.isFocused }
                 .onPreviewKeyEvent { event ->
                     if (!active || event.key != Key.Enter || onOpenMatch == null) false
@@ -108,15 +126,18 @@ internal fun DesktopChapterSearchField(
                 .semantics { contentDescription = "查找章节" },
             decorationBox = { input ->
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
-                    if (query.isEmpty()) Text("查找章节", color = colors.onSurfaceVariant, style = style,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (query.isEmpty()) Text(
+                        if (showKeyboardOnOpen) "输入卷号、话号或标题" else "查找章节",
+                        color = colors.onSurfaceVariant, style = style, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     input()
                 }
             })
         if (query.isNotEmpty()) MotionIconButton(onClick = {
             onQuery("")
             requester.requestFocus()
-        }, enabled = active, modifier = Modifier.size(30.dp), tooltip = "清除章节搜索") {
+            if (showKeyboardOnOpen) keyboard?.show()
+        }, enabled = active, modifier = Modifier.size(if (showKeyboardOnOpen) 48.dp else 30.dp),
+            tooltip = "清除章节搜索") {
             Icon(Icons.Outlined.Close, "清除章节搜索", Modifier.size(16.dp))
         }
     }

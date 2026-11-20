@@ -38,8 +38,8 @@ import dev.mangaflow.data.plugins.discardFailedScriptImage
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.MangaLayout
 import dev.mangaflow.ui.DesktopVerticalScrollbar
-import dev.mangaflow.ui.DesktopChapterSearchField
-import dev.mangaflow.ui.rememberMatchingDesktopChapters
+import dev.mangaflow.ui.ChapterSearchField
+import dev.mangaflow.ui.rememberMatchingChapters
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -115,6 +115,7 @@ import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.MyLocation
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Source
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Undo
@@ -124,6 +125,7 @@ import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.automirrored.rounded.MenuBook
 import androidx.compose.material.icons.rounded.Pause
@@ -188,6 +190,8 @@ import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.storage.StorageFile
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
@@ -818,13 +822,15 @@ fun ReaderScreen(
     val chapterPageCount = pages.size
 
     val clock = rememberReaderClock(active && !leavingReader)
+    val androidPageLabel = platformKind == PlatformKind.ANDROID
     val cornerStatusStyle = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, fontFeatureSettings = "tnum")
     val cornerStatusMeasurer = rememberTextMeasurer()
     // Reserve the chapter's widest page count before layout, so every turn keeps
     // the neighbouring status slots in place and no first-frame measurement jumps.
     val cornerStatusWidth = with(LocalDensity.current) {
         cornerStatusMeasurer.measure("88:88 · ${"8".repeat(pages.size.toString().length)} / ${pages.size}",
-            cornerStatusStyle, maxLines = 1, softWrap = false).size.width.toDp() + 8.dp
+            cornerStatusStyle, maxLines = 1, softWrap = false).size.width.toDp() +
+            if (androidPageLabel) 16.dp else 8.dp
     }.coerceAtMost(LocalMangaWindow.current.width * .45f)
     val readingEligible = active && !leavingReader && !loading && error == null && imageVisible &&
         !panelBlocksReading && !showPanelModels && !showComments && !showSpreadAdjustment && !showPageNavigator &&
@@ -1802,12 +1808,17 @@ fun ReaderScreen(
                     .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                 .padding(end = 12.dp, bottom = (if (atChapterEnd) 72.dp else 0.dp) + 2.dp),
         ) {
-            Box(Modifier.width(cornerStatusWidth).heightIn(min = 44.dp)
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { controlsVisible = true }
-                .padding(horizontal = 4.dp), contentAlignment = Alignment.Center) {
+            Box(Modifier.width(cornerStatusWidth).heightIn(min = if (androidPageLabel) 48.dp else 44.dp)
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
+                    role = Role.Button, onClickLabel = "显示阅读工具") { controlsVisible = true },
+                contentAlignment = Alignment.Center) {
                 Text("$clock · ${pageIndex + 1} / ${pages.size}",
-                    color = preferences.theme.foreground().copy(alpha = .58f), style = cornerStatusStyle,
-                    maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                    modifier = if (androidPageLabel) Modifier
+                        .background(preferences.theme.background().copy(alpha = .94f), CircleShape)
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                    else Modifier.padding(horizontal = 4.dp),
+                    color = preferences.theme.foreground().copy(alpha = if (androidPageLabel) 1f else .58f),
+                    style = cornerStatusStyle, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
             }
         }
         if (compareEnhancement && enhancementState.assets[pageIndex] != null) {
@@ -4375,15 +4386,21 @@ private fun ReaderChaptersDialog(
 ) {
     val colors = MaterialTheme.colorScheme
     val desktop = platformKind == PlatformKind.DESKTOP
+    val android = platformKind == PlatformKind.ANDROID
     val groups = remember(chapters) { chapters.map(Chapter::group).distinct() }
     val positions = rememberChapterPositions(manga, library, active = visible)
     val currentGroup = remember(chapters, currentId) { chapters.firstOrNull { it.id == currentId }?.group }
     val catalogBusy = rememberDelayedBusy(visible && loading)
-    val search = query.trim().takeIf { desktop }.orEmpty()
+    var searchExpanded by rememberSaveable(manga.id) { mutableStateOf(false) }
+    var mobileFindRequest by rememberSaveable(manga.id) { mutableIntStateOf(0) }
+    val searchVisible = desktop || android && searchExpanded
+    val search = query.trim().takeIf { searchVisible }.orEmpty()
     val searching = search.isNotEmpty()
-    val results = rememberMatchingDesktopChapters(chapters, search)
+    val results = rememberMatchingChapters(chapters, search)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val panel: @Composable () -> Unit = {
+        val focus = LocalFocusManager.current
+        val keyboard = LocalSoftwareKeyboardController.current
         var selectedGroup by rememberSaveable(manga.id, currentId) { mutableStateOf<String?>(null) }
         var locateCurrent by remember(manga.id, currentId) { mutableStateOf(false) }
         val group = selectedGroup?.takeIf { it in groups } ?: currentGroup ?: groups.firstOrNull().orEmpty()
@@ -4403,12 +4420,32 @@ private fun ReaderChaptersDialog(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("章节", fontSize = 17.sp, fontWeight = FontWeight.Medium)
                     Text("${if (searching) results.size else visibleCount} 章", Modifier.weight(1f).padding(start = 8.dp),
-                        color = colors.onSurfaceVariant, fontSize = 12.sp)
-                    Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
+                        color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (!android || catalogBusy) Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
                         if (catalogBusy) CircularProgressIndicator(Modifier.size(13.dp)
                             .semantics { contentDescription = "正在补全章节目录" }, color = colors.onSurfaceVariant, strokeWidth = 1.5.dp)
                     }
+                    if (android && (chapters.isNotEmpty() || searchExpanded)) {
+                        val searchLabel = if (searchExpanded) "收起章节搜索" else "查找章节"
+                        ReaderIcon(if (searchExpanded) Icons.Rounded.ExpandLess else Icons.Outlined.Search,
+                            searchLabel, interactive = visible) {
+                            if (searchExpanded) {
+                                keyboard?.hide()
+                                focus.clearFocus(force = true)
+                                onQuery("")
+                                searchExpanded = false
+                            } else {
+                                searchExpanded = true
+                                mobileFindRequest++
+                            }
+                        }
+                    }
                     ReaderIcon(Icons.Outlined.MyLocation, "定位当前话", enabled = currentGroup != null) {
+                        if (android && searchExpanded) {
+                            keyboard?.hide()
+                            focus.clearFocus(force = true)
+                            searchExpanded = false
+                        }
                         onQuery("")
                         selectedGroup = currentGroup
                         locateCurrent = true
@@ -4416,9 +4453,12 @@ private fun ReaderChaptersDialog(
                     ReaderIcon(Icons.Rounded.Refresh, "刷新目录", enabled = !loading, onClick = onRetry)
                     ReaderIcon(Icons.Rounded.Close, "关闭目录", onClick = onDismiss)
                 }
-                if (desktop) DesktopChapterSearchField(query, onQuery, focusRequest, visible,
+                if (searchVisible) ChapterSearchField(
+                    query, onQuery, if (android) mobileFindRequest else focusRequest, visible,
                     Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    onOpenMatch = results.singleOrNull()?.let { match -> { onSelect(match.id) } })
+                    onOpenMatch = if (desktop) results.singleOrNull()?.let { match -> { onSelect(match.id) } } else null,
+                    showKeyboardOnOpen = android,
+                )
                 if (groups.size > 1 && !searching) MotionTabs(
                     selected = groups.indexOf(group), labels = groups.map(::chapterGroupLabel), onSelect = {
                         locateCurrent = false
@@ -4437,15 +4477,16 @@ private fun ReaderChaptersDialog(
                     fillContent = embedded,
                 ) { targetGroup ->
                     val active = visible && targetGroup == group
-                    val targetChapters = remember(chapters, targetGroup, searching, results) {
-                        if (searching) results else chapters.filter { it.group == targetGroup }.sortedBy(Chapter::index)
+                    val groupChapters = remember(chapters, targetGroup) {
+                        chapters.filter { it.group == targetGroup }.sortedBy(Chapter::index)
                     }
-                    val initialIndex = remember(targetChapters, currentId) { targetChapters.indexOfFirst { it.id == currentId } }
-                    val catalogPosition = rememberLazyGridState(initialFirstVisibleItemIndex =
-                        (if (searching) 0 else initialIndex - 6).coerceAtLeast(0))
-                    val searchPosition = if (desktop) rememberLazyGridState() else catalogPosition
+                    val targetChapters = if (searching) results else groupChapters
+                    val initialIndex = remember(groupChapters, currentId) { groupChapters.indexOfFirst { it.id == currentId } }
+                    val catalogPosition = rememberLazyGridState(
+                        initialFirstVisibleItemIndex = (initialIndex - 6).coerceAtLeast(0))
+                    val searchPosition = if (desktop || android) rememberLazyGridState() else catalogPosition
                     val state = if (searching) searchPosition else catalogPosition
-                    var positioned by rememberSaveable { mutableStateOf(!searching && initialIndex >= 0) }
+                    var positioned by rememberSaveable { mutableStateOf(initialIndex >= 0) }
                     var appliedSearch by rememberSaveable { mutableStateOf("") }
                     val currentIndex by rememberUpdatedState(initialIndex)
                     LaunchedEffect(active, locateCurrent, searching) {
@@ -4532,7 +4573,12 @@ private fun ReaderChaptersDialog(
     }
     if (embedded) panel()
     else MotionDialog(visible = visible, onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false), content = panel)
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        onClosed = if (android) ({
+            searchExpanded = false
+            onQuery("")
+        }) else null,
+        content = panel)
 }
 
 @Composable

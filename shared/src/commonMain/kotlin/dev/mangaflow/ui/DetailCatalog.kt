@@ -181,7 +181,7 @@ internal fun DetailCatalog(
     var chapterQuery by rememberSaveable(mangaId) { mutableStateOf("") }
     val search = chapterQuery.trim().takeIf { desktop }.orEmpty()
     val searching = search.isNotEmpty()
-    val searchResults = rememberMatchingDesktopChapters(chapters, search)
+    val searchResults = rememberMatchingChapters(chapters, search)
     val locatePending = locateRevision != appliedLocate && progress != null
     LaunchedEffect(locateRevision) { if (locatePending) chapterQuery = "" }
     val locateChapter = remember(chapters, progress?.chapterId, locatePending) {
@@ -227,7 +227,7 @@ internal fun DetailCatalog(
         if (desktop) Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 14.dp, bottom = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             val single = searchResults.singleOrNull()?.takeUnless { downloadMode }
-            DesktopChapterSearchField(chapterQuery, { chapterQuery = it }, desktopFindRequest,
+            ChapterSearchField(chapterQuery, { chapterQuery = it }, desktopFindRequest,
                 active && !sourcePresent, Modifier.weight(1f), onOpenMatch = single?.let { match -> { onRead(match) } })
             if (searching) Text("${searchResults.size} 章", color = DetailMuted, style = MaterialTheme.typography.labelSmall)
             if (progress != null) DetailAction(Icons.Outlined.MyLocation, "定位上次阅读",

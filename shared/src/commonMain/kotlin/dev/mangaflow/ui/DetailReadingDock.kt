@@ -92,6 +92,8 @@ internal fun DetailReadingDock(
     val preferred = preferredResumeChapter?.takeIf { onContinuePreferred != null }
     val displayedResume = resume?.takeIf { preferred == null || it.chapterId == preferred.id }
     val canRead = preferred != null || resume != null || firstChapter != null
+    // The catalogue already shows loading and retry while there is no actual reading target.
+    if (platformKind == PlatformKind.ANDROID && !canRead) return
     val interaction = remember { MutableInteractionSource() }
     var actions by remember(mangaId) { mutableStateOf(false) }
     val motion = LocalMotionEnabled.current

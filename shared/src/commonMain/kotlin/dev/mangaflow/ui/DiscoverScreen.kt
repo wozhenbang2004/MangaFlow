@@ -715,7 +715,8 @@ private fun DiscoveryPane(
     }
     val loadingGrid = remember(paneKey) { LazyGridState() }
     // Hydrate disk snapshots before a short loading layout can clamp the saved position.
-    val grid = if (state.loading && state.items.isEmpty()) loadingGrid else retainedGrid
+    val initialLoad = state.loading && state.items.isEmpty()
+    val grid = if (initialLoad) loadingGrid else retainedGrid
     LaunchedEffect(active, grid) { if (!active) grid.stopScroll() }
     val heroVisible by remember(grid, adultProfile) {
         val key = if (adultProfile) "section" else "hero"
@@ -761,6 +762,8 @@ private fun DiscoveryPane(
         (featured.isNotEmpty() || state.loading)
     val mixedSources = adultProfile && state.items.asSequence().map(Manga::sourceId).distinct().take(2).count() > 1
     val desktop = platformKind == PlatformKind.DESKTOP
+    val androidManga = platformKind == PlatformKind.ANDROID && !adultProfile
+    val coverPlaceholders = !ranking && columns != 1 && (androidManga || adultProfile || desktop)
     val pull = rememberBottomPullLoadState(
         key = paneKey,
         enabled = !desktop && active && state.items.isNotEmpty() && state.hasMore && !state.loading &&
@@ -839,6 +842,8 @@ private fun DiscoveryPane(
         horizontalArrangement = Arrangement.spacedBy(gap),
         verticalArrangement = Arrangement.spacedBy(if (ranking) 6.dp else if (columns == 1) 12.dp else 10.dp),
         modifier = Modifier.fillMaxSize().then(if (desktop) Modifier else Modifier.bottomPullLoad(pull))
+            .then(if (androidManga && initialLoad && coverPlaceholders)
+                Modifier.semantics { stateDescription = "正在加载漫画" } else Modifier)
             .motionInputGate(active),
     ) {
         if (showFeatured && !adultProfile) {
@@ -854,10 +859,10 @@ private fun DiscoveryPane(
                     sectionControls()
                 }
             }
-        if (state.loading && state.items.isEmpty()) {
-            if ((adultProfile || desktop) && !ranking && columns != 1) items(visibleColumns * 2,
+        if (initialLoad) {
+            if (coverPlaceholders) items(visibleColumns * 2,
                 key = { "loading-cover:$it" }, contentType = { "cover-placeholder" }) {
-                DiscoveryCoverPlaceholder()
+                DiscoveryCoverPlaceholder(androidManga)
             }
             else if (!showFeatured) item(span = { GridItemSpan(maxLineSpan) }, key = "loading") {
                 QuietLoading("正在翻开书页…")
@@ -969,11 +974,11 @@ private fun DiscoveryPane(
 }
 
 @Composable
-private fun DiscoveryCoverPlaceholder() {
+private fun DiscoveryCoverPlaceholder(androidManga: Boolean) {
     val ink = MaterialTheme.colorScheme.onSurface
-    Column(Modifier.fillMaxWidth().semantics { contentDescription = "作品正在加载" },
-        verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        Box(Modifier.fillMaxWidth().aspectRatio(.7f).clip(RoundedCornerShape(10.dp))
+    val status = if (androidManga) Modifier else Modifier.semantics { contentDescription = "作品正在加载" }
+    Column(Modifier.fillMaxWidth().then(status), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(if (androidManga) 2f / 3f else .7f).clip(RoundedCornerShape(10.dp))
             .background(ink.copy(alpha = .055f)))
         Box(Modifier.fillMaxWidth(.86f).height(9.dp).clip(RoundedCornerShape(4.dp))
             .background(ink.copy(alpha = .075f)))

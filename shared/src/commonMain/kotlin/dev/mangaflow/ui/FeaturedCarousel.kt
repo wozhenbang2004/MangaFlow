@@ -15,6 +15,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -160,7 +161,27 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
         val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
         if (manga.isEmpty()) {
             Box(Modifier.fillMaxWidth().height(galleryHeight), contentAlignment = Alignment.Center) {
-                QuietLoading("正在翻开书页…")
+                if (platformKind == PlatformKind.ANDROID && !showSource) {
+                    val colors = MaterialTheme.colorScheme
+                    Box(Modifier.align(Alignment.TopCenter).padding(top = 6.dp)
+                        .size(width = preferredWidth, height = itemHeight)
+                        .background(colors.onSurface.copy(alpha = .045f), RoundedCornerShape(22.dp))) {
+                        val cover = if (inlineInformation) {
+                            Modifier.align(Alignment.CenterStart).padding(8.dp)
+                                .fillMaxWidth(.53f).fillMaxHeight()
+                        } else {
+                            Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
+                                .height((artworkHeight - 16.dp).coerceAtLeast(1.dp)).aspectRatio(2f / 3f)
+                        }
+                        Box(cover.background(colors.onSurface.copy(alpha = .07f), RoundedCornerShape(14.dp)))
+                        Text("正在加载推荐",
+                            modifier = if (inlineInformation) Modifier.align(Alignment.CenterEnd)
+                                .fillMaxWidth(.44f).padding(horizontal = 8.dp)
+                            else Modifier.align(Alignment.BottomCenter).padding(horizontal = 8.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                } else QuietLoading("正在翻开书页…")
             }
             return@BoxWithConstraints
         }
