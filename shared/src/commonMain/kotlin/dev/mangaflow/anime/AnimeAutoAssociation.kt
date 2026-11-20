@@ -188,10 +188,13 @@ private fun subjectEpisodeNumber(detail: AnimeDetail, requested: AnimeEpisode, c
         knownEpisodes.any { it.number != offset + requireNotNull(it.numberInSubject) }) return null
 
     val mainGroups = catalog.episodes.filter { it.kind == AnimeEpisodeKind.MAIN }.groupBy { it.group }
-    if (mainGroups.isEmpty()) return null
+    if (mainGroups.values.none { rows -> rows.any { it.number == 1.0 } }) return null
+    val firstSeriesNumber = 1.0 + offset
     val usesSubjectNumbers = mainGroups.values.all { rows ->
-        val numbers = rows.map { it.number }
-        1.0 in numbers && numbers.toSet().size == numbers.size && numbers.all { it != null && it in knownNumbers }
+        val numbers = rows.mapNotNull { it.number }.toSet()
+        // A partial route can omit episode 1. A number before this subject's
+        // series-wide start still distinguishes it from a global-numbered route.
+        numbers.size == rows.size && numbers.all { it in knownNumbers } && numbers.any { it < firstSeriesNumber }
     }
     return local.takeIf { usesSubjectNumbers }
 }

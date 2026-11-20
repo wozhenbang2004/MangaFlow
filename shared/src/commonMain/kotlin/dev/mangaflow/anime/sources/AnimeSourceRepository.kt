@@ -134,7 +134,7 @@ internal class TvtFunPlaybackException(
 )
 
 private class TvtFunProvider : RoutedAnimeProvider() {
-    override val revision = "2026-11-17-typed-episodes"
+    override val revision = "2026-11-21-public-playback-list"
     override val id = "anime-tvtfun"
     override val name = "TvTFun"
     override val homeUrl = "https://www.tvtfun.net/"
@@ -172,13 +172,37 @@ private class TvtFunProvider : RoutedAnimeProvider() {
         checked(http.json(api.newBuilder().addPathSegment(identifier(title)).build(), stage, referer = title.url), stage)
             .requiredObject("data", id, stage)
 
-    private suspend fun episodeLines(http: AnimeHttp, episode: JSONObject, stage: AnimeSourceStage): List<JSONObject> {
-        val embedded = episode.optJSONArray("sources")?.objects().orEmpty()
-        if (embedded.isNotEmpty()) return embedded
-        val episodeId = animeRemoteId(episode.text("id"))
-        return checked(http.json(api.newBuilder().addPathSegment("episodes").addPathSegment(episodeId)
-            .addPathSegment("playback").build(), stage, referer = homeUrl), stage)
-            .requiredObject("data", id, stage).requiredArray("items", id, stage).objects()
+    private suspend fun episodeLines(http: AnimeHttp, episode: JSONObject, episodeId: String,
+        automatic: Boolean): List<JSONObject> {
+        val embedded = episode.optJSONArray("sources")?.objects().orEmpty().filter {
+            runCatching { animeRemoteId(it.text("id")) }.isSuccess
+        }
+        val stage = AnimeSourceStage.RESOLVE
+        suspend fun playbackList(): List<JSONObject> {
+            val data = checked(http.json(api.newBuilder().addPathSegment("episodes").addPathSegment(episodeId)
+                .addPathSegment("playback").build(), stage, referer = homeUrl, sameOriginRedirects = true), stage)
+                .requiredObject("data", id, stage)
+            val reported = data.text("episodeId")
+            if (reported.isNotEmpty() && reported != episodeId)
+                throw AnimeSourceException(id, stage, "来源返回了另一集的线路，请刷新目录。")
+            return data.requiredArray("items", id, stage).objects().filter {
+                val lineEpisode = it.text("episodeId")
+                (lineEpisode.isBlank() || lineEpisode == episodeId) &&
+                    runCatching { animeRemoteId(it.text("id")) }.isSuccess
+            }
+        }
+        if (embedded.isEmpty()) return playbackList()
+        if (!automatic || embedded.any(::hasDirectPlayback)) return embedded
+        // Embedded stations may need resolution even when the selected episode has
+        // a direct stream in its ordinary playback list. Only add declared media.
+        val published = try { withTimeoutOrNull(2_500L) { playbackList() }.orEmpty() }
+        catch (cancel: CancellationException) { throw cancel }
+        catch (route: DownloadRouteException) { throw route }
+        catch (_: Exception) { emptyList() }
+        val direct = published.groupBy { it.text("id") }.values.mapNotNull { rows ->
+            rows.singleOrNull()?.takeIf(::hasDirectPlayback)
+        }
+        return (direct + embedded).distinctBy { it.text("id") }
     }
 
     override suspend fun catalog(title: AnimeSourceTitle): AnimeSourceCatalog {
@@ -248,7 +272,7 @@ private class TvtFunProvider : RoutedAnimeProvider() {
                         "该剧集身份已变化，请刷新剧集并重新选择。")
             }
             val candidates = duringPlaybackPhase(TvtFunPlaybackPhase.LINES) {
-                val available = episodeLines(http, currentEpisode, AnimeSourceStage.RESOLVE)
+                val available = episodeLines(http, currentEpisode, episodeId, automatic)
                 if (automatic) {
                     // Keep upstream order within each class. Use declared public media before
                     // rows that still need a site resolver or media page request.

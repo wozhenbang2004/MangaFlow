@@ -1478,11 +1478,22 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             if (!force && !retryFailed && bound && oldSignature?.copy(episodeId = null, episodeNumbers = null) == signature &&
                 mutableState.value.sourceAggregation[sourceId]?.phase == AnimeAssociationPhase.LINKED) continue
             val progress = mutableState.value.sourceAggregation[sourceId]
-            if (!force && oldSignature?.copy(episodeId = signature.episodeId) == signature &&
-                (associationJobs[sourceId]?.isActive == true ||
+            val sameLookup = oldSignature?.copy(episodeId = signature.episodeId,
+                episodeNumbers = signature.episodeNumbers) == signature
+            if (!force && sameLookup && !(retryFailed && progress?.phase == AnimeAssociationPhase.UNAVAILABLE)) {
+                if (associationJobs[sourceId]?.isActive == true) {
+                    // Search and catalogue requests belong to the work. Their result
+                    // is matched against the live episode when it becomes available.
+                    if (progress != null && progress.episodeId != signature.episodeId &&
+                        progress.phase in setOf(AnimeAssociationPhase.QUEUED, AnimeAssociationPhase.SEARCHING)) {
+                        publishAssociation(sourceId, progress.copy(episodeId = signature.episodeId))
+                    }
+                    continue
+                }
+                if (oldSignature?.episodeNumbers == signature.episodeNumbers &&
                     progress != null && progress.episodeId == signature.episodeId &&
-                    progress.phase !in setOf(AnimeAssociationPhase.QUEUED, AnimeAssociationPhase.SEARCHING) &&
-                    !(retryFailed && progress.phase == AnimeAssociationPhase.UNAVAILABLE))) continue
+                    progress.phase !in setOf(AnimeAssociationPhase.QUEUED, AnimeAssociationPhase.SEARCHING)) continue
+            }
             if (!force && associationSignatures[sourceId] == signature &&
                 !(retryFailed && mutableState.value.sourceAggregation[sourceId]?.phase == AnimeAssociationPhase.UNAVAILABLE)) continue
             associationJobs.remove(sourceId)?.cancel()
