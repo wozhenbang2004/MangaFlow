@@ -291,7 +291,7 @@ internal fun DesktopDiscoveryHeader(
                         tooltip = "返回发现，保留搜索") {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回发现", Modifier.size(20.dp))
                     } else navigation()
-                    if (!stacked) tabs(Modifier.widthIn(max = 244.dp))
+                    if (!stacked && !searching) tabs(Modifier.widthIn(max = 244.dp))
                     input(Modifier.weight(1f))
                     recent()
                 }

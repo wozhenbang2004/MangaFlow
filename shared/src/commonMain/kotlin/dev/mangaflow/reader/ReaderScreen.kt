@@ -38,6 +38,8 @@ import dev.mangaflow.data.plugins.discardFailedScriptImage
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.MangaLayout
 import dev.mangaflow.ui.DesktopVerticalScrollbar
+import dev.mangaflow.ui.DesktopChapterSearchField
+import dev.mangaflow.ui.rememberMatchingDesktopChapters
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -348,6 +350,8 @@ fun ReaderScreen(
     onUndoSourceSwitch: () -> Unit = {},
     onPrefetchPageFailed: (Chapter, Page) -> Unit = { _, _ -> },
     onCancelSourceStandbys: () -> Unit = {},
+    desktopFindRequest: Int = 0,
+    onDesktopFindHandled: (Int) -> Unit = {},
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     val adultImageContext = LocalContext.current
@@ -470,6 +474,9 @@ fun ReaderScreen(
     }
     var chapterChangeRequested by remember(chapterId) { mutableStateOf(false) }
     var showChapters by rememberSaveable { mutableStateOf(false) }
+    var chaptersQuery by rememberSaveable(manga.id) { mutableStateOf("") }
+    var handledFindRequest by rememberSaveable(manga.id) { mutableIntStateOf(0) }
+    var focusReadingAfterChapter by remember(manga.id) { mutableStateOf(false) }
     val desktop = platformKind == PlatformKind.DESKTOP
     val readerWindow = LocalMangaWindow.current
     val readerFontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
@@ -905,6 +912,19 @@ fun ReaderScreen(
         controlsVisible = true
         if (!showChapters) keyboardFocusRestore++
     }
+    LaunchedEffect(active, desktopFindRequest) {
+        if (desktop && active && desktopFindRequest > 0 && desktopFindRequest != handledFindRequest) {
+            if (!sourcePickerBlocking && !showComments && !showPanelModels && !showSpreadAdjustment &&
+                !showPageNavigator && repairState.selection == null) {
+                if (showSettings) closeReaderSettings()
+                handledFindRequest = desktopFindRequest
+                focusReadingAfterChapter = false
+                showChapters = true
+                controlsVisible = true
+            }
+            onDesktopFindHandled(desktopFindRequest)
+        }
+    }
     val settingsPanel: @Composable (Boolean) -> Unit = { embedded ->
         ReaderSettingsDialog(
             visible = showSettings && !showPanelModels, preferences = preferences, backdrop = readerBackdrop,
@@ -923,10 +943,12 @@ fun ReaderScreen(
             manga = manga, library = libraryStore,
             downloadStore = downloadStore, loading = chaptersLoading, error = chaptersError, onRetry = onRetryChapters,
             embedded = embedded,
+            query = chaptersQuery, onQuery = { chaptersQuery = it }, focusRequest = handledFindRequest,
             onSelect = {
                 onCancelSourceSelection()
                 if (it != chapterId) { chapterChangeRequested = true; chapterId = it }
                 if (!dockedPanels) showChapters = false
+                focusReadingAfterChapter = dockedPanels
                 controlsVisible = true
                 keyboardFocusRestore++
             },
@@ -1071,9 +1093,10 @@ fun ReaderScreen(
         preferences.panelEngine == PanelEngine.OFF
     LaunchedEffect(keyboardReady, keyboardFocusRestore) {
         // Let closing chrome settle first. An open inspector keeps its own focused editor.
-        if (keyboardReady && !showSettings && !showChapters) {
+        if (keyboardReady && !showSettings && (!showChapters || focusReadingAfterChapter)) {
             withFrameNanos { }
             keyboardFocus.requestFocus()
+            focusReadingAfterChapter = false
         }
     }
     val keyboardModifier = if (keyboard == null) Modifier else Modifier
@@ -2242,7 +2265,9 @@ private fun ChapterPages(
             })
         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
             .bottomPullLoad(pull).bottomPullLoad(previousPull)) {
-            LazyColumn(state = list, modifier = Modifier.widthIn(max = MangaLayout.ReaderPageWidth)
+            val desktop = platformKind == PlatformKind.DESKTOP
+            LazyColumn(state = list, modifier = Modifier.then(if (desktop) Modifier.padding(horizontal = 14.dp) else Modifier)
+                .widthIn(max = MangaLayout.ReaderPageWidth)
                 .fillMaxSize().align(Alignment.TopCenter).onSizeChanged { contentWidthPx = it.width },
                 verticalArrangement = Arrangement.spacedBy(if (preferences.pageGap) 6.dp else 0.dp)) {
                 itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }, contentType = { _, _ -> "page" }) { index, page ->
@@ -2287,6 +2312,9 @@ private fun ChapterPages(
                         onLayoutReady = { pageLayoutReady[index] = it },
                     )
                 }
+            }
+            if (desktop && active) MaterialTheme(colorScheme = MaterialTheme.colorScheme.copy(onSurface = preferences.theme.foreground())) {
+                DesktopVerticalScrollbar(list, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 3.dp))
             }
             if (atEnd) Box(Modifier.align(Alignment.BottomCenter)
                 .windowInsetsPadding(dev.mangaflow.reader.readerNavigationInsets().union(WindowInsets.displayCutout)
@@ -4340,6 +4368,9 @@ private fun ReaderChaptersDialog(
     onRetry: () -> Unit,
     onSelect: (String) -> Unit,
     embedded: Boolean = false,
+    query: String,
+    onQuery: (String) -> Unit,
+    focusRequest: Int,
     onDismiss: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -4348,6 +4379,9 @@ private fun ReaderChaptersDialog(
     val positions = rememberChapterPositions(manga, library, active = visible)
     val currentGroup = remember(chapters, currentId) { chapters.firstOrNull { it.id == currentId }?.group }
     val catalogBusy = rememberDelayedBusy(visible && loading)
+    val search = query.trim().takeIf { desktop }.orEmpty()
+    val searching = search.isNotEmpty()
+    val results = rememberMatchingDesktopChapters(chapters, search)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val panel: @Composable () -> Unit = {
         var selectedGroup by rememberSaveable(manga.id, currentId) { mutableStateOf<String?>(null) }
@@ -4368,20 +4402,24 @@ private fun ReaderChaptersDialog(
                 .padding(horizontal = if (embedded) 12.dp else 16.dp, vertical = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("章节", fontSize = 17.sp, fontWeight = FontWeight.Medium)
-                    Text("$visibleCount 章", Modifier.weight(1f).padding(start = 8.dp),
+                    Text("${if (searching) results.size else visibleCount} 章", Modifier.weight(1f).padding(start = 8.dp),
                         color = colors.onSurfaceVariant, fontSize = 12.sp)
                     Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
                         if (catalogBusy) CircularProgressIndicator(Modifier.size(13.dp)
                             .semantics { contentDescription = "正在补全章节目录" }, color = colors.onSurfaceVariant, strokeWidth = 1.5.dp)
                     }
                     ReaderIcon(Icons.Outlined.MyLocation, "定位当前话", enabled = currentGroup != null) {
+                        onQuery("")
                         selectedGroup = currentGroup
                         locateCurrent = true
                     }
                     ReaderIcon(Icons.Rounded.Refresh, "刷新目录", enabled = !loading, onClick = onRetry)
                     ReaderIcon(Icons.Rounded.Close, "关闭目录", onClick = onDismiss)
                 }
-                if (groups.size > 1) MotionTabs(
+                if (desktop) DesktopChapterSearchField(query, onQuery, focusRequest, visible,
+                    Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    onOpenMatch = results.singleOrNull()?.let { match -> { onSelect(match.id) } })
+                if (groups.size > 1 && !searching) MotionTabs(
                     selected = groups.indexOf(group), labels = groups.map(::chapterGroupLabel), onSelect = {
                         locateCurrent = false
                         selectedGroup = groups[it]
@@ -4399,21 +4437,25 @@ private fun ReaderChaptersDialog(
                     fillContent = embedded,
                 ) { targetGroup ->
                     val active = visible && targetGroup == group
-                    val targetChapters = remember(chapters, targetGroup) {
-                        chapters.filter { it.group == targetGroup }.sortedBy(Chapter::index)
+                    val targetChapters = remember(chapters, targetGroup, searching, results) {
+                        if (searching) results else chapters.filter { it.group == targetGroup }.sortedBy(Chapter::index)
                     }
                     val initialIndex = remember(targetChapters, currentId) { targetChapters.indexOfFirst { it.id == currentId } }
-                    val state = rememberLazyGridState(initialFirstVisibleItemIndex = (initialIndex - 6).coerceAtLeast(0))
-                    var positioned by rememberSaveable { mutableStateOf(initialIndex >= 0) }
+                    val catalogPosition = rememberLazyGridState(initialFirstVisibleItemIndex =
+                        (if (searching) 0 else initialIndex - 6).coerceAtLeast(0))
+                    val searchPosition = if (desktop) rememberLazyGridState() else catalogPosition
+                    val state = if (searching) searchPosition else catalogPosition
+                    var positioned by rememberSaveable { mutableStateOf(!searching && initialIndex >= 0) }
+                    var appliedSearch by rememberSaveable { mutableStateOf("") }
                     val currentIndex by rememberUpdatedState(initialIndex)
-                    LaunchedEffect(active, locateCurrent) {
+                    LaunchedEffect(active, locateCurrent, searching) {
                         if (!active) {
                             state.stopScroll()
-                        } else if (locateCurrent && currentIndex >= 0) {
+                        } else if (!searching && locateCurrent && currentIndex >= 0) {
                             positioned = true
                             state.requestScrollToItem((currentIndex - 6).coerceAtLeast(0))
                             locateCurrent = false
-                        } else if (!positioned) {
+                        } else if (!searching && !positioned) {
                             // Locate a chapter that arrives late only while the reader is still at the top.
                             // After this first placement the keyed grid owns its scroll anchor.
                             val (moved, index) = snapshotFlow {
@@ -4427,6 +4469,12 @@ private fun ReaderChaptersDialog(
                             } else state.requestScrollToItem((index - 6).coerceAtLeast(0))
                         }
                     }
+                    LaunchedEffect(active, search) {
+                        if (active && search != appliedSearch) {
+                            appliedSearch = search
+                            if (searching) searchPosition.requestScrollToItem(0)
+                        }
+                    }
                     Box(Modifier.fillMaxWidth()) {
                     LazyVerticalGrid(
                         columns = GridCells.Adaptive((if (embedded) 112.dp else 68.dp) * fontScale), state = state,
@@ -4435,6 +4483,12 @@ private fun ReaderChaptersDialog(
                         contentPadding = PaddingValues(top = 10.dp, bottom = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
+                        if (searching && targetChapters.isEmpty() && !loading) item(span = {
+                            androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
+                        }) {
+                            Text("没有符合条件的章节", color = colors.onSurfaceVariant,
+                                fontSize = 12.sp, modifier = Modifier.padding(vertical = 12.dp))
+                        }
                         items(targetChapters, key = Chapter::id) { chapter ->
                             val selected = chapter.id == currentId
                             val entry = saved[chapter.id]
@@ -4442,10 +4496,14 @@ private fun ReaderChaptersDialog(
                                 .background(colors.onSurface.copy(alpha = if (selected) .09f else .035f))
                                 .selectable(selected = selected, role = Role.RadioButton, onClick = { onSelect(chapter.id) })
                                 .padding(horizontal = 6.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Text(chapter.title, Modifier.weight(1f), color = colors.onSurface,
-                                    fontSize = 12.sp, lineHeight = 17.sp,
-                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Column(Modifier.weight(1f)) {
+                                    Text(chapter.title, color = colors.onSurface, fontSize = 12.sp, lineHeight = 17.sp,
+                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    if (searching && groups.size > 1) Text(chapterGroupLabel(chapter.group),
+                                        color = colors.onSurfaceVariant, fontSize = 10.sp, maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis)
+                                }
                                 Column(horizontalAlignment = Alignment.CenterHorizontally,
                                     verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                     ChapterReadMark(positions?.get(chapter.id), known = positions != null)

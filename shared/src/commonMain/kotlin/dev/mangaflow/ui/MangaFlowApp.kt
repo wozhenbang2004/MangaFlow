@@ -508,6 +508,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     var searchExpanded by (if (restrictedMode) restrictedSearch else ordinarySearch)
     var desktopNavigationMode by rememberSaveable { mutableIntStateOf(0) }
     var desktopSearchRequest by remember { mutableIntStateOf(0) }
+    var desktopFindRequest by remember { mutableIntStateOf(0) }
+    var desktopFindOwner by remember { mutableStateOf<String?>(null) }
+    fun finishDesktopFind(owner: String, request: Int) {
+        if (desktopFindOwner == owner && desktopFindRequest == request) desktopFindOwner = null
+    }
     var animeSearchRequest by rememberSaveable { mutableIntStateOf(0) }
     var animeBrowseRequest by rememberSaveable { mutableIntStateOf(0) }
     var animeBackRequest by rememberSaveable { mutableIntStateOf(0) }
@@ -722,6 +727,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     val frame: Frame = reading?.let { Frame.Reader(it, profileKey) } ?: detailFrame ?:
         if (copyExploreOpen && !restrictedMode) Frame.CopyExplore else Frame.Root(section, profileKey)
+    LaunchedEffect(frame.key) {
+        if (desktopFindOwner != frame.key) desktopFindOwner = null
+    }
     val desktop = platformKind == PlatformKind.DESKTOP
     val desktopNavigationVisible = desktop && reading == null && windowSize.width >= 760.dp &&
         !(section == Section.ANIME && animeImmersive)
@@ -1041,9 +1049,18 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             }
         }.onPreviewKeyEvent { event ->
             if (event.type == KeyEventType.KeyDown) experience.noteInteraction()
-            if (desktop && event.isCtrlPressed && !event.isAltPressed &&
+            if (desktop && event.isCtrlPressed && !event.isAltPressed && !event.isShiftPressed && !event.isMetaPressed &&
                 (event.key == Key.K || event.key == Key.F)) {
-                if (event.type == KeyEventType.KeyDown) openDesktopSearch()
+                if (event.type == KeyEventType.KeyDown) {
+                    val findInBook = event.key == Key.F && (frame is Frame.Reader ||
+                        frame is Frame.Detail && frame.state.rankedWork == null)
+                    if (findInBook) {
+                        if (sourceManagement == null && sourceResumeChoice == null && !drawerVisible && !rootHandoff) {
+                            desktopFindOwner = frame.key
+                            desktopFindRequest++
+                        }
+                    } else openDesktopSearch()
+                }
                 true
             } else false
         }.onKeyEvent { event ->
@@ -1300,6 +1317,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             if (model.reading.value === current.session) model.cancelReaderSourceStandbys()
                         },
                         sourceSwitchName = sourceOperation.targetSource,
+                        desktopFindRequest = desktopFindRequest.takeIf { desktopFindOwner == current.key } ?: 0,
+                        onDesktopFindHandled = { finishDesktopFind(current.key, it) },
                         onSetPreferredSource = model::preferBodySource,
                         onClearChapterSource = model::clearChapterSource,
                         onCancelSourceSelection = model::cancelSourceSelection,
@@ -1356,6 +1375,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         CompositionLocalProvider(LocalWallpaperActive provides (wallpaper.mediaPath != null)) {
                             DetailScreen(
                                 manga = current.state.manga, detail = current.state.detail,
+                                desktopFindRequest = desktopFindRequest.takeIf { desktopFindOwner == current.key } ?: 0,
+                                onDesktopFindHandled = { finishDesktopFind(current.key, it) },
                                 repository = model.repository,
                                 adultProfile = restrictedMode,
                                 loading = current.state.loading, error = current.state.error,

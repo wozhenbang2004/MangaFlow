@@ -855,7 +855,7 @@ private fun DiscoveryPane(
                 }
             }
         if (state.loading && state.items.isEmpty()) {
-            if (adultProfile && !ranking && columns != 1) items(visibleColumns * 2,
+            if ((adultProfile || desktop) && !ranking && columns != 1) items(visibleColumns * 2,
                 key = { "loading-cover:$it" }, contentType = { "cover-placeholder" }) {
                 DiscoveryCoverPlaceholder()
             }

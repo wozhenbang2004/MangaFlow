@@ -169,14 +169,21 @@ internal fun DetailCatalog(
     locateRevision: Int = 0,
     onLocate: () -> Unit = {},
     onLocateSources: (() -> Unit)? = null,
+    desktopFindRequest: Int = 0,
 ) {
+    val desktop = platformKind == PlatformKind.DESKTOP
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
     val emptyCatalog = chapters.isEmpty()
     val catalogFailure = error?.let(::detailCatalogFailureLabel)
     var chosenGroup by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
     var groupVisit by rememberSaveable(mangaId) { mutableIntStateOf(0) }
     var appliedLocate by rememberSaveable(mangaId) { mutableIntStateOf(0) }
+    var chapterQuery by rememberSaveable(mangaId) { mutableStateOf("") }
+    val search = chapterQuery.trim().takeIf { desktop }.orEmpty()
+    val searching = search.isNotEmpty()
+    val searchResults = rememberMatchingDesktopChapters(chapters, search)
     val locatePending = locateRevision != appliedLocate && progress != null
+    LaunchedEffect(locateRevision) { if (locatePending) chapterQuery = "" }
     val locateChapter = remember(chapters, progress?.chapterId, locatePending) {
         if (locatePending) chapters.firstOrNull { chapterContainsProgress(it, progress) } else null
     }
@@ -217,7 +224,16 @@ internal fun DetailCatalog(
     } else Modifier
     val showBusy = rememberDelayedBusy(loading)
     Column(Modifier.fillMaxSize()) {
-        if (groups.size > 1 || progress != null) Row(
+        if (desktop) Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 14.dp, bottom = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            val single = searchResults.singleOrNull()?.takeUnless { downloadMode }
+            DesktopChapterSearchField(chapterQuery, { chapterQuery = it }, desktopFindRequest,
+                active && !sourcePresent, Modifier.weight(1f), onOpenMatch = single?.let { match -> { onRead(match) } })
+            if (searching) Text("${searchResults.size} 章", color = DetailMuted, style = MaterialTheme.typography.labelSmall)
+            if (progress != null) DetailAction(Icons.Outlined.MyLocation, "定位上次阅读",
+                enabled = active && !sourcePresent, onClick = onLocate)
+        }
+        if (groups.size > 1 && !searching || !desktop && progress != null) Row(
             Modifier.fillMaxWidth().then(flow).heightIn(min = 44.dp).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -230,7 +246,7 @@ internal fun DetailCatalog(
                     chosenGroup = it
                 }, modifier = Modifier.weight(1f),
             ) else Spacer(Modifier.weight(1f))
-            if (progress != null) DetailAction(Icons.Outlined.MyLocation, "定位上次阅读",
+            if (!desktop && progress != null) DetailAction(Icons.Outlined.MyLocation, "定位上次阅读",
                 enabled = active && !sourcePresent, onClick = onLocate)
         }
         if (locatePending && locateChapter == null && !loading && !sourceLoading) {
@@ -263,12 +279,21 @@ internal fun DetailCatalog(
             order = { if (it == null) 0 else groups.keys.indexOf(it) + 1 },
         ) { targetGroup ->
             val paneActive = active && targetGroup == group && !sourcePresent
-            val grid = rememberLazyGridState()
+            val catalogPosition = rememberLazyGridState()
+            val searchPosition = if (desktop) rememberLazyGridState() else catalogPosition
+            val grid = if (searching) searchPosition else catalogPosition
+            var appliedSearch by rememberSaveable(mangaId) { mutableStateOf("") }
+            LaunchedEffect(search, paneActive) {
+                if (paneActive && search != appliedSearch) {
+                    appliedSearch = search
+                    if (searching) searchPosition.requestScrollToItem(0)
+                }
+            }
             SideEffect {
                 if (paneActive) onScrollTarget(grid)
             }
-            val visibleChapters = remember(chapters, targetGroup) {
-                if (targetGroup == null) chapters else chapters.filter { it.group == targetGroup }
+            val visibleChapters = remember(chapters, targetGroup, searching, searchResults) {
+                if (searching) searchResults else if (targetGroup == null) chapters else chapters.filter { it.group == targetGroup }
             }
             // Comments/reader restoration keeps this visit; even a quick A→B→A is a new visit.
             var appliedVisit by rememberSaveable(mangaId) { mutableIntStateOf(groupVisit) }
@@ -283,6 +308,7 @@ internal fun DetailCatalog(
                         Text(when {
                             loading && emptyCatalog -> "正在读取章节"
                             catalogFailure != null && emptyCatalog -> catalogFailure
+                            searching -> "没有符合条件的章节"
                             else -> "暂无章节"
                         }, color = DetailMuted, fontSize = 13.sp, textAlign = TextAlign.Center)
                         if (emptyCatalog && !loading) {
@@ -304,8 +330,7 @@ internal fun DetailCatalog(
                 }
             } else {
                 val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-                val showGroup = targetGroup == null && groups.size > 1
-                val desktop = platformKind == PlatformKind.DESKTOP
+                val showGroup = (searching || targetGroup == null) && groups.size > 1
                 val tileHeight = ((if (desktop) 56f else 40f) * fontScale + 8f).dp
                 // Source groups are consecutive. Keep that exact order and give each run
                 // its own grid row so a book cover never stretches a normal chapter row.
@@ -331,8 +356,8 @@ internal fun DetailCatalog(
                         found
                     }
                 }
-                LaunchedEffect(paneActive, groupVisit, locateRevision, locateIndex) {
-                    if (!paneActive) return@LaunchedEffect
+                LaunchedEffect(paneActive, groupVisit, locateRevision, locateIndex, searching) {
+                    if (!paneActive || searching) return@LaunchedEffect
                     if (locateIndex != null && appliedLocate != locateRevision) {
                         grid.scrollToItem(locateIndex)
                         chosenGroup = targetGroup

@@ -240,6 +240,8 @@ fun DetailScreen(
     onContinuePreferred: (() -> Unit)? = null,
     onOriginal: (MangaTag) -> Unit = {},
     adultProfile: Boolean = false,
+    desktopFindRequest: Int = 0,
+    onDesktopFindHandled: (Int) -> Unit = {},
 ) {
     val current = detail?.manga ?: manga
     var pendingDownload by remember(current.id) { mutableStateOf<Chapter?>(null) }
@@ -264,6 +266,7 @@ fun DetailScreen(
     val resume = progress?.takeIf { it.manga.id == manga.id && it.chapterId.isNotBlank() }
     val copyProgress = cloudProgress?.takeIf { it.mangaId == current.id && it.owner != null }
     var section by rememberSaveable(manga.id) { mutableIntStateOf(0) }
+    var handledFindRequest by rememberSaveable(manga.id) { mutableIntStateOf(0) }
     var chapterLocateRevision by rememberSaveable(manga.id) { mutableIntStateOf(0) }
     var chapterDownloadMode by rememberSaveable(manga.id) { mutableStateOf(false) }
     val sections = rememberSaveableStateHolder()
@@ -278,6 +281,14 @@ fun DetailScreen(
     var commentsList by remember(manga.id) { mutableStateOf<LazyListState?>(null) }
     var commentsOpenRevision by remember(manga.id) { mutableIntStateOf(0) }
     val commentCount = detailCommentCount(reviews)
+    LaunchedEffect(active, desktopFindRequest) {
+        if (active && desktopFindRequest > 0 && desktopFindRequest != handledFindRequest) {
+            handledFindRequest = desktopFindRequest
+            section = 0
+            commentFilterOpen = false
+            onDesktopFindHandled(desktopFindRequest)
+        }
+    }
     LaunchedEffect(commentsAvailable) {
         if (!commentsAvailable) {
             section = 0
@@ -426,6 +437,7 @@ fun DetailScreen(
                             onRelinkVariant = onRelinkVariant,
                             onCancelSourceSelection = onCancelSourceSelection,
                             sourceLoading = sourceLoading, sourceError = sourceError,
+                            desktopFindRequest = handledFindRequest,
                         )
                         else -> if (sourceCommentsContent != null) {
                             sourceCommentsContent(Modifier.fillMaxSize(), paneBottomPadding, commentsOpenRevision, active && targetSection == activeSection)
@@ -466,7 +478,7 @@ fun DetailScreen(
         val desktopDetail = platformKind == PlatformKind.DESKTOP &&
             maxWidth >= 840.dp * fontScale.coerceAtMost(1.5f)
         val desktopWidth = minOf(maxWidth, 1440.dp)
-        val summaryWidth = (desktopWidth * .34f).coerceIn(300.dp, 380.dp)
+        val summaryWidth = (desktopWidth * .36f).coerceIn(300.dp, 432.dp)
         // Retain the largest real dock clearance: condensing must not move the last chapter rows.
         val bottomInset = screenFitContentInsets().asPaddingValues().calculateBottomPadding()
         val readingInset = maxOf((38f * fontScale + 10f).coerceAtLeast(56f).dp,
@@ -572,14 +584,14 @@ fun DetailScreen(
             if (desktopDetail) {
                 Row(Modifier.width(desktopWidth).fillMaxHeight().align(Alignment.TopCenter)
                     .padding(start = 20.dp, end = 20.dp, top = toolbarClearance + 8.dp, bottom = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                    horizontalArrangement = Arrangement.spacedBy(18.dp)) {
                     Column(Modifier.width(summaryWidth).fillMaxHeight(),
                         verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         val summaryScroll = rememberScrollState()
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             Column(Modifier.fillMaxSize().verticalScroll(summaryScroll).padding(end = 12.dp)) {
                                 HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
-                                    compact = true, artworkHeadroom = 0.dp, adultProfile = adultProfile,
+                                    compact = true, artworkHeadroom = 0.dp, adultProfile = adultProfile, desktopSummary = true,
                                     onIntroduction = { fullIntroduction = true },
                                     onRatings = if (adultProfile) null else ({ fullRatings = true }),
                                     onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
@@ -597,6 +609,7 @@ fun DetailScreen(
                             onContinuePreferred = onContinuePreferred, cloudProgress = copyProgress,
                             onAdoptCloudProgress = onAdoptCloudProgress, onRetryCloudProgress = onRetryCloudProgress)
                     }
+                    Box(Modifier.width(1.dp).fillMaxHeight().background(DetailLine))
                     sectionPane(Modifier.weight(1f).fillMaxHeight().background(informationTone),
                         16.dp + bottomInset)
                 }
@@ -899,6 +912,7 @@ private fun HeroBookInformation(
     collapse: () -> Float,
     modifier: Modifier = Modifier,
     adultProfile: Boolean = false,
+    desktopSummary: Boolean = false,
 ) {
     val infoVisible by remember(collapse) { derivedStateOf { collapse() < .98f } }
     val density = LocalDensity.current
@@ -972,9 +986,10 @@ private fun HeroBookInformation(
                         ?.let { "更新 · $it" }.orEmpty()).filter(String::isNotBlank).joinToString(" · ")
                     if (state.isNotBlank()) Text(state, color = ink.copy(alpha = .80f),
                         fontSize = 12.sp, lineHeight = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    HeroSynopsis(manga, ink, infoVisible, onIntroduction)
+                    if (!desktopSummary) HeroSynopsis(manga, ink, infoVisible, onIntroduction)
                 }
             }
+            if (desktopSummary) HeroSynopsis(manga, ink, infoVisible, onIntroduction, lines = 4)
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
                 DetailTags(manga, includeState = false, enabled = infoVisible, onTag = onTag,
                     neutral = adultProfile,
@@ -989,7 +1004,7 @@ private fun HeroBookInformation(
 }
 
 @Composable
-private fun HeroSynopsis(manga: Manga, ink: Color, enabled: Boolean, onIntroduction: () -> Unit) {
+private fun HeroSynopsis(manga: Manga, ink: Color, enabled: Boolean, onIntroduction: () -> Unit, lines: Int = 2) {
     val interaction = remember(manga.id) { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable(enabled = enabled, role = Role.Button,
         interactionSource = interaction, indication = null,
@@ -997,7 +1012,7 @@ private fun HeroSynopsis(manga: Manga, ink: Color, enabled: Boolean, onIntroduct
         .motionPress(interaction, enabled = enabled, pressedScale = .985f).padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(manga.description.ifBlank { "作品信息" }, fontFamily = mangaFontFamily(MangaFontScene.READING), color = ink.copy(alpha = .82f),
-            fontSize = 14.sp, lineHeight = 22.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+            fontSize = 14.sp, lineHeight = 22.sp, maxLines = lines, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f))
         Icon(Icons.Outlined.ChevronRight, null, tint = ink.copy(alpha = .55f), modifier = Modifier.size(16.dp))
     }

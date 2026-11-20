@@ -476,6 +476,8 @@ fun LibraryScreen(
                             else MangaLayout.columns(maxWidth, maximum, minimumWidth, gap, 16.dp)
                         val bookWidth = (available - gap * (perShelf - 1)) / perShelf
                         val bookHeight = bookWidth / .7f
+                        val resumeColumns = if (desktop) MangaLayout.columns(maxWidth, 3, 270.dp * fontScale, gap, 16.dp) else 1
+                        val resumeWidth = ((available - gap * (resumeColumns - 1)) / resumeColumns).coerceAtMost(480.dp * fontScale)
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(perShelf),
                             state = favoritesPosition,
@@ -485,8 +487,8 @@ fun LibraryScreen(
                             horizontalArrangement = Arrangement.spacedBy(gap),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            val lastReading = visibleHistory.firstOrNull()
-                            if (shelfScope == UnifiedShelfScope.LOCAL && lastReading != null) item(
+                            val recent = visibleHistory.take(resumeColumns)
+                            if (shelfScope == UnifiedShelfScope.LOCAL && recent.isNotEmpty()) item(
                                 key = "resume-reading", span = {
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                                 }) {
@@ -500,11 +502,29 @@ fun LibraryScreen(
                                             Text("阅读记录", style = MaterialTheme.typography.labelMedium)
                                         }
                                     }
-                                    ContinueRow(lastReading, repository, onContinue = { if (active) onContinue(it) })
+                                    if (desktop) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(gap)) {
+                                        recent.forEach { progress -> key(progress.manga.id) {
+                                            Surface(Modifier.width(resumeWidth), shape = RoundedCornerShape(12.dp),
+                                                color = MaterialTheme.colorScheme.surface.copy(alpha = .82f)) {
+                                                val actions = if (active) listOf(
+                                                    DesktopMenuAction("继续阅读") { onContinue(progress) },
+                                                    DesktopMenuAction("详情与目录") { onDetails(progress.manga) },
+                                                    DesktopMenuAction("章节记录") { chapterHistoryManga = progress.manga },
+                                                ) else emptyList()
+                                                DesktopContextMenuArea(actions) {
+                                                    Box(Modifier.padding(horizontal = 10.dp, vertical = 3.dp)) {
+                                                        ContinueRow(progress, repository, onContinue = { if (active) onContinue(it) },
+                                                            onHistory = { if (active) chapterHistoryManga = progress.manga })
+                                                    }
+                                                }
+                                            }
+                                        } }
+                                    } else ContinueRow(recent.first(), repository, onContinue = { if (active) onContinue(it) })
                                 }
                             }
-                            if (adultProfile && visibleFavorites.isNotEmpty()) item(
-                                key = "adult-shelf-section", span = {
+                            if ((adultProfile || desktop && shelfScope == UnifiedShelfScope.LOCAL && recent.isNotEmpty()) &&
+                                visibleFavorites.isNotEmpty()) item(
+                                key = if (adultProfile) "adult-shelf-section" else "shelf-collection-section", span = {
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                                 }) {
                                 Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 3.dp),

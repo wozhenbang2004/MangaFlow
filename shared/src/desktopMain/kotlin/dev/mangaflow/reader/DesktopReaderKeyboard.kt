@@ -85,6 +85,8 @@ private class DesktopKeyBindings(context: PlatformContext) {
         if (value.code in setOf(AwtKeyEvent.VK_SHIFT, AwtKeyEvent.VK_CONTROL, AwtKeyEvent.VK_ALT,
                 AwtKeyEvent.VK_ALT_GRAPH, AwtKeyEvent.VK_META, AwtKeyEvent.VK_WINDOWS)) return "请同时按一个普通按键"
         if (value.code in setOf(AwtKeyEvent.VK_ESCAPE, AwtKeyEvent.VK_F11, AwtKeyEvent.VK_TAB)) return "Esc、F11 与 Tab 保留给窗口和焦点操作"
+        if (value.ctrl && !value.alt && !value.shift && !value.meta && value.code in setOf(AwtKeyEvent.VK_F, AwtKeyEvent.VK_K))
+            return "Ctrl+F 与 Ctrl+K 已用于搜索"
         val conflict = ReaderKeyboardAction.entries.firstOrNull { other ->
             other != action && (chord(other, false) == value || chord(other, true) == value)
         }
@@ -122,6 +124,8 @@ private fun DesktopShortcutSettings(bindings: DesktopKeyBindings, rtl: Boolean) 
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("键盘快捷键", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
         Text("左右方向随阅读方向调整；PageUp / PageDown、空格也可翻页。",
+            color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+        Text("Ctrl+F 查找本书章节，Ctrl+K 搜索其他作品。",
             color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
         ReaderKeyboardAction.entries.forEach { action ->
             Row(Modifier.fillMaxWidth().heightIn(min = 44.dp)
