@@ -27,6 +27,7 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.HexFormat
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import javax.swing.SwingUtilities
 
 /** The application supplies its normal save-and-close action; updates never kill an unsaved JVM. */
@@ -183,6 +184,7 @@ internal actual suspend fun downloadNativeIncrementalUpdate(
         .put("TargetVersion", state.version).put("Protocol", state.protocol).put("PayloadRoot", payload.canonicalPath)
         .put("Files", JSONArray(state.files.map { JSONObject().put("Path", it.path).put("Size", it.bytes).put("Sha256", it.sha256) }))
         .put("ChangedPaths", JSONArray(state.changed.map { it.path }))
+        .put("LocalAppData", File(context.dataRoot).parent)
         .put("ResultPath", File(cacheDirectory(context).path, "updates/last-result.json").canonicalPath)
     File(state.work, "install.json").writeText(install.toString(), Charsets.UTF_8)
     archive.delete()
@@ -191,7 +193,7 @@ internal actual suspend fun downloadNativeIncrementalUpdate(
 
 internal actual fun installNativeIncrementalUpdate(context: PlatformContext, plan: NativeIncrementalPlan): Boolean {
     val state = plans[plan.token] ?: return false
-    return launchDesktopHandoff(File(state.work, "install.json"))
+    return launchDesktopHandoff(state.work, File(state.work, "install.json").readText(Charsets.UTF_8))
 }
 
 internal fun launchNativeInstaller(context: PlatformContext, path: String): Boolean {
@@ -204,23 +206,46 @@ internal fun launchNativeInstaller(context: PlatformContext, path: String): Bool
     val plan = JSONObject().put("Mode", "installer").put("Installer", installer.path)
         .put("InstallerSize", installer.length()).put("InstallerSha256", hash(installer))
         .put("InstallRoot", executable?.canonicalFile?.parentFile?.path.orEmpty())
+        .put("LocalAppData", File(context.dataRoot).parent)
         .put("ResultPath", File(cacheDirectory(context).path, "updates/last-result.json").canonicalPath)
-    val file = File(work, "install.json")
-    file.writeText(plan.toString(), Charsets.UTF_8)
-    return launchDesktopHandoff(file)
+    return launchDesktopHandoff(work, plan.toString())
 }
 
-private fun launchDesktopHandoff(plan: File): Boolean {
+private fun launchDesktopHandoff(work: File, plan: String): Boolean {
     val close = DesktopUpdateExit.requestExit ?: return false
-    require(plan.isFile)
-    val script = File(plan.parentFile, "install-update.ps1")
+    val attempt = Files.createTempDirectory(work.toPath(), "handoff-").toFile()
+    val planFile = File(attempt, "install.json")
+    planFile.writeText(plan, Charsets.UTF_8)
+    val script = File(attempt, "install-update.ps1")
     val source = DesktopUpdateExit::class.java.getResourceAsStream("/desktop-update.ps1")
         ?: error("安装辅助程序缺失，请重新下载完整安装包")
     source.use { input -> script.outputStream().use { input.copyTo(it) } }
-    ProcessBuilder("powershell.exe", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
-        "-ExecutionPolicy", "Bypass", "-File", script.canonicalPath,
-        "-PlanPath", plan.canonicalPath, "-ParentPid", ProcessHandle.current().pid().toString())
-        .redirectErrorStream(true).redirectOutput(File(plan.parentFile, "handoff.log")).start()
+
+    val app = ProcessHandle.current()
+    val appCommand = app.info().command().orElse(null)
+    val launcher = app.parent().orElse(null)?.takeIf {
+        appCommand != null && appCommand.equals(it.info().command().orElse(null), ignoreCase = true)
+    }
+    val powershell = File(System.getenv("SystemRoot"), "System32/WindowsPowerShell/v1.0/powershell.exe")
+    val bootstrap = ProcessBuilder(powershell.path, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+        "-ExecutionPolicy", "Bypass", "-File", script.canonicalPath, "-Launch",
+        "-PlanPath", planFile.canonicalPath, "-ParentPid", app.pid().toString(),
+        "-LauncherPid", (launcher?.pid() ?: 0L).toString())
+        .redirectErrorStream(true).redirectOutput(File(attempt, "handoff.log")).start()
+    try {
+        if (!bootstrap.waitFor(10, TimeUnit.SECONDS) || bootstrap.exitValue() != 0) return false
+    } finally {
+        if (bootstrap.isAlive) bootstrap.destroyForcibly()
+    }
+
+    val ready = File(attempt, "ready")
+    val errorLog = File(attempt, "handoff-error.txt")
+    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(6)
+    while (!ready.isFile) {
+        if (errorLog.isFile || System.nanoTime() >= deadline) return false
+        Thread.sleep(75)
+    }
+    File(attempt, "apply").writeText("")
     SwingUtilities.invokeLater { close() }
     return true
 }

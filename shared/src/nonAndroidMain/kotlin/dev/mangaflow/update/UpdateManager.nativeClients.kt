@@ -29,8 +29,9 @@ actual class UpdateManager private constructor(private val context: PlatformCont
     private var activeClient: NetworkClient? = null
     private val prefs = preferences(context, "app_updates")
     private val root = StorageFile(cacheDirectory(context), "updates")
+    private val previousInstallMessage = previousNativeUpdateResult(context)
     private val _state = MutableStateFlow(UpdateState(lastChecked = prefs.getLong("last_check", 0),
-        message = previousNativeUpdateResult(context) ?: "检查漫流的新版本"))
+        message = previousInstallMessage ?: "检查漫流的新版本"))
     actual val state: StateFlow<UpdateState> = _state.asStateFlow()
     actual val automatic: Boolean get() = prefs.getBoolean("automatic", true)
     private var job: Job? = null
@@ -59,7 +60,8 @@ actual class UpdateManager private constructor(private val context: PlatformCont
                 }
                 _state.value = UpdateState(if (complete) UpdatePhase.READY else UpdatePhase.AVAILABLE, retained.release,
                     downloaded = if (complete) retained.release.bytes else 0L, total = retained.release.bytes,
-                    message = if (complete) "安装包已下载，可继续安装" else "已恢复下载计划；未完成文件将在继续时重新下载")
+                    message = previousInstallMessage ?: if (complete) "安装包已下载，可继续安装"
+                    else "已恢复下载计划；未完成文件将在继续时重新下载")
                 job = null
                 if (!complete && retained.status in setOf("queued", "running", "verifying")) download(retained.route)
             } else {
@@ -285,21 +287,22 @@ actual class UpdateManager private constructor(private val context: PlatformCont
         job = scope.launch {
             try {
                 val delta = incrementalPlan
-                if (delta != null) {
-                    val launched = withContext(Dispatchers.IO) { installNativeIncrementalUpdate(context, delta) }
-                    check(launched) { "无法启动安装辅助程序，请重新下载安装包" }
-                    _state.value = _state.value.copy(message = "正在保存并关闭应用，随后安装更新")
-                    return@launch
-                }
-                val suffix = releaseAssetSuffixes().firstOrNull { release.url.substringBefore('?').endsWith(it, true) }
-                    ?: error("安装包类型不匹配")
-                val file = StorageFile(root, release.sha256 + suffix)
                 val launched = withContext(Dispatchers.IO) {
-                    require(file.length() == release.bytes && sha256File(file.path) == release.sha256) { "安装包校验失败，请重新下载" }
-                    openDownloadedInstaller(context, file.path)
+                    if (delta != null) {
+                        installNativeIncrementalUpdate(context, delta)
+                    } else {
+                        val suffix = releaseAssetSuffixes().firstOrNull { release.url.substringBefore('?').endsWith(it, true) }
+                            ?: error("安装包类型不匹配")
+                        val file = StorageFile(root, release.sha256 + suffix)
+                        require(file.length() == release.bytes && sha256File(file.path) == release.sha256) { "安装包校验失败，请重新下载" }
+                        openDownloadedInstaller(context, file.path)
+                    }
                 }
-                check(launched) { "无法打开系统安装程序，请前往发布页下载安装" }
-                _state.value = _state.value.copy(message = "正在保存并关闭应用，随后启动系统安装程序")
+                _state.value = if (launched) {
+                    _state.value.copy(message = "正在保存并关闭应用，随后安装更新")
+                } else {
+                    _state.value.copy(phase = UpdatePhase.READY, message = "安装助手未能启动。请重试，或从发布页手动安装。")
+                }
             } catch (failure: Exception) { fail(failure.message ?: "无法继续安装") }
         }
     }

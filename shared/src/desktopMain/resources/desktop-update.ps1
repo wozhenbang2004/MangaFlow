@@ -1,24 +1,50 @@
 ﻿param(
     [Parameter(Mandatory = $true)][string]$PlanPath,
     [Parameter(Mandatory = $true)][int]$ParentPid,
+    [int]$LauncherPid = 0,
+    [switch]$Launch,
     [switch]$Elevated
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $planFile = [IO.Path]::GetFullPath($PlanPath)
 $work = Split-Path -Parent $planFile
-$plan = Get-Content -LiteralPath $planFile -Raw -Encoding UTF8 | ConvertFrom-Json
-$root = [IO.Path]::GetFullPath([string]$plan.InstallRoot)
-$resultPath = [IO.Path]::GetFullPath([string]$plan.ResultPath)
-$launcher = Join-Path $root 'MangaFlow.exe'
+
+if ($Launch) {
+    # Older jpackage launchers terminate their entire job when the JVM exits (JDK-8325203).
+    # Local WMI creates the worker outside the calling launcher's job.
+    $powershell = Join-Path $PSHOME 'powershell.exe'
+    $arguments = ('"{0}" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{1}" -PlanPath "{2}" -ParentPid {3} -LauncherPid {4}' -f
+        $powershell, $PSCommandPath, $planFile, $ParentPid, $LauncherPid)
+    $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{
+        ShowWindow = [uint16]0
+        WinstationDesktop = 'WinSta0\Default'
+    }
+    $worker = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine = $arguments
+        ProcessStartupInformation = $startup
+    }
+    if ($worker.ReturnValue -ne 0) { throw "Could not start MangaFlow's update worker (WMI $($worker.ReturnValue))." }
+    exit 0
+}
+
 $mutex = $null
 $ownsMutex = $false
+$running = $null
+$nativeLauncher = $null
+$accepted = $Elevated.IsPresent
 
 function Write-Result([bool]$success, [string]$message) {
     $parent = Split-Path -Parent $resultPath
     [IO.Directory]::CreateDirectory($parent) | Out-Null
-    @{ Success = $success; Message = $message } | ConvertTo-Json -Compress |
-        Set-Content -LiteralPath $resultPath -Encoding UTF8
+    $json = @{ Success = $success; Message = $message } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($resultPath, $json)
+}
+function Show-UpdateMessage([string]$message, [string]$icon) {
+    try {
+        Add-Type -AssemblyName PresentationFramework
+        [Windows.MessageBox]::Show($message, 'MangaFlow', 'OK', $icon) | Out-Null
+    } catch {}
 }
 function Install-File([string]$relative) {
     $segments = $relative.Split('/')
@@ -56,25 +82,55 @@ function Verify-File([string]$path, $entry) {
     }
 }
 function Start-OldOrNew {
-    if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) { return }
+    if ($null -ne $running -and -not $running.HasExited) { return }
     if (Test-Path -LiteralPath $launcher -PathType Leaf) {
         Start-Process -FilePath $launcher -WorkingDirectory $root | Out-Null
     }
 }
 try {
-    # The ordinary application close path flushes reading/preferences before its JVM terminates.
-    $running = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
-    if ($null -ne $running -and -not $running.WaitForExit(120000)) {
-        throw 'The application did not close; no installed files were changed.'
-    }
+    $plan = Get-Content -LiteralPath $planFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    $root = [IO.Path]::GetFullPath([string]$plan.InstallRoot)
+    $resultPath = [IO.Path]::GetFullPath([string]$plan.ResultPath)
+    $launcher = Join-Path $root 'MangaFlow.exe'
+    $env:LOCALAPPDATA = [IO.Path]::GetFullPath([string]$plan.LocalAppData)
     $mutex = New-Object Threading.Mutex($false, 'Local\MangaFlowDesktopUpdate')
     $ownsMutex = $mutex.WaitOne(0)
     if (-not $ownsMutex) { throw 'Another MangaFlow update is already running.' }
+
+    if (-not $Elevated) {
+        $running = Get-Process -Id $ParentPid
+        if ($running.SessionId -ne (Get-Process -Id $PID).SessionId) {
+            throw 'The update worker is outside the desktop session.'
+        }
+        $null = $running.Handle
+        if ($LauncherPid -gt 0) {
+            $nativeLauncher = Get-Process -Id $LauncherPid
+            $null = $nativeLauncher.Handle
+        }
+
+        [IO.File]::WriteAllText((Join-Path $work 'ready'), '')
+        $proceed = Join-Path $work 'apply'
+        $approvalTimer = [Diagnostics.Stopwatch]::StartNew()
+        while (-not (Test-Path -LiteralPath $proceed -PathType Leaf)) {
+            if ($running.HasExited -or $approvalTimer.ElapsedMilliseconds -ge 20000) { exit 1 }
+            Start-Sleep -Milliseconds 100
+        }
+        $accepted = $true
+        # Replacing files must wait for a successful save-and-close and for jpackage to release the EXE.
+        if (-not $running.WaitForExit(120000) -or $running.ExitCode -ne 0) {
+            throw '漫流未能正常保存并退出。请处理保存错误后重试。'
+        }
+        if ($null -ne $nativeLauncher -and -not $nativeLauncher.WaitForExit(10000)) {
+            throw '漫流启动器仍在运行。请关闭后重试。'
+        }
+    }
 
     if ($plan.Mode -eq 'installer') {
         $installer = [IO.Path]::GetFullPath([string]$plan.Installer)
         Verify-File $installer ([pscustomobject]@{ Path = 'installer'; Size = $plan.InstallerSize; Sha256 = $plan.InstallerSha256 })
         $log = Join-Path $work 'windows-installer.log'
+        $config = Join-Path $root 'app\MangaFlow.cfg'
+        $previousHash = if (Test-Path -LiteralPath $config -PathType Leaf) { (Get-FileHash -LiteralPath $config).Hash }
         if ([IO.Path]::GetExtension($installer).Equals('.msi', [StringComparison]::OrdinalIgnoreCase)) {
             $arguments = '/i "' + $installer + '" /passive /norestart /L*v "' + $log + '"'
             $process = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList $arguments -PassThru -Wait
@@ -84,8 +140,18 @@ try {
         if ($process.ExitCode -notin @(0, 1641, 3010)) {
             throw "Windows installer returned $($process.ExitCode). Log: $log"
         }
-        Write-Result $true '安装已完成。'
-        if (-not $Elevated) { Start-OldOrNew }
+        if ($process.ExitCode -in @(1641, 3010)) {
+            $message = '安装已完成。请重启 Windows，再从开始菜单打开漫流。'
+        } elseif ((Test-Path -LiteralPath $config -PathType Leaf) -and (Get-FileHash -LiteralPath $config).Hash -ne $previousHash) {
+            Write-Result $true '安装已完成。'
+            Start-OldOrNew
+            exit 0
+        } else {
+            # An MSI launched from a portable image may have upgraded a different directory.
+            $message = '安装已完成。请从开始菜单打开新版漫流。'
+        }
+        Write-Result $true $message
+        Show-UpdateMessage $message 'Information'
         exit 0
     }
     if ($plan.Mode -ne 'incremental') { throw 'Unknown update operation.' }
@@ -211,14 +277,16 @@ try {
     exit 0
 } catch {
     $message = '更新未完成：' + $_.Exception.Message
-    try { Write-Result $false $message } catch {}
-    try {
-        Add-Type -AssemblyName PresentationFramework
-        [Windows.MessageBox]::Show($message, 'MangaFlow', 'OK', 'Warning') | Out-Null
-    } catch {}
-    if (-not $Elevated) { Start-OldOrNew }
+    try { [IO.File]::WriteAllText((Join-Path $work 'handoff-error.txt'), $message) } catch {}
+    if ($accepted) {
+        try { Write-Result $false $message } catch {}
+        Show-UpdateMessage $message 'Warning'
+        if (-not $Elevated) { Start-OldOrNew }
+    }
     exit 1
 } finally {
     if ($ownsMutex -and $null -ne $mutex) { $mutex.ReleaseMutex() }
     if ($null -ne $mutex) { $mutex.Dispose() }
+    if ($null -ne $running) { $running.Dispose() }
+    if ($null -ne $nativeLauncher) { $nativeLauncher.Dispose() }
 }

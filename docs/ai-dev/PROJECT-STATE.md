@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Windows 应用内安装交接 · 2026-11-21
+
+用户反馈「我已经下载完最新版了，在应用里面下载了。然后点击安装的话，它会直接把整个软件关掉」。截图为本机 0.1.0-local.1b9b9b0571de 更新到 0.1.458。缓存 MSI 的大小及 SHA-256 与 GitHub 发布资产吻合。Windows PowerShell 事件显示助手已启动，未留下安装器日志或安装结果。该本机构建使用 JDK 21.0.2；其 [jpackage 启动器](https://github.com/openjdk/jdk21u/blob/jdk-21.0.2%2B13/src/jdk.jpackage/windows/native/applauncher/WinLauncher.cpp) 在退出时结束同一 Job 内的助手，对应 JDK-8325203。
+
+通过本机 Windows WMI 将安装助手交给独立进程。助手获取实际应用进程后发出就绪信号，应用才请求保存退出。助手确认退出成功后开始安装。启动失败保留安装包及重试入口。完整安装到其他目录时提示从开始菜单打开新版；启动旧版时保留上次安装失败提示。验收仍需用实际 Windows 安装包核对完整安装和增量交接，现有 0.1.0-local.1b9b9b0571de 可用已下载的 MSI 从资源管理器手动安装。
+
 ## Windows 沉浸阅读与翻页 · 2026-11-21
 
 从主线 `f388ca4` 接续，用户原话、界面和交互落点见 [DESKTOP-READ-01–03](../design/reading-and-discovery-redesign-20261119.md#desktop-reader-fullscreen)。本次交付范围为 Windows 本机包，工作副本位于 `D:/Kayokoi/MangaFlowLocal/desktop-fullscreen-20261121`。实机阅读和触控板手感按仓库交付约定由用户确认。
