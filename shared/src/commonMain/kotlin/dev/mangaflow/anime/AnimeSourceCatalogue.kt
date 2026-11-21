@@ -17,9 +17,11 @@ internal fun projectAnimeSourceCatalogue(
     val explicit = binding?.automatic == false
     if (!explicit && !autoPlaySubjectMatches(subject, catalog.title)) return null
     val groups = catalog.episodes.groupBy { it.group }
+    val movieLines = if (explicit) emptyMap() else autoPlayMovieEpisodes(subject, catalog, binding?.selectedGroup)
     fun valid(rows: List<AnimeSourceEpisode>): Boolean {
         if (rows.isEmpty() || rows.map { it.id }.distinct().size != rows.size || rows.any { it.id.isBlank() }) return false
         if (explicit) return rows.all { it.number == null || it.number.isFinite() }
+        if (rows.size == 1 && movieLines[rows.single().group] == rows.single()) return true
         if (rows.any { it.kind != AnimeEpisodeKind.MAIN || it.number == null || !it.number.isFinite() || it.number <= 0.0 }) return false
         val numbers = rows.map { requireNotNull(it.number) }.sorted()
         if (numbers != numbers.indices.map { it + 1.0 } || rows.map { it.edition }.distinct().size != 1) return false
@@ -29,6 +31,7 @@ internal fun projectAnimeSourceCatalogue(
     }
     val group = binding?.selectedGroup?.takeIf { it in groups } ?: when {
         binding?.selectedGroup != null -> return null
+        movieLines.isNotEmpty() -> movieLines.keys.sorted().first()
         groups.size == 1 -> groups.keys.single()
         !explicit && (catalog.sameWorkRoutes || hasLmmCatalogWorkId(catalog.title)) &&
             groups.values.all(::valid) && groups.values.map { rows ->
@@ -36,12 +39,15 @@ internal fun projectAnimeSourceCatalogue(
         }.distinct().size == 1 -> groups.keys.sorted().first()
         else -> return null
     }
-    val rows = groups.getValue(group)
+    val movie = movieLines[group]
+    val rows = movie?.let(::listOf) ?: groups.getValue(group)
     if (!valid(rows)) return null
     val origin = listOf("source", catalog.title.sourceId, catalog.title.id, catalog.title.url, group).joinToString("\n")
     val observed = rows.map { episode ->
-        AnimeEpisode(animeCatalogEpisodeId(subject, origin, episode.id), subject.id, episode.title,
-            episode.number ?: 0.0, if (episode.number == null) AnimeEpisodeKind.OTHER else episode.kind)
+        AnimeEpisode(animeCatalogEpisodeId(subject, origin, episode.id), subject.id,
+            if (movie != null) "正片" else episode.title,
+            if (movie != null) 1.0 else episode.number ?: 0.0,
+            if (movie != null) AnimeEpisodeKind.MAIN else if (episode.number == null) AnimeEpisodeKind.OTHER else episode.kind)
     }
     val mappings = observed.zip(rows).associate { (local, source) -> local.id to source.id }
     val previous = detail.episodes

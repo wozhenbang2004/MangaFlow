@@ -315,6 +315,54 @@ internal fun hasLmmCatalogWorkId(title: AnimeSourceTitle): Boolean = when {
     else -> false
 }
 
+/** A film's complete feature has no episode number on many providers. Keep that
+ * source fact intact; the confirmed movie identity supplies the one-feature scope. */
+internal fun autoPlayMovieEpisodes(subject: AnimeSubject, catalog: AnimeSourceCatalog,
+    selectedGroup: String? = null): Map<String, AnimeSourceEpisode> {
+    if (subject.format != AnimeDiscoveryFormat.MOVIE || subject.episodeCount?.let { it != 1 } == true ||
+        catalog.title.episodeCount?.let { it != 1 } == true || catalog.notice != null ||
+        !autoPlaySubjectMatches(subject, catalog.title)) return emptyMap()
+    val groups = catalog.episodes.groupBy { it.group }
+    if (selectedGroup != null && selectedGroup !in groups) return emptyMap()
+    val sameWork = catalog.sameWorkRoutes || hasLmmCatalogWorkId(catalog.title) || when (catalog.title.sourceId) {
+        "anime-age" -> catalog.title.externalIds["age"] == catalog.title.id && groups.keys.all { group ->
+            group.substringAfterLast(" [", "").removeSuffix("]") in
+                setOf("xigua", "ffm3u8", "bfzym3u8", "wjm3u8", "lzm3u8")
+        }
+        "anime-girigiri" -> catalog.title.externalIds["girigiri"] == catalog.title.id &&
+            groups.keys.all { Regex("""^(chs|cht) \[\d+\]$""").matches(it) }
+        "anime-native-yzx" -> true // Its adapter reads one requested work's playUrlList.
+        else -> false
+    }
+    if (groups.size > 1 && !sameWork && selectedGroup == null) return emptyMap()
+    val names = animeCatalogueNames(subject).map(::episodeLabelText).toSet()
+    val completeFeature = Regex("""^(?:正片|全片|完整版|完整电影|完整電影|fullmovie|full|hd|bd|uhd|高清|超清|蓝光|藍光|4k|720p|1080p|2160p)(?:高清|超清|中字|国语|國語|粤语|粵語|英语|英語|中字版|版)*$""")
+    val candidates = groups.mapNotNull { (group, rows) ->
+        if (!sameWork && selectedGroup != null && group != selectedGroup) return@mapNotNull null
+        val feature = rows.singleOrNull { it.kind == AnimeEpisodeKind.MAIN } ?: return@mapNotNull null
+        if (feature.id.isBlank() || feature.url.isBlank() || rows.count { it.id == feature.id } != 1 ||
+            feature.number != null && feature.number != 1.0) return@mapNotNull null
+        val label = episodeLabelText(feature.title)
+        if (feature.number == null && label !in names && !completeFeature.matches(label)) return@mapNotNull null
+        group to feature
+    }.toMap()
+    val edition = if (selectedGroup != null) candidates[selectedGroup]?.edition
+        else candidates.values.map { it.edition }.distinct().singleOrNull()
+    return if (edition == null) emptyMap() else candidates.filterValues { it.edition == edition }
+}
+
+/** Use one correspondence rule for automatic bindings, status and playback options. */
+internal fun autoPlayEpisodeMatches(detail: AnimeDetail, requested: AnimeEpisode,
+    catalog: AnimeSourceCatalog, episode: AnimeSourceEpisode): Boolean {
+    if (episode.kind != requested.kind) return false
+    if (episode.number != null && episode.number == autoPlayEpisodeNumber(detail, requested, catalog)) return true
+    if (requested.kind != AnimeEpisodeKind.MAIN || requested.subjectId != detail.subject.id ||
+        detail.episodes.singleOrNull { it.kind == AnimeEpisodeKind.MAIN } != requested) return false
+    // Group admission remains with autoPlayGroups; a selected line may anchor
+    // one edition even when another edition is also present in the catalogue.
+    return autoPlayMovieEpisodes(detail.subject, catalog, episode.group)[episode.group] == episode
+}
+
 /** Group selection still requires the source's audited line contracts. */
 internal fun autoPlayGroup(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog): String? =
     autoPlayGroups(detail, requested, catalog).firstOrNull()
@@ -322,6 +370,11 @@ internal fun autoPlayGroup(detail: AnimeDetail, requested: AnimeEpisode, catalog
 internal fun autoPlayGroups(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog,
     selectedGroup: String? = null): List<String> {
     if (catalog.notice != null || catalog.episodes.isEmpty()) return emptyList()
+    if (requested.kind == AnimeEpisodeKind.MAIN && requested.subjectId == detail.subject.id &&
+        detail.episodes.singleOrNull { it.kind == AnimeEpisodeKind.MAIN } == requested) {
+        val movieLines = autoPlayMovieEpisodes(detail.subject, catalog, selectedGroup)
+        if (movieLines.isNotEmpty()) return movieLines.keys.toList()
+    }
     val subjectNumber = if (requested.kind == AnimeEpisodeKind.MAIN) subjectEpisodeNumber(detail, requested, catalog) else null
     val seasonOffset = if (requested.kind == AnimeEpisodeKind.MAIN && subjectNumber == null)
         autoSeasonCatalogOffset(detail, catalog) else null
