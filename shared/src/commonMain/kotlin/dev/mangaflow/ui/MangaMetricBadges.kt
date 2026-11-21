@@ -130,23 +130,60 @@ internal fun MangaMetricBadges(
     periodHeat: Boolean = false,
     onExpand: (() -> Unit)? = null,
 ) {
+    SourceMetricBadges(
+        identity = manga.id,
+        metrics = observedMangaMetrics(manga),
+        modifier = modifier,
+        foreground = foreground,
+        heatLabel = heatLabel,
+        compact = compact,
+        maxScores = maxScores,
+        showMore = showMore,
+        plain = plain,
+        valueSize = valueSize,
+        popularity = manga.popularity,
+        totalPopularity = manga.totalPopularity,
+        periodHeat = periodHeat || manga.rank != null,
+        onExpand = onExpand,
+    )
+}
+
+/** Manga and anime share the same measured values, source-mark stack and disclosure. */
+@Composable
+internal fun SourceMetricBadges(
+    identity: String,
+    metrics: List<MangaMetric>,
+    modifier: Modifier = Modifier,
+    foreground: Color = MaterialTheme.colorScheme.onSurface,
+    heatLabel: String = "热",
+    compact: Boolean = false,
+    maxScores: Int = Int.MAX_VALUE,
+    showMore: Boolean = !compact,
+    plain: Boolean = false,
+    valueSize: TextUnit? = null,
+    popularity: Long? = null,
+    totalPopularity: Long? = null,
+    periodHeat: Boolean = false,
+    sourceOrder: List<String> = emptyList(),
+    onExpand: (() -> Unit)? = null,
+) {
     val fan = LocalMetricSourceFan.current
-    val anchorKey = remember(manga.id) { Any() }
+    val anchorKey = remember(identity) { Any() }
     DisposableEffect(fan, anchorKey) {
         onDispose { if (fan != null && fan.request?.key === anchorKey) fan.clear() }
     }
-    val liveMetrics = observedMangaMetrics(manga)
     val ownFan by remember(fan, anchorKey) { derivedStateOf {
         fan?.request?.takeIf { it.key === anchorKey }
     } }
-    val metrics = ownFan?.metrics ?: liveMetrics
-    val heat = if (periodHeat || manga.rank != null) manga.popularity
-        else manga.totalPopularity ?: metrics.firstOrNull { it.sourceId == "copy" }?.popularity ?: manga.popularity
+    val displayedMetrics = ownFan?.metrics ?: metrics
+    val heat = if (periodHeat) popularity
+        else totalPopularity ?: displayedMetrics.firstOrNull { it.sourceId == "copy" }?.popularity ?: popularity
     val heatToken = remember(heat, heatLabel) {
         heat?.let { MetricToken(metricCount(it), metricCount(it), "$heatLabel $it", "copy", popularity = it) }
     }
-    val scores = remember(metrics, compact) { metrics.filter { it.score?.let { value -> value.isFinite() && value > 0 } == true }
-        .sortedBy { ReviewProviders.order(it.sourceId) }.map { metric ->
+    val scores = remember(displayedMetrics, compact, sourceOrder) { displayedMetrics.filter { it.score?.let { value -> value.isFinite() && value > 0 } == true }
+        .sortedWith(compareBy<MangaMetric> { sourceOrder.indexOf(it.sourceId).takeIf { index -> index >= 0 } ?: sourceOrder.size }
+            .thenBy { ReviewProviders.order(it.sourceId) }).map { metric ->
             val score = requireNotNull(metric.score)
             val nativeScore = metricScore(score) +
                 (if (metric.scoreScale > 0 && (!compact || metric.scoreScale != 10)) "/${metric.scoreScale}" else "")
@@ -177,8 +214,8 @@ internal fun MangaMetricBadges(
     if (heatToken == null && scores.isEmpty()) return
 
     val showOverflow = compact || showMore
-    val interaction = remember(manga.id) { MutableInteractionSource() }
-    var stackBounds by remember(manga.id) { mutableStateOf(Rect.Zero) }
+    val interaction = remember(identity) { MutableInteractionSource() }
+    var stackBounds by remember(identity) { mutableStateOf(Rect.Zero) }
     BoxWithConstraints(modifier) {
         val availableWidth = with(density) { maxWidth.roundToPx() }
         LaunchedEffect(availableWidth, density.fontScale) {
@@ -239,7 +276,7 @@ internal fun MangaMetricBadges(
         val expandStack = onExpand?.let { details ->
             {
                 if (fan != null && stack.isNotEmpty() && stackBounds.width > 0f && stackBounds.height > 0f) {
-                    fan.open(MetricSourceFanRequest(anchorKey, metrics, stackBounds,
+                    fan.open(MetricSourceFanRequest(anchorKey, displayedMetrics, stackBounds,
                         stack.map { item ->
                             MetricSourceFanItem(item.token.sourceId, item.token.fullValue, item.token.description,
                                 item.leftPx, item.widthPx, item.clipStartPx, item.markSize)
@@ -267,7 +304,7 @@ internal fun MangaMetricBadges(
             }
             if (stack.isNotEmpty()) MetricSourceStack(stack, foreground, lineHeight,
                 Modifier.then(if (expandStack != null) Modifier.clickable(
-                    interactionSource = remember(manga.id) { MutableInteractionSource() }, indication = null,
+                    interactionSource = remember(identity) { MutableInteractionSource() }, indication = null,
                     role = Role.Button, onClickLabel = "展开其余来源评分", onClick = expandStack)
                     .clearAndSetSemantics {
                         contentDescription = stack.joinToString("；") { it.token.description }

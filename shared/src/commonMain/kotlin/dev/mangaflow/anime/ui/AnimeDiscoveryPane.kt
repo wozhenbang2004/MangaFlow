@@ -24,7 +24,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.paneTitle
@@ -50,15 +49,10 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
     scrolls: AnimeDiscoveryScrolls, onOpenItem: (AnimeDiscoveryItem) -> Unit,
     onResume: (AnimeLibraryEntry) -> Unit, active: Boolean,
     contentBottomPadding: Dp = 24.dp) {
-    var scoreItem by remember { mutableStateOf<AnimeDiscoveryItem?>(null) }
-    var scoreVisible by remember { mutableStateOf(false) }
-    val browseActive = active && scoreItem == null
-    LaunchedEffect(active, state.discoveryTab) { scoreVisible = false }
+    val ratings = LocalAnimeRatings.current
+    val browseActive = active
     fun openScores(item: AnimeDiscoveryItem) {
-        if (browseActive) {
-            scoreItem = item
-            scoreVisible = true
-        }
+        if (browseActive) ratings.open(item.ratingRequest())
     }
     MotionTabContent(state.discoveryTab, Modifier.fillMaxSize(), contentKey = { it }, order = { it.ordinal }) { tab ->
         when (tab) {
@@ -93,10 +87,6 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                 }
             }
         }
-    }
-    scoreItem?.let { item ->
-        AnimeDiscoveryScorePanel(scoreVisible && active, item, backdrop,
-            onDismiss = { scoreVisible = false }, onClosed = { scoreItem = null })
     }
 }
 
@@ -378,41 +368,6 @@ private fun AnimeDiscoveryPartialStatus(feed: AnimeDiscoveryFeed, onRetry: (() -
         feed.sourceErrors.forEach { (source, error) -> add("${animeDiscoveryProviderLabel(source)} · $error") }
     }
     AnimeDiscoveryInlineStatus(label.joinToString("\n"), retry = onRetry, retryLabel = "重试资料", showIssue = true)
-}
-
-@Composable
-private fun AnimeDiscoveryScorePanel(visible: Boolean, item: AnimeDiscoveryItem, backdrop: HazeState,
-    onDismiss: () -> Unit, onClosed: () -> Unit) {
-    val heading = if (item.sourceScores.isEmpty()) "资料来源" else "来源评分"
-    MotionDialog(visible, onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 420.dp, onClosed = onClosed) {
-        AnimePanelSurface(backdrop, Modifier.padding(horizontal = 12.dp).fillMaxWidth()) {
-            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp)
-                .semantics { paneTitle = heading }) {
-                AnimeSectionTitle(heading, item.title, action = {
-                    MotionIconButton(onClick = onDismiss, enabled = visible, modifier = Modifier.size(44.dp),
-                        tooltip = "关闭$heading") {
-                        Icon(Icons.Outlined.Close, "关闭$heading", Modifier.size(19.dp))
-                    }
-                })
-                animeDiscoverySourceProviders(item).forEach { provider ->
-                    val score = item.sourceScores.firstOrNull { it.provider == provider }
-                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ReviewSourceMark(animeDiscoveryScoreSourceId(provider), size = 18.dp)
-                        Text(animeDiscoveryProviderLabel(provider), Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodyMedium)
-                        if (score == null) Text("暂无评分", color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.labelSmall)
-                        else Text(animeDiscoveryScoreText(score),
-                            Modifier.semantics {
-                                contentDescription = "${detailMetricScore(score.rating)} 分，满分 ${score.scale}"
-                            }, style = MaterialTheme.typography.titleMedium)
-                    }
-                }
-            }
-        }
-    }
 }
 
 private fun animeDiscoverySeasonTitle(query: AnimeDiscoveryQuery): String =

@@ -137,12 +137,13 @@ internal fun AnimeFeaturedCarousel(
         val inlineInformation = preferredWidth >= 224.dp && fontScale <= 1.3f
         val titleLines = if (window.shortHeight || fontScale > 1.3f) 1 else 2
         val footerLineHeight = when {
-            entries.any { it.sources.isNotEmpty() } -> maxOf(28.dp, (15f * fontScale).dp)
+            entries.any { it.discoveryItem == null && it.sources.isNotEmpty() } -> maxOf(28.dp, (15f * fontScale).dp)
             entries.any { it.caption.isNotBlank() } -> (15f * fontScale).dp
             else -> 0.dp
         }
+        val ratingLineHeight = if (entries.any { it.discoveryItem != null }) 24.dp * fontScale else 0.dp
         val captionHeight = if (inlineInformation) 0.dp else
-            ((10f + 20f * titleLines * fontScale).dp + footerLineHeight)
+            ((10f + 20f * titleLines * fontScale).dp + ratingLineHeight + footerLineHeight)
                 .coerceAtMost(itemHeight - 36.dp)
         val artworkHeight = (itemHeight - captionHeight).coerceAtLeast(1.dp)
         val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
@@ -285,6 +286,9 @@ private fun AnimeFeaturedCard(
     onOpen: (AnimeFeaturedEntry) -> Unit,
 ) {
     val context = LocalMangaContext.current
+    val scores = observedAnimeRatingSnapshot(entry.discoveryItem?.subject,
+        entry.discoveryItem?.sourceScores.orEmpty(), enabled = enabled).scores
+    val playbackSources = entry.sources.takeIf { entry.discoveryItem == null }.orEmpty()
     val motion = LocalMotionEnabled.current
     val interaction = remember(entry.key) { MutableInteractionSource() }
     val heroBackdrop = rememberHazeState()
@@ -404,15 +408,20 @@ private fun AnimeFeaturedCard(
                     .padding(vertical = if (inlineInformation) 6.dp else 4.dp),
                     verticalArrangement = Arrangement.spacedBy(if (inlineInformation) 8.dp else 2.dp,
                         if (inlineInformation) Alignment.CenterVertically else Alignment.Bottom)) {
-                    if (inlineInformation && entry.sources.isNotEmpty()) AnimeSourceBadge(entry.sources, ink = ink, compact = true,
+                    if (inlineInformation && playbackSources.isNotEmpty()) AnimeSourceBadge(playbackSources, ink = ink, compact = true,
                         enabled = sourcesEnabled, onClick = { onOpenSources(entry) })
                     Text(entry.title, Modifier.clearAndSetSemantics { }, color = ink,
                         style = MaterialTheme.typography.titleSmall.copy(fontSize = 14.sp, lineHeight = 20.sp),
                         fontWeight = FontWeight.Medium, minLines = if (inlineInformation) 1 else titleLines,
                         maxLines = if (inlineInformation) titleLines + 1 else titleLines, overflow = TextOverflow.Ellipsis)
-                    if ((!inlineInformation && entry.sources.isNotEmpty()) || entry.caption.isNotBlank()) Row(verticalAlignment = Alignment.CenterVertically,
+                    if (entry.discoveryItem != null) Box(Modifier.fillMaxWidth().heightIn(min = 22.dp * fontScale)) {
+                        AnimeRatingBadges(entry.key, scores, Modifier.fillMaxWidth(), foreground = ink,
+                            onExpand = ({ onOpenSources(entry.copy(discoveryItem = entry.discoveryItem.copy(sourceScores = scores))) })
+                                .takeIf { sourcesEnabled })
+                    }
+                    if ((!inlineInformation && playbackSources.isNotEmpty()) || entry.caption.isNotBlank()) Row(verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (!inlineInformation && entry.sources.isNotEmpty()) AnimeSourceBadge(entry.sources, ink = ink, compact = true,
+                        if (!inlineInformation && playbackSources.isNotEmpty()) AnimeSourceBadge(playbackSources, ink = ink, compact = true,
                             enabled = sourcesEnabled, onClick = { onOpenSources(entry) })
                         if (entry.caption.isNotBlank()) Text(entry.caption,
                             Modifier.weight(1f, fill = false).clearAndSetSemantics { }, color = ink.copy(alpha = .76f),

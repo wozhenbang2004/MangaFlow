@@ -172,6 +172,7 @@ internal fun AnimeSubjectRow(
     onOpen: () -> Unit,
     supporting: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
+    ratings: (@Composable () -> Unit)? = null,
 ) {
     val interaction = remember(subject.id) { MutableInteractionSource() }
     Row(modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
@@ -183,7 +184,8 @@ internal fun AnimeSubjectRow(
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Text(subject.title, style = MaterialTheme.typography.titleSmall,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall,
+            ratings?.invoke()
+            if (subtitle.isNotBlank()) Text(subtitle, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
             supporting?.invoke()
         }

@@ -175,7 +175,8 @@ internal fun AnimeLibrary(
                     entry.resume?.let { if (it.completed) "已看完本集" else animeTime(it.positionMs) +
                         (it.durationMs.takeIf { duration -> duration > 0L }?.let { duration -> " / " + animeTime(duration) } ?: "") },
                 ).joinToString(" · ")
-                AnimeSubjectRow(entry.subject, subtitle, onOpen = { onOpen(entry.subject) }, supporting = {
+                AnimeSubjectRow(entry.subject, subtitle, onOpen = { onOpen(entry.subject) },
+                    ratings = { AnimeSubjectRatings(entry.subject, enabled = active) }, supporting = {
                     val resume = entry.resume
                     if (resume != null && !resume.completed && resume.durationMs > 0L) {
                         AnimeWatchProgressLine((resume.positionMs.toFloat() / resume.durationMs).coerceIn(0f, 1f),

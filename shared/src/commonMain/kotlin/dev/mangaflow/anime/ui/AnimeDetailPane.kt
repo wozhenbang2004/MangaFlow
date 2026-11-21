@@ -193,7 +193,7 @@ internal fun AnimeDetailPane(
             fallback.forEach { (provider, info) ->
                 val check = state.detailScoreChecks[provider]
                 info.rating?.takeIf { it.isFinite() && it > 0 && it <= 10.0 &&
-                    (check == null || check.loading || check.error != null) }?.let {
+                    check == null }?.let {
                     add(AnimeSourceScore(provider, it, 10, info.ratingCount))
                 }
             }
@@ -338,7 +338,8 @@ internal fun AnimeDetailPane(
                 if (state.relatedSubjects.isNotEmpty()) {
                     item(key = "related-heading") { AnimeSectionTitle("相关番剧", modifier = Modifier.semantics { heading() }) }
                     items(state.relatedSubjects, key = { "related:" + it.id }) { related ->
-                        AnimeSubjectRow(related, animeSubjectSummary(related), onOpen = { onOpenRelated(related) })
+                        AnimeSubjectRow(related, animeSubjectSummary(related), onOpen = { onOpenRelated(related) },
+                            ratings = { AnimeSubjectRatings(related, enabled = active) })
                     }
                 }
                 return@LazyColumn
@@ -699,19 +700,11 @@ private fun AnimeDetailRatingStrip(
                 }.ifBlank { "评分来源" } + "，查看各站评分与人数"
             }, contentPadding = PaddingValues(0.dp),
             colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)) {
-            FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                scores.forEach { score ->
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        ReviewSourceMark(score.provider.name.lowercase(), size = 14.dp)
-                        Text(score.displayScore(), style = mangaMetricValueStyle(13.sp),
-                            maxLines = 1, softWrap = false)
-                    }
-                }
-                if (scores.isEmpty()) Text(if (loading) "正在读取评分" else "评分",
-                    style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-            }
+            if (scores.isNotEmpty()) AnimeRatingBadges(ownerId, scores, Modifier.weight(1f),
+                foreground = colors.onSurface, valueSize = 14.sp,
+                onExpand = ({ open = true }).takeIf { active })
+            else Text(if (loading) "正在读取评分" else "评分", Modifier.weight(1f),
+                style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
             Spacer(Modifier.width(6.dp))
             if (loading) MotionBusyIndicator(Modifier.size(14.dp))
             else Icon(if (error == null) Icons.Outlined.ChevronRight else Icons.Outlined.Info,
@@ -725,7 +718,8 @@ private fun AnimeDetailRatingStrip(
                     Icon(Icons.Outlined.Refresh, null, Modifier.size(18.dp))
                 }
             })
-            (scores.map { it.provider } + checks.keys).distinct().sortedBy { it.ordinal }.forEach { provider ->
+            (scores.map { it.provider } + checks.keys).distinct()
+                .sortedBy { if (it == AnimeDiscoveryProvider.DOUBAN) -1 else it.ordinal }.forEach { provider ->
                 val score = scores.firstOrNull { it.provider == provider }
                 val check = checks[provider]
                 Column(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {

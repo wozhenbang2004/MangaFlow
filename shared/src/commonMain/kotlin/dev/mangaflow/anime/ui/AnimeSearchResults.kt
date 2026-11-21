@@ -44,7 +44,8 @@ internal fun LazyListScope.animeSearchResults(
     }
     items(groups, key = { it.key }) { group ->
         group.subject?.let { subject ->
-            AnimeSubjectRow(subject, animeSubjectSummary(subject), onOpen = { onOpenSubject(subject) })
+            AnimeSubjectRow(subject, animeSubjectSummary(subject), onOpen = { onOpenSubject(subject) },
+                ratings = if (matchingReference) null else ({ AnimeSubjectRatings(subject) }))
         }
     }
     if (index.canLoadMore) item(key = "search-more") {

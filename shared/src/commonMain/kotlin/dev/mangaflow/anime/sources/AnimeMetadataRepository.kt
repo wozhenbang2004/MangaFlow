@@ -19,6 +19,9 @@ import dev.mangaflow.experience.ContentCacheKind
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.identity
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import kotlinx.coroutines.CancellationException
@@ -63,26 +66,33 @@ class AnimeMetadataRepository(context: PlatformContext) {
     }
 
     suspend fun cachedBrowse(mode: AnimeBrowseMode, query: String, page: Int, year: Int?, tag: String,
-        weekday: Int?): AnimeMetadataPage? = cache.read(browseKey(mode, query, page, year, tag, weekday))?.let {
+        weekday: Int?): AnimeMetadataPage? = cache.read(browseKey(mode, query, page, year, tag, weekday,
+            DownloadRoutingStore.activeSourceSnapshot(BANGUMI_PROVIDER, DownloadCategory.ANIME)))?.let {
             withContext(Dispatchers.Default) { runCatching { decodePage(it.text) }.getOrNull() }
         }
 
     suspend fun browse(mode: AnimeBrowseMode = AnimeBrowseMode.POPULAR, query: String = "", page: Int = 1,
-        year: Int? = null, tag: String = "", weekday: Int? = null, forceRefresh: Boolean = false): AnimeMetadataPage = withContext(Dispatchers.Default) {
+        year: Int? = null, tag: String = "", weekday: Int? = null, forceRefresh: Boolean = false,
+        route: DownloadRouteSnapshot = DownloadRoutingStore.activeSourceSnapshot(BANGUMI_PROVIDER, DownloadCategory.ANIME),
+    ): AnimeMetadataPage = withContext(Dispatchers.Default) {
         require(page > 0 && (page - 1L) * PAGE_SIZE <= Int.MAX_VALUE) { "分页位置无效。" }
         require(year == null || year in 1..9998) { "请输入有效年份。" }
         require(weekday == null || weekday in 1..7)
-        val key = browseKey(mode, query, page, year, tag, weekday)
+        fun checkRoute() { check(DownloadRoutingStore.activeSourceSnapshot(BANGUMI_PROVIDER, DownloadCategory.ANIME) == route) {
+            "Bangumi 网络线路已变化，请重新读取资料。"
+        } }
+        checkRoute()
+        val key = browseKey(mode, query, page, year, tag, weekday, route)
         val kind = when {
             query.isNotBlank() -> ContentCacheKind.SEARCH
             mode == AnimeBrowseMode.POPULAR -> ContentCacheKind.RANKING
             else -> ContentCacheKind.DISCOVERY
         }
         cache.read(key)?.takeIf { !forceRefresh && cache.isFresh(it, kind) }?.let {
-            runCatching { decodePage(it.text) }.getOrNull()?.let { cached -> return@withContext cached }
+            runCatching { decodePage(it.text) }.getOrNull()?.let { cached -> checkRoute(); return@withContext cached }
         }
         val cacheGeneration = cache.generation
-        val http = AnimeHttp(BANGUMI_PROVIDER)
+        val http = AnimeHttp(BANGUMI_PROVIDER, route)
         try {
             val result = if (mode == AnimeBrowseMode.CALENDAR && query.isBlank()) {
                 require(tag.isBlank()) { "每日番表暂不支持标签筛选，请切换排行或新番。" }
@@ -117,7 +127,9 @@ class AnimeMetadataRepository(context: PlatformContext) {
                 AnimeMetadataPage(rows.mapNotNull(::bangumiSubject), page,
                     rows.isNotEmpty() && if (total >= 0) offset + rows.size < total else rows.size >= PAGE_SIZE)
             }
+            checkRoute()
             cache.write(key, encodePage(result), cacheGeneration)
+            checkRoute()
             result
         } finally { http.close() }
     }
@@ -283,14 +295,22 @@ class AnimeMetadataRepository(context: PlatformContext) {
     }
 
     /** Search completion, detailed evidence and uniqueness are all required before automatic linking. */
-    private suspend fun resolveBangumiReference(primary: AnimeSubject): AnimeSubject? {
+    internal suspend fun resolveBangumiReference(primary: AnimeSubject,
+        route: DownloadRouteSnapshot = DownloadRoutingStore.activeSourceSnapshot(BANGUMI_PROVIDER, DownloadCategory.ANIME),
+        forceRefresh: Boolean = false,
+    ): AnimeSubject? {
+        fun checkRoute() { check(DownloadRoutingStore.activeSourceSnapshot(BANGUMI_PROVIDER, DownloadCategory.ANIME) == route) {
+            "Bangumi 网络线路已变化，请重新核对作品。"
+        } }
+        checkRoute()
         if (primary.year == null || primary.format == null) return null
         val names = (listOf(primary.originalTitle) + animeCatalogueNames(primary))
             .map(String::trim).filter { it.isNotBlank() && it.length <= 500 }.distinct().take(3)
         val candidates = linkedMapOf<String, AnimeSubject>()
         for (name in names) {
             for (page in 1..2) {
-                val result = browse(query = name, page = page, year = primary.year)
+                val result = browse(query = name, page = page, year = primary.year, forceRefresh = forceRefresh, route = route)
+                checkRoute()
                 result.items.filter { animeMetadataSubjectCandidate(primary, it) }.forEach { candidates[it.id] = it }
                 if (!result.hasMore) break
                 if (page == 2) error("同名资料检索尚未完整，暂不自动确认 Bangumi 条目。")
@@ -299,7 +319,8 @@ class AnimeMetadataRepository(context: PlatformContext) {
         if (candidates.size > 6) error("同名资料候选不唯一，暂不自动关联其他季度。")
         val verified = mutableListOf<AnimeSubject>()
         for (candidate in candidates.values) {
-            val full = subjectByBangumiId(requireNotNull(candidate.canonicalBangumiId())) ?: continue
+            val full = subjectByBangumiId(requireNotNull(candidate.canonicalBangumiId()), route) ?: continue
+            checkRoute()
             if (animeMetadataSubjectsMatch(primary, full)) verified += full
         }
         return verified.singleOrNull()
@@ -328,9 +349,11 @@ class AnimeMetadataRepository(context: PlatformContext) {
         } finally { http.close() }
     }
 
-    private fun browseKey(mode: AnimeBrowseMode, query: String, page: Int, year: Int?, tag: String, weekday: Int?) =
+    private fun browseKey(mode: AnimeBrowseMode, query: String, page: Int, year: Int?, tag: String, weekday: Int?,
+        route: DownloadRouteSnapshot) =
         JSONObject().put("mode", mode.name).put("query", query.trim()).put("page", page)
-            .put("year", year).put("tag", tag.trim()).put("weekday", weekday).toString()
+            .put("year", year).put("tag", tag.trim()).put("weekday", weekday)
+            .put("route", animeHash(route.identity())).toString()
     private fun encodePage(page: AnimeMetadataPage) = JSONObject().put("page", page.page)
         .put("hasMore", page.hasMore).put("items", JSONArray(page.items.map { AnimeDocumentCodec.subject(it) }))
         .put("error", page.error).toString()

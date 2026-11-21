@@ -77,6 +77,32 @@ internal fun AnimeWorkspace(
     onDestinationChange: (AnimeWorkspaceDestination) -> Unit = {},
     onOpenMangaDownloads: () -> Unit = {},
 ) {
+    AnimeRatingHost(controller, backdrop, active,
+        listOf(navigationRequest, searchRequest, backRequest, requestedDestination)) {
+        AnimeWorkspaceContent(controller, backdrop, navigation, navigationVisible, modifier, active,
+            searchRequest, backRequest, browseRequest, onBrowseRequestConsumed, onPlaybackVisibility,
+            requestedDestination, navigationRequest, onDestinationChange, onOpenMangaDownloads)
+    }
+}
+
+@Composable
+private fun AnimeWorkspaceContent(
+    controller: AnimeController,
+    backdrop: HazeState,
+    navigation: @Composable () -> Unit,
+    navigationVisible: Boolean = true,
+    modifier: Modifier = Modifier,
+    active: Boolean = true,
+    searchRequest: Int = 0,
+    backRequest: Int = 0,
+    browseRequest: Int = 0,
+    onBrowseRequestConsumed: () -> Unit = {},
+    onPlaybackVisibility: (Boolean) -> Unit = {},
+    requestedDestination: AnimeWorkspaceDestination = AnimeWorkspaceDestination.HOME,
+    navigationRequest: Int = 0,
+    onDestinationChange: (AnimeWorkspaceDestination) -> Unit = {},
+    onOpenMangaDownloads: () -> Unit = {},
+) {
     val state by controller.state.collectAsStateWithLifecycle()
     val playbackPhase by controller.playbackPhase.collectAsStateWithLifecycle()
     val sourceBrowseState by controller.sourceBrowse.state.collectAsStateWithLifecycle()
@@ -155,7 +181,7 @@ internal fun AnimeWorkspace(
         else -> AnimeRoute("home", 0)
     }
     val overlayVisible = downloadsVisible || sourcesVisible || sourceManagerVisible || trackingVisible || reviewsVisible ||
-        storagePresent || storageModelsVisible
+        storagePresent || storageModelsVisible || LocalAnimeRatings.current.obscured
     val displayedDestination = when {
         sourceManagerVisible -> AnimeWorkspaceDestination.SOURCES
         downloadsVisible -> AnimeWorkspaceDestination.DOWNLOADS

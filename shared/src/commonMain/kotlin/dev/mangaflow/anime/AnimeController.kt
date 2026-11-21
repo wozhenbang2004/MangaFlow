@@ -113,6 +113,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     internal val discussion by lazy { AnimeDiscussionController(context, scope, discovery, metadata) }
     private val tracking = AnimeTrackingRepository(context)
     private val library = AnimeLibraryStore.get(context)
+    internal val ratings by lazy { AnimeRatingsController(context, scope, metadata, discovery, douban, library) }
     private val routing = DownloadRoutingStore.get(context)
     private val mutableState = MutableStateFlow(AnimeScreenState())
     val state = mutableState.asStateFlow()
@@ -760,12 +761,17 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         ++previewGeneration
         resumeRequest = resumeEpisodeId?.let { subject.id to it }
         val candidates = currentVideoCandidates(sourceCandidates)
-        val scores = (observedScores + mutableState.value.discoveryFeeds.values.asSequence()
+        val ratingSnapshot = ratings.currentSnapshot(subject)
+        val seedScores = observedScores + mutableState.value.discoveryFeeds.values.asSequence()
             .flatMap { it.items.asSequence() }.filter { it.subject?.id == subject.id }
-            .flatMap { it.sourceScores.asSequence() }.toList()).distinctBy { it.provider }
+            .flatMap { it.sourceScores.asSequence() }.toList()
+        val scores = (ratingSnapshot?.scores.orEmpty() + seedScores.filter { score ->
+            val check = ratingSnapshot?.checks?.get(score.provider)
+            check == null
+        }).distinctBy { it.provider }
         mutableState.update { it.copy(
             detail = initialDetail, detailLoading = true, detailError = null,
-            detailScores = scores, detailScoreChecks = emptyMap(),
+            detailScores = scores, detailScoreChecks = ratingSnapshot?.checks.orEmpty().filterValues { !it.loading },
             groupSourceCandidates = candidates, associationChoices = emptyMap(),
             nativeMetadataSearch = null,
             detailFromCache = visitedDetail != null, relatedSubjects = visitedRelated,
@@ -1244,9 +1250,24 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 "AniList 未匹配到同一部番剧" else "AniList 暂无评分" }
                     }
                 }
-                if (current()) mutableState.update { it.copy(
-                    detailScores = it.detailScores.filterNot { value -> value.provider == provider } + listOfNotNull(score),
-                    detailScoreChecks = it.detailScoreChecks + (provider to AnimeScoreCheck(message = message))) }
+                if (current()) {
+                    mutableState.value.detail?.let { detail ->
+                        val accepted = ratings.accept(detail.subject, listOfNotNull(score),
+                            mapOf(provider to AnimeScoreCheck(message = message)), supplementarySubject(detail))
+                        if (accepted) mutableState.update { it.copy(
+                            detailScores = it.detailScores.filterNot { value -> value.provider == provider } + listOfNotNull(score),
+                            detailScoreChecks = it.detailScoreChecks + (provider to AnimeScoreCheck(message = message))) }
+                        else ratings.currentSnapshot(detail.subject)?.let { confirmed ->
+                            mutableState.update { it.copy(detailScores = confirmed.scores,
+                                detailScoreChecks = confirmed.checks +
+                                    (provider to (confirmed.checks[provider] ?: AnimeScoreCheck()).copy(loading = true))) }
+                            val checked = ratings.recheck(detail.subject, provider) ?: confirmed
+                            if (current()) mutableState.update {
+                                it.copy(detailScores = checked.scores, detailScoreChecks = checked.checks)
+                            }
+                        }
+                    }
+                }
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 if (current()) mutableState.update { it.copy(detailScoreChecks = it.detailScoreChecks +
