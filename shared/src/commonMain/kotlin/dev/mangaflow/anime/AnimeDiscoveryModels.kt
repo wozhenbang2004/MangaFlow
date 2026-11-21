@@ -1,8 +1,8 @@
 package dev.mangaflow.anime
 
 enum class AnimeDiscoveryTab { HOME, SEASON, CALENDAR, RANKING, GENRES, SOURCES }
-enum class AnimeDiscoveryProvider { BANGUMI, ANILIST }
-enum class AnimeDiscoveryOrder { RANK, POPULARITY, SCORE, TRENDING }
+enum class AnimeDiscoveryProvider { BANGUMI, ANILIST, DOUBAN }
+enum class AnimeDiscoveryOrder { RANK, POPULARITY, SCORE, TRENDING, NEWEST }
 enum class AnimeDiscoveryFormat { SERIES, MOVIE, SPECIAL, SHORT }
 enum class AnimeSeason(val startMonth: Int) { WINTER(1), SPRING(4), SUMMER(7), FALL(10) }
 
@@ -16,6 +16,8 @@ data class AnimeDiscoveryQuery(
     val calendar: Boolean = false,
     val weekday: Int? = null,
     val combined: Boolean = false,
+    val region: String = "",
+    val format: AnimeDiscoveryFormat? = null,
 )
 
 data class AnimeSourceScore(val provider: AnimeDiscoveryProvider, val rating: Double, val scale: Int,

@@ -105,7 +105,8 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
 
     fun open(subject: AnimeSubject?, confirmedNativeMetadata: AnimeSubject? = null) {
         val chosen = subject?.let { current ->
-            val metadata = if ("native-source" in current.externalIds) confirmedNativeMetadata else current
+            val metadata = if ("native-source" in current.externalIds || current.id.startsWith("douban:"))
+                confirmedNativeMetadata else current
             Selection(current.id, metadata?.takeIf { it.canonicalBangumiId() != null })
         }
         if (chosen == selection) return
@@ -170,6 +171,12 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
                 ?.takeIf { it.isNotEmpty() } ?: metadataRepository.detail(metadata).let {
                     it.episodes ?: error(it.episodeError ?: "暂时无法读取 Bangumi 剧集目录。")
                 }
+            if (episode.subjectId.startsWith("douban:")) {
+                // The local work owns progress; only its separately confirmed remote episode owns comments.
+                if (episode.metadataSubjectId != metadata.id || episode.metadataEpisodeId == null) return null
+                records.singleOrNull { it.id == episode.metadataEpisodeId && it.subjectId == metadata.id &&
+                    it.kind == episode.kind } ?: return null
+            } else {
             // A provider may number this season from 1 while Bangumi retains the series total.
             // Only a supplied season number is an alternate axis; never infer an offset or use position.
             val candidates = records.filter { it.kind == episode.kind &&
@@ -187,6 +194,7 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
                 (localNumbers == canonicalNumbers || localNumbers == seasonNumbers)
             if (!sameTitle && !(episode.kind == AnimeEpisodeKind.MAIN && sameNumbering)) return null
             candidate
+            }
         }
         val id = canonical.id.removePrefix("bangumi:").toIntOrNull()?.takeIf {
             it > 0 && canonical.id == "bangumi:$it" && canonical.subjectId == metadata.id

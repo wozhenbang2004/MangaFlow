@@ -72,8 +72,6 @@ import dev.chrisbanes.haze.blur.hazeBlur
 import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.anime.AnimeDiscoveryItem
 import dev.mangaflow.anime.AnimeSearchGroup
-import dev.mangaflow.experience.sourceNetwork
-import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.platform.*
 import dev.mangaflow.ui.FeaturedCoverColors
 import dev.mangaflow.ui.GlassSurfaceRole
@@ -138,8 +136,13 @@ internal fun AnimeFeaturedCarousel(
         val itemHeight = galleryHeight - footerHeight - 14.dp
         val inlineInformation = preferredWidth >= 224.dp && fontScale <= 1.3f
         val titleLines = if (window.shortHeight || fontScale > 1.3f) 1 else 2
+        val footerLineHeight = when {
+            entries.any { it.sources.isNotEmpty() } -> maxOf(28.dp, (15f * fontScale).dp)
+            entries.any { it.caption.isNotBlank() } -> (15f * fontScale).dp
+            else -> 0.dp
+        }
         val captionHeight = if (inlineInformation) 0.dp else
-            ((10f + 20f * titleLines * fontScale).dp + maxOf(30.dp, (15f * fontScale).dp))
+            ((10f + 20f * titleLines * fontScale).dp + footerLineHeight)
                 .coerceAtMost(itemHeight - 36.dp)
         val artworkHeight = (itemHeight - captionHeight).coerceAtLeast(1.dp)
         val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
@@ -305,8 +308,8 @@ private fun AnimeFeaturedCard(
         }
     }
     val request = remember(context, entry.coverUrl, entry.sourceId, imageWidthPx, imageHeightPx, motion) {
-        ImageRequest.Builder(imagePlatformContext(context)).data(entry.coverUrl)
-            .sourceNetwork(entry.sourceId, DownloadCategory.ANIME).softwareBitmap().size(imageWidthPx, imageHeightPx)
+        ImageRequest.Builder(imagePlatformContext(context)).animeArtwork(entry.coverUrl, entry.sourceId)
+            .softwareBitmap().size(imageWidthPx, imageHeightPx)
             .crossfade(if (motion) MangaMotion.Quick else 0).build()
     }
     // The sharp poster and blurred field share the same bounded decode.
@@ -401,15 +404,15 @@ private fun AnimeFeaturedCard(
                     .padding(vertical = if (inlineInformation) 6.dp else 4.dp),
                     verticalArrangement = Arrangement.spacedBy(if (inlineInformation) 8.dp else 2.dp,
                         if (inlineInformation) Alignment.CenterVertically else Alignment.Bottom)) {
-                    if (inlineInformation) AnimeSourceBadge(entry.sources, ink = ink, compact = true,
+                    if (inlineInformation && entry.sources.isNotEmpty()) AnimeSourceBadge(entry.sources, ink = ink, compact = true,
                         enabled = sourcesEnabled, onClick = { onOpenSources(entry) })
                     Text(entry.title, Modifier.clearAndSetSemantics { }, color = ink,
                         style = MaterialTheme.typography.titleSmall.copy(fontSize = 14.sp, lineHeight = 20.sp),
                         fontWeight = FontWeight.Medium, minLines = if (inlineInformation) 1 else titleLines,
                         maxLines = if (inlineInformation) titleLines + 1 else titleLines, overflow = TextOverflow.Ellipsis)
-                    if (!inlineInformation || entry.caption.isNotBlank()) Row(verticalAlignment = Alignment.CenterVertically,
+                    if ((!inlineInformation && entry.sources.isNotEmpty()) || entry.caption.isNotBlank()) Row(verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (!inlineInformation) AnimeSourceBadge(entry.sources, ink = ink, compact = true,
+                        if (!inlineInformation && entry.sources.isNotEmpty()) AnimeSourceBadge(entry.sources, ink = ink, compact = true,
                             enabled = sourcesEnabled, onClick = { onOpenSources(entry) })
                         if (entry.caption.isNotBlank()) Text(entry.caption,
                             Modifier.weight(1f, fill = false).clearAndSetSemantics { }, color = ink.copy(alpha = .76f),

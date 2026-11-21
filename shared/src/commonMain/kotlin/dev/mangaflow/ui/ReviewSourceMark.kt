@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.sp
 
 internal fun reviewSourceAccent(id: String, onDark: Boolean): Color = when (id) {
     "copy" -> if (onDark) Color(0xFFA8BED2) else Color(0xFF567593)
+    "douban" -> if (onDark) Color(0xFFADD0B3) else Color(0xFF527C5B)
     "bangumi" -> if (onDark) Color(0xFFE9B1C8) else Color(0xFF9D5C78)
     "anilist" -> if (onDark) Color(0xFFAFCBE9) else Color(0xFF53749A)
     "mangaupdates" -> if (onDark) Color(0xFFD4BFE8) else Color(0xFF7B638F)
@@ -95,6 +96,7 @@ internal fun ReviewSourceMark(
             heat -> Icon(Icons.Outlined.LocalFireDepartment, null, tint = color,
                 modifier = Modifier.size(size * (.88f * fontScale)))
             id == "copy" -> CopySourceWordmark(Modifier.requiredSize(size * fontScale))
+            id == "douban" -> TextSourceWordmark("豆", Modifier.requiredSize(size * fontScale), color)
             id == "kitsu" -> {
                 Icon(KitsuGlyph, null, tint = color,
                     modifier = Modifier.size(size * (.92f * fontScale)))

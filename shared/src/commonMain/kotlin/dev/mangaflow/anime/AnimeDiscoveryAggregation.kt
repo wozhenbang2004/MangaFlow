@@ -14,17 +14,20 @@ internal fun animeDiscoveryPeerQuery(query: AnimeDiscoveryQuery): AnimeDiscovery
     val provider = when (query.provider) {
         AnimeDiscoveryProvider.BANGUMI -> AnimeDiscoveryProvider.ANILIST
         AnimeDiscoveryProvider.ANILIST -> AnimeDiscoveryProvider.BANGUMI
+        AnimeDiscoveryProvider.DOUBAN -> return null
     }
     val tag = query.tag.trim()
     val peerTag = if (tag.isBlank()) "" else when (provider) {
         AnimeDiscoveryProvider.BANGUMI -> animeDiscoveryGenreLabels[tag]
         AnimeDiscoveryProvider.ANILIST -> animeDiscoveryGenreLabels.entries.singleOrNull { it.value == tag }?.key
+        AnimeDiscoveryProvider.DOUBAN -> return null
     } ?: return null
     return query.copy(provider = provider, tag = peerTag, combined = false)
 }
 
 internal val AnimeDiscoveryItem.discoveryProvider: AnimeDiscoveryProvider?
     get() = when {
+        subject?.canonicalDoubanId() != null -> AnimeDiscoveryProvider.DOUBAN
         subject?.id?.startsWith("bangumi:") == true -> AnimeDiscoveryProvider.BANGUMI
         reference?.sourceId == "anime-anilist" -> AnimeDiscoveryProvider.ANILIST
         key.startsWith("bangumi:") -> AnimeDiscoveryProvider.BANGUMI
@@ -89,6 +92,7 @@ private class DiscoveryWork(val item: AnimeDiscoveryItem) {
 
     fun compatible(other: DiscoveryWork): Boolean =
         provider != null && other.provider != null && provider != other.provider &&
+            provider != AnimeDiscoveryProvider.DOUBAN && other.provider != AnimeDiscoveryProvider.DOUBAN &&
             (item.year == null || other.item.year == null || item.year == other.item.year) &&
             (item.format == null || other.item.format == null || item.format == other.item.format) &&
             !conflictingAnimeIds(ids, other.ids) && !animeWorkTitlesConflict(titles, other.titles,
@@ -129,8 +133,9 @@ private fun AnimeDiscoveryItem.discoveryKeys(): List<String> = listOfNotNull(
 
 private fun AnimeDiscoveryItem.withDiscoveryScore(): AnimeDiscoveryItem {
     val provider = discoveryProvider ?: return this
+    if (sourceScores.any { it.provider == provider }) return this
     val value = rating?.takeIf { ratingScale > 0 && it in 0.0..ratingScale.toDouble() } ?: return this
-    return copy(sourceScores = listOf(AnimeSourceScore(provider, value, ratingScale)))
+    return copy(sourceScores = sourceScores + AnimeSourceScore(provider, value, ratingScale, subject?.ratingCount))
 }
 
 private fun mergeDiscoveryWorks(left: AnimeDiscoveryItem, right: AnimeDiscoveryItem): AnimeDiscoveryItem {

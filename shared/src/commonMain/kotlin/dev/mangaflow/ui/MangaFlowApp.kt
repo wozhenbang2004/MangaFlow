@@ -1835,7 +1835,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             model.services.anime.closeDetail()
                                             model.services.anime.configureDiscovery(dev.mangaflow.anime.AnimeDiscoveryTab.RANKING,
                                                 dev.mangaflow.anime.AnimeDiscoveryQuery(provider = provider,
-                                                    order = dev.mangaflow.anime.AnimeDiscoveryOrder.RANK))
+                                                    order = when (provider) {
+                                                        dev.mangaflow.anime.AnimeDiscoveryProvider.DOUBAN -> dev.mangaflow.anime.AnimeDiscoveryOrder.POPULARITY
+                                                        dev.mangaflow.anime.AnimeDiscoveryProvider.BANGUMI -> dev.mangaflow.anime.AnimeDiscoveryOrder.RANK
+                                                        dev.mangaflow.anime.AnimeDiscoveryProvider.ANILIST -> dev.mangaflow.anime.AnimeDiscoveryOrder.TRENDING
+                                                    }))
                                             animeBrowseRequest++
                                             changeSection(Section.ANIME)
                                         },

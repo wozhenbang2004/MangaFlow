@@ -20,6 +20,9 @@ data class AnimeSubject(
     val rank: Int? = null,
     /** Number of ratings returned by the metadata provider; never collection popularity. */
     val ratingCount: Int? = null,
+    val format: AnimeDiscoveryFormat? = null,
+    /** Complete names supplied by the catalogue, never a title with its season removed. */
+    val aliases: List<String> = emptyList(),
 )
 
 enum class AnimeEpisodeKind { MAIN, SPECIAL, OPENING, ENDING, TRAILER, OTHER }
@@ -34,9 +37,17 @@ data class AnimeEpisode(
     val airDate: String? = null,
     /** Episode number within this subject, when the metadata provider supplies one. */
     val numberInSubject: Double? = null,
+    /** Confirmed remote Bangumi identities; the local episode ID retains its own work owner. */
+    val metadataEpisodeId: String? = null,
+    val metadataSubjectId: String? = null,
 )
 
-data class AnimeDetail(val subject: AnimeSubject, val episodes: List<AnimeEpisode>)
+data class AnimeDetail(
+    val subject: AnimeSubject,
+    val episodes: List<AnimeEpisode>,
+    /** Optional, confirmed supplementary metadata. It never replaces the primary catalogue's presentation. */
+    val metadataSubject: AnimeSubject? = null,
+)
 
 data class AnimeSourceTitle(
     val sourceId: String,
@@ -145,8 +156,12 @@ data class AnimeLibraryEntry(
     val pinned: Boolean = false,
     /** Explicit per-work exclusions survive background association and process restarts. */
     val excludedSourceIds: Set<String> = emptySet(),
-    /** A user-confirmed reference for native work information and work-level discussion. */
+    /** A user-confirmed Bangumi reference for native or Douban works; automatic links belong to detail metadata. */
     val nativeMetadata: AnimeSubject? = null,
+    /** An explicit Douban unlink survives background metadata resolution and process restarts. */
+    val metadataAutoMatchDisabled: Boolean = false,
+    /** Stable Douban episode ownership survives disposable metadata-cache cleanup. */
+    val catalogDetail: AnimeDetail? = null,
 )
 
 data class AnimeSourceBinding(
@@ -432,5 +447,10 @@ data class AnimeNativeMetadataSearch(
 
 internal fun AnimeSubject.canonicalBangumiId(): Int? = externalIds["bangumi"]?.toIntOrNull()?.takeIf {
     it > 0 && id == "bangumi:$it" && externalIds["bangumi"] == it.toString() &&
+        "native-source" !in externalIds
+}
+
+internal fun AnimeSubject.canonicalDoubanId(): Long? = externalIds["douban"]?.toLongOrNull()?.takeIf {
+    it > 0L && id == "douban:$it" && externalIds["douban"] == it.toString() &&
         "native-source" !in externalIds
 }

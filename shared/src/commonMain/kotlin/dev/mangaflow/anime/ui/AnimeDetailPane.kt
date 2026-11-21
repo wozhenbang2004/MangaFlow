@@ -58,9 +58,8 @@ import dev.mangaflow.anime.AnimeSourceScore
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeWatchProgress
 import dev.mangaflow.anime.AnimeWatchStatus
-import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
-import dev.mangaflow.experience.sourceNetwork
-import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.anime.canonicalBangumiId
+import dev.mangaflow.anime.canonicalDoubanId
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
@@ -97,6 +96,8 @@ internal fun AnimeDetailPane(
     val subject = detail.subject
     val nativeSource = subject.externalIds["native-source"]
     val native = nativeSource != null
+    val douban = subject.canonicalDoubanId() != null
+    val supportsMetadataLink = native || douban
     val currentDiscussion by controller.discussion.state.collectAsStateWithLifecycle()
     val discussion = currentDiscussion.takeIf { it.subjectId == subject.id }
     var detailTab by rememberSaveable(subject.id, "detail-sections") { mutableIntStateOf(0) }
@@ -129,7 +130,8 @@ internal fun AnimeDetailPane(
         selectedGroup != null && catalog.episodes.none { it.group == selectedGroup }
     } == true
     val entry = state.library.firstOrNull { it.subject.id == subject.id }
-    val nativeMetadata = entry?.nativeMetadata.takeIf { native }
+    val linkedMetadata = (detail.metadataSubject ?: entry?.nativeMetadata.takeIf { supportsMetadataLink })
+        ?.takeIf { it.canonicalBangumiId() != null }
     val metadataSearch = state.nativeMetadataSearch?.takeIf { it.subjectId == subject.id }
     var metadataQuery by rememberSaveable(subject.id, "metadata-query") { mutableStateOf(subject.title) }
     var reviewedMetadata by rememberSaveable(subject.id, "metadata-candidate") { mutableStateOf<String?>(null) }
@@ -163,27 +165,37 @@ internal fun AnimeDetailPane(
         ?: main.firstOrNull() ?: extra.firstOrNull { it.id !in completed } ?: extra.firstOrNull()
     val firstAvailability = first?.let { controller.episodeAvailability(it.id, state) }
     val awaitingSources = state.associationChoices.filterValues { it.isNotEmpty() }.keys
-    val sourceNames = (bindings.sortedBy { it.catalog.sourceId != state.preferredSourceId }.map { it.catalog.sourceId } +
-        state.groupSourceCandidates.map { it.sourceId } + awaitingSources).distinct()
+    val linkedSourceIds = bindings.sortedBy { it.catalog.sourceId != state.preferredSourceId }
+        .map { it.catalog.sourceId }.distinct()
+    val sourceNames = linkedSourceIds
         .map { it to animeSourceName(it, state) }
-    val linkedSourceCount = bindings.map { it.catalog.sourceId }.distinct().size
+    val pendingSourceCount = (state.groupSourceCandidates.map { it.sourceId } + awaitingSources)
+        .distinct().count { it !in linkedSourceIds }
+    val linkedSourceCount = linkedSourceIds.size
     val sourceSummary = when {
-        linkedSourceCount > 0 -> "$linkedSourceCount 个已关联片源"
-        sourceNames.isNotEmpty() -> "${sourceNames.size} 个来源待确认"
+        linkedSourceCount > 0 -> "$linkedSourceCount 个已关联片源" +
+            if (pendingSourceCount > 0) " · $pendingSourceCount 个待确认" else ""
+        pendingSourceCount > 0 -> "$pendingSourceCount 个来源待确认"
         else -> null
     }
     val incompleteSources = (state.sourceCatalogs.filter {
         !it.notice.isNullOrBlank() && it != pendingNativeCatalog
     }.map { it.title.sourceId } + state.sourceCatalogErrors.keys).distinct()
-    val canonicalInfo = if (native) nativeMetadata else subject
-    val detailScores = remember(state.detailScores, state.detailScoreChecks, canonicalInfo) {
+    val canonicalInfo = subject.takeIf { it.canonicalBangumiId() != null } ?: linkedMetadata
+    val detailScores = remember(state.detailScores, state.detailScoreChecks, subject, canonicalInfo) {
         buildList {
             addAll(state.detailScores.filter { it.scale > 0 && it.rating.isFinite() &&
                 it.rating > 0 && it.rating <= it.scale.toDouble() })
-            val check = state.detailScoreChecks[AnimeDiscoveryProvider.BANGUMI]
-            canonicalInfo?.rating?.takeIf { it > 0 && it <= 10.0 &&
-                (check == null || check.loading || check.error != null) }?.let {
-                add(AnimeSourceScore(AnimeDiscoveryProvider.BANGUMI, it, 10, canonicalInfo.ratingCount))
+            val fallback = listOfNotNull(
+                subject.takeIf { douban }?.let { AnimeDiscoveryProvider.DOUBAN to it },
+                canonicalInfo?.let { AnimeDiscoveryProvider.BANGUMI to it },
+            )
+            fallback.forEach { (provider, info) ->
+                val check = state.detailScoreChecks[provider]
+                info.rating?.takeIf { it.isFinite() && it > 0 && it <= 10.0 &&
+                    (check == null || check.loading || check.error != null) }?.let {
+                    add(AnimeSourceScore(provider, it, 10, info.ratingCount))
+                }
             }
         }.distinctBy { it.provider }
     }
@@ -223,11 +235,11 @@ internal fun AnimeDetailPane(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = horizontal),
                     onRetry = { controller.discussion.retry(subject.id, it) },
                     onPresence = { discussionChecksPresent = it })
-                if (native && nativeMetadata == null) {
+                if (supportsMetadataLink && canonicalInfo == null) {
                     Box(Modifier.padding(horizontal = horizontal, vertical = 8.dp)) {
-                        AnimeDetailStatus("关联这部番后即可看评论", Icons.Outlined.Info,
-                            detail = "选择对应作品和季度，评论会显示在这里。",
-                            actionLabel = "关联 Bangumi", onAction = { selectDetailTab(1) })
+                        AnimeDetailStatus("补充评论资料", Icons.Outlined.Info,
+                            detail = "确认对应作品和季度后，可读取 Bangumi 等来源的评论。",
+                            actionLabel = "补充资料", onAction = { selectDetailTab(1) })
                     }
                 } else {
                     CommunityPanel(mangaId = "anime:${subject.id}", sources = commentSources,
@@ -260,7 +272,6 @@ internal fun AnimeDetailPane(
                 AnimeDetailHero(
                     subject = subject,
                     metadata = canonicalInfo,
-                    nativeSourceName = nativeSource?.let { animeSourceName(it, state) },
                     scores = detailScores,
                     scoresLoading = state.detailScoreLoading,
                     scoresError = state.detailScoreError,
@@ -299,12 +310,15 @@ internal fun AnimeDetailPane(
             }
             if (detailTab == 1) {
                 item(key = "description") {
-                    val info = canonicalInfo?.copy(description = canonicalInfo.description.ifBlank { subject.description }) ?: subject
+                    val info = subject.copy(
+                        description = subject.description.ifBlank { canonicalInfo?.description.orEmpty() },
+                        tags = subject.tags.ifEmpty { canonicalInfo?.tags.orEmpty() },
+                    )
                     if (info.description.isNotBlank() || info.tags.isNotEmpty()) AnimeDetailDescription(info)
                     else AnimeMessage("暂无简介", subject.originalTitle.takeIf { it != subject.title && it.isNotBlank() })
                 }
-                if (native && !state.libraryReadUnavailable) {
-                    nativeMetadataPicker(nativeMetadata, metadataSearch, active, metadataQuery, reviewedMetadata,
+                if (supportsMetadataLink && !state.libraryReadUnavailable) {
+                    nativeMetadataPicker(linkedMetadata, metadataSearch, active, metadataQuery, reviewedMetadata,
                         unlinkMetadata,
                         onQueryChange = { metadataQuery = it },
                         onSearch = {
@@ -365,18 +379,16 @@ internal fun AnimeDetailPane(
                                     }
                                 }
                                 if (sourceNames.isNotEmpty()) {
-                                    AnimeSourceBadge(sourceNames, enabled = active,
-                                        modifier = Modifier.widthIn(max = 90.dp).semantics {
-                                            if (awaitingSources.isNotEmpty()) stateDescription = "有播放来源待确认"
+                                    AnimeSourceBadge(sourceNames, enabled = active, compact = true,
+                                        modifier = Modifier.heightIn(min = 44.dp).widthIn(max = 124.dp).semantics {
+                                            stateDescription = "$linkedSourceCount 个已关联片源" +
+                                                if (pendingSourceCount > 0) "，$pendingSourceCount 个待确认" else ""
                                         },
                                         onClick = { onSources(null) })
                                 } else {
-                                    MotionTextButton(onClick = { onSources(null) }, enabled = active,
-                                        modifier = Modifier.heightIn(min = 44.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp)) {
-                                        Icon(Icons.Outlined.Link, null, Modifier.size(18.dp))
-                                        Spacer(Modifier.width(4.dp))
-                                        Text("来源", maxLines = 1)
+                                    MotionIconButton(onClick = { onSources(null) }, enabled = active,
+                                        modifier = Modifier.size(44.dp), tooltip = "查看播放来源") {
+                                        Icon(Icons.Outlined.Link, "查看播放来源", Modifier.size(18.dp))
                                     }
                                 }
                             }
@@ -415,7 +427,8 @@ internal fun AnimeDetailPane(
                         Icons.Outlined.Info, loading = true,
                     )
                     state.detailError != null -> AnimeDetailStatus(
-                        if (detail.episodes.isEmpty()) "集数暂不可用" else "集数更新未完成",
+                        if (subject.canonicalDoubanId() != null && detail.episodes.isNotEmpty()) "资料补充未完成"
+                        else if (detail.episodes.isEmpty()) "集数暂不可用" else "集数更新未完成",
                         Icons.Outlined.CloudOff, detail = state.detailError,
                         actionLabel = "重试加载集数", actionIcon = Icons.Outlined.Refresh,
                         onAction = controller::retryCurrentDetail,
@@ -494,10 +507,10 @@ private fun LazyListScope.nativeMetadataPicker(
 ) {
     item(key = "native-metadata") {
         Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            AnimeSectionTitle("Bangumi 资料", linked?.let { listOfNotNull(it.title, it.year?.toString()).joinToString(" · ") }) {
+            AnimeSectionTitle("补充资料", linked?.let { listOfNotNull(it.title, it.year?.toString()).joinToString(" · ") }) {
                 if (search == null) MotionTextButton(onClick = onSearch,
                     enabled = active && query.isNotBlank(), modifier = Modifier.heightIn(min = 44.dp)) {
-                    Text(if (linked == null) "查找关联" else "更换关联")
+                    Text(if (linked == null) "关联 Bangumi" else "更换关联")
                 } else {
                     MotionIconButton(onClick = onClose, enabled = active && !search.saving,
                         modifier = Modifier.size(44.dp), tooltip = "关闭资料选择") {
@@ -528,7 +541,7 @@ private fun LazyListScope.nativeMetadataPicker(
                     search.loading -> AnimeDetailStatus("正在查找 ${search.query}", Icons.Outlined.Search, loading = true)
                     search.error != null -> AnimeDetailStatus("资料操作未完成", Icons.Outlined.Info, detail = search.error)
                     !unlink && search.candidates.isEmpty() -> AnimeQuietLabel("未找到 ${search.query} 的资料，可用原名或加上季度再搜索。")
-                    !unlink -> AnimeQuietLabel("选择相同作品与季度，以关联简介和作品评论。")
+                    !unlink -> AnimeQuietLabel("选择相同作品与季度，补充剧集与评论资料。")
                 }
             }
         }
@@ -560,7 +573,6 @@ private fun LazyListScope.nativeMetadataPicker(
 private fun AnimeDetailHero(
     subject: AnimeSubject,
     metadata: AnimeSubject?,
-    nativeSourceName: String?,
     scores: List<AnimeSourceScore>,
     scoresLoading: Boolean,
     scoresError: String?,
@@ -588,11 +600,8 @@ private fun AnimeDetailHero(
 ) {
     val colors = MaterialTheme.colorScheme
     val facts = listOfNotNull(
-        nativeSourceName,
         (subject.year ?: metadata?.year)?.toString(),
-        (subject.episodeCount ?: metadata?.episodeCount)?.takeIf { it > 0 }?.let {
-            if (native && subject.episodeCount == null) "Bangumi 共 $it 集" else "$it 集"
-        },
+        (subject.episodeCount ?: metadata?.episodeCount)?.takeIf { it > 0 }?.let { "$it 集" },
     ).joinToString(" · ")
     val alternateTitle = listOfNotNull(subject.originalTitle, metadata?.originalTitle, metadata?.title)
         .firstOrNull { it.isNotBlank() && it != subject.title }
@@ -605,9 +614,8 @@ private fun AnimeDetailHero(
         val posterWidth = minOf(maxWidth * if (stacked) .54f else .42f, 224.dp)
         val imageWidth = with(density) { (posterWidth.roundToPx() * 2).coerceIn(1, 1200) }
         val request = remember(context, artwork.coverUrl, artwork.externalIds, imageWidth, motion) {
-            val source = artwork.externalIds["native-source"] ?: BANGUMI_PROVIDER
-            ImageRequest.Builder(imagePlatformContext(context)).data(artwork.coverUrl)
-                .sourceNetwork(source, DownloadCategory.ANIME).size(imageWidth, imageWidth * 3 / 2)
+            ImageRequest.Builder(imagePlatformContext(context)).animeArtwork(artwork.coverUrl, animePosterSourceId(artwork))
+                .size(imageWidth, imageWidth * 3 / 2)
                 .crossfade(if (motion) MangaMotion.Quick else 0).build()
         }
         val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Fit)
@@ -645,7 +653,7 @@ private fun AnimeDetailHero(
                 if (facts.isNotBlank()) {
                     Text(facts, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
                 }
-                if (metadata != null || scores.isNotEmpty()) AnimeDetailRatingStrip(
+                if (metadata != null || subject.canonicalDoubanId() != null || scores.isNotEmpty()) AnimeDetailRatingStrip(
                     subject.id, scores, scoresLoading, scoresError, scoresMessage, scoreChecks,
                     backdrop, active, onRefreshScores, onRefreshScore, onRatingPresence,
                 )

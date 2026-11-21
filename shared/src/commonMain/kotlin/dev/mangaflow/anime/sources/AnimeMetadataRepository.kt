@@ -7,7 +7,14 @@ import dev.mangaflow.anime.AnimeEpisodeKind
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeBrowseMode
 import dev.mangaflow.anime.AnimeDocumentCodec
+import dev.mangaflow.anime.AnimeDiscoveryFormat
+import dev.mangaflow.anime.animeCatalogueNames
+import dev.mangaflow.anime.animeMetadataSubjectCandidate
+import dev.mangaflow.anime.animeMetadataSubjectsMatch
 import dev.mangaflow.anime.canonicalBangumiId
+import dev.mangaflow.anime.canonicalDoubanId
+import dev.mangaflow.anime.enrichAnimeCatalogueSubject
+import dev.mangaflow.anime.projectAnimeMetadataEpisodes
 import dev.mangaflow.experience.ContentCacheKind
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
@@ -19,20 +26,26 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** Official Bangumi v0 contract: bangumi/api/open-api/v0.yaml, read 2026-11-16. */
-data class AnimeMetadataPage(val items: List<AnimeSubject>, val page: Int, val hasMore: Boolean)
+data class AnimeMetadataPage(val items: List<AnimeSubject>, val page: Int, val hasMore: Boolean,
+    val error: String? = null)
 data class AnimeMetadataDetailResult(
     val subject: AnimeSubject?,
     val episodes: List<AnimeEpisode>?,
     val subjectError: String? = null,
     val episodeError: String? = null,
+    val metadataSubject: AnimeSubject? = null,
+    /** Exact remote records for a controller merge after a concurrent local-source bootstrap. */
+    val metadataEpisodes: List<AnimeEpisode>? = null,
 )
 internal class AnimeMetadataIdentityException(message: String) : IllegalStateException(message)
 
 class AnimeMetadataRepository(context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
     private val cache = AnimeMetadataCache.get(context)
+    private val douban = DoubanAnimeRepository(context)
 
     suspend fun discover(): List<AnimeSubject> = browse().items
     suspend fun search(query: String): List<AnimeSubject> = browse(query = query).items
@@ -109,14 +122,34 @@ class AnimeMetadataRepository(context: PlatformContext) {
         } finally { http.close() }
     }
 
-    suspend fun cachedDetail(subject: AnimeSubject): AnimeDetail? = cache.read("detail:${subject.id}")?.let {
-        withContext(Dispatchers.Default) { runCatching { AnimeDocumentCodec.detail(JSONObject(it.text)) }.getOrNull() }?.takeIf { detail -> detail.subject.id == subject.id }
+    suspend fun cachedDetail(subject: AnimeSubject): AnimeDetail? {
+        val stored = cache.read("detail:${subject.id}")?.let {
+            withContext(Dispatchers.Default) { runCatching { AnimeDocumentCodec.detail(JSONObject(it.text)) }.getOrNull() }
+                ?.takeIf { detail -> detail.subject.id == subject.id }
+        }
+        if (stored != null || subject.canonicalDoubanId() == null) return stored
+        return douban.cachedDetail(subject)?.let { AnimeDetail(it, emptyList()) }
+    }
+
+    /** Source bootstrap persists its real local catalogue without inventing a metadata association. */
+    suspend fun cacheCatalogDetail(detail: AnimeDetail) {
+        require(detail.subject.canonicalDoubanId() != null) { "请选择有效的豆瓣作品。" }
+        val cacheGeneration = cache.generation
+        AnimeDocumentCodec.validateDetail(detail)
+        val document = AnimeDocumentCodec.detail(detail)
+        cache.write("detail:${detail.subject.id}", document.toString(), cacheGeneration)
     }
 
     suspend fun detail(
         subject: AnimeSubject,
+        previous: AnimeDetail? = null,
+        reference: AnimeSubject? = null,
+        allowAutoMatch: Boolean = true,
+        onSubjectAvailable: suspend (AnimeSubject, String?) -> Unit = { _, _ -> },
         onEpisodesAvailable: suspend (List<AnimeEpisode>) -> Unit = {},
     ): AnimeMetadataDetailResult = withContext(Dispatchers.Default) {
+        if (subject.canonicalDoubanId() != null)
+            return@withContext doubanDetail(subject, previous, reference, allowAutoMatch, onSubjectAvailable, onEpisodesAvailable)
         require(subject.id.startsWith("bangumi:")) { "请选择有效的番剧条目。" }
         val id = animeNumericId(subject.id.removePrefix("bangumi:"))
         val key = "detail:${subject.id}"
@@ -177,6 +210,107 @@ class AnimeMetadataRepository(context: PlatformContext) {
         } finally { http.close() }
     }
 
+    private suspend fun doubanDetail(
+        subject: AnimeSubject,
+        previous: AnimeDetail?,
+        reference: AnimeSubject?,
+        allowAutoMatch: Boolean,
+        onSubjectAvailable: suspend (AnimeSubject, String?) -> Unit,
+        onEpisodesAvailable: suspend (List<AnimeEpisode>) -> Unit,
+    ): AnimeMetadataDetailResult {
+        require(previous == null || previous.subject.id == subject.id) { "本地目录属于另一部作品。" }
+        val cached = catalogueRead { cachedDetail(subject) }.getOrNull()
+        val baseline = previous?.takeIf { it.episodes.isNotEmpty() } ?: cached ?: previous
+        val mainRead = catalogueRead {
+            douban.detail(subject).also { require(it.canonicalDoubanId() == subject.canonicalDoubanId()) {
+                "豆瓣返回了其他作品的资料。"
+            } }
+        }
+        (mainRead.exceptionOrNull() as? AnimeMetadataIdentityException)?.let { throw it }
+        val readPrimary = mainRead.getOrNull() ?: previous?.subject ?: cached?.subject ?: subject
+        val primary = if (reference == null && !allowAutoMatch)
+            readPrimary.copy(externalIds = readPrimary.externalIds - "bangumi") else readPrimary
+        val subjectError = mainRead.exceptionOrNull()?.message ?: if (mainRead.isFailure) "豆瓣作品资料未能读取。" else null
+        onSubjectAvailable(primary, subjectError)
+
+        if (reference == null && !allowAutoMatch) {
+            val local = baseline?.episodes.orEmpty().map { it.copy(metadataEpisodeId = null, metadataSubjectId = null) }
+            return AnimeMetadataDetailResult(primary, local, subjectError)
+        }
+
+        val resolved = catalogueRead {
+            if (reference != null) {
+                require(reference.canonicalBangumiId() != null) { "手工资料关联缺少有效的 Bangumi 身份。" }
+                reference
+            } else {
+                val known = listOfNotNull(previous?.metadataSubject, cached?.metadataSubject)
+                    .firstOrNull { animeMetadataSubjectsMatch(primary, it) }
+                known ?: run {
+                    val lookup = withTimeoutOrNull(15_000L) { Result.success(resolveBangumiReference(primary)) }
+                        ?: error("Bangumi 资料匹配超时；豆瓣作品与播放来源保留，可稍后重试。")
+                    lookup.getOrThrow() ?: error("尚未确认同一部番剧的 Bangumi 资料；播放来源仍可独立匹配。")
+                }
+            }
+        }
+        val selected = resolved.getOrNull() ?: return AnimeMetadataDetailResult(primary, null, subjectError,
+            resolved.exceptionOrNull()?.message ?: "补充资料未能匹配。")
+        val supplementary = catalogueRead {
+            withTimeoutOrNull(15_000L) { detail(selected) }
+                ?: error("Bangumi 补充剧集读取超时；豆瓣作品与本地选集保留，可稍后重试。")
+        }
+        val loaded = supplementary.getOrNull() ?: return AnimeMetadataDetailResult(primary, null, subjectError,
+            supplementary.exceptionOrNull()?.message ?: "Bangumi 剧集资料未能读取。")
+        val metadata = loaded.subject?.let { fresh ->
+            // Legacy cache rows may predate format/alias fields; the freshly resolved record owns them.
+            fresh.copy(format = fresh.format ?: selected.format,
+                aliases = (fresh.aliases + selected.aliases).distinct().take(64))
+        } ?: selected
+        if (metadata.canonicalBangumiId() != selected.canonicalBangumiId() ||
+            reference == null && !animeMetadataSubjectsMatch(primary, metadata)) {
+            return AnimeMetadataDetailResult(primary, null, subjectError,
+                "补充资料与当前作品的年份、格式或季度不一致，已保留豆瓣作品和本地选集。")
+        }
+        val shown = enrichAnimeCatalogueSubject(primary, metadata)
+        val episodes = loaded.episodes?.let { remote ->
+            projectAnimeMetadataEpisodes(shown, AnimeDetail(metadata, remote), baseline)
+        }
+        episodes?.let { onEpisodesAvailable(it) }
+        val episodeError = loaded.episodeError ?: if (episodes?.any { it.metadataEpisodeId == null } == true)
+            "已保留本地选集；部分剧集尚未确认对应的 Bangumi 集记录。" else null
+        // The controller persists/caches its final merge under the current detail/restore/route fence.
+        // A supplementary request may have outlived a newly bootstrapped local source catalogue.
+        return AnimeMetadataDetailResult(shown, episodes, subjectError, episodeError, metadata, loaded.episodes)
+    }
+
+    /** Search completion, detailed evidence and uniqueness are all required before automatic linking. */
+    private suspend fun resolveBangumiReference(primary: AnimeSubject): AnimeSubject? {
+        if (primary.year == null || primary.format == null) return null
+        val names = (listOf(primary.originalTitle) + animeCatalogueNames(primary))
+            .map(String::trim).filter { it.isNotBlank() && it.length <= 500 }.distinct().take(3)
+        val candidates = linkedMapOf<String, AnimeSubject>()
+        for (name in names) {
+            for (page in 1..2) {
+                val result = browse(query = name, page = page, year = primary.year)
+                result.items.filter { animeMetadataSubjectCandidate(primary, it) }.forEach { candidates[it.id] = it }
+                if (!result.hasMore) break
+                if (page == 2) error("同名资料检索尚未完整，暂不自动确认 Bangumi 条目。")
+            }
+        }
+        if (candidates.size > 6) error("同名资料候选不唯一，暂不自动关联其他季度。")
+        val verified = mutableListOf<AnimeSubject>()
+        for (candidate in candidates.values) {
+            val full = subjectByBangumiId(requireNotNull(candidate.canonicalBangumiId())) ?: continue
+            if (animeMetadataSubjectsMatch(primary, full)) verified += full
+        }
+        return verified.singleOrNull()
+    }
+
+    /** A supplementary service's identity/read failure never discards the primary catalogue. */
+    private suspend fun <T> catalogueRead(block: suspend () -> T): Result<T> = try {
+        Result.success(block())
+    } catch (cancel: CancellationException) { throw cancel }
+    catch (failure: Exception) { Result.failure(failure) }
+
     private suspend fun <T> metadataRead(block: suspend () -> T): Result<T> = try {
         Result.success(block())
     } catch (cancel: CancellationException) { throw cancel }
@@ -198,11 +332,12 @@ class AnimeMetadataRepository(context: PlatformContext) {
         JSONObject().put("mode", mode.name).put("query", query.trim()).put("page", page)
             .put("year", year).put("tag", tag.trim()).put("weekday", weekday).toString()
     private fun encodePage(page: AnimeMetadataPage) = JSONObject().put("page", page.page)
-        .put("hasMore", page.hasMore).put("items", JSONArray(page.items.map { AnimeDocumentCodec.subject(it) })).toString()
+        .put("hasMore", page.hasMore).put("items", JSONArray(page.items.map { AnimeDocumentCodec.subject(it) }))
+        .put("error", page.error).toString()
     private fun decodePage(text: String): AnimeMetadataPage {
         val json = JSONObject(text)
         return AnimeMetadataPage(json.getJSONArray("items").objects().map { AnimeDocumentCodec.subject(it) },
-            json.getInt("page"), json.getBoolean("hasMore"))
+            json.getInt("page"), json.getBoolean("hasMore"), json.optString("error", null))
     }
     private companion object { const val PAGE_SIZE = 24 }
 }
@@ -231,7 +366,32 @@ internal fun bangumiSubject(json: JSONObject): AnimeSubject? {
         rank = json.optJSONObject("rating")?.positiveInt("rank") ?: json.positiveInt("rank"),
         ratingCount = json.optJSONObject("rating")?.optLong("total", -1L)
             ?.takeIf { it in 0..Int.MAX_VALUE.toLong() }?.toInt(),
+        format = when (json.text("platform")) {
+            "TV" -> AnimeDiscoveryFormat.SERIES
+            "剧场版" -> AnimeDiscoveryFormat.MOVIE
+            "OVA" -> AnimeDiscoveryFormat.SPECIAL
+            "WEB" -> if ((json.positiveInt("eps") ?: json.positiveInt("eps_count") ?: 0) > 1)
+                AnimeDiscoveryFormat.SERIES else null
+            else -> null
+        },
+        aliases = bangumiAliases(json),
     )
+}
+
+private fun bangumiAliases(json: JSONObject): List<String> {
+    fun values(value: Any?, depth: Int): List<String> {
+        if (depth > 4) return emptyList()
+        return when (value) {
+            is String -> listOf(value.trim())
+            is JSONArray -> (0 until minOf(value.length(), 64)).flatMap { values(value.opt(it), depth + 1) }
+            is JSONObject -> values(value.opt("v"), depth + 1)
+            else -> emptyList()
+        }
+    }
+    return json.optJSONArray("infobox")?.objects().orEmpty()
+        .filter { it.text("key") in setOf("别名", "中文名") }
+        .flatMap { values(it.opt("value"), 0) }
+        .filter { it.isNotBlank() && it.length <= 1000 }.distinct().take(64)
 }
 
 /** The legacy calendar API still advertises HTTP URLs for the HTTPS-capable official CDN.

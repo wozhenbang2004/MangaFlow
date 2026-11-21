@@ -94,12 +94,15 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
             contentKey = { (selected, snapshot) -> selected.id + ":" + selected.revision + ":" + (snapshot.selectedTitle?.id ?: "catalog") },
             order = { (_, snapshot) -> if (snapshot.selectedTitle == null) 0 else 1 }, modifier = Modifier.weight(1f).motionInputGate(contentActive)) { (shownSource, snapshot) ->
             val title = snapshot.selectedTitle
+            val openTitle: (AnimeSourceTitle) -> Unit = { candidate ->
+                if (!shownSource.videoSource && candidate.sourceId in setOf("anime-douban", "anime-lanerc-douban"))
+                    onChooseTitle(candidate, false)
+                else if (shownSource.videoSource && "related" !in shownSource.capabilities) onChooseTitle(candidate, true)
+                else owner.openTitle(candidate)
+            }
             if (title != null) AnimeSourcePreview(title, shownSource.name, shownSource.videoSource, snapshot,
-                columns, scrolls, contentBottomPadding, onChooseTitle, onOpen = owner::openTitle, onRetry = owner::retryRelated)
-            else AnimeSourceCatalogue(snapshot, columns, scrolls, contentBottomPadding, onOpen = { title ->
-                if (shownSource.videoSource && "related" !in shownSource.capabilities) onChooseTitle(title, true)
-                else owner.openTitle(title)
-            },
+                columns, scrolls, contentBottomPadding, onChooseTitle, onOpen = openTitle, onRetry = owner::retryRelated)
+            else AnimeSourceCatalogue(snapshot, columns, scrolls, contentBottomPadding, onOpen = openTitle,
                 onRetry = owner::retryPage, onMore = owner::loadMore)
         }
     }

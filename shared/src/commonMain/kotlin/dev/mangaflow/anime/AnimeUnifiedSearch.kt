@@ -1,6 +1,9 @@
 package dev.mangaflow.anime
 
 import dev.mangaflow.anime.sources.AnimeMetadataRepository
+import dev.mangaflow.anime.sources.DoubanAnimeRepository
+import dev.mangaflow.anime.sources.DOUBAN_PROVIDER
+import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
 import dev.mangaflow.anime.sources.AnimeProvider
 import dev.mangaflow.anime.sources.AnimeSourceRepository
 import dev.mangaflow.anime.sources.lanerc.LanercProvider
@@ -34,6 +37,8 @@ internal data class AnimeSearchIndex(
     val hasMore: Boolean = false,
     val loading: Boolean = false,
     val error: String? = null,
+    /** Stable completed prefix; a retried partial page replaces its own rows in remote order. */
+    val completedItems: List<AnimeSubject> = emptyList(),
 ) {
     val canLoadMore: Boolean get() = hasMore && !loading && error == null
 }
@@ -43,7 +48,8 @@ internal val AnimeSourceResult.canLoadMoreSearch: Boolean
 
 internal data class AnimeUnifiedSearchState(
     val query: String = "",
-    val indexOnly: Boolean = false,
+    val indexOnly: Boolean = true,
+    val catalogProvider: AnimeDiscoveryProvider = AnimeDiscoveryProvider.DOUBAN,
     val index: AnimeSearchIndex = AnimeSearchIndex(),
     val sources: List<AnimeSourceResult> = emptyList(),
     val groups: List<AnimeSearchGroup> = emptyList(),
@@ -54,6 +60,7 @@ internal class AnimeUnifiedSearch(
     private val scope: CoroutineScope,
     private val metadata: AnimeMetadataRepository,
     private val repository: AnimeSourceRepository,
+    private val douban: DoubanAnimeRepository,
 ) {
     private data class Route(val snapshot: DownloadRouteSnapshot?, val error: String? = null) {
         fun requireAvailable() = checkNotNull(snapshot) { error ?: "网络线路不可用。" }
@@ -80,9 +87,10 @@ internal class AnimeUnifiedSearch(
     private var firstPageIndexSubject: AnimeSubject? = null
     private var generation = 0L
 
-    fun search(query: String, indexOnly: Boolean) {
+    fun search(query: String, indexOnly: Boolean, provider: AnimeDiscoveryProvider = AnimeDiscoveryProvider.DOUBAN) {
+        require(provider == AnimeDiscoveryProvider.DOUBAN || provider == AnimeDiscoveryProvider.BANGUMI)
         val current = mutableState.value
-        if (query != current.query) {
+        if (query != current.query || provider != current.catalogProvider) {
             generation++
             indexJob?.cancel()
             sourceJobs.values.forEach { it.cancel() }
@@ -92,7 +100,7 @@ internal class AnimeUnifiedSearch(
             overlappingPages.clear()
             sourceKeys = emptyMap()
             indexRoute = null
-            mutableState.value = AnimeUnifiedSearchState(query = query, indexOnly = indexOnly)
+            mutableState.value = AnimeUnifiedSearchState(query = query, indexOnly = indexOnly, catalogProvider = provider)
         } else if (indexOnly != current.indexOnly) mutableState.value = current.copy(indexOnly = indexOnly)
         reconcile()
     }
@@ -100,7 +108,7 @@ internal class AnimeUnifiedSearch(
     fun reconcile() {
         val search = mutableState.value
         if (search.query.isBlank()) return
-        val route = routeFor(INDEX_ID)
+        val route = routeFor(indexId(search.catalogProvider))
         val refreshIndex = indexRoute != route
         val changedIndexRoute = indexRoute != null && refreshIndex
         if (refreshIndex) {
@@ -160,13 +168,15 @@ internal class AnimeUnifiedSearch(
         indexJob = scope.launch {
             fun current(): Boolean {
                 if (owner != generation || route != indexRoute) return false
-                if (route == routeFor(INDEX_ID)) return true
+                if (route == routeFor(indexId(state.catalogProvider))) return true
                 reconcile()
                 return false
             }
             try {
                 if (page == 1) {
-                    val cached = metadata.cachedBrowse(AnimeBrowseMode.POPULAR, state.query, page, null, "", null)
+                    val cached = if (state.catalogProvider == AnimeDiscoveryProvider.DOUBAN)
+                        douban.cachedSearch(state.query, page)
+                    else metadata.cachedBrowse(AnimeBrowseMode.POPULAR, state.query, page, null, "", null)
                     if (!current()) return@launch
                     if (cached != null && cached.page == page) {
                         val live = mutableState.value
@@ -174,8 +184,11 @@ internal class AnimeUnifiedSearch(
                     }
                 }
                 route.requireAvailable()
-                val result = withTimeoutOrNull(SEARCH_TIMEOUT_MILLIS) {
-                    metadata.browse(AnimeBrowseMode.POPULAR, state.query, page, null, "", null, forceRefresh = forceRefresh)
+                val result = withTimeoutOrNull(if (state.catalogProvider == AnimeDiscoveryProvider.DOUBAN)
+                    CATALOG_TIMEOUT_MILLIS else SEARCH_TIMEOUT_MILLIS) {
+                    if (state.catalogProvider == AnimeDiscoveryProvider.DOUBAN)
+                        douban.search(state.query, page, forceRefresh)
+                    else metadata.browse(AnimeBrowseMode.POPULAR, state.query, page, null, "", null, forceRefresh = forceRefresh)
                 } ?: error("番剧资料搜索超时，请重试。")
                 check(result.page == page) { "番剧资料返回了不同页码。" }
                 val subject = if (page == 1) withContext(Dispatchers.Default) {
@@ -187,9 +200,13 @@ internal class AnimeUnifiedSearch(
                     firstPageIndexTerms = bodySourceSearchTerms(state.query,
                         subject?.let { listOf(it.title, it.originalTitle) }.orEmpty())
                 }
+                val prefix = if (page == 1) emptyList() else previous.completedItems
+                val shown = (prefix + result.items).distinctBy(AnimeSubject::id)
                 publish(mutableState.value.copy(index = AnimeSearchIndex(
-                    items = ((if (page == 1) emptyList() else previous.items) + result.items).distinctBy(AnimeSubject::id),
-                    page = page, hasMore = result.hasMore)), regroup = true)
+                    items = shown,
+                    page = if (result.error == null) page else previous.page,
+                    hasMore = result.hasMore, error = result.error,
+                    completedItems = if (result.error == null) shown else prefix)), regroup = true)
                 if (page == 1) firstPageAttempts.keys.toList().forEach { sourceId ->
                     repository.provider(sourceId)?.let(::retryWithIndexTerms)
                 }
@@ -362,13 +379,20 @@ internal class AnimeUnifiedSearch(
     }
 
     private fun publish(state: AnimeUnifiedSearchState, regroup: Boolean = false) {
-        mutableState.value = if (regroup) state.copy(groups = groupAnimeSearch(
-            state.index.items, state.sources, state.groups, state.query)) else state
+        mutableState.value = if (regroup) state.copy(groups = if (state.indexOnly)
+            state.index.items.map { AnimeSearchGroup("subject:${it.id}", it) }
+        else groupAnimeSearch(state.index.items, state.sources, state.groups, state.query)) else state
     }
 
     private fun sourceKey(provider: AnimeProvider): Source? = runCatching {
         Source(provider.revision, routeFor(provider.id))
     }.getOrNull()
+
+    private fun indexId(provider: AnimeDiscoveryProvider): String = when (provider) {
+        AnimeDiscoveryProvider.DOUBAN -> DOUBAN_PROVIDER
+        AnimeDiscoveryProvider.BANGUMI -> BANGUMI_PROVIDER
+        AnimeDiscoveryProvider.ANILIST -> error("此资料源不支持主目录搜索。")
+    }
 
     private fun routeFor(sourceId: String): Route = try {
         Route(DownloadRoutingStore.activeSourceSnapshot(sourceId, DownloadCategory.ANIME))
@@ -379,7 +403,7 @@ internal class AnimeUnifiedSearch(
     private fun nextPage(page: Int): Int? = page.takeIf { it < Int.MAX_VALUE }?.plus(1)
 
     private companion object {
-        const val INDEX_ID = "anime-bangumi"
+        const val CATALOG_TIMEOUT_MILLIS = 24_000L
         const val SEARCH_TIMEOUT_MILLIS = 7_000L
         const val SEARCH_ALIAS_TIMEOUT_MILLIS = 2_250L
     }

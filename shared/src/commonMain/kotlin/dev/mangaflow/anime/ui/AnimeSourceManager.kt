@@ -171,8 +171,11 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                                 item(key = "builtin-browse-heading") { AnimeSectionTitle("作品与播出资料") }
                                 items(AnimeDiscoveryProvider.entries, key = { "builtin-browse:" + it.name }) { provider ->
                                     AnimeSelection(animeDiscoveryProviderLabel(provider),
-                                        if (provider == AnimeDiscoveryProvider.BANGUMI) "评分、新番、番表"
-                                        else "评分、人气、趋势", selected = false,
+                                        when (provider) {
+                                            AnimeDiscoveryProvider.DOUBAN -> "作品主目录、评分、分类"
+                                            AnimeDiscoveryProvider.BANGUMI -> "评分、新番、番表"
+                                            AnimeDiscoveryProvider.ANILIST -> "评分、人气、趋势"
+                                        }, selected = false,
                                         onClick = { pendingBrowse = provider; onDismiss() })
                                 }
                                 if (browse.isNotEmpty()) {

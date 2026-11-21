@@ -567,9 +567,13 @@ internal fun AnimePlayerPane(
             onPlayDownload = onPlayDownload, onSources = onSources, initialEnhancementPage = settingsEnhancementPage,
             onStorage = onStorage)
         discussionEpisode?.let { focused ->
-            val reference = detail?.subject?.takeIf { it.canonicalBangumiId() != null } ?:
-                state.library.firstOrNull { it.subject.id == focused.subjectId }?.nativeMetadata
-            AnimeEpisodeDiscussionPanel(discussionVisible, focused, detail?.episodes.orEmpty(), reference?.id,
+            val focusedDetail = detail?.takeIf { it.subject.id == focused.subjectId }
+            val reference = focusedDetail?.subject?.takeIf { it.canonicalBangumiId() != null }
+                ?: focusedDetail?.metadataSubject
+                ?: state.library.firstOrNull { it.subject.id == focused.subjectId &&
+                    it.subject.id.startsWith("native:") }?.nativeMetadata
+            val currentEpisode = focusedDetail?.episodes?.firstOrNull { it.id == focused.id && it.subjectId == focused.subjectId } ?: focused
+            AnimeEpisodeDiscussionPanel(discussionVisible, currentEpisode, focusedDetail?.episodes.orEmpty(), reference,
                 backdrop, controller, onDismiss = { discussionVisible = false; interact() },
                 onClosed = { if (!discussionVisible) discussionEpisode = null })
         }

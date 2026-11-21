@@ -37,6 +37,7 @@ internal data class AnimeAniListMatch(val id: Int, val malId: Int?, val rating: 
 class AnimeDiscoveryRepository(context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
     private val cache = AnimeMetadataCache.get(context)
+    private val douban = DoubanAnimeRepository(context)
     private val calendarMutex = Mutex()
 
     internal fun route(query: AnimeDiscoveryQuery): DownloadRouteSnapshot =
@@ -144,6 +145,7 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
         route: DownloadRouteSnapshot? = runCatching { route(query) }.getOrNull(),
     ): AnimeDiscoveryPage? {
         validate(query, page)
+        if (query.provider == AnimeDiscoveryProvider.DOUBAN) return douban.cachedBrowse(query, page, route)
         // Earlier versions did not record the route. Keep their displayable snapshots,
         // but revalidate them before treating a query as fresh on the current route.
         return route?.let { readCache(query, page, cacheKey(query, page, it), freshOnly = false) }
@@ -155,6 +157,7 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
         route: DownloadRouteSnapshot = route(query),
     ): AnimeDiscoveryPage {
         validate(query, page)
+        if (query.provider == AnimeDiscoveryProvider.DOUBAN) return douban.browse(query, page, forceRefresh, route)
         return if (query.calendar) calendarMutex.withLock {
             // Recheck the shared weekly cache after an earlier weekday request finishes.
             // Explicit refresh still bypasses that fresh copy and performs its own request.
@@ -247,6 +250,7 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
             AnimeDiscoveryOrder.POPULARITY -> "heat"
             AnimeDiscoveryOrder.SCORE -> "score"
             AnimeDiscoveryOrder.TRENDING -> throw IllegalArgumentException("Bangumi 暂不提供近期趋势排序。")
+            AnimeDiscoveryOrder.NEWEST -> throw IllegalArgumentException("Bangumi 此目录暂不提供最新排序。")
         }
         return http.json(BANGUMI_API.newBuilder().addPathSegments("search/subjects")
             .addQueryParameter("limit", PAGE_SIZE.toString())
@@ -260,6 +264,7 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
             AnimeDiscoveryOrder.POPULARITY -> "POPULARITY_DESC"
             AnimeDiscoveryOrder.SCORE -> "SCORE_DESC"
             AnimeDiscoveryOrder.RANK -> throw IllegalArgumentException("AniList 暂不提供 Bangumi 综合名次排序。")
+            AnimeDiscoveryOrder.NEWEST -> throw IllegalArgumentException("AniList 此目录暂不提供最新排序。")
         }
         val variables = JSONObject().put("page", page).put("perPage", PAGE_SIZE)
             .put("sort", JSONArray(listOf(sort)))
@@ -286,6 +291,7 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
         }
         val payload = document.getJSONObject("payload")
         return when (query.provider) {
+            AnimeDiscoveryProvider.DOUBAN -> error("豆瓣目录由独立的真实身份和缓存合同读取。")
             AnimeDiscoveryProvider.BANGUMI -> {
                 val total = payload.optLong("total", -1L)
                 require(total >= 0) { "Bangumi 没有返回分页总数。" }
@@ -370,7 +376,12 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
     }
 
     private fun validate(query: AnimeDiscoveryQuery, page: Int) {
+        if (query.provider == AnimeDiscoveryProvider.DOUBAN) {
+            douban.validateBrowse(query, page)
+            return
+        }
         require(page > 0) { "分页位置无效。" }
+        require(query.region.isBlank() && query.format == null) { "地区和作品形式筛选目前适用于豆瓣动画目录。" }
         require(query.year == null || query.year in 1..9998) { "请输入有效年份。" }
         require(query.season == null || query.year != null) { "季度筛选需要同时选择年份。" }
         require(query.weekday == null || query.weekday in 1..7) { "请选择有效的放送日。" }
@@ -382,12 +393,15 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
         } else {
             require(query.weekday == null) { "放送日筛选只适用于每日番表。" }
             when (query.provider) {
+                AnimeDiscoveryProvider.DOUBAN -> error("豆瓣目录已经完成筛选校验。")
                 AnimeDiscoveryProvider.BANGUMI -> {
                     require((page - 1L) * PAGE_SIZE <= Int.MAX_VALUE) { "分页位置无效。" }
                     require(query.order != AnimeDiscoveryOrder.TRENDING) { "Bangumi 暂不提供近期趋势排序。" }
+                    require(query.order != AnimeDiscoveryOrder.NEWEST) { "Bangumi 此目录暂不提供最新排序。" }
                 }
                 AnimeDiscoveryProvider.ANILIST -> {
                     require(query.order != AnimeDiscoveryOrder.RANK) { "AniList 暂不提供 Bangumi 综合名次排序。" }
+                    require(query.order != AnimeDiscoveryOrder.NEWEST) { "AniList 此目录暂不提供最新排序。" }
                     require(query.tag.isBlank() || query.tag.trim() in ANILIST_GENRES) { "请选择 AniList 支持的分类。" }
                 }
             }
@@ -411,6 +425,7 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
     }
 
     private fun providerId(query: AnimeDiscoveryQuery): String = when (query.provider) {
+        AnimeDiscoveryProvider.DOUBAN -> DOUBAN_PROVIDER
         AnimeDiscoveryProvider.BANGUMI -> BANGUMI_PROVIDER
         AnimeDiscoveryProvider.ANILIST -> ANILIST_PROVIDER
     }

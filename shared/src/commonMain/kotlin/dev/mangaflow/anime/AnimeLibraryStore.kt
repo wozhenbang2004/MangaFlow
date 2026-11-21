@@ -93,7 +93,8 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
     suspend fun editPlaybackAssociation(
         subject: AnimeSubject,
         editBindings: (List<AnimeSourceBinding>) -> List<AnimeSourceBinding>,
-    ): AnimeLibraryEntry = editInternal(subject, null, false, editBindings, { it }, sessionAllowed = true)
+        transform: (AnimeLibraryEntry) -> AnimeLibraryEntry = { it },
+    ): AnimeLibraryEntry = editInternal(subject, null, false, editBindings, transform, sessionAllowed = true)
 
     private suspend fun editInternal(
         subject: AnimeSubject, expectedRevision: Long?, rememberUndo: Boolean,
@@ -111,8 +112,12 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             val changed = transform(current).copy(
                 subject = subject, revision = current.revision + 1L, updatedAt = wallTimeMillis())
             require(changed.subject.id == subject.id)
+            validateCatalogueEntry(changed)
             val bindings = editBindings(before.bindings.filter { it.subjectId == subject.id })
             require(bindings.all { it.subjectId == subject.id })
+            if (subject.canonicalDoubanId() != null) require(bindings.all { binding ->
+                binding.episodeMappings.keys.all { catalogueEpisodeKey(subject, it) }
+            }) { "豆瓣来源映射与本地剧集身份不一致。" }
             require(bindings.map { it.catalog.sourceId }.distinct().size == bindings.size)
             val next = before.copy(
                 entries = before.entries + (subject.id to changed),
@@ -135,6 +140,8 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
     ): Boolean {
         awaitLoaded()
         if (state.value.readUnavailable) return false
+        if (subject.canonicalDoubanId() != null) require(progress.subjectId == subject.id &&
+            catalogueEpisodeKey(subject, progress.episodeId)) { "豆瓣观看位置与本地剧集身份不一致。" }
         return writer.withLock {
             if (!isCurrent()) return@withLock false
             val before = mutableState.value
@@ -158,10 +165,12 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         }
     }
 
-    suspend fun setTrackingTarget(subjectId: String, providerId: String, ownerId: String, remoteId: String) {
+    suspend fun setTrackingTarget(subjectId: String, providerId: String, ownerId: String, remoteId: String,
+        isCurrent: () -> Boolean = { true }) {
         awaitReady()
         writer.withLock {
             val before = mutableState.value
+            check(isCurrent()) { "作品、资料关联或本地记录已经变化，请重新核对追番目标。" }
             persist(before.copy(trackingTargets = before.trackingTargets +
                 (trackingKey(subjectId, providerId, ownerId) to remoteId)))
         }
@@ -304,6 +313,10 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         val bindings = objects(json.getJSONArray("bindings")).map(::decodeBinding)
         require(bindings.all { it.subjectId in entries && it.catalog.sourceId.isNotBlank() && it.catalog.id.isNotBlank() })
         require(bindings.map { it.subjectId to it.catalog.sourceId }.distinct().size == bindings.size)
+        require(bindings.all { binding ->
+            val subject = entries.getValue(binding.subjectId).subject
+            subject.canonicalDoubanId() == null || binding.episodeMappings.keys.all { catalogueEpisodeKey(subject, it) }
+        }) { "豆瓣来源映射与本地剧集身份不一致。" }
         require(bindings.groupBy { it.subjectId }.all { (subjectId, subjectBindings) ->
             val subject = entries.getValue(subjectId).subject
             val source = subject.externalIds["native-source"]
@@ -320,6 +333,12 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         val progress = progressRows.associateBy { it.episodeId }
         require(progress.size == progressRows.size && progress.values.all { it.episodeId.isNotBlank() &&
             (it.subjectId.isEmpty() || it.subjectId in entries) })
+        require(progress.values.all { row ->
+            val owner = entries[row.subjectId]?.subject
+            if (row.episodeId.startsWith("douban:") || owner?.canonicalDoubanId() != null)
+                owner != null && owner.canonicalDoubanId() != null && catalogueEpisodeKey(owner, row.episodeId)
+            else true
+        }) { "豆瓣观看位置与所属作品不一致。" }
         require(entries.values.all { entry -> entry.resume?.let { resume ->
             progress[resume.episodeId]?.let { it.subjectId.isEmpty() || it.subjectId == entry.subject.id } != false
         } != false }) { "观看位置与所属番剧不一致。" }
@@ -352,6 +371,8 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("revision", entry.revision).put("folder", entry.folder).put("pinned", entry.pinned)
         .put("excludedSourceIds", JSONArray(entry.excludedSourceIds.sorted()))
         .put("nativeMetadata", entry.nativeMetadata?.let(::encodeSubject))
+        .put("metadataAutoMatchDisabled", entry.metadataAutoMatchDisabled)
+        .put("catalogDetail", entry.catalogDetail?.let(AnimeDocumentCodec::detail))
 
     private fun decodeEntry(json: JSONObject) = AnimeLibraryEntry(
         subject = decodeSubject(json.getJSONObject("subject")),
@@ -364,7 +385,29 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         excludedSourceIds = json.optJSONArray("excludedSourceIds")?.let { strings(it).toSet() } ?: emptySet(),
         nativeMetadata = json.optJSONObject("nativeMetadata")?.let(::decodeSubject)
             ?.takeIf { it.canonicalBangumiId() != null },
-    )
+        metadataAutoMatchDisabled = json.optBoolean("metadataAutoMatchDisabled"),
+        catalogDetail = json.optJSONObject("catalogDetail")?.let(AnimeDocumentCodec::detail),
+    ).also(::validateCatalogueEntry)
+
+    private fun catalogueEpisodeKey(subject: AnimeSubject, episodeId: String): Boolean =
+        Regex("${Regex.escape(subject.id)}:episode:[a-f0-9]{64}").matches(episodeId)
+
+    private fun validateCatalogueEntry(entry: AnimeLibraryEntry) {
+        val subject = entry.subject
+        require(entry.nativeMetadata == null || entry.nativeMetadata.canonicalBangumiId() != null &&
+            ("native-source" in subject.externalIds || subject.canonicalDoubanId() != null)) {
+            "手工资料关联仅适用于原始来源或豆瓣作品，并须为有效 Bangumi 条目。"
+        }
+        if (subject.canonicalDoubanId() != null) require(
+            entry.completedEpisodeIds.all { catalogueEpisodeKey(subject, it) } &&
+                entry.resume?.let { it.subjectId == subject.id && catalogueEpisodeKey(subject, it.episodeId) } != false
+        ) { "豆瓣观看记录与本地剧集身份不一致。" }
+        entry.catalogDetail?.let { detail ->
+            require(subject.canonicalDoubanId() != null && detail.subject.canonicalDoubanId() == subject.canonicalDoubanId() &&
+                detail.subject.id == subject.id) { "持久作品目录与豆瓣主条目不一致。" }
+            AnimeDocumentCodec.validateDetail(detail)
+        }
+    }
 
     private fun encodeSubject(subject: AnimeSubject) = AnimeDocumentCodec.subject(subject)
     private fun decodeSubject(json: JSONObject) = AnimeDocumentCodec.subject(json)

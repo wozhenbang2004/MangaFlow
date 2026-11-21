@@ -36,6 +36,7 @@ import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
+import dev.mangaflow.anime.sources.DOUBAN_PROVIDER
 import dev.mangaflow.anime.sources.AnimeHttp
 import dev.mangaflow.anime.sources.lanerc.lanercArtworkUrl
 import dev.mangaflow.experience.sourceNetwork
@@ -70,7 +71,9 @@ internal fun animeEpisodeSubtitle(episode: AnimeEpisode): String? {
 }
 
 internal fun animeEpisodeLabel(episode: AnimeEpisode): String =
-    if (episode.subjectId.startsWith("native:")) episode.title.ifBlank { "来源剧集" }
+    if (episode.subjectId.startsWith("native:") || episode.subjectId.startsWith("douban:") &&
+        episode.kind == AnimeEpisodeKind.OTHER && episode.number <= 0.0 && episode.metadataEpisodeId == null)
+        episode.title.ifBlank { "来源剧集" }
     else when (episode.kind) {
     AnimeEpisodeKind.MAIN -> "第 " + animeEpisodeNumber(episode.number) + " 集"
     AnimeEpisodeKind.SPECIAL -> "特别篇 " + animeEpisodeNumber(episode.number)
@@ -90,6 +93,7 @@ internal fun animeStatusLabel(status: AnimeWatchStatus?): String = when (status)
 }
 
 internal fun animeSourceName(id: String): String = when (id) {
+    DOUBAN_PROVIDER, "anime-lanerc-douban", "douban" -> "豆瓣"
     "anime-tvtfun" -> "TvTFun"
     "anime-age" -> "AGE 动漫"
     "anime-girigiri" -> "GiriGiriLove"
@@ -103,6 +107,7 @@ internal fun animeSourceName(id: String, state: AnimeScreenState): String =
         ?: animeSourceName(id)
 
 internal fun animeProviderName(id: String): String = when (id) {
+    DOUBAN_PROVIDER, "anime-lanerc-douban", "douban" -> "豆瓣"
     "anime-bangumi", "bangumi" -> "Bangumi"
     "anime-anilist", "anilist" -> "AniList"
     else -> id
@@ -117,10 +122,30 @@ internal fun animeTime(milliseconds: Long): String {
     else minutes.toString() + ":" + (seconds % 60L).toString().padStart(2, '0')
 }
 
+internal fun animePosterSourceId(subject: AnimeSubject): String? = subject.externalIds["native-source"] ?: when {
+    subject.canonicalDoubanId() != null -> DOUBAN_PROVIDER
+    subject.canonicalBangumiId() != null -> BANGUMI_PROVIDER
+    else -> null
+}
+
+internal fun ImageRequest.Builder.animeArtwork(url: String, sourceId: String?): ImageRequest.Builder {
+    val imageUrl = sourceId?.let { lanercArtworkUrl(it, url) } ?: url
+    data(imageUrl)
+    if (sourceId != null) sourceNetwork(sourceId, DownloadCategory.ANIME)
+    val host = imageUrl.toHttpUrlOrNull()?.takeIf { it.isHttps }?.host
+    if (sourceId in setOf(DOUBAN_PROVIDER, "anime-lanerc-douban", "anime-lanerc-lanerc") &&
+        (host == "doubanio.com" || host?.endsWith(".doubanio.com") == true)) {
+        httpHeaders(NetworkHeaders.Builder().apply {
+            set("Referer", "https://movie.douban.com/")
+            set("User-Agent", AnimeHttp.USER_AGENT)
+        }.build())
+    }
+    return this
+}
+
 @Composable
 internal fun AnimePoster(subject: AnimeSubject, modifier: Modifier = Modifier) =
-    AnimePoster(subject.coverUrl, modifier, subject.externalIds["native-source"]
-        ?: BANGUMI_PROVIDER.takeIf { "bangumi" in subject.externalIds })
+    AnimePoster(subject.coverUrl, modifier, animePosterSourceId(subject))
 
 @Composable
 internal fun AnimePoster(url: String, modifier: Modifier = Modifier, sourceId: String? = null) {
@@ -131,19 +156,7 @@ internal fun AnimePoster(url: String, modifier: Modifier = Modifier, sourceId: S
         if (url.isNotBlank()) {
             val context = LocalMangaContext.current
             val request = remember(context, url, sourceId) {
-                sourceId?.let { id ->
-                    val imageUrl = lanercArtworkUrl(id, url)
-                    val builder = ImageRequest.Builder(imagePlatformContext(context)).data(imageUrl)
-                        .sourceNetwork(id, DownloadCategory.ANIME)
-                    val host = imageUrl.toHttpUrlOrNull()?.takeIf { it.isHttps }?.host
-                    if (id == "anime-lanerc-lanerc" && (host == "doubanio.com" || host?.endsWith(".doubanio.com") == true)) {
-                        builder.httpHeaders(NetworkHeaders.Builder().apply {
-                            set("Referer", "https://movie.douban.com/")
-                            set("User-Agent", AnimeHttp.USER_AGENT)
-                        }.build())
-                    }
-                    builder.build()
-                } ?: url
+                ImageRequest.Builder(imagePlatformContext(context)).animeArtwork(url, sourceId).build()
             }
             AsyncImage(model = request, contentDescription = null,
                 contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())

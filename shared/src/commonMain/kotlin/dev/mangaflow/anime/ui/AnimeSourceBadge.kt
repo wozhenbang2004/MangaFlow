@@ -16,6 +16,7 @@ import androidx.compose.material.icons.outlined.DirectionsBus
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -34,12 +35,16 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.mangaflow.anime.sources.ANILIST_PROVIDER
 import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
+import dev.mangaflow.anime.sources.DOUBAN_PROVIDER
 import dev.mangaflow.ui.ReviewSourceMark
 import dev.mangaflow.ui.TextSourceWordmark
+import dev.mangaflow.ui.mangaMetricValueStyle
 import dev.mangaflow.ui.reviewSourceMarkWidth
 import dev.mangaflow.ui.motion.motionPress
 
@@ -82,10 +87,13 @@ internal fun AnimeSourceBadge(sources: List<Pair<String, String>>, modifier: Mod
     val action = if (selectedId == null) "查看来源" else "切换来源"
     val names = unique.joinToString("、") { it.second }
     val selected = unique.firstOrNull { it.first == selectedId }?.second
-    val fontScale = LocalDensity.current.fontScale
-    val markSize = if (compact) 16.dp else 18.dp
+    val density = LocalDensity.current
+    val fontScale = density.fontScale
+    val markSize = if (compact) 14.dp else 18.dp
     val gap = 4.dp
-    BoxWithConstraints(modifier.defaultMinSize(minWidth = if (compact) 30.dp else 44.dp,
+    val overflowStyle = mangaMetricValueStyle(10.sp, 14.sp)
+    val measurer = rememberTextMeasurer()
+    BoxWithConstraints(modifier.defaultMinSize(minWidth = 44.dp,
         minHeight = if (compact) 28.dp else 44.dp)
         .clip(RoundedCornerShape(8.dp))
         .clickable(enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button,
@@ -94,20 +102,33 @@ internal fun AnimeSourceBadge(sources: List<Pair<String, String>>, modifier: Mod
         .semantics(mergeDescendants = true) {
             contentDescription = if (selected == null) "来源：$names" else "当前来源：$selected，来源：$names"
         }.padding(end = gap), contentAlignment = Alignment.CenterStart) {
-        // The arrow opens the whole list if the cover can display only a few marks.
+        // Fit the existing source marks first; +N keeps the undisplayed sources explicit.
         val availableWidth = maxWidth
-        val markRoom = availableWidth - 12.dp - gap
-        var used = 0.dp
-        val visible = unique.take(3).takeWhile { (id, name) ->
-            val width = if (animeReviewSourceId(id) != null) reviewSourceMarkWidth(markSize, fontScale)
+        val widths = unique.map { (id, name) ->
+            if (animeReviewSourceId(id) != null) reviewSourceMarkWidth(markSize, fontScale)
                 else animeSourceWordmarkWidth(animeSourceWordmark(id, name), markSize)
-            val fits = used == 0.dp || used + gap + width <= markRoom
-            if (fits) used += if (used == 0.dp) width else gap + width
-            fits
         }
+        var count = minOf(5, unique.size)
+        var overflowWidth = 0.dp
+        var used = 0.dp
+        while (true) {
+            used = widths.take(count).fold(0.dp) { sum, width -> sum + width } +
+                gap * (count - 1).coerceAtLeast(0)
+            val hidden = unique.size - count
+            overflowWidth = if (hidden == 0) 0.dp else with(density) {
+                measurer.measure("+$hidden", style = overflowStyle, softWrap = false, maxLines = 1).size.width.toDp()
+            }
+            val total = used + overflowWidth + if (count > 0 && hidden > 0) gap else 0.dp
+            if (total <= availableWidth || count == 0) break
+            count--
+        }
+        val hidden = unique.size - count
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(gap)) {
-            visible.forEach { (id, name) -> AnimeSourceMark(id, name, size = markSize, ink = ink) }
-            if (used + gap + 12.dp <= availableWidth) {
+            unique.take(count).forEach { (id, name) -> AnimeSourceMark(id, name, size = markSize, ink = ink) }
+            if (hidden > 0) {
+                Text("+$hidden", Modifier.clearAndSetSemantics { }, color = ink.copy(alpha = .78f),
+                    style = overflowStyle, maxLines = 1, softWrap = false)
+            } else if (used + gap + 12.dp <= availableWidth) {
                 Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(12.dp), tint = ink.copy(alpha = .70f))
             }
         }
@@ -115,6 +136,7 @@ internal fun AnimeSourceBadge(sources: List<Pair<String, String>>, modifier: Mod
 }
 
 private fun animeReviewSourceId(id: String): String? = when (id) {
+    DOUBAN_PROVIDER, "anime-lanerc-douban", "douban" -> "douban"
     BANGUMI_PROVIDER, "bangumi" -> "bangumi"
     ANILIST_PROVIDER, "anilist" -> "anilist"
     else -> null

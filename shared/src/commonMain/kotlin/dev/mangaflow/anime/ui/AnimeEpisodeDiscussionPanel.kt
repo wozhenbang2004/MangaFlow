@@ -26,6 +26,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.anime.AnimeEpisode
+import dev.mangaflow.anime.AnimeSubject
+import dev.mangaflow.anime.canonicalBangumiId
 import dev.mangaflow.anime.sources.AnimeEpisodeDiscussion
 import dev.mangaflow.data.ReviewPage
 import dev.mangaflow.data.ReviewSource
@@ -38,18 +40,25 @@ import kotlinx.coroutines.CancellationException
 
 @Composable
 internal fun AnimeEpisodeDiscussionPanel(visible: Boolean, episode: AnimeEpisode, catalogue: List<AnimeEpisode>,
-    referenceId: String?, backdrop: HazeState, controller: AnimeController, onDismiss: () -> Unit, onClosed: () -> Unit) {
+    metadata: AnimeSubject?, backdrop: HazeState, controller: AnimeController, onDismiss: () -> Unit, onClosed: () -> Unit) {
     val discussion by controller.discussion.state.collectAsStateWithLifecycle()
+    val referenceId = metadata?.takeIf { it.canonicalBangumiId() != null }?.id
     val contextKey = discussion.takeIf { it.subjectId == episode.subjectId }?.episodeContextKey
-    val requestKey = listOf(episode.subjectId, episode.id, referenceId, contextKey)
+    val exactReference = episode.metadataEpisodeId?.let { id ->
+        id.removePrefix("bangumi:").toIntOrNull()?.takeIf { it > 0 && id == "bangumi:$it" }
+    } != null && episode.metadataSubjectId == referenceId
+    val canRead = referenceId != null && contextKey != null && episode in catalogue &&
+        (!episode.subjectId.startsWith("douban:") || exactReference)
+    val requestKey = listOf(episode.subjectId, episode.id, referenceId, contextKey,
+        episode.metadataEpisodeId, episode.metadataSubjectId)
     var result by remember(requestKey, catalogue) { mutableStateOf<AnimeEpisodeDiscussion?>(null) }
-    var loading by remember(requestKey, catalogue) { mutableStateOf(referenceId != null && contextKey != null) }
+    var loading by remember(requestKey, catalogue) { mutableStateOf(canRead) }
     var error by remember(requestKey, catalogue) { mutableStateOf<String?>(null) }
     var revision by remember(requestKey) { mutableIntStateOf(0) }
     var filterOpen by remember(requestKey) { mutableStateOf(false) }
 
     LaunchedEffect(visible, requestKey, catalogue, revision) {
-        if (!visible || referenceId == null || contextKey == null) return@LaunchedEffect
+        if (!visible || !canRead) return@LaunchedEffect
         loading = true
         error = null
         try {
@@ -70,7 +79,7 @@ internal fun AnimeEpisodeDiscussionPanel(visible: Boolean, episode: AnimeEpisode
                         AnimeSectionTitle("评论")
                         AnimeQuietLabel(animeEpisodeLabel(episode) + result?.source?.reviews?.size?.let { " · $it 条" }.orEmpty())
                     }
-                    if (referenceId != null && contextKey != null) {
+                    if (canRead) {
                         if (result != null || loading) MotionIconButton(onClick = { filterOpen = !filterOpen }, enabled = visible,
                             modifier = Modifier.size(44.dp), tooltip = "筛选评论") {
                             Icon(Icons.Outlined.Tune, "筛选评论", Modifier.size(19.dp))
@@ -86,11 +95,11 @@ internal fun AnimeEpisodeDiscussionPanel(visible: Boolean, episode: AnimeEpisode
                 }
                 val comments = result
                 val failure = error
-                if (referenceId == null || contextKey == null || comments == null && !loading) {
+                if (!canRead || comments == null && !loading) {
                     Column(Modifier.padding(16.dp)) {
                         if (failure != null) AnimeDiscoveryInlineStatus(failure, retry = { revision++ })
-                        else AnimeQuietLabel(if (referenceId == null || contextKey == null) "在作品简介关联对应的 Bangumi 季度后可查看讨论。"
-                            else "Bangumi 目录中暂未确认对应的这一集。")
+                        else AnimeQuietLabel(if (referenceId == null || contextKey == null) "可在作品简介补充对应季度的 Bangumi 资料。"
+                            else "这集尚未关联到准确的 Bangumi 集记录。")
                     }
                 } else {
                     val source = comments?.source?.copy(loadingMore = loading, reviewsError = failure)

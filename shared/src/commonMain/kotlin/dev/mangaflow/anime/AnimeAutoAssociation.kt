@@ -114,7 +114,7 @@ internal fun animeWorkTitlesConflict(
 
 /** Presentation-only title hint. A conflicting year is a review candidate, not an automatic identity. */
 internal fun autoPlayTitleCandidate(subject: AnimeSubject, title: AnimeSourceTitle): Boolean {
-    val names = listOf(subject.title, subject.originalTitle).filter(String::isNotBlank)
+    val names = animeCatalogueNames(subject)
     if (animeWorkTitlesConflict(names, listOf(title.title), requireMatchingEdition = true)) return false
     val titleKey = animeWorkTitleKey(title.title)
     val season = autoSeasonSignature(title.title)
@@ -125,7 +125,7 @@ internal fun autoPlayTitleCandidate(subject: AnimeSubject, title: AnimeSourceTit
 /** Search recall is wider than automatic binding. Search variants still must pass full identity checks. */
 internal fun autoPlaySearchKeywords(subject: AnimeSubject): List<String> {
     val ordinal = listOf("", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
-    val names = listOf(subject.title, subject.originalTitle).map(String::trim).filter(String::isNotBlank).distinct()
+    val names = animeCatalogueNames(subject)
     val variants = names.flatMap { raw ->
         val signature = autoSeasonSignature(raw)
         if (signature == null) listOf(raw) else {
@@ -186,7 +186,7 @@ private fun autoPlaySubjectEvidence(subject: AnimeSubject, title: AnimeSourceTit
     if (conflictingAnimeIds(animeAuthoritativeIds(subjectIds), animeAuthoritativeIds(title.externalIds))) return false
     if (subject.year != null && title.year != null && subject.year != title.year) return false
     val sharedId = sharesAuthoritativeAnimeId(subject, title)
-    val names = listOf(subject.title, subject.originalTitle).filter(String::isNotBlank)
+    val names = animeCatalogueNames(subject)
     if (animeWorkTitlesConflict(names, listOf(title.title), requireMatchingEdition = !sharedId)) return false
     val titleKey = animeWorkTitleKey(title.title)
     val exactName = titleKey.isNotBlank() && names.any {
@@ -214,7 +214,7 @@ private fun autoSeasonCatalogOffset(detail: AnimeDetail, catalog: AnimeSourceCat
     if (catalog.notice != null || catalog.episodes.isEmpty() ||
         !autoPlaySubjectCandidate(detail.subject, catalog.title)) return null
     val namedSeason = autoSeasonSignature(catalog.title.title) ?: return null
-    if (listOf(detail.subject.title, detail.subject.originalTitle).none {
+    if (animeCatalogueNames(detail.subject).none {
             it.isNotBlank() && autoSeasonSignature(it) == namedSeason
         }) return null
     val canonical = detail.episodes.filter {
@@ -257,11 +257,17 @@ internal fun autoPlayCatalogSubjectMatches(detail: AnimeDetail, catalog: AnimeSo
 private fun subjectEpisodeNumber(detail: AnimeDetail, requested: AnimeEpisode, catalog: AnimeSourceCatalog): Double? {
     val local = requested.numberInSubject ?: return null
     val offset = requested.number - local
+    val metadataOwner = detail.metadataSubject?.takeIf { it.canonicalBangumiId() != null }?.id
+    val projectedMetadata = detail.subject.canonicalDoubanId() != null && metadataOwner != null &&
+        requested.metadataSubjectId == metadataOwner && animeBangumiReferenceId(requested.metadataEpisodeId) != null &&
+        detail.episodes.any { it == requested }
     if (!offset.isFinite() || offset <= 0.0 || catalog.notice != null ||
-        requested.subjectId != detail.subject.id || !detail.subject.id.startsWith("bangumi:") ||
+        requested.subjectId != detail.subject.id || (!detail.subject.id.startsWith("bangumi:") && !projectedMetadata) ||
         !autoPlaySubjectMatches(detail.subject, catalog.title)) return null
 
     val knownEpisodes = detail.episodes.filter { it.kind == AnimeEpisodeKind.MAIN && it.numberInSubject != null }
+    if (projectedMetadata && knownEpisodes.any { it.metadataSubjectId != metadataOwner ||
+            animeBangumiReferenceId(it.metadataEpisodeId) == null }) return null
     val knownNumbers = knownEpisodes.mapNotNull { it.numberInSubject }.toSet()
     if (1.0 !in knownNumbers || local !in knownNumbers || knownNumbers.size != knownEpisodes.size ||
         knownEpisodes.any { it.number != offset + requireNotNull(it.numberInSubject) }) return null

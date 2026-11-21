@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.sources.ANILIST_PROVIDER
 import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
+import dev.mangaflow.anime.sources.DOUBAN_PROVIDER
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.MangaLayout
@@ -38,18 +39,11 @@ import dev.mangaflow.ui.motion.motionPress
 import kotlin.math.roundToInt
 
 /** Root-retained positions belong to the visible feed, never to an unrelated search request. */
-internal class AnimeDiscoveryScrolls(homeSourceState: MutableState<String?>) {
+internal class AnimeDiscoveryScrolls {
     val grids = mutableMapOf<String, LazyGridState>()
     val queries = mutableMapOf<String, AnimeDiscoveryQuery>()
     var featuredKey: String? = null
-    var featuredSourceOrder: List<String> = emptyList()
-    var featuredSourceGroups: List<AnimeSearchGroup> = emptyList()
-    var updatedSourceGroups: List<AnimeSearchGroup> = emptyList()
-    var homeSourceId by homeSourceState
-    var automaticHomeSourceId by mutableStateOf<String?>(null)
-    var expandedUpdates by mutableStateOf(false)
     var placedHomeFeature = false
-    var expandedHomeSections by mutableStateOf(emptySet<String>())
     fun grid(key: String): LazyGridState = grids.getOrPut(key) { LazyGridState() }
 }
 
@@ -74,11 +68,13 @@ internal fun animeDiscoveryColumns(width: Dp, preferred: Int?): Int {
 }
 
 internal fun animeDiscoveryProviderLabel(provider: AnimeDiscoveryProvider): String = when (provider) {
+    AnimeDiscoveryProvider.DOUBAN -> "豆瓣"
     AnimeDiscoveryProvider.BANGUMI -> "Bangumi"
     AnimeDiscoveryProvider.ANILIST -> "AniList"
 }
 
 internal fun animeDiscoverySourceId(provider: AnimeDiscoveryProvider): String = when (provider) {
+    AnimeDiscoveryProvider.DOUBAN -> DOUBAN_PROVIDER
     AnimeDiscoveryProvider.BANGUMI -> BANGUMI_PROVIDER
     AnimeDiscoveryProvider.ANILIST -> ANILIST_PROVIDER
 }
@@ -88,6 +84,7 @@ internal fun animeDiscoveryOrderLabel(order: AnimeDiscoveryOrder): String = when
     AnimeDiscoveryOrder.POPULARITY -> "人气"
     AnimeDiscoveryOrder.SCORE -> "评分"
     AnimeDiscoveryOrder.TRENDING -> "趋势"
+    AnimeDiscoveryOrder.NEWEST -> "最新"
 }
 
 internal fun animeDiscoveryCaption(query: AnimeDiscoveryQuery): String = when {
@@ -139,7 +136,7 @@ internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQ
         item.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).take(2).joinToString(" · ")
     val rated = item.copy(sourceScores = scores)
     val showScores = onScores?.let { open -> { open(rated) } }
-    val sourceBadge: (@Composable () -> Unit)? = if (scores.isEmpty() && showScores != null) {
+    val sourceBadge: (@Composable () -> Unit)? = if (provider != AnimeDiscoveryProvider.DOUBAN && scores.isEmpty() && showScores != null) {
         {
             val sources = animeDiscoverySourceProviders(rated, provider).map {
                 animeDiscoverySourceId(it) to animeDiscoveryProviderLabel(it)
@@ -161,7 +158,8 @@ internal fun animeDiscoverySourceScores(item: AnimeDiscoveryItem, provider: Anim
 
 internal fun animeDiscoverySourceProviders(item: AnimeDiscoveryItem, fallback: AnimeDiscoveryProvider? = null): List<AnimeDiscoveryProvider> =
     (listOfNotNull(item.discoveryProvider ?: fallback, item.coverProvider,
-        AnimeDiscoveryProvider.ANILIST.takeIf { item.reference?.sourceId == ANILIST_PROVIDER }) +
+        AnimeDiscoveryProvider.ANILIST.takeIf { item.reference?.sourceId == ANILIST_PROVIDER },
+        AnimeDiscoveryProvider.DOUBAN.takeIf { item.reference?.sourceId in setOf(DOUBAN_PROVIDER, "anime-lanerc-douban") }) +
         item.sourceScores.map { it.provider }).distinct()
 
 @Composable
@@ -283,6 +281,7 @@ private fun AnimeDiscoveryScores(scores: List<AnimeSourceScore>, inline: Boolean
 }
 
 internal fun animeDiscoveryScoreSourceId(provider: AnimeDiscoveryProvider): String = when (provider) {
+    AnimeDiscoveryProvider.DOUBAN -> "douban"
     AnimeDiscoveryProvider.BANGUMI -> "bangumi"
     AnimeDiscoveryProvider.ANILIST -> "anilist"
 }
