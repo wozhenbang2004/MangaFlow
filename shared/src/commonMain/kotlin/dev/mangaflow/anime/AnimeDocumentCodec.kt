@@ -10,6 +10,7 @@ internal object AnimeDocumentCodec {
         .put("description", value.description).put("count", value.episodeCount).put("year", value.year)
         .put("tags", JSONArray(value.tags)).put("externalIds", JSONObject(value.externalIds))
         .put("weekday", value.airWeekday).put("rating", value.rating).put("rank", value.rank)
+        .put("ratingCount", value.ratingCount)
 
     fun subject(json: JSONObject): AnimeSubject {
         val ids = json.optJSONObject("externalIds") ?: JSONObject()
@@ -39,7 +40,8 @@ internal object AnimeDocumentCodec {
             externalIds = ids.keys().asSequence().associateWith { ids.getString(it) },
             airWeekday = json.optInt("weekday").takeIf { it in 1..7 },
             rating = if (json.has("rating") && !json.isNull("rating")) json.getDouble("rating").takeIf { it.isFinite() } else null,
-            rank = json.optInt("rank").takeIf { it > 0 })
+            rank = json.optInt("rank").takeIf { it > 0 },
+            ratingCount = json.optLong("ratingCount", -1L).takeIf { it in 0..Int.MAX_VALUE.toLong() }?.toInt())
     }
 
     fun detail(value: AnimeDetail): JSONObject = JSONObject().put("subject", subject(value.subject))

@@ -53,6 +53,7 @@ import dev.mangaflow.anime.AnimeEpisodeKind
 import dev.mangaflow.anime.AnimeLibraryEntry
 import dev.mangaflow.anime.AnimeNativeMetadataSearch
 import dev.mangaflow.anime.AnimeScreenState
+import dev.mangaflow.anime.AnimeScoreCheck
 import dev.mangaflow.anime.AnimeSourceScore
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeWatchProgress
@@ -73,9 +74,11 @@ import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.ReviewSourceMark
 import dev.mangaflow.ui.detailMetricScore
+import dev.mangaflow.ui.mangaMetricValueStyle
 import dev.mangaflow.ui.mangaFontFamily
 import dev.mangaflow.ui.mangaNumberText
 import dev.mangaflow.ui.motion.*
+import androidx.compose.ui.unit.sp
 
 @Composable
 internal fun AnimeDetailPane(
@@ -98,6 +101,13 @@ internal fun AnimeDetailPane(
     val discussion = currentDiscussion.takeIf { it.subjectId == subject.id }
     var detailTab by rememberSaveable(subject.id, "detail-sections") { mutableIntStateOf(0) }
     var discussionFilter by remember(subject.id) { mutableStateOf(false) }
+    var discussionChecksPresent by remember(subject.id) { mutableStateOf(false) }
+    var discussionOpenRevision by rememberSaveable(subject.id) { mutableIntStateOf(0) }
+    fun selectDetailTab(index: Int) {
+        if (index == 2) discussionOpenRevision++
+        discussionFilter = false
+        detailTab = index
+    }
     val commentsVisible = active && detailTab == 2
     DisposableEffect(controller, subject.id, commentsVisible) {
         if (commentsVisible) controller.discussion.setVisible(subject.id, true)
@@ -166,13 +176,15 @@ internal fun AnimeDetailPane(
         !it.notice.isNullOrBlank() && it != pendingNativeCatalog
     }.map { it.title.sourceId } + state.sourceCatalogErrors.keys).distinct()
     val canonicalInfo = if (native) nativeMetadata else subject
-    val detailScores = remember(state.detailScores, canonicalInfo) {
+    val detailScores = remember(state.detailScores, state.detailScoreChecks, canonicalInfo) {
         buildList {
-            canonicalInfo?.rating?.takeIf { it > 0 && it <= 10.0 }?.let {
-                add(AnimeSourceScore(AnimeDiscoveryProvider.BANGUMI, it, 10))
-            }
             addAll(state.detailScores.filter { it.scale > 0 && it.rating.isFinite() &&
                 it.rating > 0 && it.rating <= it.scale.toDouble() })
+            val check = state.detailScoreChecks[AnimeDiscoveryProvider.BANGUMI]
+            canonicalInfo?.rating?.takeIf { it > 0 && it <= 10.0 &&
+                (check == null || check.loading || check.error != null) }?.let {
+                add(AnimeSourceScore(AnimeDiscoveryProvider.BANGUMI, it, 10, canonicalInfo.ratingCount))
+            }
         }.distinctBy { it.provider }
     }
 
@@ -184,29 +196,38 @@ internal fun AnimeDetailPane(
         if (detailTab == 2) {
             val commentSources = discussion?.sources.orEmpty()
             Column(Modifier.widthIn(max = 1080.dp).fillMaxSize().padding(top = 10.dp)) {
+                Text(subject.title, Modifier.fillMaxWidth().padding(horizontal = horizontal)
+                    .padding(bottom = 4.dp).semantics { heading() },
+                    style = MaterialTheme.typography.titleMedium.copy(fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE)),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Row(Modifier.fillMaxWidth().padding(horizontal = horizontal),
                     verticalAlignment = Alignment.CenterVertically) {
-                    AnimeChoiceStrip(detailTabs, detailTab, onSelect = { detailTab = it }, active = active,
+                    AnimeChoiceStrip(detailTabs, detailTab, onSelect = ::selectDetailTab,
+                        active = active && !discussionChecksPresent,
                         modifier = Modifier.weight(1f).widthIn(max = 400.dp))
-                    if (commentSources.isNotEmpty()) {
-                        MotionIconButton(onClick = {
-                            commentSources.forEach { controller.discussion.retry(subject.id, it.id) }
-                            if (discussion?.matching != true) controller.discussion.retryMatch(subject.id)
-                        }, enabled = active && commentSources.none { it.loadingMore },
-                            modifier = Modifier.size(44.dp), tooltip = "刷新评论") {
-                            Icon(Icons.Outlined.Refresh, "刷新评论", Modifier.size(19.dp))
-                        }
-                        MotionIconButton(onClick = { discussionFilter = true }, enabled = active,
-                            modifier = Modifier.size(44.dp), tooltip = "筛选评论") {
-                            Icon(Icons.Outlined.Tune, "筛选评论", Modifier.size(19.dp))
-                        }
+                    MotionIconButton(onClick = {
+                        commentSources.forEach { controller.discussion.retry(subject.id, it.id) }
+                        if (discussion?.matching != true) controller.discussion.retryMatch(subject.id)
+                    }, enabled = active && !discussionChecksPresent && commentSources.none { it.loadingMore } &&
+                        (canonicalInfo != null), modifier = Modifier.size(44.dp), tooltip = "刷新评论") {
+                        Icon(Icons.Outlined.Refresh, "刷新评论", Modifier.size(19.dp))
+                    }
+                    MotionIconButton(onClick = { discussionFilter = !discussionFilter },
+                        enabled = active && !discussionChecksPresent,
+                        modifier = Modifier.size(44.dp), tooltip = "筛选评论") {
+                        Icon(Icons.Outlined.Tune, "筛选评论", Modifier.size(19.dp))
                     }
                 }
+                AnimeDiscussionSourcesStrip(subject.id, discussion?.checks.orEmpty(), backdrop = backdrop,
+                    enabled = active, canRetry = canonicalInfo != null,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = horizontal),
+                    onRetry = { controller.discussion.retry(subject.id, it) },
+                    onPresence = { discussionChecksPresent = it })
                 if (native && nativeMetadata == null) {
                     Box(Modifier.padding(horizontal = horizontal, vertical = 8.dp)) {
                         AnimeDetailStatus("关联这部番后即可看评论", Icons.Outlined.Info,
                             detail = "选择对应作品和季度，评论会显示在这里。",
-                            actionLabel = "关联 Bangumi", onAction = { detailTab = 1 })
+                            actionLabel = "关联 Bangumi", onAction = { selectDetailTab(1) })
                     }
                 } else {
                     CommunityPanel(mangaId = "anime:${subject.id}", sources = commentSources,
@@ -214,7 +235,9 @@ internal fun AnimeDetailPane(
                         onMore = { controller.discussion.loadMore(subject.id, it) },
                         onRetry = { controller.discussion.retry(subject.id, it) },
                         onMatch = { _, _ -> }, onRelink = {}, loadReplies = { _, _, _ -> ReviewPage(emptyList()) },
-                        modifier = Modifier.weight(1f), backdrop = backdrop, active = active,
+                        modifier = Modifier.weight(1f).motionInputGate(active && !discussionChecksPresent),
+                        backdrop = backdrop, active = active,
+                        openRevision = discussionOpenRevision,
                         filterOpen = discussionFilter, onFilterDismiss = { discussionFilter = false })
                 }
             }
@@ -239,6 +262,12 @@ internal fun AnimeDetailPane(
                     metadata = canonicalInfo,
                     nativeSourceName = nativeSource?.let { animeSourceName(it, state) },
                     scores = detailScores,
+                    scoresLoading = state.detailScoreLoading,
+                    scoresError = state.detailScoreError,
+                    scoresMessage = state.detailScoreMessage,
+                    scoreChecks = state.detailScoreChecks,
+                    onRefreshScores = { controller.refreshDetailScores() },
+                    onRefreshScore = { controller.refreshDetailScores(it) },
                     episode = first,
                     availability = firstAvailability,
                     progress = savedProgress.takeIf { resume != null },
@@ -265,7 +294,7 @@ internal fun AnimeDetailPane(
                 )
             }
             item(key = "detail-tabs") {
-                AnimeChoiceStrip(detailTabs, detailTab, onSelect = { detailTab = it },
+                AnimeChoiceStrip(detailTabs, detailTab, onSelect = ::selectDetailTab,
                     active = active, modifier = Modifier.widthIn(max = 400.dp).padding(vertical = 4.dp))
             }
             if (detailTab == 1) {
@@ -413,12 +442,13 @@ internal fun AnimeDetailPane(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     row.forEach { episode ->
                         key(episode.id) {
+                            val lines = controller.confirmedPlaybackLines(episode.id, state)
                             AnimeEpisodeCell(
                                 episode = episode,
                                 completed = episode.id in completed,
                                 resume = episode.id == resume?.id,
                                 availability = controller.episodeAvailability(episode.id, state),
-                                matched = controller.confirmedPlaybackLines(episode.id, state).size,
+                                sources = animeEpisodeSources(episode.id, lines, controller, state),
                                 backdrop = backdrop,
                                 active = active,
                                 compact = desktop,
@@ -532,6 +562,12 @@ private fun AnimeDetailHero(
     metadata: AnimeSubject?,
     nativeSourceName: String?,
     scores: List<AnimeSourceScore>,
+    scoresLoading: Boolean,
+    scoresError: String?,
+    scoresMessage: String?,
+    scoreChecks: Map<AnimeDiscoveryProvider, AnimeScoreCheck>,
+    onRefreshScores: () -> Unit,
+    onRefreshScore: (AnimeDiscoveryProvider) -> Unit,
     episode: AnimeEpisode?,
     availability: AnimeEpisodeAvailability?,
     progress: AnimeWatchProgress?,
@@ -609,7 +645,10 @@ private fun AnimeDetailHero(
                 if (facts.isNotBlank()) {
                     Text(facts, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
                 }
-                if (scores.isNotEmpty()) AnimeDetailRatingStrip(scores, backdrop, active, onRatingPresence)
+                if (metadata != null || scores.isNotEmpty()) AnimeDetailRatingStrip(
+                    subject.id, scores, scoresLoading, scoresError, scoresMessage, scoreChecks,
+                    backdrop, active, onRefreshScores, onRefreshScore, onRatingPresence,
+                )
             }
         }
         Column(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 8.dp),
@@ -634,40 +673,103 @@ private fun AnimeDetailHero(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AnimeDetailRatingStrip(scores: List<AnimeSourceScore>, backdrop: HazeState, active: Boolean,
-    onPresence: (Boolean) -> Unit) {
-    var open by remember { mutableStateOf(false) }
+private fun AnimeDetailRatingStrip(
+    ownerId: String, scores: List<AnimeSourceScore>, loading: Boolean, error: String?, message: String?,
+    checks: Map<AnimeDiscoveryProvider, AnimeScoreCheck>, backdrop: HazeState, active: Boolean,
+    onRefresh: () -> Unit, onRefreshSource: (AnimeDiscoveryProvider) -> Unit, onPresence: (Boolean) -> Unit,
+) {
+    var open by remember(ownerId) { mutableStateOf(false) }
     LaunchedEffect(active) { if (!active) open = false }
     fun AnimeSourceScore.displayScore() = "${detailMetricScore(rating)} / $scale"
-    Box {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            scores.forEach { score ->
-                val provider = animeDiscoveryProviderLabel(score.provider)
-                MotionTextButton(onClick = { open = true }, enabled = active,
-                    modifier = Modifier.heightIn(min = 44.dp).semantics {
-                        contentDescription = "$provider 评分 ${score.displayScore()}，查看各站评分"
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
-                    contentPadding = PaddingValues(horizontal = 5.dp)) {
-                    ReviewSourceMark(score.provider.name.lowercase(), size = 14.dp)
-                    Spacer(Modifier.width(5.dp))
-                    Text(score.displayScore(), style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1, softWrap = false)
+    val colors = MaterialTheme.colorScheme
+    Box(Modifier.fillMaxWidth()) {
+        MotionTextButton(onClick = { open = true }, enabled = active,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).semantics {
+                contentDescription = scores.joinToString("，") {
+                    "${animeDiscoveryProviderLabel(it.provider)} ${it.displayScore()}" +
+                        (it.ratingCount?.let { count -> "，$count 人评分" } ?: "")
+                }.ifBlank { "评分来源" } + "，查看各站评分与人数"
+            }, contentPadding = PaddingValues(0.dp),
+            colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)) {
+            FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                scores.forEach { score ->
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        ReviewSourceMark(score.provider.name.lowercase(), size = 14.dp)
+                        Text(score.displayScore(), style = mangaMetricValueStyle(13.sp),
+                            maxLines = 1, softWrap = false)
+                    }
                 }
+                if (scores.isEmpty()) Text(if (loading) "正在读取评分" else "评分",
+                    style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
             }
+            Spacer(Modifier.width(6.dp))
+            if (loading) MotionBusyIndicator(Modifier.size(14.dp))
+            else Icon(if (error == null) Icons.Outlined.ChevronRight else Icons.Outlined.Info,
+                null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
         }
         CompactGlassPopover(open, backdrop, onDismiss = { open = false }, onPresenceChange = onPresence,
-            alignToStart = true) {
-            AnimeSectionTitle("各站评分")
-            scores.forEach { score ->
-                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ReviewSourceMark(score.provider.name.lowercase(), size = 18.dp)
-                    Text(animeDiscoveryProviderLabel(score.provider), Modifier.weight(1f),
-                        style = MaterialTheme.typography.bodyMedium)
-                    Text(score.displayScore(), style = MaterialTheme.typography.bodyMedium)
+            alignToStart = true, maximumWidth = 340.dp) {
+            AnimeSectionTitle("各站评分", action = {
+                MotionIconButton(onClick = onRefresh, enabled = active && !loading,
+                    modifier = Modifier.size(44.dp), tooltip = "刷新评分") {
+                    Icon(Icons.Outlined.Refresh, null, Modifier.size(18.dp))
+                }
+            })
+            (scores.map { it.provider } + checks.keys).distinct().sortedBy { it.ordinal }.forEach { provider ->
+                val score = scores.firstOrNull { it.provider == provider }
+                val check = checks[provider]
+                Column(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        ReviewSourceMark(provider.name.lowercase(), size = 20.dp)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(animeDiscoveryProviderLabel(provider), style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (score != null) Text(score.ratingCount?.let { "$it 人评分" } ?: "人数未提供",
+                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        }
+                        if (score != null) Row(horizontalArrangement = Arrangement.spacedBy(3.dp),
+                            modifier = Modifier.semantics(mergeDescendants = true) {
+                                contentDescription = "${score.displayScore()}，" +
+                                    (score.ratingCount?.let { "$it 人评分" } ?: "评分人数未提供")
+                            }) {
+                            Text(detailMetricScore(score.rating), Modifier.alignByBaseline(),
+                                style = mangaMetricValueStyle(20.sp, 26.sp), maxLines = 1, softWrap = false)
+                            Text("/ ${score.scale}", Modifier.alignByBaseline(),
+                                style = mangaMetricValueStyle(12.sp, 16.sp), color = colors.onSurfaceVariant,
+                                maxLines = 1, softWrap = false)
+                        }
+                        if (check?.loading == true) {
+                            Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+                                MotionBusyIndicator(Modifier.size(16.dp))
+                            }
+                        } else MotionIconButton(onClick = { onRefreshSource(provider) }, enabled = active,
+                            modifier = Modifier.size(44.dp), tooltip = "刷新 ${animeDiscoveryProviderLabel(provider)} 评分") {
+                            Icon(Icons.Outlined.Refresh, null, Modifier.size(18.dp))
+                        }
+                    }
+                    val status = when {
+                        check?.loading == true -> "正在更新"
+                        check?.error != null -> check.error
+                        check?.message != null -> check.message
+                        score == null -> "暂无评分"
+                        else -> null
+                    }
+                    if (status != null) AnimeQuietLabel(status, Modifier.padding(start = 30.dp, bottom = 4.dp))
                 }
             }
+            if (checks.isEmpty()) when {
+                loading -> AnimeDetailStatus("正在更新评分", Icons.Outlined.Info, loading = true)
+                error != null -> AnimeDetailStatus("部分评分读取未完成", Icons.Outlined.Info,
+                    detail = error, actionLabel = "重试", onAction = onRefresh)
+                message != null -> AnimeQuietLabel(message, Modifier.padding(vertical = 6.dp))
+                scores.isEmpty() -> AnimeQuietLabel("暂未取得可显示的评分", Modifier.padding(vertical = 6.dp))
+            }
+            AnimeQuietLabel("各站保留原始分制，不合并总分；人数仅在来源提供时显示。",
+                Modifier.padding(top = 8.dp, bottom = 4.dp))
         }
     }
 }
@@ -890,7 +992,7 @@ private fun AnimeEpisodeCell(
     completed: Boolean,
     resume: Boolean,
     availability: AnimeEpisodeAvailability,
-    matched: Int,
+    sources: AnimeEpisodeSources,
     backdrop: HazeState,
     active: Boolean,
     compact: Boolean,
@@ -969,6 +1071,8 @@ private fun AnimeEpisodeCell(
                 textAlign = TextAlign.Center, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.labelSmall,
                 color = if (resume) colors.onPrimaryContainer else colors.onSurfaceVariant)
+            AnimeEpisodeSourceBadges(sources, Modifier.fillMaxWidth(), enabled = active,
+                ink = if (resume) colors.onPrimaryContainer else colors.onSurfaceVariant, onOpen = onSources)
         }
         if (resume || completed) {
             Icon(
@@ -992,7 +1096,7 @@ private fun AnimeEpisodeCell(
                 }
             },
         ) {
-            AnimeQuietLabel(sourceState ?: "$matched 条已匹配线路",
+            AnimeQuietLabel(sourceState ?: "${sources.sources.size} 个来源 · ${sources.lineCount} 条已匹配线路",
                 Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
             CompactMenuAction(
                 if (completed) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,

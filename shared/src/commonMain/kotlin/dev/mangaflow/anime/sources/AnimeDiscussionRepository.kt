@@ -43,6 +43,18 @@ internal data class AnimeDiscussionState(
     val subjectId: String? = null,
     val sources: List<ReviewSource> = emptyList(),
     val matching: Boolean = false,
+    val checks: List<AnimeDiscussionSourceCheck> = emptyList(),
+    /** Changes when the confirmed work or its discussion route changes. */
+    val episodeContextKey: String? = null,
+)
+
+internal enum class AnimeDiscussionCheckStatus { WAITING, CHECKING, READY, NO_MATCH, UNAVAILABLE }
+
+internal data class AnimeDiscussionSourceCheck(
+    val sourceId: String,
+    val name: String,
+    val status: AnimeDiscussionCheckStatus,
+    val message: String,
 )
 
 internal data class AnimeEpisodeDiscussion(val source: ReviewSource, val replies: Map<String, List<MangaReview>>)
@@ -64,6 +76,7 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
     }
 
     private data class Selection(val subjectId: String, val metadata: AnimeSubject?)
+    private data class MatchContext(val selectionRevision: Long, val route: DownloadRouteSnapshot?)
     private class Lane(val provider: Provider, val remoteId: Int, val route: DownloadRouteSnapshot?, var source: ReviewSource) {
         var initialized = false
         var request: Job? = null
@@ -76,10 +89,15 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
     val state = mutableState.asStateFlow()
     private val lanes = mutableMapOf<Provider, Lane>()
     private var selection: Selection? = null
+    private var selectionRevision = 0L
     private var visibleSubject: String? = null
     private var match: AnimeAniListMatch? = null
     private var matchRequest: Job? = null
     private var matchFinished = false
+    private var matchContext: MatchContext? = null
+    private var matchToken = 0L
+    private var matchFailure: String? = null
+    private var forceMatch = false
 
     init {
         scope.launch { routing.state.collect { updateSources() } }
@@ -97,10 +115,15 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
             lanes.clear()
         }
         selection = chosen
+        selectionRevision++
+        matchToken++
         matchRequest?.cancel()
         matchRequest = null
         match = null
         matchFinished = false
+        matchContext = null
+        matchFailure = null
+        forceMatch = false
         updateSources()
     }
 
@@ -117,7 +140,9 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
     fun retry(subjectId: String, sourceId: String) {
         if (selection?.subjectId != subjectId) return
         updateSources()
-        lanes.values.firstOrNull { it.provider.id == sourceId }?.let { load(it, it.failedPage ?: 0, force = true) }
+        val lane = lanes.values.firstOrNull { it.provider.id == sourceId }
+        if (lane != null) load(lane, lane.failedPage ?: 0, force = true)
+        else if (sourceId == Provider.ANILIST.id || sourceId == Provider.MAL.id) retryMatch(subjectId)
     }
 
     fun loadMore(subjectId: String, sourceId: String) {
@@ -130,24 +155,37 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
     fun retryMatch(subjectId: String) {
         if (selection?.subjectId != subjectId || matchRequest != null) return
         matchFinished = false
+        matchFailure = null
+        forceMatch = true
         updateSources()
     }
 
     suspend fun readEpisode(episode: AnimeEpisode, catalogue: List<AnimeEpisode>, force: Boolean): AnimeEpisodeDiscussion? {
         val owner = selection?.takeIf { it.subjectId == episode.subjectId } ?: return null
+        val revision = selectionRevision
+        if (catalogue.none { it.id == episode.id && it.subjectId == episode.subjectId }) return null
         val metadata = owner.metadata ?: return null
         val canonical = if (episode.subjectId == metadata.id) episode else {
             val records = metadataRepository.cachedDetail(metadata)?.episodes
                 ?.takeIf { it.isNotEmpty() } ?: metadataRepository.detail(metadata).let {
                     it.episodes ?: error(it.episodeError ?: "暂时无法读取 Bangumi 剧集目录。")
                 }
-            val candidate = records.singleOrNull { it.kind == episode.kind && it.number == episode.number } ?: return null
+            // A provider may number this season from 1 while Bangumi retains the series total.
+            // Only a supplied season number is an alternate axis; never infer an offset or use position.
+            val candidates = records.filter { it.kind == episode.kind &&
+                (it.number == episode.number || it.numberInSubject == episode.number) }
+            val candidate = candidates.singleOrNull() ?: return null
             if (catalogue.count { it.kind == episode.kind && it.number == episode.number } != 1) return null
             val localTitle = normalizedEpisodeTitle(episode.title)
             val sameTitle = localTitle.isNotEmpty() && localTitle == normalizedEpisodeTitle(candidate.title)
             val localNumbers = catalogue.filter { it.kind == AnimeEpisodeKind.MAIN }.map { it.number }.sorted()
-            val canonicalNumbers = records.filter { it.kind == AnimeEpisodeKind.MAIN }.map { it.number }.sorted()
-            if (!sameTitle && !(episode.kind == AnimeEpisodeKind.MAIN && localNumbers.size > 1 && localNumbers == canonicalNumbers)) return null
+            val mainRecords = records.filter { it.kind == AnimeEpisodeKind.MAIN }
+            val canonicalNumbers = mainRecords.map { it.number }.sorted()
+            val seasonNumbers = mainRecords.mapNotNull { it.numberInSubject?.takeIf { value -> value > 0 && value.isFinite() } }
+                .takeIf { it.size == mainRecords.size && it.distinct().size == it.size }?.sorted()
+            val sameNumbering = localNumbers.size > 1 && localNumbers.distinct().size == localNumbers.size &&
+                (localNumbers == canonicalNumbers || localNumbers == seasonNumbers)
+            if (!sameTitle && !(episode.kind == AnimeEpisodeKind.MAIN && sameNumbering)) return null
             candidate
         }
         val id = canonical.id.removePrefix("bangumi:").toIntOrNull()?.takeIf {
@@ -155,6 +193,9 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
         } ?: return null
         val provider = Provider.BANGUMI
         val route = provider.route()
+        fun current() = selectionRevision == revision && selection == owner &&
+            runCatching { provider.route() }.getOrNull() == route
+        if (!current()) return null
         val key = "discussion:v1:bangumi-episode:$id:${animeHash(route.identity())}"
         val cacheEpoch = cache.generation
         val cached = if (force) null else cache.read(key)?.takeIf { cache.isFresh(it, ContentCacheKind.COMMENTS) }
@@ -170,11 +211,11 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
                 } ?: error("等待读取本集讨论超时。")
             } finally { http.close() }
             val decoded = withContext(Dispatchers.Default) { decodeBangumiEpisodeComments(JSONArray(response.text), id) }
-            if (selection != owner || provider.route() != route) return null
+            if (!current()) return null
             cache.write(key, response.text, cacheEpoch)
             decoded
         }
-        if (selection != owner || provider.route() != route) return null
+        if (!current()) return null
         return AnimeEpisodeDiscussion(ReviewSource(provider.id, provider.label, ReviewStatus.READY,
             "https://bgm.tv/ep/$id", reviews = data.items, subjectId = "episode:$id",
             reviewCount = data.items.size, supportsReplies = true), data.replies)
@@ -185,20 +226,72 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
         .orEmpty().filter(Char::isLetterOrDigit)
 
     private fun publish() {
-        mutableState.value = AnimeDiscussionState(selection?.subjectId,
-            Provider.entries.mapNotNull { lanes[it]?.source }, matchRequest != null)
+        val chosen = selection
+        if (chosen == null) {
+            mutableState.value = AnimeDiscussionState()
+            return
+        }
+        val checks = Provider.entries.map { provider ->
+            val lane = lanes[provider]
+            val (status, message) = when {
+                lane?.source?.reviewsError != null -> AnimeDiscussionCheckStatus.UNAVAILABLE to lane.source.reviewsError.orEmpty()
+                lane?.source?.loadingMore == true -> AnimeDiscussionCheckStatus.CHECKING to
+                    if (lane.initialized) "正在读取更多评论" else "正在读取评论"
+                lane?.initialized == true -> AnimeDiscussionCheckStatus.READY to
+                    if (lane.source.reviews.isEmpty()) "已检查，暂时没有评论" else "已载入 ${lane.source.reviews.size} 条评论"
+                lane != null -> AnimeDiscussionCheckStatus.WAITING to "打开评论时读取"
+                chosen.metadata == null -> AnimeDiscussionCheckStatus.NO_MATCH to "先在简介中确认对应作品与季度"
+                provider == Provider.MAL && conflictingMalIds(chosen.metadata) ->
+                    AnimeDiscussionCheckStatus.NO_MATCH to "来源中的 MAL 编号冲突，未混入评论"
+                matchRequest != null -> AnimeDiscussionCheckStatus.CHECKING to "正在核对作品与季度"
+                matchFailure != null -> AnimeDiscussionCheckStatus.UNAVAILABLE to matchFailure.orEmpty()
+                !matchFinished -> AnimeDiscussionCheckStatus.WAITING to "打开评论时核对作品与季度"
+                else -> AnimeDiscussionCheckStatus.NO_MATCH to "未确认对应作品与季度，未混入评论"
+            }
+            AnimeDiscussionSourceCheck(provider.id, provider.label, status, message)
+        }
+        val sources = Provider.entries.mapIndexed { index, provider ->
+            lanes[provider]?.source ?: checks[index].let { check ->
+                ReviewSource(provider.id, provider.label,
+                    if (check.status == AnimeDiscussionCheckStatus.UNAVAILABLE) ReviewStatus.UNAVAILABLE else ReviewStatus.NO_MATCH,
+                    url = "", message = check.message,
+                    loadingMore = check.status == AnimeDiscussionCheckStatus.CHECKING,
+                    reviewsError = check.message.takeIf { check.status == AnimeDiscussionCheckStatus.UNAVAILABLE })
+            }
+        }
+        val reference = chosen.metadata?.canonicalBangumiId()
+        val episodeContext = reference?.let {
+            val route = runCatching { Provider.BANGUMI.route().identity() }.getOrNull()
+            "${chosen.subjectId}:$it:$selectionRevision:${route?.let(::animeHash) ?: "unavailable"}"
+        }
+        mutableState.value = AnimeDiscussionState(chosen.subjectId, sources, matchRequest != null, checks, episodeContext)
     }
+
+    private fun conflictingMalIds(metadata: AnimeSubject): Boolean = listOfNotNull(
+        metadata.externalIds["myanimelist"]?.toIntOrNull()?.takeIf { it > 0 },
+        metadata.externalIds["mal"]?.toIntOrNull()?.takeIf { it > 0 },
+    ).distinct().size > 1
 
     private fun updateSources() {
         val chosen = selection
         val metadata = chosen?.metadata
+        val context = metadata?.let { MatchContext(selectionRevision, runCatching { Provider.ANILIST.route() }.getOrNull()) }
+        if (context != matchContext) {
+            matchToken++
+            matchRequest?.cancel()
+            matchRequest = null
+            matchContext = context
+            match = null
+            matchFinished = false
+            matchFailure = null
+        }
         val ids = metadata?.externalIds.orEmpty()
         fun id(key: String) = ids[key]?.toIntOrNull()?.takeIf { it > 0 }
         val explicitMal = listOfNotNull(id("myanimelist"), id("mal")).distinct().singleOrNull()
         val targets = mapOf(
             Provider.BANGUMI to metadata?.canonicalBangumiId(),
             Provider.ANILIST to (id("anilist") ?: match?.id),
-            Provider.MAL to (explicitMal ?: match?.malId),
+            Provider.MAL to if (metadata != null && conflictingMalIds(metadata)) null else (explicitMal ?: match?.malId),
         )
         targets.forEach { (provider, remote) ->
             val existing = lanes[provider]
@@ -220,15 +313,33 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
         }
         if (visibleSubject != null && chosen?.subjectId == visibleSubject) {
             lanes.values.filter { !it.initialized && it.failedPage == null }.forEach { load(it, 0, force = false) }
-            if (metadata != null && !matchFinished && matchRequest == null &&
-                (targets[Provider.ANILIST] == null || targets[Provider.MAL] == null)) {
+            if (metadata != null && context != null && !matchFinished && matchRequest == null &&
+                (forceMatch || targets[Provider.ANILIST] == null || targets[Provider.MAL] == null)) {
+                val token = ++matchToken
+                val force = forceMatch
+                forceMatch = false
                 matchRequest = scope.launch(start = CoroutineStart.LAZY) {
-                    val found = discovery.lookupAniListMatch(metadata)
-                    if (selection != chosen) return@launch
-                    match = found
-                    matchRequest = null
-                    matchFinished = true
-                    updateSources()
+                    fun current() = matchToken == token && matchContext == context && selection == chosen &&
+                        runCatching { Provider.ANILIST.route() }.getOrNull() == context.route
+                    try {
+                        val found = discovery.lookupAniListMatch(metadata, forceRefresh = force, reportFailure = true)
+                        if (!current()) return@launch
+                        match = found
+                        matchFailure = null
+                        matchFinished = true
+                    } catch (cancel: CancellationException) {
+                        throw cancel
+                    } catch (failure: Exception) {
+                        if (current()) {
+                            matchFailure = failure.message ?: "暂时无法核对评论来源，请重试。"
+                            matchFinished = true
+                        }
+                    } finally {
+                        if (matchToken == token) {
+                            matchRequest = null
+                            if (matchFinished) updateSources() else publish()
+                        }
+                    }
                 }
                 matchRequest?.start()
             }

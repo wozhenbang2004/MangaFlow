@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -21,11 +22,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.anime.AnimeEpisode
 import dev.mangaflow.anime.sources.AnimeEpisodeDiscussion
 import dev.mangaflow.data.ReviewPage
+import dev.mangaflow.data.ReviewSource
+import dev.mangaflow.data.ReviewStatus
 import dev.mangaflow.ui.CommunityPanel
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.motion.MotionDialog
@@ -35,13 +39,17 @@ import kotlinx.coroutines.CancellationException
 @Composable
 internal fun AnimeEpisodeDiscussionPanel(visible: Boolean, episode: AnimeEpisode, catalogue: List<AnimeEpisode>,
     referenceId: String?, backdrop: HazeState, controller: AnimeController, onDismiss: () -> Unit, onClosed: () -> Unit) {
-    var result by remember(episode.id, referenceId) { mutableStateOf<AnimeEpisodeDiscussion?>(null) }
-    var loading by remember(episode.id, referenceId) { mutableStateOf(referenceId != null) }
-    var error by remember(episode.id, referenceId) { mutableStateOf<String?>(null) }
-    var revision by remember(episode.id, referenceId) { mutableIntStateOf(0) }
+    val discussion by controller.discussion.state.collectAsStateWithLifecycle()
+    val contextKey = discussion.takeIf { it.subjectId == episode.subjectId }?.episodeContextKey
+    val requestKey = listOf(episode.subjectId, episode.id, referenceId, contextKey)
+    var result by remember(requestKey, catalogue) { mutableStateOf<AnimeEpisodeDiscussion?>(null) }
+    var loading by remember(requestKey, catalogue) { mutableStateOf(referenceId != null && contextKey != null) }
+    var error by remember(requestKey, catalogue) { mutableStateOf<String?>(null) }
+    var revision by remember(requestKey) { mutableIntStateOf(0) }
+    var filterOpen by remember(requestKey) { mutableStateOf(false) }
 
-    LaunchedEffect(visible, episode.id, referenceId, revision) {
-        if (!visible || referenceId == null) return@LaunchedEffect
+    LaunchedEffect(visible, requestKey, catalogue, revision) {
+        if (!visible || referenceId == null || contextKey == null) return@LaunchedEffect
         loading = true
         error = null
         try {
@@ -59,12 +67,18 @@ internal fun AnimeEpisodeDiscussionPanel(visible: Boolean, episode: AnimeEpisode
                 Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 6.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Column(Modifier.weight(1f)) {
-                        AnimeSectionTitle("本集讨论")
-                        AnimeQuietLabel(animeEpisodeLabel(episode))
+                        AnimeSectionTitle("评论")
+                        AnimeQuietLabel(animeEpisodeLabel(episode) + result?.source?.reviews?.size?.let { " · $it 条" }.orEmpty())
                     }
-                    if (referenceId != null) MotionIconButton(onClick = { revision++ }, enabled = visible && !loading,
-                        modifier = Modifier.size(44.dp), tooltip = "刷新本集讨论") {
-                        Icon(Icons.Outlined.Refresh, "刷新本集讨论", Modifier.size(19.dp))
+                    if (referenceId != null && contextKey != null) {
+                        if (result != null || loading) MotionIconButton(onClick = { filterOpen = !filterOpen }, enabled = visible,
+                            modifier = Modifier.size(44.dp), tooltip = "筛选评论") {
+                            Icon(Icons.Outlined.Tune, "筛选评论", Modifier.size(19.dp))
+                        }
+                        MotionIconButton(onClick = { revision++ }, enabled = visible && !loading,
+                            modifier = Modifier.size(44.dp), tooltip = "刷新本集讨论") {
+                            Icon(Icons.Outlined.Refresh, "刷新本集讨论", Modifier.size(19.dp))
+                        }
                     }
                     MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭本集讨论") {
                         Icon(Icons.Outlined.Close, "关闭本集讨论", Modifier.size(20.dp))
@@ -72,21 +86,24 @@ internal fun AnimeEpisodeDiscussionPanel(visible: Boolean, episode: AnimeEpisode
                 }
                 val comments = result
                 val failure = error
-                if (referenceId == null || comments == null && !loading) {
+                if (referenceId == null || contextKey == null || comments == null && !loading) {
                     Column(Modifier.padding(16.dp)) {
                         if (failure != null) AnimeDiscoveryInlineStatus(failure, retry = { revision++ })
-                        else AnimeQuietLabel(if (referenceId == null) "在作品简介关联对应的 Bangumi 季度后可查看讨论。"
+                        else AnimeQuietLabel(if (referenceId == null || contextKey == null) "在作品简介关联对应的 Bangumi 季度后可查看讨论。"
                             else "Bangumi 目录中暂未确认对应的这一集。")
                     }
                 } else {
                     val source = comments?.source?.copy(loadingMore = loading, reviewsError = failure)
-                    CommunityPanel(mangaId = "anime-episode:${episode.subjectId}:${episode.id}",
-                        sources = listOfNotNull(source), loading = loading, onMore = {}, onRetry = { revision++ },
+                        ?: ReviewSource("bangumi", "Bangumi", ReviewStatus.NO_MATCH, "", loadingMore = loading)
+                    CommunityPanel(mangaId = "anime-episode:${episode.subjectId}:${episode.id}:$contextKey",
+                        sources = listOf(source), loading = loading, onMore = {}, onRetry = { revision++ },
                         onMatch = { _, _ -> }, onRelink = {},
                         loadReplies = { requested, review, page ->
-                            ReviewPage(if (page == 0 && requested.subjectId == comments?.source?.subjectId)
+                            ReviewPage(if (page == 0 && requested.id == comments?.source?.id &&
+                                requested.subjectId == comments?.source?.subjectId)
                                 comments?.replies?.get(review.id).orEmpty() else emptyList())
-                        }, modifier = Modifier.weight(1f), backdrop = backdrop, captureBackdrop = false, active = visible)
+                        }, modifier = Modifier.weight(1f), backdrop = backdrop, captureBackdrop = false, active = visible,
+                        filterOpen = filterOpen, onFilterDismiss = { filterOpen = false })
                 }
             }
         }

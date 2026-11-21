@@ -119,7 +119,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             val scores = if (subjectId == null) emptyList() else
                 feed.items.firstOrNull { it.subject?.id == subjectId }?.sourceScores.orEmpty()
             state.copy(discoveryFeeds = state.discoveryFeeds + (key to feed),
-                detailScores = (scores + state.detailScores).distinctBy { it.provider })
+                detailScores = (state.detailScores + scores.filter {
+                    it.provider !in detailRatingRequests && it.provider !in state.detailScoreChecks
+                })
+                    .distinctBy { it.provider })
         } })
     val extensions get() = sources.extensions
     internal val builtInVideoSources get() = sources.builtInVideoSources
@@ -160,9 +163,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private var catalogGeneration = 0L
     private val catalogRequests = mutableMapOf<String, Long>()
     private var detailJob: Job? = null
-    private var detailScoreJob: Job? = null
+    private data class DetailRatingRequest(val subject: AnimeSubject, val ownerId: String,
+        val generation: Long, val route: DownloadRouteSnapshot)
+    private val detailRatingJobs = mutableMapOf<AnimeDiscoveryProvider, Job>()
+    private val detailRatingRequests = mutableMapOf<AnimeDiscoveryProvider, DetailRatingRequest>()
     private var nativeMetadataJob: Job? = null
-    private var nativeDiscussionOwner: Pair<String, String?>? = null
+    private var nativeDiscussionOwner: Pair<String, AnimeSubject?>? = null
     private var sourceJob: Job? = null
     private var previewJob: Job? = null
     private var previewSourceId: String? = null
@@ -368,7 +374,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         ++detailGeneration
                         cancelSourceAggregation()
                         detailJob?.cancel()
-                        detailScoreJob?.cancel()
+                        cancelDetailScores()
                         boundCatalogJob?.cancel()
                         nativeMetadataJob?.cancel()
                         relatedJob?.cancel()
@@ -379,6 +385,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         recentPlaybackSources.clear()
                         reviewSnapshots.clear()
                         mutableState.update { it.copy(reviews = emptyList(), detailLoading = false,
+                            detailScores = emptyList(), detailScoreChecks = emptyMap(),
                             nativeMetadataSearch = null, relatedSubjects = emptyList(),
                             detailError = if (it.detail != null) "本机记录已恢复，请重新打开番剧以读取恢复后的关联。" else null) }
                     }
@@ -461,6 +468,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 unifiedSearch.reconcile()
                 invalidatePreparation()
                 if (discoveryVisible && foreground) ensureDiscovery()
+                currentRatingSubject()?.let { reference ->
+                    val owner = mutableState.value.detail?.subject?.id ?: return@let
+                    val providers = detailRatingRequests.keys.toSet() + mutableState.value.detailScoreChecks.keys +
+                        AnimeDiscoveryProvider.ANILIST
+                    providers.forEach { startDetailRating(it, reference, owner, detailGeneration) }
+                }
             }
         }
         scope.launch {
@@ -710,7 +723,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         cancelSourceAggregation()
         val openingRestoreEpoch = library.state.value.restoreEpoch
         detailJob?.cancel()
-        detailScoreJob?.cancel()
+        cancelDetailScores()
         boundCatalogJob?.cancel()
         relatedJob?.cancel()
         nativeMetadataJob?.cancel()
@@ -730,7 +743,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             .flatMap { it.sourceScores.asSequence() }.toList()).distinctBy { it.provider }
         mutableState.update { it.copy(
             detail = initialDetail, detailLoading = true, detailError = null,
-            detailScores = scores, groupSourceCandidates = candidates, associationChoices = emptyMap(),
+            detailScores = scores, detailScoreChecks = emptyMap(),
+            groupSourceCandidates = candidates, associationChoices = emptyMap(),
             nativeMetadataSearch = null,
             detailFromCache = visitedDetail != null, relatedSubjects = visitedRelated,
             sourceCatalogs = emptyList(), sourceResults = emptyList(), episodeOptions = emptyMap(),
@@ -743,7 +757,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         ) }
         if ("native-source" in subject.externalIds) {
             refreshNativeDiscussion(subject, library.state.value.entries[subject.id]?.nativeMetadata, generation)
-        } else discussion.open(subject)
+        } else {
+            discussion.open(subject)
+            mutableState.update { it.copy(detailScoreChecks = it.detailScoreChecks +
+                (AnimeDiscoveryProvider.BANGUMI to AnimeScoreCheck(loading = true))) }
+            loadDetailScore(subject, generation)
+        }
         if (candidates.isNotEmpty()) {
             stageSearchCandidates(subject.id, candidates)
             // Group membership supplies candidates for detail lookup. The source's
@@ -848,6 +867,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     if (!currentDetail(generation, subject.id)) return@launch
                     mutableState.update { it.copy(detail = cached, detailFromCache = true) }
                     discussion.open(cached.subject)
+                    loadDetailScore(cached.subject, generation)
                     rebuildOptions()
                     startSourceAggregation(cached)
                 }
@@ -868,8 +888,22 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     result.episodes ?: previous?.episodes.orEmpty())
                 val failure = listOfNotNull(result.subjectError?.let { "作品资料：$it" },
                     result.episodeError?.let { "集数目录：$it" }).joinToString("\n").ifBlank { null }
-                mutableState.update { it.copy(detail = detail, detailLoading = false, detailError = failure,
-                    detailFromCache = it.detailFromCache && (result.subject == null || result.episodes == null)) }
+                mutableState.update { current ->
+                    val independentScore = AnimeDiscoveryProvider.BANGUMI in detailRatingRequests
+                    val freshScore = result.subject?.let { canonical ->
+                        canonical.rating?.takeIf { it.isFinite() && it > 0.0 && it <= 10.0 }
+                            ?.let { AnimeSourceScore(AnimeDiscoveryProvider.BANGUMI, it, 10, canonical.ratingCount) }
+                    }
+                    current.copy(detail = detail, detailLoading = false, detailError = failure,
+                        detailFromCache = current.detailFromCache && (result.subject == null || result.episodes == null),
+                        detailScores = if (independentScore || result.subject == null) current.detailScores else
+                            current.detailScores.filterNot { it.provider == AnimeDiscoveryProvider.BANGUMI } + listOfNotNull(freshScore),
+                        detailScoreChecks = if (independentScore) current.detailScoreChecks else current.detailScoreChecks +
+                            (AnimeDiscoveryProvider.BANGUMI to AnimeScoreCheck(
+                                error = result.subjectError?.let { "Bangumi：$it" },
+                                message = "Bangumi 暂无评分".takeIf { result.subject != null && freshScore == null }))
+                    )
+                }
                 discussion.open(detail.subject)
                 loadDetailScore(detail.subject, generation)
                 rebuildOptions()
@@ -884,10 +918,16 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     if (failure is AnimeMetadataIdentityException) {
                         closePlayback()
                         cancelSourceAggregation()
-                        mutableState.update { it.copy(detail = AnimeDetail(subject, emptyList()), episodeOptions = emptyMap()) }
+                        cancelDetailScores()
+                        discussion.open(null)
+                        mutableState.update { it.copy(detail = AnimeDetail(subject, emptyList()), episodeOptions = emptyMap(),
+                            detailScores = emptyList(), detailScoreChecks = emptyMap()) }
                     }
                     mutableState.update {
-                        it.copy(detailLoading = false, detailError = failure.message ?: "番剧详情未能加载，请重试。")
+                        it.copy(detailLoading = false, detailError = failure.message ?: "番剧详情未能加载，请重试。",
+                            detailScoreChecks = if (AnimeDiscoveryProvider.BANGUMI in detailRatingRequests) it.detailScoreChecks else
+                                it.detailScoreChecks + (AnimeDiscoveryProvider.BANGUMI to AnimeScoreCheck(
+                                    error = "Bangumi：${failure.message ?: "评分资料未能读取，请重试。"}")))
                     }
                 }
             }
@@ -895,11 +935,17 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     private fun refreshNativeDiscussion(subject: AnimeSubject, reference: AnimeSubject?, generation: Long) {
-        val owner = subject.id to reference?.id
+        val owner = subject.id to reference
         if (nativeDiscussionOwner == owner) return
         val previous = nativeDiscussionOwner
         nativeDiscussionOwner = owner
         discussion.open(subject, reference)
+        cancelDetailScores()
+        mutableState.update { it.copy(detailScores = emptyList(), detailScoreChecks = emptyMap()) }
+        if (reference != null) {
+            loadDetailScore(reference, generation, subject.id)
+            startDetailRating(AnimeDiscoveryProvider.BANGUMI, reference, subject.id, generation)
+        }
         relatedJob?.cancel()
         if (reference == null || previous?.first == subject.id) {
             mutableState.update { it.copy(relatedSubjects = emptyList()) }
@@ -978,15 +1024,88 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
     }
 
-    private fun loadDetailScore(subject: AnimeSubject, generation: Long) {
-        if (!subject.id.startsWith("bangumi:") || detailScoreJob?.isActive == true ||
-            mutableState.value.detailScores.any { it.provider == AnimeDiscoveryProvider.ANILIST }) return
-        detailScoreJob = scope.launch {
-            val score = discovery.lookupAniListScore(subject) ?: return@launch
-            if (currentDetail(generation, subject.id)) mutableState.update { state ->
-                state.copy(detailScores = state.detailScores.filterNot { it.provider == score.provider } + score)
+    private fun currentRatingSubject(): AnimeSubject? {
+        val subject = mutableState.value.detail?.subject ?: return null
+        return (if ("native-source" in subject.externalIds)
+            library.state.value.entries[subject.id]?.nativeMetadata else subject)
+            ?.takeIf { it.canonicalBangumiId() != null }
+    }
+
+    private fun cancelDetailScores() {
+        detailRatingJobs.values.forEach { it.cancel() }
+        detailRatingJobs.clear()
+        detailRatingRequests.clear()
+    }
+
+    private fun loadDetailScore(subject: AnimeSubject, generation: Long, ownerId: String = subject.id) {
+        startDetailRating(AnimeDiscoveryProvider.ANILIST, subject, ownerId, generation)
+    }
+
+    /** Explicit refresh stays in the current detail; each rating site fails independently. */
+    internal fun refreshDetailScores(provider: AnimeDiscoveryProvider? = null) {
+        val subject = currentRatingSubject() ?: return
+        val ownerId = mutableState.value.detail?.subject?.id ?: return
+        (provider?.let { listOf(it) } ?: AnimeDiscoveryProvider.entries).forEach {
+            startDetailRating(it, subject, ownerId, detailGeneration, forceRefresh = true)
+        }
+    }
+
+    private fun startDetailRating(provider: AnimeDiscoveryProvider, subject: AnimeSubject, ownerId: String,
+        generation: Long, forceRefresh: Boolean = false) {
+        if (subject.canonicalBangumiId() == null || !currentDetail(generation, ownerId)) return
+        val routingId = if (provider == AnimeDiscoveryProvider.BANGUMI)
+            dev.mangaflow.anime.sources.BANGUMI_PROVIDER else dev.mangaflow.anime.sources.ANILIST_PROVIDER
+        val name = if (provider == AnimeDiscoveryProvider.BANGUMI) "Bangumi" else "AniList"
+        val route = try { DownloadRoutingStore.activeSourceSnapshot(routingId, DownloadCategory.ANIME) }
+        catch (failure: Exception) {
+            detailRatingJobs.remove(provider)?.cancel()
+            detailRatingRequests.remove(provider)
+            mutableState.update { it.copy(detailScoreChecks = it.detailScoreChecks +
+                (provider to AnimeScoreCheck(error = "$name：${failure.message ?: "评分网络线路不可用。"}"))) }
+            return
+        }
+        val request = DetailRatingRequest(subject, ownerId, generation, route)
+        if (!forceRefresh && detailRatingRequests[provider] == request) return
+        detailRatingJobs.remove(provider)?.cancel()
+        detailRatingRequests[provider] = request
+        fun current() = detailRatingRequests[provider] === request && currentDetail(generation, ownerId) &&
+            currentRatingSubject()?.let { it.id == subject.id && it.externalIds == subject.externalIds } == true &&
+            runCatching { DownloadRoutingStore.activeSourceSnapshot(routingId, DownloadCategory.ANIME) }.getOrNull() == route
+        mutableState.update { it.copy(detailScoreChecks = it.detailScoreChecks +
+            (provider to AnimeScoreCheck(loading = true))) }
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                var message: String? = null
+                val score = when (provider) {
+                    AnimeDiscoveryProvider.BANGUMI -> {
+                        val fresh = withTimeoutOrNull(8_000L) {
+                            metadata.subjectByBangumiId(requireNotNull(subject.canonicalBangumiId()), route)
+                                ?: error("返回的作品资料与当前番剧不一致。")
+                        } ?: error("等待读取评分超时。")
+                        fresh.rating?.takeIf { it.isFinite() && it > 0.0 && it <= 10.0 }
+                            ?.let { AnimeSourceScore(provider, it, 10, fresh.ratingCount) }
+                            .also { if (it == null) message = "Bangumi 暂无评分" }
+                    }
+                    AnimeDiscoveryProvider.ANILIST -> {
+                        val match = discovery.lookupAniListMatch(subject, forceRefresh, reportFailure = true)
+                        match?.rating?.let { AnimeSourceScore(provider, it, 100, match.ratingCount) }
+                            .also { if (it == null) message = if (match == null)
+                                "AniList 未匹配到同一部番剧" else "AniList 暂无评分" }
+                    }
+                }
+                if (current()) mutableState.update { it.copy(
+                    detailScores = it.detailScores.filterNot { value -> value.provider == provider } + listOfNotNull(score),
+                    detailScoreChecks = it.detailScoreChecks + (provider to AnimeScoreCheck(message = message))) }
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) {
+                if (current()) mutableState.update { it.copy(detailScoreChecks = it.detailScoreChecks +
+                    (provider to AnimeScoreCheck(error = "$name：${failure.message ?: "评分读取失败，请重试。"}"))) }
+            } finally {
+                if (detailRatingRequests[provider] === request) detailRatingJobs.remove(provider)
             }
         }
+        detailRatingJobs[provider] = job
+        job.start()
     }
 
     fun closeDetail() {
@@ -1001,7 +1120,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         ++searchGeneration
         ++previewGeneration
         detailJob?.cancel()
-        detailScoreJob?.cancel()
+        cancelDetailScores()
         boundCatalogJob?.cancel()
         relatedJob?.cancel()
         sourceJob?.cancel()
@@ -1010,7 +1129,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         previewJob?.cancel()
         mutableState.update { it.copy(detail = null, detailLoading = false, detailError = null,
             nativeMetadataSearch = null,
-            detailScores = emptyList(), groupSourceCandidates = emptyList(), associationChoices = emptyMap(),
+            detailScores = emptyList(), detailScoreChecks = emptyMap(),
+            groupSourceCandidates = emptyList(), associationChoices = emptyMap(),
             sourceResults = emptyList(), sourceCatalogs = emptyList(), episodeOptions = emptyMap(),
             previewCatalog = null, previewLoading = false, sourceError = null, preferredSourceId = null,
             sourceGroups = emptyMap(), sourceBindings = emptyList(), sourceCatalogErrors = emptyMap(),
@@ -4083,7 +4203,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 ++detailGeneration
                 ++searchGeneration
                 ++previewGeneration
-                detailJob?.cancel(); detailScoreJob?.cancel(); boundCatalogJob?.cancel(); relatedJob?.cancel(); previewJob?.cancel()
+                detailJob?.cancel(); cancelDetailScores(); boundCatalogJob?.cancel(); relatedJob?.cancel(); previewJob?.cancel()
                 nativeMetadataJob?.cancel()
                 nativeDiscussionOwner = null
                 sourceSearchJobs.values.forEach { it.cancel() }
@@ -4106,7 +4226,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 discussion.open(null)
                 mutableState.update { it.copy(detail = detail, detailLoading = false, detailError = null,
                     nativeMetadataSearch = null,
-                    detailScores = emptyList(), groupSourceCandidates = emptyList(), associationChoices = emptyMap(),
+                    detailScores = emptyList(), detailScoreChecks = emptyMap(),
+                    groupSourceCandidates = emptyList(), associationChoices = emptyMap(),
                     detailFromCache = cached != null, relatedSubjects = emptyList(), sourceResults = emptyList(),
                     sourceCatalogs = emptyList(), sourceBindings = emptyList(), sourceCatalogErrors = emptyMap(),
                     episodeOptions = emptyMap(), previewCatalog = null, previewLoading = false,

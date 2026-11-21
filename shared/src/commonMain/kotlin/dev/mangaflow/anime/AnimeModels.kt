@@ -18,6 +18,8 @@ data class AnimeSubject(
     val airWeekday: Int? = null,
     val rating: Double? = null,
     val rank: Int? = null,
+    /** Number of ratings returned by the metadata provider; never collection popularity. */
+    val ratingCount: Int? = null,
 )
 
 enum class AnimeEpisodeKind { MAIN, SPECIAL, OPENING, ENDING, TRAILER, OTHER }
@@ -358,6 +360,7 @@ data class AnimeScreenState(
     val detailLoading: Boolean = false,
     val detailError: String? = null,
     val detailScores: List<AnimeSourceScore> = emptyList(),
+    val detailScoreChecks: Map<AnimeDiscoveryProvider, AnimeScoreCheck> = emptyMap(),
     val nativeMetadataSearch: AnimeNativeMetadataSearch? = null,
     val groupSourceCandidates: List<AnimeSourceTitle> = emptyList(),
     val associationChoices: Map<String, List<AnimeSourceTitle>> = emptyMap(),
@@ -412,7 +415,11 @@ data class AnimeScreenState(
     val sourceExtensions: List<dev.mangaflow.anime.sources.lanerc.LanercSourceListing> = emptyList(),
     val sourceOperationIds: Set<String> = emptySet(),
     val sourcePreparation: Map<String, dev.mangaflow.anime.sources.lanerc.SourcePreparationState> = emptyMap(),
-)
+) {
+    val detailScoreLoading: Boolean get() = detailScoreChecks.values.any { it.loading }
+    val detailScoreError: String? get() = detailScoreChecks.values.mapNotNull { it.error }.joinToString("\n").ifBlank { null }
+    val detailScoreMessage: String? get() = detailScoreChecks.values.mapNotNull { it.message }.joinToString(" · ").ifBlank { null }
+}
 
 data class AnimeNativeMetadataSearch(
     val subjectId: String,

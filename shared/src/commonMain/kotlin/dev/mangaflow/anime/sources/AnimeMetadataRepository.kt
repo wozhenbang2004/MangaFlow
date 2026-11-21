@@ -38,9 +38,10 @@ class AnimeMetadataRepository(context: PlatformContext) {
     suspend fun search(query: String): List<AnimeSubject> = browse(query = query).items
 
     /** A source-provided reference is a picker suggestion until the user confirms the exact entry. */
-    internal suspend fun subjectByBangumiId(id: Int): AnimeSubject? = withContext(Dispatchers.Default) {
+    internal suspend fun subjectByBangumiId(id: Int,
+        route: dev.mangaflow.net.DownloadRouteSnapshot? = null): AnimeSubject? = withContext(Dispatchers.Default) {
         require(id > 0)
-        val http = AnimeHttp(BANGUMI_PROVIDER)
+        val http = route?.let { AnimeHttp(BANGUMI_PROVIDER, it) } ?: AnimeHttp(BANGUMI_PROVIDER)
         try {
             bangumiSubject(http.json(BANGUMI_API.newBuilder().addPathSegment("subjects")
                 .addPathSegment(id.toString()).build(), AnimeSourceStage.METADATA))
@@ -124,7 +125,8 @@ class AnimeMetadataRepository(context: PlatformContext) {
             // but refresh them once to recover Bangumi's subject-relative episode numbers.
             runCatching {
                 val document = JSONObject(it.text)
-                if (document.optBoolean("hasSubjectEpisodeNumbers")) AnimeDocumentCodec.detail(document) else null
+                if (document.optBoolean("hasSubjectEpisodeNumbers") &&
+                    document.optBoolean("hasRatingCounts")) AnimeDocumentCodec.detail(document) else null
             }.getOrNull()?.takeIf { detail -> detail.subject.id == subject.id }?.let { detail ->
                     return@withContext AnimeMetadataDetailResult(detail.subject, detail.episodes)
                 }
@@ -165,7 +167,8 @@ class AnimeMetadataRepository(context: PlatformContext) {
             }
             if (canonical.isSuccess && episodes.isSuccess) {
                 val complete = AnimeDetail(canonical.getOrThrow(), episodes.getOrThrow())
-                cache.write(key, AnimeDocumentCodec.detail(complete).put("hasSubjectEpisodeNumbers", true).toString(), cacheGeneration)
+                cache.write(key, AnimeDocumentCodec.detail(complete).put("hasSubjectEpisodeNumbers", true)
+                    .put("hasRatingCounts", true).toString(), cacheGeneration)
             }
             // Partial responses never replace the complete persisted snapshot or its freshness.
             AnimeMetadataDetailResult(canonical.getOrNull(), episodes.getOrNull(),
@@ -226,6 +229,8 @@ internal fun bangumiSubject(json: JSONObject): AnimeSubject? {
         airWeekday = json.optInt("air_weekday").takeIf { it in 1..7 },
         rating = json.optJSONObject("rating")?.finiteNumber("score"),
         rank = json.optJSONObject("rating")?.positiveInt("rank") ?: json.positiveInt("rank"),
+        ratingCount = json.optJSONObject("rating")?.optLong("total", -1L)
+            ?.takeIf { it in 0..Int.MAX_VALUE.toLong() }?.toInt(),
     )
 }
 

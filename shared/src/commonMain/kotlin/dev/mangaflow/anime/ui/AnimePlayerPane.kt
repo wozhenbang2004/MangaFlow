@@ -550,6 +550,9 @@ internal fun AnimePlayerPane(
                 episodeListState.SaveableStateProvider("episodes") {
                     AnimePlayerEpisodes(detail?.episodes.orEmpty(), episode?.id, entry?.completedEpisodeIds.orEmpty(),
                         onEpisode, episodeAvailability = { controller.episodeAvailability(it, state) },
+                        episodeSources = { id -> animeEpisodeSources(id,
+                            controller.confirmedPlaybackLines(id, state), controller, state) },
+                        onSources = onSources,
                         active = active && !obscured && !settingsPresent, desktopRail = desktop && sideBySide,
                         modifier = episodePanel)
                 }
@@ -796,6 +799,7 @@ internal fun animeBytes(bytes: Long): String = when {
 private fun AnimePlayerEpisodes(
     episodes: List<AnimeEpisode>, currentId: String?, completed: Set<String>,
     onEpisode: (AnimeEpisode) -> Unit, episodeAvailability: (String) -> AnimeEpisodeAvailability,
+    episodeSources: (String) -> AnimeEpisodeSources, onSources: (AnimeEpisode) -> Unit,
     active: Boolean, desktopRail: Boolean, modifier: Modifier = Modifier,
 ) {
     val subjectId = episodes.firstOrNull()?.subjectId
@@ -903,6 +907,7 @@ private fun AnimePlayerEpisodes(
                 items(shown, key = { it.id }, contentType = { "episode" }) { episode ->
                     WatchEpisodeCell(episode, current = episode.id == currentId, watched = episode.id in completed,
                         availability = episodeAvailability(episode.id),
+                        sources = episodeSources(episode.id), onSources = { onSources(episode) },
                         enabled = active, inRail = desktopRail, onClick = { onEpisode(episode) })
                 }
             }
@@ -914,6 +919,7 @@ private fun AnimePlayerEpisodes(
 @Composable
 private fun WatchEpisodeCell(
     episode: AnimeEpisode, current: Boolean, watched: Boolean, availability: AnimeEpisodeAvailability,
+    sources: AnimeEpisodeSources, onSources: () -> Unit,
     enabled: Boolean, inRail: Boolean, onClick: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -960,6 +966,8 @@ private fun WatchEpisodeCell(
                             maxLines = 1, overflow = TextOverflow.Ellipsis,
                             color = if (current) color else colors.onSurfaceVariant)
                     }
+                    AnimeEpisodeSourceBadges(sources, Modifier.fillMaxWidth(), enabled = enabled,
+                        ink = if (current) color else colors.onSurfaceVariant, onOpen = onSources)
                 }
                 when {
                     current -> Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp), tint = color)
@@ -980,6 +988,8 @@ private fun WatchEpisodeCell(
             }
             if (lineLabel != null && availability != AnimeEpisodeAvailability.CHECKING) Text(lineLabel, style = MaterialTheme.typography.labelSmall,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, color = color.copy(alpha = .8f))
+            AnimeEpisodeSourceBadges(sources, Modifier.fillMaxWidth(), enabled = enabled,
+                ink = color.copy(alpha = .8f), onOpen = onSources)
         }
     }
 }

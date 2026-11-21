@@ -18,7 +18,10 @@ data class AnimeDiscoveryQuery(
     val combined: Boolean = false,
 )
 
-data class AnimeSourceScore(val provider: AnimeDiscoveryProvider, val rating: Double, val scale: Int)
+data class AnimeSourceScore(val provider: AnimeDiscoveryProvider, val rating: Double, val scale: Int,
+    val ratingCount: Int? = null)
+
+data class AnimeScoreCheck(val loading: Boolean = false, val error: String? = null, val message: String? = null)
 
 /** A foreign discovery reference is never promoted to a canonical Bangumi identity by its title. */
 data class AnimeDiscoveryItem(
