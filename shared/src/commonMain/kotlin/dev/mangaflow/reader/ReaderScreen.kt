@@ -44,6 +44,7 @@ import dev.mangaflow.ui.MangaLayout
 import dev.mangaflow.ui.DesktopVerticalScrollbar
 import dev.mangaflow.ui.ChapterSearchField
 import dev.mangaflow.ui.rememberMatchingChapters
+import dev.mangaflow.platform.LocalWindowFullscreen
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -463,7 +464,7 @@ fun ReaderScreen(
     val currentSourceName = chapter.variants.firstOrNull { it.storageId == chapter.id }?.sourceName
     val sourceSwitchWait = remember(sourceLoading, sourceSwitchName) { ReaderLoadAttempt() }
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
-    val fullscreen = LocalReaderFullscreen.current
+    val fullscreen = LocalWindowFullscreen.current
     val immersive = fullscreen?.active == true
     val hideAmbientChrome = immersive && !controlsVisible
     var topControlsHeightPx by remember { mutableIntStateOf(0) }
@@ -1512,7 +1513,7 @@ fun ReaderScreen(
                     if (fullscreen != null) ReaderIcon(
                         if (immersive) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen,
                         if (immersive) "退出全屏（Esc）" else "沉浸全屏（F11）",
-                        interactive = controlsVisible, onClick = fullscreen.toggle,
+                        interactive = controlsVisible, onClick = { fullscreen.setActive(!immersive) },
                     )
                 }
             }

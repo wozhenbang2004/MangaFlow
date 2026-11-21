@@ -23,10 +23,10 @@ import dev.mangaflow.MangaFlowHost
 import dev.mangaflow.initializeMangaFlow
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.platform.LocalWindowFullscreen
+import dev.mangaflow.platform.WindowFullscreen
 import dev.mangaflow.update.DesktopUpdateExit
-import dev.mangaflow.reader.LocalReaderFullscreen
 import dev.mangaflow.reader.ProvideDesktopReaderKeyboard
-import dev.mangaflow.reader.ReaderFullscreen
 import dev.mangaflow.ui.MangaFlowTheme
 import androidx.compose.material3.MaterialTheme
 import java.io.File
@@ -69,12 +69,13 @@ fun main() {
                 placement = windowPreferences.initialPlacement,
             )
             val fullscreen = remember { DesktopFullscreen() }
-            val toggleFullscreen: () -> Unit = {
-                if (!fullscreen.active && !fullscreen.restoring) {
+            val requestFullscreen: (Boolean) -> Unit = { enabled ->
+                if (enabled && !fullscreen.active && !fullscreen.restoring) {
                     windowPreferences.capture(windowState.desktopSnapshot())
                 }
-                fullscreen.toggle(inReader = model?.reading?.value != null)
+                fullscreen.setActive(enabled, inReader = model?.reading?.value != null)
             }
+            val reportPlaybackVisibility = remember(fullscreen) { fullscreen::onAnimePlaybackVisibilityChanged }
             LaunchedEffect(model, fullscreen) {
                 model?.reading?.collectLatest { if (it == null) fullscreen.onReaderClosed() }
             }
@@ -119,7 +120,7 @@ fun main() {
                         }
                         event.key == Key.F11 -> {
                             // Commit on release: holding F11 cannot toggle repeatedly.
-                            if (event.type == KeyEventType.KeyUp) toggleFullscreen()
+                            if (event.type == KeyEventType.KeyUp) requestFullscreen(!fullscreen.active)
                             true
                         }
                         event.key == Key.Escape && fullscreen.active -> {
@@ -147,7 +148,7 @@ fun main() {
                 }
                 CompositionLocalProvider(
                     LocalMangaContext provides context,
-                    LocalReaderFullscreen provides ReaderFullscreen(fullscreen.active, toggleFullscreen),
+                    LocalWindowFullscreen provides WindowFullscreen(fullscreen.active, requestFullscreen, reportPlaybackVisibility),
                 ) {
                     MangaFlowTheme {
                         DesktopWindowChrome(window, MaterialTheme.colorScheme.background,

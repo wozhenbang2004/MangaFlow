@@ -10,7 +10,7 @@ import com.sun.jna.platform.win32.WinUser.*
 import java.awt.EventQueue
 import java.awt.Window
 
-/** Changes the Win32 frame in place so the Compose scene and reader position stay alive. */
+/** Changes the Win32 frame in place so the Compose scene stays alive. */
 internal class DesktopFullscreen {
     var window: Window? = null
     var active by mutableStateOf(false)
@@ -18,15 +18,21 @@ internal class DesktopFullscreen {
     var restoring by mutableStateOf(false)
         private set
     private var windowed: WindowedPlacement? = null
-    private var enteredInReader = false
+    private var owner: Owner? = null
+    private var animePlaybackVisible = false
 
-    fun toggle(inReader: Boolean) {
-        if (restoring) return
-        if (active) exit() else enter(inReader)
+    fun setActive(enabled: Boolean, inReader: Boolean) {
+        if (restoring || active == enabled) return
+        if (enabled) enter(inReader) else exit()
     }
 
     fun onReaderClosed() {
-        if (enteredInReader) exit()
+        if (owner == Owner.READER) exit()
+    }
+
+    fun onAnimePlaybackVisibilityChanged(visible: Boolean) {
+        animePlaybackVisible = visible
+        if (!visible && owner == Owner.ANIME) exit()
     }
 
     private fun enter(inReader: Boolean) {
@@ -42,7 +48,11 @@ internal class DesktopFullscreen {
             check(style != 0)
             val previous = WindowedPlacement(handle, style, placement)
             windowed = previous
-            enteredInReader = inReader
+            owner = when {
+                inReader -> Owner.READER
+                animePlaybackVisible -> Owner.ANIME
+                else -> null
+            }
             active = true
             val bounds = monitor.rcMonitor
             check(user32.SetWindowLong(handle, GWL_STYLE,
@@ -68,11 +78,13 @@ internal class DesktopFullscreen {
             check(positioned && framed)
         }.onFailure { System.err.println("漫流无法恢复窗口：${it.message}") }
         windowed = null
-        enteredInReader = false
+        owner = null
         active = false
         // Let the native resize events update Compose before saving windowed geometry again.
         EventQueue.invokeLater { restoring = false }
     }
+
+    private enum class Owner { READER, ANIME }
 
     private data class WindowedPlacement(val handle: HWND, val style: Int, val placement: WINDOWPLACEMENT)
 }

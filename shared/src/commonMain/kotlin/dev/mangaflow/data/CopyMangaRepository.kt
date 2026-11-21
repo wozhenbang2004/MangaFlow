@@ -19,6 +19,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import dev.mangaflow.net.DownloadRoutingStore
@@ -665,9 +666,18 @@ class CopyMangaRepository(
         }.distinct()
     }
 
-    private suspend fun comicMetadata(mangaId: String): JSONObject {
+    private suspend fun catalogJson(url: HttpUrl, label: String): JSONObject {
+        if (platformKind == PlatformKind.DESKTOP) {
+            // A stalled desktop handshake can consume the whole catalog budget.
+            // Cancel the first GET so a fresh call can use the remaining budget.
+            withTimeoutOrNull(12_000L) { apiJson(url, label) }?.let { return it }
+        }
+        return apiJson(url, label)
+    }
+
+    private suspend fun comicMetadata(mangaId: String, forCatalog: Boolean = false): JSONObject {
         val url = apiOrigin.newBuilder().addPathSegments("api/v3/comic2").addPathSegment(mangaId).build()
-        val data = apiJson(url, "漫画详情")
+        val data = if (forCatalog) catalogJson(url, "漫画详情") else apiJson(url, "漫画详情")
         val comic = data.optJSONObject("comic") ?: throw SourceException("来源未返回漫画资料。", comicUrl(mangaId))
         if (comic.requiredText("path_word") != mangaId) {
             throw SourceException("来源返回的漫画与请求不匹配。", comicUrl(mangaId))
@@ -677,7 +687,7 @@ class CopyMangaRepository(
     }
 
     private suspend fun readCatalog(mangaId: String, onMetadata: ((Manga) -> Unit)? = null): CachedCatalog {
-        val data = comicMetadata(mangaId)
+        val data = comicMetadata(mangaId, forCatalog = true)
         val comic = data.getJSONObject("comic")
         demandReadingAccess(data)
         demandPublic(comic)
@@ -723,7 +733,7 @@ class CopyMangaRepository(
                 val url = apiOrigin.newBuilder().addPathSegments("api/v3/comic").addPathSegment(mangaId)
                     .addPathSegment("group").addPathSegment(groupId).addPathSegment("chapters")
                     .addQueryParameter("limit", "100").addQueryParameter("offset", offset.toString()).build()
-                val page = apiJson(url, "章节目录")
+                val page = catalogJson(url, "章节目录")
                 demandPublic(page)
                 val rows = page.optJSONArray("list") ?: throw SourceException("来源未返回章节清单。", manga.sourceUrl)
                 val pageTotal = page.optInt("total", -1)

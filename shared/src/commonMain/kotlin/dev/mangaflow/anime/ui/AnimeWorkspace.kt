@@ -26,6 +26,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.player.AnimePlayerPhase
+import dev.mangaflow.platform.LocalWindowFullscreen
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.motion.*
@@ -139,7 +140,13 @@ internal fun AnimeWorkspace(
     var trackingVisible by remember { mutableStateOf(false) }
     var reviewsVisible by remember { mutableStateOf(false) }
     var openingSubject by remember { mutableStateOf<AnimeSubject?>(null) }
-    var playerFullscreen by rememberSaveable { mutableStateOf(false) }
+    val windowFullscreen = LocalWindowFullscreen.current
+    var layoutFullscreen by rememberSaveable { mutableStateOf(false) }
+    val playerFullscreen = windowFullscreen?.active ?: layoutFullscreen
+    fun setPlayerFullscreen(enabled: Boolean) {
+        if (windowFullscreen != null) windowFullscreen.setActive(enabled)
+        else layoutFullscreen = enabled
+    }
     var recheckRequest by remember { mutableStateOf<AnimeTrackingReview?>(null) }
     val playing = state.playbackTarget != null || state.resolving ||
         playbackPhase != AnimePlayerPhase.IDLE && playbackPhase != AnimePlayerPhase.RELEASED
@@ -172,6 +179,11 @@ internal fun AnimeWorkspace(
     DisposableEffect(controller) {
         onDispose { currentPlaybackVisibility(false) }
     }
+    val reportWindowPlayback = windowFullscreen?.onPlaybackVisibilityChange
+    DisposableEffect(reportWindowPlayback, playing) {
+        if (playing) reportWindowPlayback?.invoke(true)
+        onDispose { if (playing) reportWindowPlayback?.invoke(false) }
+    }
     val discoveryVisible = rootActive && pane == AnimeWorkspacePane.DISCOVERY
     DisposableEffect(controller, discoveryVisible) {
         if (discoveryVisible) controller.setDiscoveryVisible(true)
@@ -182,7 +194,7 @@ internal fun AnimeWorkspace(
     }
     LaunchedEffect(browseRequest) {
         if (browseRequest != 0) {
-            playerFullscreen = false
+            layoutFullscreen = false
             pendingAssociation = null
             browseCandidate = null
             tab = 0
@@ -206,7 +218,7 @@ internal fun AnimeWorkspace(
     LaunchedEffect(searchRequest, active) {
         if (active && searchRequest != consumedSearchRequest) {
             consumedSearchRequest = searchRequest
-            playerFullscreen = false
+            layoutFullscreen = false
             controller.closePlayback()
             controller.closeDetail()
             toolsVisible = false
@@ -231,7 +243,7 @@ internal fun AnimeWorkspace(
     }
 
     fun closePlayback() {
-        playerFullscreen = false
+        layoutFullscreen = false
         controller.closePlayback()
     }
     fun submitSearch(term: String, indexOnly: Boolean = browseCandidate != null) {
@@ -245,7 +257,7 @@ internal fun AnimeWorkspace(
             detailHistory.clear()
             returnToSearch = searchExpanded
         }
-        playerFullscreen = false
+        layoutFullscreen = false
         searchExpanded = false
     }
     fun open(subject: AnimeSubject) {
@@ -392,7 +404,7 @@ internal fun AnimeWorkspace(
             trackingVisible -> trackingVisible = false
             reviewsVisible -> reviewsVisible = false
             searchExpanded -> { searchExpanded = false; browseCandidate = null }
-            playing && playerFullscreen -> playerFullscreen = false
+            playing && playerFullscreen -> setPlayerFullscreen(false)
             playing -> closePlayback()
             route.depth == 1 -> returnFromDetail()
             directoryOpen -> returnFromDirectory()
@@ -423,7 +435,7 @@ internal fun AnimeWorkspace(
     LaunchedEffect(navigationRequest, active) {
         if (!active || navigationRequest == 0 || navigationRequest == consumedNavigationRequest) return@LaunchedEffect
         consumedNavigationRequest = navigationRequest
-        playerFullscreen = false
+        layoutFullscreen = false
         controller.closeDetail()
         pendingAssociation = null
         browseCandidate = null
@@ -499,7 +511,7 @@ internal fun AnimeWorkspace(
                     val playback by controller.player.state.collectAsStateWithLifecycle()
                     AnimePlayerPane(controller, state, playback, backdrop,
                         active = active && shown.key == route.key, fullscreen = playerFullscreen,
-                        onFullscreenChange = { playerFullscreen = it },
+                        onFullscreenChange = ::setPlayerFullscreen,
                         obscured = overlayVisible || state.pendingPlayback != null,
                         onBack = ::closePlayback,
                         onRetry = controller::retryPlayback,
