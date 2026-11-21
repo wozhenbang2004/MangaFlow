@@ -1677,6 +1677,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 val catalog = catalogs.firstOrNull {
                     it.title.sourceId == binding.catalog.sourceId && it.title.id == binding.catalog.id && it.title.url == binding.catalog.url
                 } ?: return@bindingLoop emptyList()
+                if (binding.automatic && nativeSource != binding.catalog.sourceId &&
+                    !autoPlaySubjectCandidate(detail.subject, catalog.title)) return@bindingLoop emptyList()
                 val automaticGroups = autoPlayGroups(detail, canonical, catalog, binding.selectedGroup)
                 val sourceNumber = autoPlayEpisodeNumber(detail, canonical, catalog)
                 fun mappingStillMatches(episode: AnimeSourceEpisode): Boolean =
@@ -2044,7 +2046,16 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                     sourceCatalogErrors = state.sourceCatalogErrors - sourceId) }
                                 stageCatalogue(catalog)
                                 rebuildOptions()
-                                report(AnimeAssociationPhase.LINKED, catalog.notice)
+                                val liveDetail = mutableState.value.detail ?: return@aggregation false
+                                val automaticallyBound = mutableState.value.sourceBindings.any {
+                                    it.catalog.sourceId == sourceId && it.automatic
+                                }
+                                val identityIssue = if (automaticallyBound && nativeOrigin != sourceId &&
+                                    !autoPlaySubjectCandidate(liveDetail.subject, catalog.title))
+                                    animeCatalogIdentityIssue(liveDetail, catalog) else null
+                                report(AnimeAssociationPhase.LINKED, catalog.notice ?: identityIssue?.let {
+                                    "$it 已暂停这个来源的自动对应。"
+                                })
                                 return@aggregation true
                             }
                             val keywords = autoPlaySearchKeywords(detail.subject)
@@ -2143,9 +2154,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                     return@mapNotNull null
                                 }
                                 if (catalog.title.sourceId != sourceId || catalog.title.id != title.id ||
-                                    catalog.title.url != title.url || !autoPlayCatalogSubjectMatches(detail, catalog)) {
+                                    catalog.title.url != title.url) {
                                     candidateChecks += AnimeAssociationCandidateCheck(title, AnimeAssociationPhase.NEEDS_SELECTION,
-                                        "目录返回的作品身份或年份未能确认。")
+                                        "来源返回了不同的作品目录，请重新核对。")
+                                    return@mapNotNull null
+                                }
+                                animeCatalogIdentityIssue(detail, catalog)?.let { reason ->
+                                    candidateChecks += AnimeAssociationCandidateCheck(catalog.title,
+                                        AnimeAssociationPhase.NEEDS_SELECTION, reason)
                                     return@mapNotNull null
                                 }
                                 catalog
@@ -2169,24 +2185,19 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 return@aggregation true
                             }
                             val liveDetail = mutableState.value.detail ?: return@aggregation false
-                            if (liveDetail.subject.canonicalDoubanId() != null && liveDetail.episodes.isEmpty() &&
-                                projectAnimeSourceCatalogue(liveDetail, catalog) != null) {
-                                stageCatalogue(catalog)
-                                report(AnimeAssociationPhase.EPISODE_UNMATCHED, "作品已确认，正在建立统一选集。")
-                                return@aggregation true
-                            }
                             val requested = focusFor(liveDetail)
                             val groups = requested?.let { autoPlayGroups(liveDetail, it, catalog) }.orEmpty()
-                            if (groups.isEmpty() && !autoPlaySubjectHasSharedId(detail.subject, catalog.title)) {
-                                val exists = requested?.let { episode ->
-                                    val sourceNumber = autoPlayEpisodeNumber(liveDetail, episode, catalog)
-                                    catalog.episodes.any { it.kind == episode.kind && it.number == sourceNumber }
-                                } == true
-                                val phase = if (exists) AnimeAssociationPhase.NEEDS_SELECTION else AnimeAssociationPhase.EPISODE_UNMATCHED
-                                val reason = if (exists) "目录中有对应集，线路组仍需确认。"
-                                    else if (requested == null) "当前作品没有可确认的剧集编号。" else "作品身份已核对，目录中暂无本集。"
-                                report(phase, checks = candidateChecks + AnimeAssociationCandidateCheck(catalog.title, phase, reason))
-                                return@aggregation true
+                            val sourceNumber = requested?.let { autoPlayEpisodeNumber(liveDetail, it, catalog) }
+                            // Work identity has already passed. Episode/route coverage must not
+                            // send a confirmed work back to the work-association prompt.
+                            val episodeStatus = when {
+                                groups.isNotEmpty() -> null
+                                requested == null -> "作品已关联，正在核对统一选集。"
+                                catalog.episodes.none { it.number != null } -> "作品已关联，来源未标集号，本集尚未对应。"
+                                catalog.episodes.any { it.kind == requested.kind &&
+                                    it.number == sourceNumber } ->
+                                    "作品已关联，本集线路尚未对应。"
+                                else -> "作品已关联，目录中暂无本集。"
                             }
                             library.editPlaybackAssociation(detail.subject, editBindings = { bindings ->
                                 check(current() && sourceId !in library.state.value.entries[detail.subject.id]?.excludedSourceIds.orEmpty()) {
@@ -2201,8 +2212,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             mutableState.update { state -> state.copy(sourceCatalogs = state.sourceCatalogs.filterNot {
                                 it.title.sourceId == sourceId
                             } + catalog, sourceCatalogErrors = state.sourceCatalogErrors - sourceId) }
+                            stageCatalogue(catalog)
                             rebuildOptions()
-                            report(AnimeAssociationPhase.LINKED)
+                            report(AnimeAssociationPhase.LINKED, episodeStatus)
                             true
                         }
                         if (loaded != true) report(AnimeAssociationPhase.UNAVAILABLE, "来源暂未完成，已保留现有目录。")

@@ -30,7 +30,8 @@ internal fun projectAnimeSourceCatalogue(
     val group = binding?.selectedGroup?.takeIf { it in groups } ?: when {
         binding?.selectedGroup != null -> return null
         groups.size == 1 -> groups.keys.single()
-        !explicit && catalog.sameWorkRoutes && groups.values.all(::valid) && groups.values.map { rows ->
+        !explicit && (catalog.sameWorkRoutes || hasLmmCatalogWorkId(catalog.title)) &&
+            groups.values.all(::valid) && groups.values.map { rows ->
             rows.map { Triple(it.kind, it.number, it.edition) }.sortedBy { it.second }
         }.distinct().size == 1 -> groups.keys.sorted().first()
         else -> return null

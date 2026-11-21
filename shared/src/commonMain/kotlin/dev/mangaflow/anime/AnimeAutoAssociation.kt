@@ -250,6 +250,24 @@ private fun autoSeasonCatalogOffset(detail: AnimeDetail, catalog: AnimeSourceCat
 internal fun autoPlayCatalogSubjectMatches(detail: AnimeDetail, catalog: AnimeSourceCatalog): Boolean =
     autoPlaySubjectMatches(detail.subject, catalog.title) || autoSeasonCatalogOffset(detail, catalog) != null
 
+/** Explain work identity separately from episode/route coverage, using the fetched catalogue. */
+internal fun animeCatalogIdentityIssue(detail: AnimeDetail, catalog: AnimeSourceCatalog): String? {
+    if (autoPlayCatalogSubjectMatches(detail, catalog)) return null
+    val subject = detail.subject
+    val title = catalog.title
+    if (conflictingAnimeIds(animeAuthoritativeIds(animeSubjectIds(subject)), animeAuthoritativeIds(title.externalIds)))
+        return "来源的作品编号与当前资料不同，请核对版本。"
+    if (subject.year != null && title.year != null && subject.year != title.year)
+        return "来源标注 ${title.year} 年，当前作品为 ${subject.year} 年，请核对是否为同名版本。"
+    if (animeWorkTitlesConflict(animeCatalogueNames(subject), listOf(title.title),
+            requireMatchingEdition = !sharesAuthoritativeAnimeId(subject, title)))
+        return "来源的季度或版本与当前作品尚未对应。"
+    if (!autoPlaySubjectCandidate(subject, title)) return "来源标题或作品身份与当前资料尚未对应。"
+    if (title.year == null) return "未取得来源的明确年份，作品身份尚未确认。"
+    if (subject.year == null) return "当前作品缺少年份资料，暂不能确认来源版本。"
+    return "来源的作品资料尚未确认，可核对后手动关联。"
+}
+
 /**
  * Bangumi can give one episode both a series-wide sort number and a number in
  * this subject. A verified season catalogue can start at 1 while still airing.

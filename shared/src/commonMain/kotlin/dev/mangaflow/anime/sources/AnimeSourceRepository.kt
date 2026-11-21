@@ -534,7 +534,7 @@ private class GiriGiriProvider : RoutedAnimeProvider() {
 private class LmmProvider : RoutedAnimeProvider() {
     override val supportsSearchPagination = false
     override val id = "anime-lmm"
-    override val revision = "2026-11-17-detail-year"
+    override val revision = "2026-11-21-work-routes"
     override val name = "LMM 动漫"
     override val homeUrl = "https://www.lmm22.com/"
 
@@ -576,26 +576,25 @@ private class LmmProvider : RoutedAnimeProvider() {
                         sourceEpisodeKind(episodeLabel), "$label [${groupIndex + 1}]")
                 }
             }
-            // LMM22's observed work-local release row (not LMM85's contract or a
-            // recommendation/filter year). Missing/conflicting evidence stays unconfirmed.
+            // Read only explicitly labelled dates inside this work's information block.
+            // Native work/route ownership is independent of the date's display format.
             val identity = withContext(Dispatchers.Default) {
                 val info = document.selectFirst(".video-info")
                 val name = info?.selectFirst(".video-info-header h1.page-title")?.text().orEmpty().trim()
                 val releaseDates = info?.select(".video-info-items").orEmpty().filter { row ->
-                    row.selectFirst(".video-info-itemtitle")?.text()?.trim() == "上映："
+                    normalizeNfkc(row.selectFirst(".video-info-itemtitle")?.text().orEmpty())
+                        .trim().removeSuffix(":").trim() in setOf("上映", "首播", "年份")
                 }.map { row -> row.selectFirst(".video-info-item")?.text().orEmpty().trim() }.distinct()
-                val year = releaseDates.singleOrNull()?.let { value ->
-                    if (!Regex("""\d{4}-\d{2}-\d{2}""").matches(value)) null
-                    else runCatching { LocalDate.parse(value).year }.getOrNull()?.takeIf { it in 1900..2100 }
-                }
+                val years = releaseDates.map(::lmmReleaseYear)
+                val year = years.takeIf { it.isNotEmpty() && it.none { value -> value == null } }
+                    ?.filterNotNull()?.distinct()?.singleOrNull()
                 val home = animePublicUrl(homeUrl)
                 val trustedOrigin = url.scheme == home.scheme && url.host == home.host && url.port == home.port
                 val samePage = response.url.scheme == url.scheme && response.url.host == url.host &&
                     response.url.port == url.port && response.url.encodedPath == url.encodedPath
                 val exactWork = url.encodedPath == "/index.php/vod/detail/id/${title.id}.html"
-                val unverified = title.copy(externalIds = title.externalIds - "lmm22")
-                if (!trustedOrigin || !samePage || !exactWork || name != title.title.trim() || year == null ||
-                    (title.year != null && title.year != year)) return@withContext unverified
+                val unverified = title.copy(year = null, externalIds = title.externalIds - "lmm22")
+                if (!trustedOrigin || !samePage || !exactWork || name.isBlank()) return@withContext unverified
                 val playPath = Regex("""/play/${Regex.escape(title.id)}_\d+_\d+\.html""")
                 val sameWorkLines = episodes.isNotEmpty() && episodes.all { episode ->
                     val link = runCatching { animePublicUrl(episode.url) }.getOrNull()
@@ -603,11 +602,20 @@ private class LmmProvider : RoutedAnimeProvider() {
                         playPath.matches(link.encodedPath)
                 }
                 val ids = if (sameWorkLines) unverified.externalIds + ("lmm22" to title.id) else unverified.externalIds
-                unverified.copy(year = year, externalIds = ids)
+                unverified.copy(title = name, year = year, externalIds = ids)
             }
             requireEpisodes(identity, episodes)
         } finally { http.close() }
     }
+}
+
+/** A year, or an actual ISO release date optionally followed by its region. */
+private fun lmmReleaseYear(value: String): Int? {
+    val match = Regex("""^(\d{4})(-\d{2}-\d{2})?(?:\s*\([^()]*\))?$""")
+        .matchEntire(normalizeNfkc(value).trim()) ?: return null
+    val year = if (match.groupValues[2].isBlank()) match.groupValues[1].toIntOrNull()
+        else runCatching { LocalDate.parse(match.groupValues[1] + match.groupValues[2]).year }.getOrNull()
+    return year?.takeIf { it in 1900..2100 }
 }
 
 internal fun sourceCover(base: String, raw: String): String =

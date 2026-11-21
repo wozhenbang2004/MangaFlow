@@ -274,6 +274,16 @@ internal fun AnimeSourcesPanel(
                             AnimeMessage("正在读取来源目录")
                         }
                         if (preview != null) {
+                            val previewDetail = state.detail
+                            val identityIssue = if (previewDetail == null) "当前作品资料尚未取得。"
+                                else animeCatalogIdentityIssue(previewDetail, preview)
+                            val routeCount = preview.episodes.map { it.group }.distinct().size
+                            val multiEpisodeWork = subject?.format == AnimeDiscoveryFormat.SERIES ||
+                                subject?.format != AnimeDiscoveryFormat.MOVIE &&
+                                maxOf(subject?.episodeCount ?: 0,
+                                    previewDetail?.episodes?.count { it.kind == AnimeEpisodeKind.MAIN } ?: 0) > 1
+                            val unnumberedSeries = multiEpisodeWork && preview.episodes.isNotEmpty() &&
+                                preview.episodes.all { it.number == null }
                             item {
                                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -306,11 +316,15 @@ internal fun AnimeSourcesPanel(
                                 Text("替换后重新核对线路与集数映射；观看记录会保留，关联改动可以撤销。",
                                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            if (!previewLinked && !openAsNative) item {
-                                Text("请核对季度、正片/特别篇与版本。关联作品后还需选择线路组；同名或集数相同不代表同一版本。",
+                            if (!openAsNative && (!previewLinked || unnumberedSeries)) item {
+                                val explanation = listOfNotNull(
+                                    (identityIssue ?: "作品身份已核对，可对应的集数与线路会自动整理。").takeIf { !previewLinked },
+                                    "来源目录未标注集号，暂时无法对应到本番的具体集。".takeIf { unnumberedSeries },
+                                ).joinToString(" ")
+                                Text(explanation,
                                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            item { AnimeSectionTitle("来源目录", preview.episodes.size.toString() + " 条原始记录") }
+                            item { AnimeSectionTitle("来源目录", "$routeCount 条线路 · ${preview.episodes.size} 条播放记录") }
                             items(preview.episodes.take(if (allPreviewEpisodes) Int.MAX_VALUE else 10),
                                 key = { it.group + "|" + it.id }) { episode ->
                                 Column(Modifier.fillMaxWidth().padding(vertical = 5.dp),
@@ -321,7 +335,7 @@ internal fun AnimeSourcesPanel(
                             }
                             if (preview.episodes.size > 10) item {
                                 MotionTextButton(onClick = { allPreviewEpisodes = !allPreviewEpisodes }) {
-                                    Text(if (allPreviewEpisodes) "收起目录" else "查看全部 " + preview.episodes.size + " 条")
+                                    Text(if (allPreviewEpisodes) "收起目录" else "查看全部 " + preview.episodes.size + " 条播放记录")
                                 }
                             }
                         }
@@ -541,6 +555,9 @@ internal fun AnimeSourcesPanel(
                                             ?.let { AnimeQuietLabel(it) }
                                         if (sourceDisabled) AnimeQuietLabel("启用此来源后可读取目录。")
                                         if (error != null) AnimeQuietLabel(error)
+                                        if (error == null && catalog?.notice.isNullOrBlank() &&
+                                            (if (focusEpisode == null) (matchesBySource[sourceId] ?: 0) == 0 else lines.isEmpty()))
+                                            association?.message?.let { AnimeQuietLabel(it) }
                                         if (!sourceDisabled && (error != null || catalog == null)) {
                                             MotionTextButton(onClick = { controller.refreshSource(sourceId) },
                                                 modifier = Modifier.heightIn(min = 44.dp)) {
@@ -960,14 +977,14 @@ private fun animeAssociationPhaseLabel(phase: AnimeAssociationPhase): String = w
     AnimeAssociationPhase.LINKED -> "作品已关联"
     AnimeAssociationPhase.NO_MATCH -> "未找到可靠候选"
     AnimeAssociationPhase.NEEDS_SELECTION -> "待确认作品或版本"
-    AnimeAssociationPhase.EPISODE_UNMATCHED -> "目录中暂无本集"
+    AnimeAssociationPhase.EPISODE_UNMATCHED -> "本集尚未对应"
     AnimeAssociationPhase.UNAVAILABLE -> "搜索或目录读取未完成"
     AnimeAssociationPhase.EXCLUDED -> "已排除自动关联"
 }
 
 internal fun animeSourceEpisodeSummary(episode: AnimeSourceEpisode): String =
     listOfNotNull(episode.group.takeIf { it.isNotBlank() }, episode.edition.takeIf { it.isNotBlank() },
-        episode.number?.let { "编号 " + animeEpisodeNumber(it) },
+        episode.number?.let { "编号 " + animeEpisodeNumber(it) } ?: "未标集号",
         when (episode.kind) {
             AnimeEpisodeKind.MAIN -> "正片"
             AnimeEpisodeKind.SPECIAL -> "特别篇"
