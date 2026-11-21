@@ -90,7 +90,7 @@ private abstract class RoutedAnimeProvider : AnimeProvider {
         subtitles: List<AnimeSubtitle> = emptyList(),
     ): AnimePlaybackAsset = AnimePlaybackAsset(
         id = "$id:${animeHash(episode.id + "\n" + episode.edition + "\n" + animeContentIdentity(url))}",
-        sourceId = id, sourceEpisodeId = episode.id, url = animePublicUrl(url).toString(),
+        sourceId = id, sourceEpisodeId = episode.id, url = animeMediaUrl(url).toString(),
         route = http.route, title = episode.title, edition = episode.edition, mimeType = mimeType ?: animeMediaType(url),
         headers = mapOf("User-Agent" to AnimeHttp.USER_AGENT, "Referer" to animePublicUrl(referer).toString()),
         subtitles = subtitles, sourceRevision = revision,
@@ -311,7 +311,7 @@ private class TvtFunProvider : RoutedAnimeProvider() {
             if (resolved.text("episodeId").isNotEmpty() && resolved.text("episodeId") != episodeId)
                 throw AnimeSourceException(id, AnimeSourceStage.RESOLVE, "来源返回了另一集的播放地址，请刷新目录。")
             subtitles = resolved.optJSONArray("subtitles")?.objects().orEmpty().mapIndexedNotNull { index, subtitle ->
-                val url = runCatching { animeAbsolute(homeUrl, subtitle.text("url")) }.getOrNull()
+                val url = runCatching { animeMediaAbsolute(homeUrl, subtitle.text("url")) }.getOrNull()
                     ?: return@mapIndexedNotNull null
                 AnimeSubtitle(subtitle.text("id").ifBlank { "subtitle-$index" }, url,
                     subtitle.text("label", "language").ifBlank { "字幕 ${index + 1}" },
@@ -324,7 +324,7 @@ private class TvtFunProvider : RoutedAnimeProvider() {
                     "该线路尚未提供播放地址，请选择另一条线路。")
         }
         return duringPlaybackPhase(TvtFunPlaybackPhase.MEDIA) {
-            val url = animeAbsolute(homeUrl, playback.text("url"))
+            val url = animeMediaAbsolute(homeUrl, playback.text("url"))
             val mediaType = playbackMediaType(playback, url)
             if (mediaType == null) {
                 val stream = AnimeStreamResolver(http).resolve(url, homeUrl)
@@ -339,7 +339,7 @@ private class TvtFunProvider : RoutedAnimeProvider() {
 
     private fun hasDirectPlayback(line: JSONObject): Boolean {
         val playback = declaredPlayback(line) ?: return false
-        val url = runCatching { animeAbsolute(homeUrl, playback.text("url")) }.getOrNull() ?: return false
+        val url = runCatching { animeMediaAbsolute(homeUrl, playback.text("url")) }.getOrNull() ?: return false
         return playbackMediaType(playback, url) != null
     }
 
@@ -447,6 +447,7 @@ private class AgeProvider : RoutedAnimeProvider() {
                     val value = item.optString(1)
                     if (label.isBlank() || value.isBlank()) return@mapNotNull null
                     val url = when {
+                        animeMediaType(value) != null -> animeMediaUrl(value).toString()
                         runCatching { animePublicUrl(value) }.isSuccess -> value
                         road.endsWith("m3u8") && !road.contains("xigua", true) && parser.isNotBlank() ->
                             animeAbsolute(homeUrl, parser + value)
@@ -513,7 +514,7 @@ private class GiriGiriProvider : RoutedAnimeProvider() {
                     if (separator <= 0 || separator == item.lastIndex) return@mapIndexedNotNull null
                     val label = item.substring(0, separator).trim()
                     val value = item.substring(separator + 1).trim()
-                    val direct = runCatching { animePublicUrl(value) }.getOrNull()
+                    val direct = runCatching { animeMediaUrl(value) }.getOrNull()
                     val url = if (direct != null && animeMediaType(direct.toString()) != null) direct.toString()
                         else animePublicUrl("https://pl.girigirilove.com/addons/aplyer/atom.php").newBuilder()
                             .addQueryParameter("key", "0").addQueryParameter("url", value).build().toString()
@@ -646,8 +647,8 @@ internal fun animeEpisodeLabel(number: Double): String =
 
 /** Exclude known expiring signatures from resource identity, retaining content/quality parameters. */
 internal fun animeContentIdentity(raw: String): String {
-    val url = runCatching { animePublicUrl(raw) }.getOrNull() ?: return raw
-    val nested = url.queryParameter("url")?.let { runCatching { animePublicUrl(it) }.getOrNull() }
+    val url = runCatching { animeMediaUrl(raw) }.getOrNull() ?: return raw
+    val nested = url.queryParameter("url")?.let { runCatching { animeMediaUrl(it) }.getOrNull() }
     val content = nested ?: url
     val builder = content.newBuilder()
     val signatures = setOf("token", "sign", "signature", "expires", "expire", "expiry", "auth_key",

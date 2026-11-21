@@ -2,7 +2,7 @@ package dev.mangaflow.anime
 
 import dev.mangaflow.anime.player.animeHlsTransportOffset
 import dev.mangaflow.anime.player.usesImagePrefixedAnimeHls
-import dev.mangaflow.anime.sources.animePublicUrl
+import dev.mangaflow.anime.sources.animeMediaUrl
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.net.NetworkResponse
@@ -38,8 +38,8 @@ private data class ProbeSample(val url: HttpUrl, val response: NetworkResponse, 
 
 internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset): AnimeMediaPreflight {
     val origin = publicProbeUrl(asset.url)
-        ?: return AnimeMediaPreflight(wallTimeMillis(), failure = "媒体地址超出公开 HTTPS 探测范围")
-    val client = NetworkClient(route = asset.route, connectTimeoutMillis = 2_500,
+        ?: return AnimeMediaPreflight(wallTimeMillis(), failure = "媒体地址超出公开 HTTP(S) 探测范围")
+    val client = NetworkClient(route = asset.route, publicMediaOnly = true, connectTimeoutMillis = 2_500,
         readTimeoutMillis = 4_000, callTimeoutMillis = 4_500)
     val startedAt = monotonicTimeMillis()
     fun result(code: Int? = null, verified: Boolean? = null, failure: String? = null,
@@ -70,8 +70,10 @@ internal suspend fun inspectAnimeMediaBeforePlayback(asset: AnimePlaybackAsset):
                 } ?: return null
                 when {
                     response.code in redirectCodes -> {
-                        url = response.header("Location")?.let(url::resolve)?.toString()?.let(::publicProbeUrl)
+                        val next = response.header("Location")?.let(url::resolve)?.toString()?.let(::publicProbeUrl)
                             ?: return null
+                        if (url.isHttps && !next.isHttps) return null
+                        url = next
                     }
                     else -> return ProbeSample(url, response,
                         (monotonicTimeMillis() - start).coerceAtLeast(1L))
@@ -174,7 +176,7 @@ private val ignoredProbeHeaders = setOf("host", "connection", "content-length", 
 private val publicMediaHeaders = setOf("user-agent", "referer", "origin", "accept", "accept-language")
 private val redirectCodes = setOf(301, 302, 303, 307, 308)
 
-private fun publicProbeUrl(value: String): HttpUrl? = runCatching { animePublicUrl(value) }.getOrNull()
+private fun publicProbeUrl(value: String): HttpUrl? = runCatching { animeMediaUrl(value) }.getOrNull()
 private fun publicProbeChild(parent: HttpUrl, value: String): HttpUrl? = parent.resolve(value)?.toString()?.let(::publicProbeUrl)
 private fun firstHlsSampleRange(value: String, maximumBytes: Int): LongRange? {
     val length = value.substringBefore('@').toLongOrNull()?.takeIf { it > 0L } ?: return null

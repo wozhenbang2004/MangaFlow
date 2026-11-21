@@ -148,7 +148,7 @@ internal suspend fun prepareAndroidAnimeWindow(
             coroutineScope {
                 val cancelRequests = launch(Dispatchers.IO) {
                     try { awaitCancellation() }
-                    finally { client.dispatcher.cancelAll() }
+                    finally { client.cancelAll() }
                 }
                 try { exportWindow(context, request, mimeType, data, effect, output) }
                 finally { cancelRequests.cancel() }

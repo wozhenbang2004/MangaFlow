@@ -51,7 +51,7 @@ internal class AnonymousPlayerPages(private val http: AnimeHttp) {
         val raw = config.optString("url").takeIf { it.isNotBlank() && it.length <= 16384 } ?: return null
         // A public media declaration is data; opaque tokens/key/time require an unverified POST
         // protocol and are deliberately not submitted or evaluated.
-        val media = runCatching { animePublicUrl(animeAbsolute(page.toString(), raw)).toString() }.getOrNull()
+        val media = runCatching { animeMediaAbsolute(page.toString(), raw) }.getOrNull()
         return media?.takeIf { animeMediaType(it) != null }
     }
 
@@ -75,7 +75,7 @@ internal class AnonymousPlayerPages(private val http: AnimeHttp) {
             runCatching { decodeUrlComponent(decoded) }.getOrNull()?.let(candidates::add)
         }
         return candidates.firstNotNullOfOrNull { candidate ->
-            runCatching { animePublicUrl(animeAbsolute(page.toString(), candidate)).toString() }.getOrNull()
+            runCatching { animeMediaAbsolute(page.toString(), candidate) }.getOrNull()
                 ?.takeIf { animeMediaType(it) != null }
         }
     }
@@ -101,13 +101,13 @@ internal class AnonymousPlayerPages(private val http: AnimeHttp) {
         val result = withContext(Dispatchers.Default) { JSONObject(response.text) }
         if (result.optInt("code") != 200) throw AnimeSourceException(http.sourceId, AnimeSourceStage.RESOLVE,
             "此线路的公开解析暂未成功，请刷新或选择其他线路。")
-        // Only literal public HTTPS media is supported. Browser instructions such as youku
+        // Only literal public media is supported. Browser instructions such as youku
         // remain unsupported, rather than being executed or mistaken for playable content.
         if (result.optString("ext").equals("youku", ignoreCase = true)) return null
         if (http.route != DownloadRoutingStore.activeSourceSnapshot(http.sourceId, DownloadCategory.ANIME))
             throw AnimeSourceException(http.sourceId, AnimeSourceStage.RESOLVE, "动漫来源路由已变化，请重新读取。")
-        val media = runCatching { animePublicUrl(result.optString("url")) }.getOrNull() ?: return null
-        return media.toString().takeIf { media.scheme == "https" && animeMediaType(it) != null }
+        val media = runCatching { animeMediaUrl(result.optString("url")) }.getOrNull() ?: return null
+        return media.toString().takeIf { animeMediaType(it) != null }
     }
 
     suspend fun rejectAccessPage(html: String): Unit = withContext(Dispatchers.Default) {

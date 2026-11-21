@@ -16,7 +16,7 @@ import androidx.media3.exoplayer.hls.playlist.HlsMediaPlaylist
 import androidx.media3.exoplayer.hls.playlist.HlsMultivariantPlaylist
 import androidx.media3.exoplayer.hls.playlist.HlsPlaylist
 import androidx.media3.exoplayer.hls.playlist.HlsPlaylistParser
-import dev.mangaflow.anime.sources.animePublicUrl
+import dev.mangaflow.anime.sources.animeMediaUrl
 import dev.mangaflow.platform.PlatformContext
 import java.io.ByteArrayInputStream
 import java.io.IOException
@@ -42,11 +42,11 @@ internal suspend fun cacheAndroidAnimeStartup(
     val client = animeMediaHttpClient(request.asset, forPrefetch = true)
     val cancelRequests = launch(Dispatchers.IO) {
         try { awaitCancellation() }
-        finally { client.dispatcher.cancelAll() }
+        finally { client.cancelAll() }
     }
     val expiry = launch(Dispatchers.IO) {
         delay((request.validUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
-        client.dispatcher.cancelAll()
+        client.cancelAll()
     }
     try {
         withContext(Dispatchers.IO) {
@@ -403,7 +403,7 @@ private class VerifiedStartupMediaSource(
 }
 
 private const val STARTUP_PREFIX_BYTES = 5 * 188
-private fun checkedUri(uri: Uri): Uri = Uri.parse(animePublicUrl(uri.toString()).toString())
+private fun checkedUri(uri: Uri): Uri = Uri.parse(animeMediaUrl(uri.toString()).toString())
 private fun millisToMicros(value: Long): Long = value.coerceIn(0L, Long.MAX_VALUE / 1_000L) * 1_000L
 private fun boundedEnd(start: Long, length: Long): Long = start + minOf(length, Long.MAX_VALUE - start)
 

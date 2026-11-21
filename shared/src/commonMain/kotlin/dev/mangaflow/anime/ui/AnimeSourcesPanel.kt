@@ -395,26 +395,18 @@ internal fun AnimeSourcesPanel(
                             val finding = state.autoMatching || (!canAutoPlay && availability == AnimeEpisodeAvailability.CHECKING)
                             when {
                                 availability == AnimeEpisodeAvailability.UPCOMING -> AnimeQuietLabel("本集尚未放送", Modifier.padding(8.dp))
-                                canAutoPlay -> MotionTextButton(onClick = { onAutomaticPlay(focusEpisode) }, enabled = !finding,
-                                    modifier = Modifier.heightIn(min = 44.dp)) {
-                                    Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp))
-                                    Spacer(Modifier.width(5.dp))
-                                    Text("自动选线播放")
-                                }
-                                availability == AnimeEpisodeAvailability.RECENTLY_FAILED -> MotionTextButton(
-                                    onClick = { controller.measureEpisodeSources(focusEpisode.id, force = true) }, enabled = !measuring,
-                                    modifier = Modifier.heightIn(min = 44.dp)) {
-                                    Icon(Icons.Outlined.Refresh, null, Modifier.size(16.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("重新探测本集线路")
-                                }
-                                else -> MotionTextButton(onClick = { controller.verifyEpisodeSources(focusEpisode.id, retry = true) },
-                                    enabled = !finding,
+                                else -> MotionTextButton(onClick = { onAutomaticPlay(focusEpisode) }, enabled = !state.autoMatching,
                                     modifier = Modifier.heightIn(min = 44.dp)) {
                                     if (finding) MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
-                                    else Icon(Icons.Outlined.Search, null, Modifier.size(16.dp))
+                                    else Icon(if (availability == AnimeEpisodeAvailability.RECENTLY_FAILED)
+                                        Icons.Outlined.Refresh else Icons.Outlined.PlayArrow, null, Modifier.size(16.dp))
                                     Spacer(Modifier.width(6.dp))
-                                    Text(if (finding) "查找线路中" else "查找本集线路")
+                                    Text(when {
+                                        state.autoMatching -> "正在查找本集线路"
+                                        availability == AnimeEpisodeAvailability.RECENTLY_FAILED -> "重试本集播放"
+                                        canAutoPlay -> "自动选线播放"
+                                        else -> "找源并播放"
+                                    })
                                 }
                             }
                         } else if (bindings.isEmpty()) item(key = "no-bindings") {

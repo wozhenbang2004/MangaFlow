@@ -71,11 +71,12 @@ import androidx.media3.session.MediaSession
 import androidx.media3.ui.SubtitleView
 import androidx.media3.ui.compose.ContentFrame
 import dev.mangaflow.anime.AnimePlaybackAsset
-import dev.mangaflow.anime.sources.animePublicUrl
+import dev.mangaflow.anime.sources.animeMediaUrl
 import dev.mangaflow.enhancement.engine.AndroidRealtimeVideoModel
 import dev.mangaflow.enhancement.engine.AndroidLiveRifeVulkan
 import dev.mangaflow.enhancement.engine.EnhancementEngineIds
 import dev.mangaflow.net.applyDownloadRoute
+import dev.mangaflow.net.applyPublicMediaNetwork
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
 import dev.mangaflow.platform.wallTimeMillis
@@ -100,6 +101,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.Call
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -123,7 +125,7 @@ internal class AndroidAnimePlayer(
     private var session: MediaSession? = null
     private var listener: Player.Listener? = null
     private var polling: Job? = null
-    private var http: OkHttpClient? = null
+    private var http: AnimeMediaHttpClient? = null
     private var releaseCache: (() -> Unit)? = null
     private var recovery: Job? = null
     private var recoveryNotice: String? = null
@@ -135,7 +137,7 @@ internal class AndroidAnimePlayer(
     )
     private class RemoteMediaResources(
         val plan: RemoteMediaPlan,
-        val client: OkHttpClient,
+        val client: AnimeMediaHttpClient,
         val bytes: AtomicLong,
         val releaseCache: (() -> Unit)?,
         val unsupportedSubtitle: Boolean,
@@ -607,7 +609,7 @@ internal class AndroidAnimePlayer(
         checkedMediaUrl(asset.url)
         // SimpleCache opens its database/files once, off the UI thread. The process owns it.
         var pendingLease: (() -> Unit)? = null
-        var pendingClient: OkHttpClient? = null
+        var pendingClient: AnimeMediaHttpClient? = null
         var cacheNotice: String? = null
         try {
             val cacheOwner = if (request.bypassMediaCache) null else withContext(Dispatchers.IO) {
@@ -1954,16 +1956,48 @@ internal fun inferAnimeMediaContentType(uri: Uri, mimeType: String?): Int {
     return Util.inferContentTypeForUriAndMimeType(uri, normalized)
 }
 
-internal fun closeAnimeMediaHttpClient(client: OkHttpClient) {
+internal fun closeAnimeMediaHttpClient(client: AnimeMediaHttpClient) {
     // Closing a pooled TLS socket can write a close-notify record. The retired
     // client must be released off Main even after its playback scope has ended.
     Dispatchers.IO.dispatch(EmptyCoroutineContext, Runnable {
-        try { client.dispatcher.cancelAll() }
-        finally { client.connectionPool.evictAll() }
+        client.close()
     })
 }
 
-internal fun animeMediaHttpClient(asset: AnimePlaybackAsset, forPrefetch: Boolean = false): OkHttpClient =
+/** One player transport owner, selecting the source's declared protocol per resource. */
+internal class AnimeMediaHttpClient(private val create: (Boolean) -> OkHttpClient) : Call.Factory {
+    private val lock = Any()
+    private val https = create(false)
+    private var cleartext: OkHttpClient? = null
+    private var closed = false
+
+    override fun newCall(request: Request): Call {
+        val target = checkedMediaUrl(request.url.toString())
+        val client = synchronized(lock) {
+            if (closed) throw IOException("播放连接已关闭")
+            if (target.isHttps) https else cleartext ?: try {
+                create(true).also { cleartext = it }
+            } catch (failure: IllegalStateException) { throw IOException(failure.message, failure) }
+        }
+        return client.newCall(request)
+    }
+
+    fun cancelAll() {
+        val clients = synchronized(lock) { listOfNotNull(https, cleartext) }
+        clients.forEach { it.dispatcher.cancelAll() }
+    }
+
+    fun close() {
+        val clients = synchronized(lock) { closed = true; listOfNotNull(https, cleartext) }
+        clients.forEach { client ->
+            try { client.dispatcher.cancelAll() }
+            finally { client.connectionPool.evictAll() }
+        }
+    }
+}
+
+internal fun animeMediaHttpClient(asset: AnimePlaybackAsset, forPrefetch: Boolean = false): AnimeMediaHttpClient =
+    AnimeMediaHttpClient { publicMedia ->
     OkHttpClient.Builder()
         .apply {
             if (forPrefetch) {
@@ -1972,7 +2006,6 @@ internal fun animeMediaHttpClient(asset: AnimePlaybackAsset, forPrefetch: Boolea
                 callTimeout(6L, TimeUnit.SECONDS)
             }
         }
-        .applyDownloadRoute(asset.route)
         .followRedirects(false)
         .followSslRedirects(false)
         .addInterceptor { chain ->
@@ -2000,12 +2033,20 @@ internal fun animeMediaHttpClient(asset: AnimePlaybackAsset, forPrefetch: Boolea
                 response.close()
                 if (next == null || ++redirects > 8) throw IOException("来源重定向无效或次数过多")
                 checkedMediaUrl(next.toString())
+                if (requestedUrl.isHttps && !next.isHttps)
+                    throw IOException("播放线路不允许从 HTTPS 跳转到 HTTP，请重新解析线路")
                 // Rebuild per hop: scoped credentials never survive a cross-origin redirect.
                 original = original.newBuilder().url(next).build()
             }
             @Suppress("UNREACHABLE_CODE")
             error("Unreachable redirect state")
-        }.build()
+        }
+        // These interceptors follow the manual redirect owner, so every hop
+        // rechecks the same route and HTTP public-network policy.
+        .applyDownloadRoute(asset.route, publicMediaOnly = publicMedia)
+        .apply { if (publicMedia) applyPublicMediaNetwork(asset.route) }
+        .build()
+    }
 
 internal fun animeCacheDataSource(asset: AnimePlaybackAsset, cacheOwner: AndroidAnimeCache,
     upstream: DataSource.Factory): CacheDataSource.Factory = CacheDataSource.Factory()
@@ -2024,7 +2065,8 @@ internal fun animeCacheKey(asset: AnimePlaybackAsset, uri: Uri): String {
 }
 
 private fun checkedMediaUrl(value: String): HttpUrl {
-    return animePublicUrl(value).toString().toHttpUrl()
+    return try { animeMediaUrl(value).toString().toHttpUrl() }
+    catch (failure: IllegalArgumentException) { throw IOException("媒体地址不是有效的公开 HTTP(S) 地址", failure) }
 }
 
 private fun headersFor(asset: AnimePlaybackAsset, target: HttpUrl, origin: String = target.toString()): Map<String, String> {

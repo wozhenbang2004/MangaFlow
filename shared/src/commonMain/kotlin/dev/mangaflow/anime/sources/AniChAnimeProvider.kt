@@ -236,7 +236,7 @@ internal class AniChAnimeProvider(override val revision: String) : AnimeProvider
                 val unpadded = encoded.removeRange(3, 4).replace('-', '+').replace('_', '/')
                 val normalized = unpadded + "=".repeat((4 - unpadded.length % 4) % 4)
                 val url = Base64.decode(normalized).decodeToString(throwOnInvalidSequence = true)
-                Line(slug, animePublicUrl(url).toString())
+                Line(slug, animeMediaUrl(url).toString())
             }.distinct()
         }
     }

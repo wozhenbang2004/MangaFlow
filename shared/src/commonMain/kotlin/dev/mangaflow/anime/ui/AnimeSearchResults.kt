@@ -112,18 +112,22 @@ internal fun LazyListScope.animeSearchResults(
         if (display != null) {
             val candidates = if (indexOnly) emptyList() else group.sources
             val marks = candidates.map { it.sourceId to (sourceNames[it.sourceId] ?: animeSourceName(it.sourceId)) }
+                .distinctBy { it.first }
+            val sourceDirectories = remember(candidates) { candidates.groupBy { it.sourceId } }
             val expanded = candidates.isNotEmpty() && expandedGroup == group.key
-            val subtitle = if (subject != null) animeSubjectSummary(subject) else listOfNotNull(
-                first?.let { sourceNames[it.sourceId] ?: animeSourceName(it.sourceId) },
-                first?.updateText?.takeIf(String::isNotBlank),
+            val workSummary = if (subject != null) animeSubjectSummary(subject) else listOfNotNull(
+                first?.year?.toString(), first?.updateText?.takeIf(String::isNotBlank)
+                    ?: first?.episodeCount?.takeIf { it > 0 }?.let { "$it 集" },
             ).joinToString(" · ")
+            val subtitle = listOfNotNull(workSummary.takeIf { it.isNotBlank() },
+                marks.size.takeIf { it > 0 }?.let { "$it 个来源命中" }).joinToString(" · ")
             Column {
                 AnimeSubjectRow(display, subtitle, onOpen = {
                     if (subject != null) onOpenSubject(subject) else onOpenSourceGroup(group)
                 }, trailing = {
                     if (marks.isNotEmpty()) AnimeSourceBadge(marks, compact = true,
                         modifier = Modifier.widthIn(max = 88.dp).semantics {
-                            stateDescription = if (expanded) "已展开来源候选" else "搜索命中的播放候选"
+                            stateDescription = if (expanded) "已展开 ${marks.size} 个来源" else "${marks.size} 个来源命中，可展开查看"
                         }, onClick = { onToggleSources(group.key) })
                 })
                 val motion = LocalMotionEnabled.current
@@ -135,12 +139,15 @@ internal fun LazyListScope.animeSearchResults(
                     Column(Modifier.padding(start = 68.dp).motionInputGate(expanded)) {
                         candidates.forEach { candidate ->
                             val name = sourceNames[candidate.sourceId] ?: animeSourceName(candidate.sourceId)
+                            val sameSource = sourceDirectories[candidate.sourceId].orEmpty()
+                            val directory = if (sameSource.size > 1) "目录 ${sameSource.indexOf(candidate) + 1}" else null
                             MotionTextButton(onClick = { onOpenSource(group, candidate) },
                                 modifier = Modifier.heightIn(min = 44.dp),
                                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                                     AnimeSourceMark(candidate.sourceId, name, size = 17.dp)
-                                    Text(listOfNotNull(name, candidate.title.takeIf { it != display.title })
+                                    Text(listOfNotNull(name, directory, candidate.title.takeIf { it != display.title },
+                                        candidate.updateText.takeIf { it.isNotBlank() })
                                         .joinToString(" · "), maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 }
                             }

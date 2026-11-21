@@ -164,7 +164,7 @@ internal class AnimeHttp(
     }
 }
 
-/** Public source and CDN URLs only; no credentials, local paths or TLS downgrade. */
+/** Source pages, metadata and account/API requests keep their HTTPS-only contract. */
 internal fun animePublicUrl(value: String): HttpUrl {
     val url = value.trim().toHttpUrlOrNull()
         ?: throw IllegalArgumentException("请输入完整的 HTTPS 来源链接。")
@@ -184,9 +184,49 @@ internal fun animePublicUrl(value: String): HttpUrl {
     return url.newBuilder().fragment(null).build()
 }
 
+/**
+ * A source-declared media/subtitle address may use HTTP. Preserve its scheme and signed
+ * query; this does not grant HTTP access to source pages or account/API requests.
+ * Transports must also validate resolved addresses and each redirect before connecting.
+ */
+internal fun animeMediaUrl(value: String): HttpUrl {
+    val raw = value.trim()
+    require(raw.length in 1..16_384 && raw.none { it.code <= 0x20 || it.code in 0x7f..0x9f }) {
+        "媒体地址格式无效。"
+    }
+    val url = raw.toHttpUrlOrNull() ?: throw IllegalArgumentException("媒体地址必须使用 HTTP 或 HTTPS。")
+    require(url.username.isEmpty() && url.password.isEmpty() &&
+        '@' !in raw.substringAfter("://").substringBefore('/').substringBefore('?').substringBefore('#')) {
+        "媒体地址不能包含账号密码。"
+    }
+    // Validate a copy only. Never upgrade, retry or return a different protocol.
+    animePublicUrl(url.newBuilder().scheme("https").build().toString())
+    val host = url.host.removeSurrounding("[", "]").trimEnd('.')
+    require(listOf("local", "localhost", "internal", "test", "invalid", "example", "onion", "alt",
+        "arpa", "example.com", "example.net", "example.org").none { host == it || host.endsWith(".$it") }) {
+        "媒体地址必须指向公共网络。"
+    }
+    val parts = host.split('.')
+    if (parts.last().all(Char::isDigit) || parts.last().startsWith("0x", true)) {
+        val address = parts.map { it.toIntOrNull() }
+        require(address.size == 4 && address.all { it != null && it in 0..255 } &&
+            parts.indices.all { parts[it] == address[it].toString() }) { "媒体地址中的 IP 格式无效。" }
+        val a = address[0]!!; val b = address[1]!!; val c = address[2]!!
+        require(!(a == 192 && (b == 0 && c in setOf(0, 2) || b == 88 && c == 99)) &&
+            !(a == 198 && (b in 18..19 || b == 51 && c == 100)) &&
+            !(a == 203 && b == 0 && c == 113)) { "媒体地址必须指向公共网络。" }
+    }
+    return url.newBuilder().fragment(null).build()
+}
+
 internal fun animeAbsolute(base: String, value: String): String =
     animePublicUrl(animePublicUrl(base).resolve(value.trim())?.toString()
         ?: throw IllegalArgumentException("来源返回了无效链接。")).toString()
+
+/** Resolve only a source's declared media value; HTML/API navigation uses animeAbsolute. */
+internal fun animeMediaAbsolute(base: String, value: String): String =
+    animeMediaUrl(animeMediaUrl(base).resolve(value.trim())?.toString()
+        ?: throw IllegalArgumentException("来源返回了无效媒体链接。")).toString()
 
 internal fun animeHash(value: String): String =
     sha256(value.encodeToByteArray()).joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }

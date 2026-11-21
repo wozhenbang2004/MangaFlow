@@ -67,12 +67,14 @@ internal actual class JavascriptHttpSession actual constructor(
     private val allowRedirects: Boolean,
     private val observeRelayTraffic: Boolean,
     cleartextEndpoints: Set<String>,
+    playbackParsers: List<PublicPlaybackParserGrant>,
 ) {
         // Only the host can grant these reviewed anonymous App endpoints to a pinned script.
         // Snapshot the capability; request JSON and mutable caller collections cannot enlarge it.
         private val permittedCleartext = cleartextEndpoints.toSet().also { endpoints ->
             require(endpoints.all(PUBLIC_APP_CLEARTEXT_METHODS::containsKey)) { "来源 HTTP 端点未获宿主授权。" }
         }
+        private val permittedParsers = playbackParsers.toList().also { require(it.size <= 2) }
         private val owned = route != null
         private val client = if (route == null) defaultClient else {
             val sockets = publicSourceSocketFactory(route, ::isPublic)
@@ -103,13 +105,23 @@ internal actual class JavascriptHttpSession actual constructor(
                 ?: throw IllegalArgumentException("来源请求 URL 无效。")
             var headers = checkedHeaders(input.optJSONObject("headers") ?: JSONObject())
             var body = requestBody(input.opt("body"), headers)
+            val parser = permittedParsers.firstOrNull { it.allows(url.toString()) }
+            if (parser != null) require(method == "GET" && body == null &&
+                headers.keys.all { it.lowercase() in PublicPlaybackParserGrant.PUBLIC_HEADERS }) {
+                "公开播放解析只允许无正文、无认证信息的 GET 请求。"
+            }
             if (method in setOf("GET", "HEAD")) body = null
             return slots.withPermit {
                 repeat(4) { redirect ->
                     currentCoroutineContext().ensureActive()
                     checkSessionUrl(url)
+                    if (permittedParsers.any { it.allows(url.toString()) }) require(method == "GET" && body == null &&
+                        headers.keys.all { it.lowercase() in PublicPlaybackParserGrant.PUBLIC_HEADERS }) {
+                        "公开播放解析只允许无正文、无认证信息的 GET 请求。"
+                    }
                     if (!url.isHttps) {
-                        require(publicAppCleartextMethod(url.toString(), permittedCleartext) == method) {
+                        require((if (permittedParsers.any { it.allows(url.toString()) }) "GET"
+                            else publicAppCleartextMethod(url.toString(), permittedCleartext)) == method) {
                             "来源 HTTP 端点不支持此请求方法。"
                         }
                         require(headers.keys.none { it.lowercase() in CLEARTEXT_CREDENTIAL_HEADERS }) {
@@ -131,6 +143,7 @@ internal actual class JavascriptHttpSession actual constructor(
                         checkReference(location)
                         val target = url.resolve(location) ?: throw SourceException("漫画源重定向地址无效。", url.toString())
                         require(!url.isHttps || target.isHttps) { "来源请求不允许从 HTTPS 重定向降级到 HTTP。" }
+                        require(parser == null || parser.allows(target.toString())) { "播放解析跳转超出了本集声明的端点。" }
                         checkSessionUrl(target)
                         if (url.origin() != target.origin()) {
                             require(body == null) { "不允许跨站点重定向请求正文，请更新来源地址后重试。" }
@@ -161,7 +174,8 @@ internal actual class JavascriptHttpSession actual constructor(
             require(url.username.isEmpty() && url.password.isEmpty() && url.fragment == null &&
                 url.toString().length <= 8192) { "来源请求 URL 无效或包含内嵌凭据、片段。" }
             if (url.isHttps) checkUrl(url) else {
-                require(url.scheme == "http" && publicAppCleartextMethod(url.toString(), permittedCleartext) != null) {
+                require(url.scheme == "http" && (publicAppCleartextMethod(url.toString(), permittedCleartext) != null ||
+                    permittedParsers.any { it.allows(url.toString()) })) {
                     "来源仅支持 HTTPS 或宿主为此脚本授权的精确 HTTP 接口。"
                 }
                 JvmScriptNetwork.checkPublicHost(url)

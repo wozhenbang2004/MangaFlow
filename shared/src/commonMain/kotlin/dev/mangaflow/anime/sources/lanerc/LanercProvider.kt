@@ -14,6 +14,7 @@ import dev.mangaflow.anime.sources.AnimeStreamResolver
 import dev.mangaflow.anime.sources.animeContentIdentity
 import dev.mangaflow.anime.sources.animeHash
 import dev.mangaflow.anime.sources.animeMediaType
+import dev.mangaflow.anime.sources.animeMediaUrl
 import dev.mangaflow.anime.sources.animePublicUrl
 import dev.mangaflow.anime.sources.sourceCover
 import dev.mangaflow.anime.sources.sourceEpisodeKind
@@ -101,7 +102,7 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
         val flag = ticket.getString("flag")
         val expectedRevision = ticket.getString("revision")
         val reply = try {
-            store.runtime.call(id, "play", JSONArray(listOf(flag)), expectedRevision)
+            store.runtime.play(id, catalog.title.id, episode.group, flag, expectedRevision)
         } catch (unsupported: LanercMediaSniffingUnsupported) {
             return resolveDeclaredLmm85Media(catalog, episode, flag, expectedRevision) ?: throw unsupported
         }
@@ -236,8 +237,8 @@ internal fun lanercCards(descriptor: LanercSourceDescriptor, value: Any?, revisi
     return cards
 }
 
-private fun checkedMedia(url: String): String = try { animePublicUrl(url).toString() }
-    catch (_: Exception) { throw LanercCapabilityException("来源返回的媒体地址不受支持；需要有效的公共 HTTPS 地址。") }
+private fun checkedMedia(url: String): String = try { animeMediaUrl(url).toString() }
+    catch (_: Exception) { throw LanercCapabilityException("来源返回的媒体地址不受支持；需要有效的公共 HTTP 或 HTTPS 地址。") }
 /** Referer is a header value; validating it must not rewrite its declared HTTP scheme. */
 private fun checkedReferer(value: String): String = try {
     require(value.none { it.code < 0x20 || it.code in 0x7f..0x9f })
@@ -262,6 +263,14 @@ private fun checkedReferer(value: String): String = try {
 } catch (_: Exception) {
     throw LanercCapabilityException("来源播放 Referer 格式不受支持；需要有效的公共 HTTP 或 HTTPS 地址。")
 }
+private fun checkedOrigin(value: String): String = try {
+    val url = value.toHttpUrlOrNull() ?: throw IllegalArgumentException()
+    checkedReferer(value)
+    require(url.encodedPath == "/" && url.query == null && url.fragment == null)
+    url.toString().removeSuffix("/")
+} catch (_: Exception) {
+    throw LanercCapabilityException("来源播放 Origin 格式不受支持；需要有效的公共 HTTP 或 HTTPS 站点。")
+}
 private fun lanercYear(value: String): Int? = Regex("(?:19|20)\\d{2}").find(value)?.value?.toIntOrNull()
 private fun lanercMediaType(type: String, url: String): String? = when (type.lowercase()) {
     "hls", "m3u8", "application/x-mpegurl", "application/vnd.apple.mpegurl" -> "application/x-mpegURL"
@@ -270,7 +279,7 @@ private fun lanercMediaType(type: String, url: String): String? = when (type.low
     "flv", "video/x-flv" -> "video/x-flv"
     else -> animeMediaType(url)
 }
-private val LANERC_PORTABLE_MEDIA_HEADERS = setOf("user-agent", "accept", "accept-language")
+private val LANERC_PORTABLE_MEDIA_HEADERS = setOf("user-agent", "referer", "origin", "accept", "accept-language")
 
 private fun lanercHeaders(value: JSONObject): Map<String, String> {
     val raw = value.opt("headers")
@@ -280,10 +289,14 @@ private fun lanercHeaders(value: JSONObject): Map<String, String> {
             catch (_: Exception) { throw LanercCapabilityException("来源播放请求头格式不受支持。") }
         else -> JSONObject()
     }
-    val headers = objectValue.keys().asSequence().associateWith { objectValue.optString(it) }.toMutableMap()
-    value.optString("referer").takeIf(String::isNotBlank)?.let { headers["Referer"] = it }
-    headers.keys.filter { it.equals("Referer", true) }.forEach { name -> headers[name] = checkedReferer(headers.getValue(name)) }
-    value.optString("userAgent").ifBlank { value.optString("ua") }.takeIf(String::isNotBlank)?.let { headers["User-Agent"] = it }
+    // HTTP names are case-insensitive. Top-level protocol fields explicitly override the
+    // header object, without leaving duplicate Referer/User-Agent keys for transports.
+    val headers = linkedMapOf<String, String>()
+    objectValue.keys().asSequence().forEach { name -> headers[name.lowercase()] = objectValue.optString(name) }
+    value.optString("referer").takeIf(String::isNotBlank)?.let { headers["referer"] = it }
+    value.optString("userAgent").ifBlank { value.optString("ua") }.takeIf(String::isNotBlank)?.let { headers["user-agent"] = it }
+    headers["referer"]?.let { headers["referer"] = checkedReferer(it) }
+    headers["origin"]?.let { headers["origin"] = checkedOrigin(it) }
     require(headers.size <= 64 && headers.entries.sumOf { it.key.length + it.value.length } <= 32_768 &&
         headers.all { (name, text) -> name.matches(Regex("[A-Za-z0-9!#%&'*+.^_`|~-]{1,128}")) &&
             name.lowercase() !in setOf("host", "content-length", "connection", "transfer-encoding") &&

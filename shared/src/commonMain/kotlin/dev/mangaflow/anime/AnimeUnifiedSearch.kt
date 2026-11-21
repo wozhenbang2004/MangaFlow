@@ -265,14 +265,31 @@ internal class AnimeUnifiedSearch(
                     return@launch
                 }
                 if (page == 1 && found.isNotEmpty()) sourceTerms[provider.id] = matchedTerm
-                val known = previous.items.map { it.id to it.url }.toHashSet()
-                val added = found.filter { known.add(it.id to it.url) }.map { it.copy(sourceRevision = key.revision) }
-                if (added.isNotEmpty()) overlappingPages.remove(provider.id)
+                val itemsByIdentity = previous.items.associateByTo(linkedMapOf()) { it.id to it.url }
+                val added = found.any { (it.id to it.url) !in itemsByIdentity }
+                for (incoming in found) {
+                    val identity = incoming.id to incoming.url
+                    val existing = itemsByIdentity[identity]
+                    // A later alias/page may enrich the same native catalogue. Retain its
+                    // position and other results instead of discarding the newer evidence.
+                    itemsByIdentity[identity] = incoming.copy(
+                        coverUrl = incoming.coverUrl.ifBlank { existing?.coverUrl.orEmpty() },
+                        year = incoming.year ?: existing?.year,
+                        episodeCount = incoming.episodeCount ?: existing?.episodeCount,
+                        externalIds = existing?.externalIds.orEmpty() + incoming.externalIds
+                            .mapValues { it.value.trim() }.filterValues(String::isNotBlank),
+                        updateText = incoming.updateText.ifBlank { existing?.updateText.orEmpty() },
+                        ratingText = incoming.ratingText.ifBlank { existing?.ratingText.orEmpty() },
+                        sourceRevision = key.revision,
+                    )
+                }
+                val items = itemsByIdentity.values.toList()
+                if (added) overlappingPages.remove(provider.id)
                 // A provider may return one overlapping page when new episodes shift its results.
                 val hasMore = provider.supportsSearchPagination && found.isNotEmpty() && page < Int.MAX_VALUE &&
-                    (added.isNotEmpty() || overlappingPages.add(provider.id))
-                publishSource(previous.copy(items = previous.items + added, page = page,
-                    hasMore = hasMore, error = null), regroup = added.isNotEmpty())
+                    (added || overlappingPages.add(provider.id))
+                publishSource(previous.copy(items = items, page = page,
+                    hasMore = hasMore, error = null), regroup = items != previous.items)
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
@@ -385,78 +402,93 @@ private fun groupAnimeWorks(
     fun AnimeSourceTitle.identity() = Triple(sourceId, id, url)
     val names = mutableMapOf<String, String>()
     fun normalized(title: String) = names.getOrPut(title) { animeWorkTitleKey(title) }
-    val distinctTitles = titles.distinctBy { it.identity() }
-    // MangaFlow's ordinary manga search groups complete display titles. A missing
-    // year can allow the same display grouping here, while conflicting records
-    // and two native objects from the same provider need stronger evidence.
-    val unambiguousNames = distinctTitles.groupBy { normalized(it.title) }.filter { (name, rows) ->
-        name.isNotBlank() && rows.map { it.sourceId }.distinct().size == rows.size &&
-            rows.mapNotNull { it.year }.distinct().size <= 1 &&
-            rows.flatMap { it.externalIds.entries }.filter { it.value.isNotBlank() }
-                .groupBy({ it.key }, { it.value }).values.none { it.distinct().size > 1 }
-    }.keys
+    val displayNames = mutableMapOf<String, Set<String>>()
+    fun displayKeys(title: String) = displayNames.getOrPut(title) { animeWorkDisplayKeys(title) }
+    val oldSourceOrder = previous.flatMap { it.sources }.mapIndexed { index, title -> title.identity() to index }.toMap()
+    // Establish known identities and their aliases before attaching title-only records.
+    // Within that evidence level, an arriving duplicate must not displace an older match.
+    val distinctTitles = titles.distinctBy { it.identity() }.sortedWith(
+        compareByDescending<AnimeSourceTitle> { animeAuthoritativeIds(it.externalIds).isNotEmpty() }
+            .thenByDescending { it.year != null }
+            .thenBy { oldSourceOrder[it.identity()] ?: Int.MAX_VALUE },
+    )
     val groups = subjects.distinctBy { it.id }.map { AnimeSearchGroup("subject:${it.id}", it) }.toMutableList()
+    val mergedGroups = mutableSetOf<Int>()
     val groupsByName = mutableMapOf<String, MutableSet<Int>>()
     val groupsById = mutableMapOf<Pair<String, String>, MutableSet<Int>>()
     fun addName(index: Int, name: String) {
-        if (name.isNotBlank()) groupsByName.getOrPut(name) { linkedSetOf() }.add(index)
+        displayKeys(name).forEach { groupsByName.getOrPut(it) { linkedSetOf() }.add(index) }
     }
     fun addIdentities(index: Int, ids: Map<String, String>) {
-        ids.forEach { (type, value) ->
-            if (type in authoritativeAnimeIdTypes && value.isNotBlank())
-                groupsById.getOrPut(type to value) { linkedSetOf() }.add(index)
+        animeAuthoritativeIds(ids).forEach { identity ->
+            groupsById.getOrPut(identity) { linkedSetOf() }.add(index)
         }
     }
     groups.forEachIndexed { index, group ->
         val subject = requireNotNull(group.subject)
-        addName(index, normalized(subject.title))
-        addName(index, normalized(subject.originalTitle))
+        addName(index, subject.title)
+        addName(index, subject.originalTitle)
         addIdentities(index, animeSubjectIds(subject))
     }
-    fun canShareCard(title: AnimeSourceTitle, name: String, group: AnimeSearchGroup): Boolean {
-        // A source must not collapse two distinct native records into one result card.
-        if (group.sources.any { it.sourceId == title.sourceId }) return false
-        val subject = group.subject
-        val subjectIds = subject?.let(::animeSubjectIds)
-        val identities = listOfNotNull(subjectIds) + group.sources.map { it.externalIds }
-        if (identities.any { ids -> title.externalIds.any { (key, value) ->
-            value.isNotBlank() && ids[key]?.takeIf { it.isNotBlank() }?.let { it != value } == true
-        } }) return false
-        val years = listOfNotNull(subject?.year) + group.sources.mapNotNull { it.year }
-        if (title.year != null && years.any { it != title.year }) return false
-        val sharedId = identities.any { ids -> title.externalIds.any { (key, value) ->
-            key in authoritativeAnimeIdTypes && value.isNotBlank() && ids[key] == value
-        } }
-        // A unique title with a missing year may share the display card.
-        // Catalogue verification still establishes the work and episode binding.
-        return sharedId || (subject?.year != null && title.year == subject.year) || name in unambiguousNames
+    fun groupNames(group: AnimeSearchGroup) =
+        listOfNotNull(group.subject?.title, group.subject?.originalTitle) + group.sources.map { it.title }
+    fun groupIds(group: AnimeSearchGroup) =
+        (listOfNotNull(group.subject?.let(::animeSubjectIds)) + group.sources.map { it.externalIds })
+            .flatMap(::animeAuthoritativeIds).toSet()
+    fun groupYears(group: AnimeSearchGroup) = listOfNotNull(group.subject?.year) + group.sources.mapNotNull { it.year }
+    fun canShareCard(title: AnimeSourceTitle, group: AnimeSearchGroup): Boolean {
+        val titleIds = animeAuthoritativeIds(title.externalIds)
+        val identities = groupIds(group)
+        if (conflictingAnimeIds(titleIds, identities)) return false
+        if (title.year != null && groupYears(group).any { it != title.year }) return false
+        val sharedId = titleIds.intersect(identities).isNotEmpty()
+        val workNames = groupNames(group)
+        if (animeWorkTitlesConflict(workNames, listOf(title.title), requireMatchingEdition = !sharedId)) return false
+        // Multiple native catalogues from one source remain distinct below this card.
+        // Full-title display grouping never creates an episode or playback binding.
+        return sharedId || workNames.any { displayKeys(it).intersect(displayKeys(title.title)).isNotEmpty() }
     }
     distinctTitles.forEach { title ->
-        val name = normalized(title.title)
-        val identified = title.externalIds.flatMap { (type, value) -> groupsById[type to value].orEmpty() }.distinct()
-        val candidates = identified.ifEmpty { groupsByName[name].orEmpty().toList() }
-            .filter { canShareCard(title, name, groups[it]) }
+        val identified = animeAuthoritativeIds(title.externalIds).flatMap { groupsById[it].orEmpty() }
+            .distinct().filterNot(mergedGroups::contains)
+        val candidates = identified.ifEmpty { displayKeys(title.title).flatMap { groupsByName[it].orEmpty() }.distinct() }
+            .filter { it !in mergedGroups && canShareCard(title, groups[it]) }
         val canonical = candidates.filter { groups[it].subject != null }
-        val index = if (canonical.isEmpty()) candidates.singleOrNull() else canonical.singleOrNull()
+        // An ID bridge can connect previously separate language aliases. Merge the whole
+        // component only when every identity, known year and explicit version agrees.
+        val bridge = identified.isNotEmpty() && candidates.size > 1 && canonical.size <= 1 &&
+            !conflictingAnimeIds(candidates.flatMap { groupIds(groups[it]) }.toSet(), emptySet()) &&
+            candidates.flatMap { groupYears(groups[it]) }.distinct().size <= 1 &&
+            candidates.all { left -> candidates.all { right ->
+                !animeWorkTitlesConflict(groupNames(groups[left]), groupNames(groups[right]))
+            } }
+        val index = if (bridge) canonical.singleOrNull() ?: candidates.first()
+            else if (canonical.isEmpty()) candidates.singleOrNull() else canonical.singleOrNull()
+        if (bridge && index != null) {
+            val sources = candidates.flatMap { groups[it].sources }.distinctBy { it.identity() }
+            groups[index] = groups[index].copy(sources = sources)
+            candidates.filterNot { it == index }.forEach(mergedGroups::add)
+            sources.forEach { source -> addName(index, source.title); addIdentities(index, source.externalIds) }
+        }
         val target = index ?: groups.size
         if (index == null)
             groups += AnimeSearchGroup("source:${title.sourceId}:${title.id.length}:${title.id}:${title.url}", sources = listOf(title))
         else groups[index] = groups[index].copy(sources = groups[index].sources + title)
-        addName(target, name)
+        addName(target, title.title)
         addIdentities(target, title.externalIds)
     }
     // When a later response enriches a visible native card, keep its key and position.
     // If a group splits, only one successor can keep its old key.
     val oldBySubject = previous.mapNotNull { group -> group.subject?.id?.let { it to group.key } }.toMap()
     val oldBySource = previous.flatMap { group -> group.sources.map { it.identity() to group.key } }.toMap()
-    val oldSourceOrder = previous.flatMap { it.sources }.mapIndexed { index, title -> title.identity() to index }.toMap()
     val order = previous.mapIndexed { index, group -> group.key to index }.toMap()
-    val baselineKeys = groups.mapTo(mutableSetOf()) { it.key }
+    val activeGroups = groups.filterIndexed { index, _ -> index !in mergedGroups }
+    val baselineKeys = activeGroups.mapTo(mutableSetOf()) { it.key }
     fun existingCanonicalKey(group: AnimeSearchGroup) = group.subject?.id?.let(oldBySubject::get)
         ?.takeIf { it == group.key || it !in baselineKeys }
-    val canonicalKeys = groups.mapNotNull(::existingCanonicalKey).toSet()
+    val canonicalKeys = activeGroups.mapNotNull(::existingCanonicalKey).toSet()
     val claimed = mutableSetOf<String>()
-    val retained = groups.map { group ->
+    val retained = activeGroups.map { group ->
         val inherited = existingCanonicalKey(group) ?: group.sources.mapNotNull { oldBySource[it.identity()] }
             .filter { it !in canonicalKeys && (it == group.key || it !in baselineKeys) && it !in claimed }
             .minByOrNull { order.getValue(it) }

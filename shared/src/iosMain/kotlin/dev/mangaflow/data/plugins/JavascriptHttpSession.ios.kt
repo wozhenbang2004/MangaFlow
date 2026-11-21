@@ -55,10 +55,12 @@ internal actual class JavascriptHttpSession actual constructor(
     private val allowRedirects: Boolean,
     private val observeRelayTraffic: Boolean,
     cleartextEndpoints: Set<String>,
+    playbackParsers: List<PublicPlaybackParserGrant>,
 ) {
     private val permittedCleartext = cleartextEndpoints.toSet().also { endpoints ->
         require(endpoints.all(PUBLIC_APP_CLEARTEXT_METHODS::containsKey)) { "来源 HTTP 端点未获宿主授权。" }
     }
+    private val permittedParsers = playbackParsers.toList().also { require(it.size <= 2) }
     private val operations = atomic(0)
     private val slots = Semaphore(2)
     private val lock = SynchronizedObject()
@@ -82,11 +84,21 @@ internal actual class JavascriptHttpSession actual constructor(
         if (bodyValue != null && bodyValue != JSONObject.NULL && headers.keys.none { it.equals("Content-Type", true) })
             headers = headers + ("Content-Type" to when (bodyValue) { is JSONObject -> "application/x-www-form-urlencoded"; is JSONArray -> "application/octet-stream"; else -> "text/plain; charset=utf-8" })
         var body = nativeScriptBody(bodyValue, headers)
+        val parser = permittedParsers.firstOrNull { it.allows(url.toString()) }
+        if (parser != null) require(method == "GET" && body.isEmpty() &&
+            headers.keys.all { it.lowercase() in PublicPlaybackParserGrant.PUBLIC_HEADERS }) {
+            "公开播放解析只允许无正文、无认证信息的 GET 请求。"
+        }
         if (method in setOf("GET", "HEAD")) body = ByteArray(0)
         repeat(4) { redirects ->
             currentCoroutineContext().ensureActive()
+            if (permittedParsers.any { it.allows(url.toString()) }) require(method == "GET" && body.isEmpty() &&
+                headers.keys.all { it.lowercase() in PublicPlaybackParserGrant.PUBLIC_HEADERS }) {
+                "公开播放解析只允许无正文、无认证信息的 GET 请求。"
+            }
             if (!url.isHttps) {
-                require(publicAppCleartextMethod(url.toString(), permittedCleartext) == method) {
+                require((if (permittedParsers.any { it.allows(url.toString()) }) "GET"
+                    else publicAppCleartextMethod(url.toString(), permittedCleartext)) == method) {
                     "来源 HTTP 端点不支持此请求方法。"
                 }
                 require(headers.keys.none { it.lowercase() in CLEARTEXT_CREDENTIAL_HEADERS }) {
@@ -112,6 +124,7 @@ internal actual class JavascriptHttpSession actual constructor(
                 val location = result.headers.entries.firstOrNull { it.key.equals("Location", true) }?.value ?: error("漫画源重定向缺少目标。")
                 val target = url.resolve(location)?.let { checkedRequestUrl(it.toString()) } ?: error("漫画源重定向地址无效。")
                 require(!url.isHttps || target.isHttps) { "来源请求不允许从 HTTPS 重定向降级到 HTTP。" }
+                require(parser == null || parser.allows(target.toString())) { "播放解析跳转超出了本集声明的端点。" }
                 if (url.origin() != target.origin()) {
                     require(body.isEmpty()) { "不允许跨站点重定向请求正文，请更新来源地址后重试。" }
                     headers = headers.filterKeys { it.lowercase() !in CLEARTEXT_CREDENTIAL_HEADERS }
@@ -132,7 +145,8 @@ internal actual class JavascriptHttpSession actual constructor(
             "来源请求 URL 无效或包含内嵌凭据、片段。"
         }
         if (url.isHttps) return publicPluginUrl(address)
-        require(publicAppCleartextMethod(url.toString(), permittedCleartext) != null) {
+        require(publicAppCleartextMethod(url.toString(), permittedCleartext) != null ||
+            permittedParsers.any { it.allows(url.toString()) }) {
             "来源仅支持 HTTPS 或宿主为此脚本授权的精确 HTTP 接口。"
         }
         publicPluginUrl(url.newBuilder().scheme("https").build().toString())

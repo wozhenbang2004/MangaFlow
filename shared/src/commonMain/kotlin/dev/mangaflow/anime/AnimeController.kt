@@ -1383,10 +1383,20 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     fun play(episodeId: String, option: AnimeEpisodeOption? = null) {
-        val episode = mutableState.value.detail?.episodes?.firstOrNull { it.id == episodeId } ?: return
+        val detail = mutableState.value.detail ?: return
+        val episode = detail.episodes.firstOrNull { it.id == episodeId } ?: return
         cancelEpisodeSourceMeasurements()
         cancelPlaybackResolution()
         resetPlaybackRecoveryWindow()
+        if (option == null && !hasAutomaticPlaybackLine(episodeId)) {
+            // A new play intent may retry temporary failures for this exact episode.
+            // Recovery within the same round never clears these receipts, and
+            // a still-valid unsupported-capability receipt remains authoritative.
+            confirmedPlaybackLines(episodeId).forEach { line ->
+                val key = playbackHistoryKey(detail.subject.id, episodeId, line) ?: return@forEach
+                if (currentPlaybackFailure(key)?.unsupported == false) playbackFailures.remove(key)
+            }
+        }
         mutableState.update { it.copy(playbackTarget = AnimePlaybackTarget(episode, option), autoMatching = false) }
         if (option == null && !hasAutomaticPlaybackLine(episodeId)) {
             autoAssociateAndPlay(episodeId)
@@ -3092,21 +3102,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     fun retryPlayback() {
-        fun retryFailedLine(episodeId: String, sourceId: String?): AnimeEpisodeOption? {
-            if (hasAutomaticPlaybackLine(episodeId)) return null
-            val lines = confirmedPlaybackLines(episodeId).filter { canAttemptPlaybackLine(episodeId, it) }
-            val current = active?.takeIf { it.episode.id == episodeId }?.option
-            return lines.firstOrNull { current != null && samePlaybackLine(it, current) }
-                ?: lines.firstOrNull { it.sourceId == sourceId } ?: lines.firstOrNull()
-        }
         mutableState.value.playbackTarget?.takeIf { it.error != null }?.let {
-            play(it.episode.id, it.manualOption ?: retryFailedLine(it.episode.id, it.failure?.sourceId))
+            play(it.episode.id, it.manualOption?.takeIf { line -> canAttemptPlaybackLine(it.episode.id, line) })
             return
         }
         val current = active ?: return
         if (current.localMedia != null) player.retry()
-        else play(current.episode.id, if (current.automaticIntent)
-            retryFailedLine(current.episode.id, current.option.sourceId) else current.option)
+        else play(current.episode.id, current.option.takeUnless { current.automaticIntent }
+            ?.takeIf { canAttemptPlaybackLine(current.episode.id, it) })
     }
 
     fun closePlayback() = stopPlayback(discardCheckpoint = false)

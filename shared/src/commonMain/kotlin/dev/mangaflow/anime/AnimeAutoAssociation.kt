@@ -35,7 +35,7 @@ private fun episodeLabelText(value: String) = animeWorkTitleKey(value).filter { 
 /** Only the explicitly written season suffix and a separated sequel number may be compared.
  * The base title and year must still agree. A bare series title never equals season two. */
 private fun autoSeasonSignature(value: String): Pair<String, Int>? {
-    val title = value.trim().lowercase()
+    val title = normalizeNfkc(value).trim().lowercase()
     val named = Regex("""^(.+?)\s*第([一二三四五六七八九十]|[1-9])季$""").matchEntire(title)
     val numbered = Regex("""^(.+?)\s+([2-9])$""").matchEntire(title)
     val base = named?.groupValues?.get(1) ?: numbered?.groupValues?.get(1) ?: return null
@@ -44,9 +44,78 @@ private fun autoSeasonSignature(value: String): Pair<String, Int>? {
     return animeWorkTitleKey(base).takeIf { it.length >= 2 }?.let { it to number }
 }
 
+/** Display aliases retain the entire work name, including an explicitly written season. */
+internal fun animeWorkDisplayKeys(value: String): Set<String> = buildSet {
+    animeWorkTitleKey(value).takeIf(String::isNotBlank)?.let(::add)
+    autoSeasonSignature(value)?.let { (base, season) -> add("season:$base:$season") }
+}
+
+private val animeExplicitSeason = Regex(
+    """第([一二三四五六七八九十0-9]{1,3})[季期部]|(?:^|[^a-z0-9])season\s*([0-9]{1,2})(?:$|[^0-9])|(?:^|[^a-z0-9])([0-9]{1,2})(?:st|nd|rd|th)\s+season(?:$|[^a-z0-9])""",
+)
+private val animeEditionMarkers = listOf(
+    "fan-edit" to Regex("""(?:^|[^a-z0-9])(?:mad|amv)\s*[)\]】）]?\s*$|^[\[【(（]\s*(?:mad|amv)\s*[\]】)）]"""),
+    "live-action" to Regex("""真人版|真人电影|真人電影|実写版|(?:^|[^a-z0-9])live[ -]?action(?:$|[^a-z0-9])"""),
+    "movie" to Regex("""剧场版|劇場版|电影版|電影版|大电影|大電影|(?:^|[^a-z0-9])movie(?:$|[^a-z0-9])"""),
+    "ova" to Regex("""(?:^|[^a-z0-9])ova(?:$|[^a-z0-9])"""),
+    "oad" to Regex("""(?:^|[^a-z0-9])oad(?:$|[^a-z0-9])"""),
+    "recap" to Regex("""总集篇|總集篇|総集編|(?:^|[^a-z0-9])recap(?:$|[^a-z0-9])"""),
+)
+
+private fun animeSeasonNumber(label: String): Int? {
+    label.toIntOrNull()?.takeIf { it in 1..99 }?.let { return it }
+    val digits = "零一二三四五六七八九"
+    if (label.length == 1) return if (label == "十") 10 else digits.indexOf(label).takeIf { it > 0 }
+    val tens = label.indexOf('十')
+    if (tens !in 0..1 || label.length > tens + 2) return null
+    val first = if (tens == 0) 1 else digits.indexOf(label[0]).takeIf { it > 0 } ?: return null
+    val last = label.getOrNull(tens + 1)?.let { digits.indexOf(it).takeIf { number -> number > 0 } ?: return null } ?: 0
+    return first * 10 + last
+}
+
+/** A generic alias must not erase a different season, film, fan edit or live-action version.
+ * Shared IDs may explain an omitted format label, but never contradictory explicit labels. */
+internal fun animeWorkTitlesConflict(
+    left: List<String>, right: List<String>, requireMatchingEdition: Boolean = false,
+): Boolean {
+    fun seasons(names: List<String>) = names.flatMap { raw ->
+        val text = normalizeNfkc(raw).lowercase()
+        listOfNotNull(autoSeasonSignature(raw)?.second) + animeExplicitSeason.findAll(text).mapNotNull { match ->
+            animeSeasonNumber(match.groupValues.drop(1).firstOrNull(String::isNotBlank).orEmpty())
+        }.toList()
+    }.toSet()
+    val leftSeasons = seasons(left)
+    val rightSeasons = seasons(right)
+    if (leftSeasons.isNotEmpty() && rightSeasons.isNotEmpty() && leftSeasons != rightSeasons) return true
+    val completeNames = left.map(::animeWorkTitleKey).toSet().intersect(right.map(::animeWorkTitleKey).toSet())
+        .filter(String::isNotBlank)
+    val bareSeasonNames = (left + right).flatMap { raw ->
+        val text = normalizeNfkc(raw).lowercase()
+        listOfNotNull(autoSeasonSignature(raw)?.first) + animeExplicitSeason.findAll(text).map { match ->
+            animeWorkTitleKey(text.removeRange(match.range))
+        }.toList()
+    }.toSet()
+    // A complete supplied original title may express a sequel with a subtitle instead
+    // of a season label. The bare series name obtained by removing a season is excluded.
+    val exactAlias = completeNames.any { it !in bareSeasonNames }
+    val requireLabels = requireMatchingEdition && !exactAlias
+    if (requireLabels && leftSeasons.isEmpty() != rightSeasons.isEmpty()) return true
+    fun editions(names: List<String>) = animeEditionMarkers.filter { (_, pattern) ->
+        names.any { pattern.containsMatchIn(normalizeNfkc(it).lowercase()) }
+    }.map { it.first }.toSet()
+    val leftEditions = editions(left)
+    val rightEditions = editions(right)
+    if ((leftEditions - rightEditions + (rightEditions - leftEditions)).any {
+        it == "fan-edit" || it == "live-action"
+    }) return true
+    return leftEditions != rightEditions &&
+        (requireLabels || (leftEditions.isNotEmpty() && rightEditions.isNotEmpty()))
+}
+
 /** Presentation-only title hint. A conflicting year is a review candidate, not an automatic identity. */
 internal fun autoPlayTitleCandidate(subject: AnimeSubject, title: AnimeSourceTitle): Boolean {
     val names = listOf(subject.title, subject.originalTitle).filter(String::isNotBlank)
+    if (animeWorkTitlesConflict(names, listOf(title.title), requireMatchingEdition = true)) return false
     val titleKey = animeWorkTitleKey(title.title)
     val season = autoSeasonSignature(title.title)
     return names.any { (titleKey.isNotBlank() && animeWorkTitleKey(it) == titleKey) ||
@@ -91,34 +160,44 @@ internal fun autoPlaySubjectCandidate(subject: AnimeSubject, title: AnimeSourceT
 internal fun autoPlaySubjectHasSharedId(subject: AnimeSubject, title: AnimeSourceTitle): Boolean =
     autoPlaySubjectMatches(subject, title) && sharesAuthoritativeAnimeId(subject, title)
 
-internal val authoritativeAnimeIdTypes = setOf("bangumi", "anilist", "mal", "douban")
+internal val authoritativeAnimeIdTypes = setOf("bangumi", "anilist", "myanimelist", "douban")
+
+/** Source-native IDs are catalogue identities, not evidence that two works differ. */
+internal fun animeAuthoritativeIds(ids: Map<String, String>): Set<Pair<String, String>> = ids.mapNotNull { (type, value) ->
+    val namespace = if (type == "mal") "myanimelist" else type
+    value.trim().takeIf { namespace in authoritativeAnimeIdTypes && it.isNotBlank() }?.let { namespace to it }
+}.toSet()
+
+internal fun conflictingAnimeIds(left: Set<Pair<String, String>>, right: Set<Pair<String, String>>): Boolean =
+    (left + right).groupBy({ it.first }, { it.second }).values.any { it.distinct().size > 1 }
 
 internal fun animeSubjectIds(subject: AnimeSubject): Map<String, String> =
     subject.externalIds + if (subject.id.startsWith("bangumi:"))
         mapOf("bangumi" to subject.id.removePrefix("bangumi:")) else emptyMap()
 
 private fun sharesAuthoritativeAnimeId(subject: AnimeSubject, title: AnimeSourceTitle): Boolean =
-    animeSubjectIds(subject).any { (key, id) ->
-        key in authoritativeAnimeIdTypes && id.isNotBlank() && id == title.externalIds[key]
-    }
+    animeAuthoritativeIds(animeSubjectIds(subject)).intersect(animeAuthoritativeIds(title.externalIds)).isNotEmpty()
 
 private fun autoPlaySubjectEvidence(subject: AnimeSubject, title: AnimeSourceTitle, requireEvidence: Boolean): Boolean {
     val subjectIds = animeSubjectIds(subject)
     val sharedKeys = subjectIds.keys.intersect(title.externalIds.keys)
     if (sharedKeys.any { key -> subjectIds[key]?.isNotBlank() == true &&
         title.externalIds[key]?.isNotBlank() == true && subjectIds[key] != title.externalIds[key] }) return false
+    if (conflictingAnimeIds(animeAuthoritativeIds(subjectIds), animeAuthoritativeIds(title.externalIds))) return false
     if (subject.year != null && title.year != null && subject.year != title.year) return false
+    val sharedId = sharesAuthoritativeAnimeId(subject, title)
+    val names = listOf(subject.title, subject.originalTitle).filter(String::isNotBlank)
+    if (animeWorkTitlesConflict(names, listOf(title.title), requireMatchingEdition = !sharedId)) return false
     val titleKey = animeWorkTitleKey(title.title)
-    val exactName = titleKey.isNotBlank() && listOf(subject.title, subject.originalTitle).any {
+    val exactName = titleKey.isNotBlank() && names.any {
         animeWorkTitleKey(it) == titleKey
     }
     val sourceSeason = autoSeasonSignature(title.title)
-    val explicitSeasonAlias = sourceSeason != null && listOf(subject.title, subject.originalTitle).any { name ->
+    val explicitSeasonAlias = sourceSeason != null && names.any { name ->
         // Different spellings of one explicit season are allowed; the bare base and another
         // season remain different works. Year evidence is mandatory before binding.
         autoSeasonSignature(name) == sourceSeason
     }
-    val sharedId = sharesAuthoritativeAnimeId(subject, title)
     // A shared authoritative ID permits aliases. Name-only binding still requires both years.
     return sharedId || ((exactName || explicitSeasonAlias) &&
         (!requireEvidence || (subject.year != null && title.year == subject.year)))

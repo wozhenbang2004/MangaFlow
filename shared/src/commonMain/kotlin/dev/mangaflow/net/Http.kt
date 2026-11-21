@@ -133,7 +133,8 @@ data class NetworkTransferObservation(
 )
 
 /** Engines retain system TLS validation. Each client has isolated jobs and no cookie installation. */
-internal expect fun platformHttpClient(http1Only: Boolean, route: DownloadRouteSnapshot?, observeRelayTraffic: Boolean, configure: HttpClientConfig<*>.() -> Unit): HttpClient
+internal expect fun platformHttpClient(http1Only: Boolean, route: DownloadRouteSnapshot?, observeRelayTraffic: Boolean,
+    publicMediaOnly: Boolean = false, configure: HttpClientConfig<*>.() -> Unit): HttpClient
 
 class NetworkClient(
     http1Only: Boolean = false,
@@ -143,24 +144,43 @@ class NetworkClient(
     acceptCompression: Boolean = true,
     route: DownloadRouteSnapshot? = null,
     observeRelayTraffic: Boolean = true,
+    private val publicMediaOnly: Boolean = false,
     private val onTransfer: ((NetworkTransferObservation) -> Unit)? = null,
 ) {
     private val timeouts = Triple(connectTimeoutMillis, readTimeoutMillis, callTimeoutMillis)
     private val selectedRoute = route?.checkedActive()
-    private val client = platformHttpClient(http1Only, selectedRoute, observeRelayTraffic) {
-        expectSuccess = false
-        followRedirects = false
-        if (acceptCompression) install(ContentEncoding) { gzip(); deflate() }
-        install(HttpTimeout) {
-            this.connectTimeoutMillis = timeouts.first
-            this.socketTimeoutMillis = timeouts.second
-            this.requestTimeoutMillis = timeouts.third
+    private val clientFactory: (Boolean) -> HttpClient = { publicMedia ->
+        platformHttpClient(http1Only, selectedRoute, observeRelayTraffic, publicMedia) {
+            expectSuccess = false
+            followRedirects = false
+            if (acceptCompression) install(ContentEncoding) { gzip(); deflate() }
+            install(HttpTimeout) {
+                this.connectTimeoutMillis = timeouts.first
+                this.socketTimeoutMillis = timeouts.second
+                this.requestTimeoutMillis = timeouts.third
+            }
         }
+    }
+    private val client = clientFactory(false)
+    private val mediaClientLock = SynchronizedObject()
+    private var cleartextMediaClient: HttpClient? = null
+    private var closed = false
+    // HTTPS retains its existing selected proxy. Only newly supported HTTP media
+    // needs a DNS-pinned transport; a manifest or subtitle selects it per request.
+    private fun clientFor(url: HttpUrl): HttpClient = synchronized(mediaClientLock) {
+        check(!closed) { "网络客户端已关闭" }
+        if (publicMediaOnly && !url.isHttps) cleartextMediaClient ?: clientFactory(true).also { cleartextMediaClient = it }
+        else client
     }
     private val activeLock = SynchronizedObject()
     private val active = mutableSetOf<Job>()
     fun cancelAll() { synchronized(activeLock) { active.toList() }.forEach { it.cancel() } }
-    fun close() { cancelAll(); client.close() }
+    fun close() {
+        val media = synchronized(mediaClientLock) { closed = true; cleartextMediaClient }
+        cancelAll()
+        client.close()
+        media?.close()
+    }
     suspend fun execute(request: Request, maximumBytes: Long = 8L * 1024 * 1024): NetworkResponse = coroutineScope {
         val output = Buffer()
         val response = transfer(request, maximumBytes, { _, _ -> }, { buffer, count -> output.write(buffer, 0, count) })
@@ -223,7 +243,7 @@ class NetworkClient(
                 "等待来源响应超时，请稍后重试")
         } else null
         try {
-            client.prepareRequest {
+            clientFor(request.url).prepareRequest {
                 // A progressing large image may take longer than the ordinary API
                 // call budget. Inactivity remains independently bounded below.
                 if (streaming) timeout {

@@ -2,6 +2,7 @@ package dev.mangaflow.anime.sources.lanerc
 
 import dev.mangaflow.anime.sources.animePublicUrl
 import dev.mangaflow.data.plugins.YUZU_HTTP_PLAYBACK_ENDPOINTS
+import dev.mangaflow.data.plugins.PublicPlaybackParserGrant
 import dev.mangaflow.data.plugins.publicAppCleartextMethod
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
@@ -23,12 +24,14 @@ internal fun lanercCleartextEndpoints(id: String, digest: String, method: String
     else setOf(endpoint)
 }
 
-internal fun lanercRequestUrl(value: String, cleartextEndpoints: Set<String>): HttpUrl {
+internal fun lanercRequestUrl(value: String, cleartextEndpoints: Set<String>,
+    playbackParsers: List<PublicPlaybackParserGrant> = emptyList()): HttpUrl {
     require(value.length <= 8192 && value.none { it.code < 32 || it.code == 127 }) { "来源请求地址无效。" }
     val url = value.toHttpUrlOrNull() ?: throw IllegalArgumentException("来源请求地址无效。")
     if (url.isHttps) return animePublicUrl(value)
     if (url.scheme != "http" || url.username.isNotEmpty() || url.password.isNotEmpty() ||
-        url.fragment != null || publicAppCleartextMethod(url.toString(), cleartextEndpoints) == null
+        url.fragment != null || (publicAppCleartextMethod(url.toString(), cleartextEndpoints) == null &&
+            playbackParsers.none { it.allows(url.toString()) })
     ) {
         throw LanercCapabilityException("此来源返回了当前版本不支持的 HTTP 接口。")
     }

@@ -10,7 +10,6 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Call
 import okhttp3.Callback
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 
@@ -21,7 +20,7 @@ internal data class AnimeRemoteMediaInspection(
 )
 
 /** Called only after a startup parser error, through the exact player's routed client. */
-internal suspend fun inspectAnimeRemoteMedia(client: OkHttpClient, url: String): AnimeRemoteMediaInspection? =
+internal suspend fun inspectAnimeRemoteMedia(client: Call.Factory, url: String): AnimeRemoteMediaInspection? =
     withTimeoutOrNull(4_500L) {
         suspendCancellableCoroutine<AnimeRemoteMediaInspection?> { continuation ->
             val call = client.newCall(Request.Builder().url(url).build())

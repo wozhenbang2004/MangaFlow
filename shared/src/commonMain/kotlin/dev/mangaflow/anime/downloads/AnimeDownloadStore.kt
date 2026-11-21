@@ -424,7 +424,7 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
                     save(next); records[id] = next
                 }
             }
-            val transport = NetworkClient(route = asset.route, acceptCompression = false)
+            val transport = NetworkClient(route = asset.route, acceptCompression = false, publicMediaOnly = true)
             client = transport
             val hls = initial.entryName == "media.m3u8" || asset.mimeType?.contains("mpegurl", true) == true ||
                 asset.url.substringBefore('?').endsWith(".m3u8", true)

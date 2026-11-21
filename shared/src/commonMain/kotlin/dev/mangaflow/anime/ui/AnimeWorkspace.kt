@@ -384,6 +384,10 @@ internal fun AnimeWorkspace(
         sourcesVisible = true
     }
     fun requestPlayback(episode: AnimeEpisode, option: AnimeEpisodeOption?) {
+        if (option == null && controller.episodeAvailability(episode.id) == AnimeEpisodeAvailability.UPCOMING) {
+            showSources(episode)
+            return
+        }
         controller.dismissNotice()
         controller.play(episode.id, option)
     }

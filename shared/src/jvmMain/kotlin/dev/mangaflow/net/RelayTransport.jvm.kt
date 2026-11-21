@@ -110,12 +110,26 @@ internal fun OkHttpClient.Builder.observeRelayRoute(route: DownloadRouteSnapshot
     }
 }
 
-internal fun OkHttpClient.Builder.applyDownloadRoute(route: DownloadRouteSnapshot?, observeTraffic: Boolean = true): OkHttpClient.Builder = apply {
+internal fun OkHttpClient.Builder.applyDownloadRoute(route: DownloadRouteSnapshot?, observeTraffic: Boolean = true,
+    publicMediaOnly: Boolean = false): OkHttpClient.Builder = apply {
     val selected = route?.checkedActive()
     addInterceptor { chain ->
         try { selected?.checkedActive() }
         catch (failure: DownloadRouteException) { throw IOException(failure.message, failure) }
         chain.proceed(chain.request())
+    }
+    if (!publicMediaOnly) {
+        // Moving dynamic media HTTP permission into Android's platform config
+        // must not expand ordinary API/image/update clients. The network guard
+        // also checks each hop of clients that follow redirects automatically.
+        val cleartextGuard = okhttp3.Interceptor { chain ->
+            val url = chain.request().url
+            if (!url.isHttps && !isDefaultCleartextAllowed(url.host))
+                throw IOException("此网络通道仅允许 HTTPS 或已授权的来源接口")
+            chain.proceed(chain.request())
+        }
+        addInterceptor(cleartextGuard)
+        addNetworkInterceptor(cleartextGuard)
     }
     if (selected?.relayBinding != null) {
         dns(relayDeferredDns)

@@ -2,7 +2,7 @@ package dev.mangaflow.anime.downloads
 
 import dev.mangaflow.anime.AnimePlaybackAsset
 import dev.mangaflow.anime.player.playbackIdentity
-import dev.mangaflow.anime.sources.animePublicUrl
+import dev.mangaflow.anime.sources.animeMediaUrl
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.NetworkClient
@@ -32,7 +32,14 @@ private data class Range(val start: Long, val end: Long, val total: Long)
 internal fun animeDigest(value: String): String = sha256(value.encodeToByteArray())
     .joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
 
-internal fun checkedAnimeDownloadUrl(value: String): HttpUrl = animePublicUrl(value)
+internal fun checkedAnimeDownloadUrl(value: String): HttpUrl = animeMediaUrl(value)
+
+private fun checkedDownloadRedirect(origin: HttpUrl, location: String?): HttpUrl {
+    val target = location?.let(origin::resolve)?.let { checkedAnimeDownloadUrl(it.toString()) }
+        ?: error("媒体地址跳转无效，请重新解析线路")
+    require(!origin.isHttps || target.isHttps) { "媒体地址不允许从 HTTPS 跳转到 HTTP，请重新解析线路" }
+    return target
+}
 
 internal fun downloadHeaders(asset: AnimePlaybackAsset, target: HttpUrl): Map<String, String> {
     val origin = checkedAnimeDownloadUrl(asset.url)
@@ -64,6 +71,7 @@ internal suspend fun downloadAnimeResource(
     asset: AnimePlaybackAsset, plan: AnimeResourcePlan, directory: StorageFile, client: NetworkClient,
     guard: () -> Unit, onProgress: (Long, Long?) -> Unit, validateVideo: Boolean = false,
 ): AnimeSavedResource {
+    val initialTarget = checkedAnimeDownloadUrl(plan.url)
     val identity = requestIdentity(asset, plan.url)
     val complete = StorageFile(directory, plan.name)
     val receipt = StorageFile(directory, plan.name + ".done.json")
@@ -92,7 +100,7 @@ internal suspend fun downloadAnimeResource(
             (it.total == null || partial.length() <= it.total) }
     }.getOrNull()
     if (resume == null) discard()
-    var target = checkedAnimeDownloadUrl(plan.url)
+    var target = initialTarget
     var redirects = 0
     var restarted = false
     while (true) {
@@ -205,8 +213,7 @@ internal suspend fun downloadAnimeResource(
         currentCoroutineContext().ensureActive(); guard()
         if (response.code in setOf(301, 302, 303, 307, 308)) {
             require(++redirects <= 8) { "媒体地址跳转次数过多，请重新解析线路" }
-            target = response.header("Location")?.let(target::resolve)?.let { checkedAnimeDownloadUrl(it.toString()) }
-                ?: error("媒体地址跳转无效，请重新解析线路")
+            target = checkedDownloadRedirect(target, response.header("Location"))
             continue
         }
         if (response.code == 416 && !restarted) { discard(); resume = null; restarted = true; continue }
@@ -243,8 +250,7 @@ internal suspend fun fetchAnimePlaylist(asset: AnimePlaybackAsset, client: Netwo
         }.build()
         val response = client.execute(request, 2L * 1024 * 1024)
         if (response.code in setOf(301, 302, 303, 307, 308)) {
-            target = response.header("Location")?.let(target::resolve)?.let { checkedAnimeDownloadUrl(it.toString()) }
-                ?: error("HLS 清单跳转无效")
+            target = checkedDownloadRedirect(target, response.header("Location"))
         } else {
             check(response.code == 200) { "HLS 清单无法读取（HTTP ${response.code}），请刷新线路" }
             return target to response.text()

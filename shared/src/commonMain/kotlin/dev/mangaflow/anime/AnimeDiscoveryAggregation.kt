@@ -1,7 +1,5 @@
 package dev.mangaflow.anime
 
-import dev.mangaflow.platform.normalizeNfkc
-
 internal val animeDiscoveryGenreLabels = linkedMapOf(
     "Action" to "动作", "Adventure" to "冒险", "Comedy" to "喜剧",
     "Drama" to "剧情", "Fantasy" to "奇幻", "Horror" to "恐怖", "Mahou Shoujo" to "魔法少女",
@@ -83,23 +81,18 @@ internal fun combineAnimeDiscoveryItems(
 
 private class DiscoveryWork(val item: AnimeDiscoveryItem) {
     val provider = item.discoveryProvider
-    val names = (listOfNotNull(item.title, item.subject?.title, item.subject?.originalTitle, item.reference?.title) +
-        item.aliases).mapTo(linkedSetOf()) { normalizeNfkc(it).lowercase().filterNot(Char::isWhitespace) }
-        .filterNot(String::isEmpty)
-    val ids = buildMap {
-        for ((key, id) in item.reference?.externalIds.orEmpty() + item.subject?.externalIds.orEmpty()) {
-            val namespace = if (key == "mal") "myanimelist" else key
-            if (namespace in setOf("bangumi", "anilist", "myanimelist", "douban") && id.isNotBlank()) {
-                put(namespace, id)
-            }
-        }
-    }
+    val titles = (listOfNotNull(item.title, item.subject?.title, item.subject?.originalTitle, item.reference?.title) +
+        item.aliases).filter(String::isNotBlank).distinct()
+    val names = titles.flatMap(::animeWorkDisplayKeys).toSet()
+    val ids = animeAuthoritativeIds(item.reference?.externalIds.orEmpty()) +
+        animeAuthoritativeIds(item.subject?.let(::animeSubjectIds).orEmpty())
 
     fun compatible(other: DiscoveryWork): Boolean =
         provider != null && other.provider != null && provider != other.provider &&
             (item.year == null || other.item.year == null || item.year == other.item.year) &&
             (item.format == null || other.item.format == null || item.format == other.item.format) &&
-            ids.none { (namespace, id) -> other.ids[namespace]?.let { it != id } == true }
+            !conflictingAnimeIds(ids, other.ids) && !animeWorkTitlesConflict(titles, other.titles,
+                requireMatchingEdition = ids.intersect(other.ids).isEmpty())
 
     fun compatibleWithoutId(other: DiscoveryWork): Boolean {
         if (!compatible(other)) return false
@@ -122,7 +115,7 @@ private class DiscoveryMatches(works: List<DiscoveryWork>) {
 
     fun uniquePeer(work: DiscoveryWork): DiscoveryWork? {
         val identified = work.ids.flatMap { (namespace, id) -> byId[namespace to id].orEmpty() }.distinct()
-        if (identified.isNotEmpty()) return identified.singleOrNull()?.takeIf(work::compatible)
+        if (identified.isNotEmpty()) return identified.filter(work::compatible).singleOrNull()
         val year = work.item.year ?: return null
         return work.names.flatMap { byTitleAndYear[it to year].orEmpty() }.distinct()
             .filter(work::compatibleWithoutId).singleOrNull()

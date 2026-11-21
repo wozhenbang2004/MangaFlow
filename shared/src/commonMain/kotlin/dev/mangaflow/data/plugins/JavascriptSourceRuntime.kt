@@ -231,7 +231,8 @@ internal expect suspend fun prepareJavascriptEngine(context: PlatformContext)
 internal expect fun javascriptCodec(raw: String): String
 internal expect class JavascriptHttpSession(enabled: Boolean, route: DownloadRouteSnapshot?, maximumBytes: Int,
     allowRedirects: Boolean = true, observeRelayTraffic: Boolean = true,
-    cleartextEndpoints: Set<String> = emptySet()) {
+    cleartextEndpoints: Set<String> = emptySet(),
+    playbackParsers: List<PublicPlaybackParserGrant> = emptyList()) {
     suspend fun request(raw: String): String
     fun close()
 }

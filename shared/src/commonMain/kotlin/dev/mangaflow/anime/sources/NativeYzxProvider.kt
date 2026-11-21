@@ -230,13 +230,13 @@ internal class NativeYzxProvider(override val revision: String) : AnimeProvider 
             catch (failure: Exception) { checkRoute(http, AnimeSourceStage.RESOLVE); lastFailure = failure }
         }
         direct?.let { return it }
-        // Preserve the upstream's last HLS candidate after ordinary HLS and HTTPS direct media.
+        // Preserve the upstream's last HLS candidate after ordinary HLS and direct media.
         // yuanType alone does not prove the bytes' layout. Android's existing HLS extractor
         // accepts only a complete PNG/JPEG prefix followed by confirmed TS packets; other
         // platforms keep their own normal HLS handling and honest unsupported-format errors.
         imageFallback?.let { return it }
         throw lastFailure ?: AnimeSourceException(id, AnimeSourceStage.RESOLVE,
-            "优可没有返回此集可用的 HTTPS 视频地址，请重试或更换来源。")
+            "优可没有返回此集可用的公共视频地址，请重试或更换来源。")
     }
 
     private suspend fun play(
@@ -271,7 +271,7 @@ internal class NativeYzxProvider(override val revision: String) : AnimeProvider 
         }.orEmpty()
         val primary = listOf(data.text("url"))
         val values = if ((data.optJSONArray("duo")?.length() ?: 0) > 0) alternatives + primary else primary + alternatives
-        return values.mapNotNull { raw -> runCatching { animePublicUrl(raw) }.getOrNull() }
+        return values.mapNotNull { raw -> runCatching { animeMediaUrl(raw) }.getOrNull() }
             .filterNot { url ->
                 (url.host == "v.trgfd.cn" && url.encodedPath == "/66.m3u8") ||
                     (url.host == "tc.trgfd.cn" && url.encodedPath.startsWith("/123/"))

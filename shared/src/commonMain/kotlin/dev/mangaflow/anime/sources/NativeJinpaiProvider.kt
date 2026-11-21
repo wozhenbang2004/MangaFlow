@@ -114,7 +114,7 @@ internal class NativeJinpaiProvider(override val revision: String) : AnimeProvid
                 val headers = mapOf("Origin" to host, "Referer" to host, "User-Agent" to MEDIA_USER_AGENT)
                 val resolutions = objects(data.requiredArray("list", id, AnimeSourceStage.RESOLVE))
                     .sortedByDescending(::resolutionRank).mapNotNull { row ->
-                        val url = runCatching { animePublicUrl(row.text("url")).toString() }.getOrNull()
+                        val url = runCatching { animeMediaUrl(row.text("url")).toString() }.getOrNull()
                             ?: return@mapNotNull null
                         val label = row.text("resolutionName").ifEmpty {
                             row.positiveInt("resolution")?.let { it.toString() + "P" } ?: "默认"
@@ -125,7 +125,7 @@ internal class NativeJinpaiProvider(override val revision: String) : AnimeProvid
                         )
                     }.distinctBy { it.url }
                 val best = resolutions.firstOrNull() ?: throw AnimeSourceException(id, AnimeSourceStage.RESOLVE,
-                    "金牌未返回此集可用的 HTTPS 视频地址，请重试或更换来源。")
+                    "金牌未返回此集可用的公共视频地址，请重试或更换来源。")
                 AnimePlaybackAsset(
                     id = id + ":" + animeHash(episode.id + "\n" + animeContentIdentity(best.url)),
                     sourceId = id, sourceEpisodeId = episode.id, url = best.url, route = http.route,

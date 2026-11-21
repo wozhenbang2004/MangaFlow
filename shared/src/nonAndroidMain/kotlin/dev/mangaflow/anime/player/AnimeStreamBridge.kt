@@ -3,7 +3,7 @@ package dev.mangaflow.anime.player
 import dev.mangaflow.anime.AnimePlaybackAsset
 import dev.mangaflow.anime.AnimeSubtitle
 import dev.mangaflow.anime.downloads.parseAnimeHlsDownload
-import dev.mangaflow.anime.sources.animePublicUrl
+import dev.mangaflow.anime.sources.animeMediaUrl
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrl
 import dev.mangaflow.net.NetworkClient
@@ -72,7 +72,7 @@ internal class AnimeStreamBridge private constructor(
         val imagePrefixedTransport: Boolean = false,
     )
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[Job]))
-    private val client = NetworkClient(acceptCompression = false, route = asset.route)
+    private val client = NetworkClient(acceptCompression = false, route = asset.route, publicMediaOnly = true)
     private val lock = SynchronizedObject()
     private val warmReads = startupByteLimit?.let(::StartupReads)
     private val resources = linkedMapOf<String, Resource>()
@@ -251,9 +251,7 @@ internal class AnimeStreamBridge private constructor(
                         response = received
                         when {
                             received.code in setOf(301, 302, 303, 307, 308) -> {
-                                redirect = received.header("Location")?.let(url::resolve)
-                                    ?.let { checkedUrl(it.toString()) }
-                                    ?: error("播放线路重定向无效")
+                                redirect = checkedRedirect(url, received.header("Location"))
                                 false
                             }
                             received.code !in 200..299 -> {
@@ -504,7 +502,7 @@ internal class AnimeStreamBridge private constructor(
                 accepted
             }, onChunk = { bytes, count -> body.write(bytes, 0, count) })
             if (response.code in setOf(301, 302, 303, 307, 308)) {
-                url = response.header("Location")?.let(url::resolve)?.let { checkedUrl(it.toString()) } ?: return null
+                url = checkedRedirect(url, response.header("Location"))
             } else {
                 if (!accepted || body.size == 0L ||
                     response.header("Content-Length")?.toLongOrNull()?.let { it != body.size } == true) return null
@@ -584,8 +582,7 @@ internal class AnimeStreamBridge private constructor(
                     }, onChunk = { bytes, count -> check(current()) { "预读身份已过期" }; writer?.append(bytes, count) })
                     writer?.close(); writer = null
                     if (response.code in setOf(301, 302, 303, 307, 308)) {
-                        url = response.header("Location")?.let(url::resolve)?.let { checkedUrl(it.toString()) }
-                            ?: return AnimeStartupCacheResult(0L)
+                        url = checkedRedirect(url, response.header("Location"))
                     } else {
                         val retained = (if (accepted && current()) owner.read(asset, primary.toString(), range) else null)
                             ?: return AnimeStartupCacheResult(0L, detail = "原视频字节未进入可复用缓存")
@@ -751,7 +748,14 @@ internal class AnimeStreamBridge private constructor(
 }
 
 private fun checkedUrl(value: String): HttpUrl {
-    return animePublicUrl(value)
+    return animeMediaUrl(value)
+}
+
+private fun checkedRedirect(origin: HttpUrl, location: String?): HttpUrl {
+    val target = location?.let(origin::resolve)?.let { checkedUrl(it.toString()) }
+        ?: error("播放线路重定向无效")
+    require(!origin.isHttps || target.isHttps) { "播放线路不允许从 HTTPS 跳转到 HTTP，请重新解析线路" }
+    return target
 }
 
 internal data class LoopbackRequest(val method: String, val target: String, val headers: Map<String, String>)

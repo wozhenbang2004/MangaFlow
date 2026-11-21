@@ -7,6 +7,7 @@ import dev.mangaflow.anime.sources.AnimeSourceStage
 import dev.mangaflow.anime.sources.animeHash
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.plugins.JavascriptHttpSession
+import dev.mangaflow.data.plugins.PublicPlaybackParserGrant
 import dev.mangaflow.data.plugins.prepareJavascriptEngine
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
@@ -39,11 +40,13 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
     private val lock = SynchronizedObject()
     private val sourceLocks = mutableMapOf<String, Mutex>()
     private val running = mutableMapOf<String, () -> Unit>()
+    private val playbackParsers = LanercPlaybackParsers()
     private val slots = Semaphore(4)
     // Catalogue work cannot occupy every slot needed to resolve a playback candidate.
     private val backgroundSlots = Semaphore(2)
 
     fun invalidate(id: String) {
+        playbackParsers.invalidate(id)
         val cancel = synchronized(lock) { running[id] }
         cancel?.invoke()
     }
@@ -68,8 +71,35 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
         return if (method == "play") invokeCurrent() else backgroundSlots.withPermit { invokeCurrent() }
     }
 
+    suspend fun play(id: String, catalogId: String, group: String, flag: String, expectedRevision: String): LanercInvocation {
+        require(catalogId.isNotBlank() && group.isNotBlank() && flag.length in 1..262_144)
+        store.ready.await()
+        val sourceLock = synchronized(lock) { sourceLocks.getOrPut(id) { Mutex() } }
+        return sourceLock.withLock {
+            val bundle = store.snapshot(id) ?: throw LanercCapabilityException("该来源未安装或已停用，请先启用来源。")
+            if (bundle.revision != expectedRevision)
+                throw LanercCapabilityException("来源版本或参数已改变，请刷新剧集后重新选择。")
+            val descriptor = store.descriptor(id)
+            val selection = LanercPlaybackSelection(catalogId, group, flag)
+            val route = DownloadRoutingStore.get(context).sourceSnapshot(id, DownloadCategory.ANIME)
+            // Restored/long-lived catalogues need a fresh native declaration, not a broader
+            // HTTP exemption. The refresh and play keep this source's session lock.
+            if (playbackParsers.needsRefresh(bundle, route, selection)) {
+                val detail = execute(bundle, descriptor, "detail", JSONArray(listOf(catalogId)), true)
+                if (detail.revision != expectedRevision || detail.digest != bundle.digest || detail.route != route ||
+                    !store.isCurrent(bundle) || DownloadRoutingStore.get(context).sourceSnapshot(id, DownloadCategory.ANIME) != route) {
+                    playbackParsers.invalidate(id)
+                    throw LanercCapabilityException("来源或网络路由已改变，请刷新后重试。")
+                }
+                playbackParsers.rememberSelection(bundle, route, selection, detail.value)
+            }
+            execute(bundle, descriptor, "play", JSONArray(listOf(flag)), true, selection)
+        }
+    }
+
     private suspend fun execute(bundle: LanercInstalledPackage, descriptor: LanercSourceDescriptor,
-        method: String, args: JSONArray, networkAllowed: Boolean): LanercInvocation = withContext(Dispatchers.Default) {
+        method: String, args: JSONArray, networkAllowed: Boolean,
+        playbackSelection: LanercPlaybackSelection? = null): LanercInvocation = withContext(Dispatchers.Default) {
         try {
             withTimeout(60_000L) {
                 slots.withPermit {
@@ -77,12 +107,14 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                 val operationContext = currentCoroutineContext()
                 operationContext.ensureActive()
                 val route = DownloadRoutingStore.get(context).sourceSnapshot(bundle.id, DownloadCategory.ANIME)
-                val js = QuickJs.create(Dispatchers.Default)
                 val cleartextEndpoints = lanercCleartextEndpoints(bundle.id, bundle.digest, method)
+                val parserGrants = if (networkAllowed && method == "play")
+                    playbackParsers.forPlay(bundle, route, args.optString(0), playbackSelection) else emptyList()
+                val js = QuickJs.create(Dispatchers.Default)
                 val escapePlaybackQueryPipes = method == "play" && bundle.id == "anime-lanerc-07" &&
                     bundle.digest == descriptor.observedDigest
                 val network = JavascriptHttpSession(networkAllowed, route, 8 * 1024 * 1024,
-                    cleartextEndpoints = cleartextEndpoints)
+                    cleartextEndpoints = cleartextEndpoints, playbackParsers = parserGrants)
                 val sessionRouteKey = animeHash(route.toString())
                 var sourceLoaded = false
                 val sdEvidence = SdSearchResponseEvidence.forCall(bundle.id, bundle.digest, method, args.optString(0))
@@ -93,10 +125,12 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                     operationContext.ensureActive()
                     if (networkAllowed && (!store.isCurrent(bundle) || DownloadRoutingStore.get(context).sourceSnapshot(bundle.id, DownloadCategory.ANIME) != route)) {
                         changed = true
+                        playbackParsers.invalidate(bundle.id)
                         throw LanercCapabilityException("来源或网络路由已改变，请刷新后重试。")
                     }
                 }
                 val cancel: () -> Unit = {
+                    playbackParsers.invalidate(bundle.id)
                     operationContext[Job]?.cancel(CancellationException("Anime source changed"))
                     network.close()
                     runCatching { if (!js.isClosed) js.interruptEvaluation() }
@@ -118,7 +152,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                             sdEvidence?.beforeRequest(request)
                             lanercBlocking(operationContext) {
                                 http(request, network, preferences, cleartextEndpoints, ::checkCurrent,
-                                    sdEvidence, escapePlaybackQueryPipes).also {
+                                    sdEvidence, escapePlaybackQueryPipes, parserGrants).also {
                                     responseStatus = lanercResponseFailure(responseStatus, JSONObject(it).optInt("statusCode"))
                                 }
                             }
@@ -193,8 +227,13 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                     if (result is JSONArray && result.length() == 0 && sdEvidence?.twoUnresolvedMainAttempts() == true)
                         throw LanercCapabilityException("闪电主搜索响应解析未完成，未将其当作没有匹配作品。")
                     checkCurrent()
+                    if (method == "detail") playbackParsers.remember(bundle, route, args.optString(0), result)
+                    checkCurrent()
                     LanercInvocation(result, route, bundle.revision, bundle.digest)
-                } catch (cancelled: CancellationException) { throw cancelled }
+                } catch (cancelled: CancellationException) {
+                    playbackParsers.invalidate(bundle.id)
+                    throw cancelled
+                }
                 catch (failure: Exception) {
                     operationContext.ensureActive()
                     if (changed) throw LanercCapabilityException("来源或网络路由已改变，请刷新后重试。")
@@ -225,8 +264,12 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                 }
             }
         } catch (_: TimeoutCancellationException) {
+            playbackParsers.invalidate(bundle.id)
             throw LanercCapabilityException("来源响应超时，已停止本次请求，可重试或切换来源。")
-        } catch (cancelled: CancellationException) { throw cancelled }
+        } catch (cancelled: CancellationException) {
+            playbackParsers.invalidate(bundle.id)
+            throw cancelled
+        }
         catch (known: AnimeSourceException) { throw known }
         catch (known: DownloadRouteException) { throw known }
         catch (known: LanercCapabilityException) { throw known }
@@ -235,19 +278,24 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
 
     private suspend fun http(raw: String, network: JavascriptHttpSession, preferences: LanercPreferences,
         cleartextEndpoints: Set<String>, checkCurrent: () -> Unit, sdEvidence: SdSearchResponseEvidence?,
-        escapePlaybackQueryPipes: Boolean): String {
+        escapePlaybackQueryPipes: Boolean, parserGrants: List<PublicPlaybackParserGrant>): String {
         val input = JSONObject(raw)
         var method = input.optString("method", "GET").uppercase()
         val address = input.getString("url")
         val queryAt = address.indexOf('?')
         // The pinned 07 parser appends its opaque value with literal pipe characters.
         val requestAddress = if (escapePlaybackQueryPipes && method == "GET" && queryAt >= 0 &&
-            address.startsWith("https://", ignoreCase = true)) {
+            (address.startsWith("https://", ignoreCase = true) || parserGrants.any { it.allows(address) })) {
             address.substring(0, queryAt + 1) + address.substring(queryAt + 1).replace("|", "%7C")
         } else address
-        var url = lanercRequestUrl(requestAddress, cleartextEndpoints)
+        var url = lanercRequestUrl(requestAddress, cleartextEndpoints, parserGrants)
         var headers = input.optJSONObject("headers") ?: JSONObject()
         var body: Any? = input.opt("body")
+        val parser = parserGrants.firstOrNull { it.allows(url.toString()) }
+        if (parser != null) require(method == "GET" && (body == null || body === JSONObject.NULL) &&
+            headers.keys().asSequence().all { it.lowercase() in PublicPlaybackParserGrant.PUBLIC_HEADERS }) {
+            "公开播放解析只允许无正文、无认证信息的 GET 请求。"
+        }
         val bodyEncoding = input.optString("bodyEncoding", "utf8").lowercase()
         if (body != null && body !== JSONObject.NULL && bodyEncoding !in setOf("utf8", "utf-8", "text")) {
             val encodedBody = body as? String
@@ -286,8 +334,9 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
             val location = responseHeaders.keys().asSequence().firstOrNull { it.equals("Location", true) }
                 ?.let(responseHeaders::optString) ?: error("来源重定向缺少目标。")
             val target = lanercRequestUrl(url.resolve(location)?.toString() ?: error("来源重定向地址无效。"),
-                cleartextEndpoints)
+                cleartextEndpoints, parserGrants)
             require(!url.isHttps || target.isHttps) { "不能把 HTTPS 来源请求降级到 HTTP。" }
+            require(parser == null || parser.allows(target.toString())) { "播放解析跳转超出了本集声明的端点。" }
             if (url.host != target.host || url.port != target.port || url.scheme != target.scheme) {
                 require(body == null || body === JSONObject.NULL || body.toString().isEmpty()) { "不能跨站重放来源请求正文。" }
                 headers = JSONObject(headers.keys().asSequence().filter { !it.equals("Authorization", true) && !it.equals("Cookie", true) }

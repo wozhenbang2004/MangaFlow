@@ -116,7 +116,7 @@ internal fun AnimePlayerPane(
     val index = ordered.indexOfFirst { it.id == episode?.id }
     val previous = ordered.getOrNull(index - 1).takeIf { index > 0 }
     val next = ordered.getOrNull(index + 1).takeIf { index >= 0 }
-    val nextReady = next?.let { controller.episodeAvailability(it.id, state) == AnimeEpisodeAvailability.MATCHED } == true
+    val nextUpcoming = next?.let { controller.episodeAvailability(it.id, state) == AnimeEpisodeAvailability.UPCOMING } == true
     val playerFailure = playback.error ?: if (playback.phase == AnimePlayerPhase.ERROR)
         "播放器未能准备视频，请重试或选择其他来源。" else null
     val playbackSource = currentOption?.sourceName
@@ -125,10 +125,8 @@ internal fun AnimePlayerPane(
     } }
     val error = incident?.reason ?: resolutionError ?: playerFailure
     val failure = error?.let { listOfNotNull(it, state.playbackRecoveryStopReason).joinToString("\n") }
-    val hasAlternative = incident != null && usableOptions.any { it.sourceId != incident.sourceId }
-    val canRetry = if (target?.manualOption != null && episode != null)
-        controller.canAttemptPlaybackLine(episode.id, target.manualOption, state)
-    else optionCount > 0 || target == null && currentOption == null && playback.phase == AnimePlayerPhase.ERROR
+    // Retrying a failed lookup is useful even before any source has delivered a line.
+    val canRetry = episode != null || playback.phase == AnimePlayerPhase.ERROR
     val focus = remember { FocusRequester() }
     val chromeFocus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
@@ -373,10 +371,10 @@ internal fun AnimePlayerPane(
                             resolving = blockingResolution, autoMatching = state.autoMatching,
                             sourceName = if (target == null) playbackSource else target.sourceName,
                             failure = failure, incident = incident, playback = playback,
-                            optionsAvailable = optionCount, hasAlternative = hasAlternative,
+                            optionsAvailable = optionCount,
                             canChooseSource = episode != null, canRetry = canRetry,
                             compact = videoHeight - statusTop - statusBottom < 196.dp,
-                            next = next, nextReady = nextReady, onRetry = onRetry, onSources = ::showSources, onEpisode = onEpisode,
+                            next = next, nextUpcoming = nextUpcoming, onRetry = onRetry, onSources = ::showSources, onEpisode = onEpisode,
                             onKeepPlayback = onKeepPlayback,
                             canKeepPlayback = playback.phase == AnimePlayerPhase.READY && (state.resolving || resolutionError != null),
                             onRestorePlayback = onRestorePlayback, canRestorePlayback = state.canRestorePlayback,
@@ -580,8 +578,8 @@ internal fun AnimePlayerPane(
 @Composable
 private fun AnimeVideoStatus(
     resolving: Boolean, autoMatching: Boolean, sourceName: String?, failure: String?, incident: AnimePlaybackFailure?,
-    playback: AnimePlayerState, optionsAvailable: Int, hasAlternative: Boolean, canChooseSource: Boolean, canRetry: Boolean,
-    compact: Boolean, next: AnimeEpisode?, nextReady: Boolean,
+    playback: AnimePlayerState, optionsAvailable: Int, canChooseSource: Boolean, canRetry: Boolean,
+    compact: Boolean, next: AnimeEpisode?, nextUpcoming: Boolean,
     onRetry: () -> Unit, onSources: () -> Unit, onEpisode: (AnimeEpisode) -> Unit,
     onKeepPlayback: () -> Unit, canKeepPlayback: Boolean, onRestorePlayback: () -> Unit, canRestorePlayback: Boolean,
 ) {
@@ -613,19 +611,16 @@ private fun AnimeVideoStatus(
                 incident = incident)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                 verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                if (canChooseSource && (hasAlternative || optionsAvailable > 1 || !canRetry)) {
-                    MotionButton(onClick = onSources, shape = shape, modifier = Modifier.heightIn(min = 44.dp)) {
-                        Text(if (hasAlternative || optionsAvailable > 1) "换线路" else "查看来源")
-                    }
-                    if (canRetry) MotionTextButton(onClick = onRetry, modifier = Modifier.heightIn(min = 44.dp)) {
-                        Text("重试本集", color = Color.White)
-                    }
-                } else if (canRetry) {
+                if (canRetry) {
                     MotionButton(onClick = onRetry, shape = shape, modifier = Modifier.heightIn(min = 44.dp)) {
                         Text("重试本集")
                     }
                     if (canChooseSource) MotionTextButton(onClick = onSources, modifier = Modifier.heightIn(min = 44.dp)) {
-                        Text("查看线路", color = Color.White)
+                        Text("选择线路", color = Color.White)
+                    }
+                } else if (canChooseSource) {
+                    MotionButton(onClick = onSources, shape = shape, modifier = Modifier.heightIn(min = 44.dp)) {
+                        Text("查看线路")
                     }
                 }
                 if (canKeepPlayback || canRestorePlayback) MotionTextButton(
@@ -663,7 +658,7 @@ private fun AnimeVideoStatus(
             verticalArrangement = Arrangement.spacedBy(6.dp)) {
             PlayerStageMessage("本集已播完", null)
             if (next != null) MotionButton(onClick = { onEpisode(next) }, shape = shape,
-                modifier = Modifier.heightIn(min = 44.dp)) { Text(if (nextReady) "播放下一集" else "查看下一集来源") }
+                modifier = Modifier.heightIn(min = 44.dp)) { Text(if (nextUpcoming) "查看下一集" else "播放下一集") }
         }
     }
 }
@@ -933,7 +928,7 @@ private fun WatchEpisodeCell(
         AnimeEpisodeAvailability.MATCHED -> null
         AnimeEpisodeAvailability.CHECKING -> "找源中"
         AnimeEpisodeAvailability.UNMATCHED -> "待匹配"
-        AnimeEpisodeAvailability.RECENTLY_FAILED -> "线路暂不可用"
+        AnimeEpisodeAvailability.RECENTLY_FAILED -> "可重试"
         AnimeEpisodeAvailability.UPCOMING -> "待播"
     }
     val surface = when {
@@ -946,8 +941,11 @@ private fun WatchEpisodeCell(
         .clip(RoundedCornerShape(if (inRail) 8.dp else 11.dp)).background(surface)
         .motionPress(interaction, enabled = enabled)
         .clickable(enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button,
-            onClickLabel = if (availability == AnimeEpisodeAvailability.RECENTLY_FAILED ||
-                availability == AnimeEpisodeAvailability.UPCOMING) "查看本集来源" else "播放本集", onClick = onClick)
+            onClickLabel = when (availability) {
+                AnimeEpisodeAvailability.UPCOMING -> "查看本集来源"
+                AnimeEpisodeAvailability.RECENTLY_FAILED -> "重试播放本集"
+                else -> "播放本集"
+            }, onClick = onClick)
         .semantics { selected = current; stateDescription = listOfNotNull(stateLabel, lineLabel).joinToString("，") }
         .padding(horizontal = if (inRail) 10.dp else 6.dp, vertical = 6.dp), contentAlignment = Alignment.Center) {
         if (inRail) {

@@ -156,6 +156,15 @@ internal fun AnimeDetailPane(
     val sourceNames = (bindings.sortedBy { it.catalog.sourceId != state.preferredSourceId }.map { it.catalog.sourceId } +
         state.groupSourceCandidates.map { it.sourceId } + awaitingSources).distinct()
         .map { it to animeSourceName(it, state) }
+    val linkedSourceCount = bindings.map { it.catalog.sourceId }.distinct().size
+    val sourceSummary = when {
+        linkedSourceCount > 0 -> "$linkedSourceCount 个已关联片源"
+        sourceNames.isNotEmpty() -> "${sourceNames.size} 个来源待确认"
+        else -> null
+    }
+    val incompleteSources = (state.sourceCatalogs.filter {
+        !it.notice.isNullOrBlank() && it != pendingNativeCatalog
+    }.map { it.title.sourceId } + state.sourceCatalogErrors.keys).distinct()
     val canonicalInfo = if (native) nativeMetadata else subject
     val detailScores = remember(state.detailScores, canonicalInfo) {
         buildList {
@@ -295,11 +304,12 @@ internal fun AnimeDetailPane(
                 Column(Modifier.fillMaxWidth().padding(top = 5.dp)) {
                     AnimeSectionTitle(
                         "选集",
-                        when {
+                        listOfNotNull(when {
                             search.isNotEmpty() -> "${episodes.size} / ${selectedEpisodes.size} 集"
                             selectedEpisodes.isNotEmpty() -> "${selectedEpisodes.size} 集"
                             else -> null
-                        },
+                        }, sourceSummary, "继续找源中".takeIf { state.sourceAggregationRunning })
+                            .joinToString(" · ").takeIf { it.isNotBlank() },
                         modifier = Modifier.semantics { heading() },
                         action = {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -427,23 +437,12 @@ internal fun AnimeDetailPane(
                     repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
-            if (state.sourceError != null) item(key = "source-status") {
-                AnimeDetailStatus("部分线路暂不可用", Icons.Outlined.CloudOff,
-                    actionLabel = "查看线路", onAction = { onSources(null) })
-            }
-            state.sourceCatalogs.filter {
-                (!it.notice.isNullOrBlank() || state.sourceCatalogErrors[it.title.sourceId] != null) &&
-                    it != pendingNativeCatalog
-            }.forEach { catalog ->
-                item(key = "partial-catalog:${catalog.title.sourceId}:${catalog.title.id}") {
-                    AnimeDetailStatus(
-                        "${animeSourceName(catalog.title.sourceId, state)} · 目录未更新完整",
-                        Icons.Outlined.Info,
-                        detail = state.sourceCatalogErrors[catalog.title.sourceId] ?: catalog.notice,
-                        actionLabel = "重试此来源目录", actionIcon = Icons.Outlined.Refresh,
-                        onAction = { controller.refreshSource(catalog.title.sourceId) },
-                    )
-                }
+            if (state.sourceError != null || incompleteSources.isNotEmpty()) item(key = "source-status") {
+                AnimeDetailStatus(
+                    if (incompleteSources.isNotEmpty()) "${incompleteSources.size} 个来源目录待更新" else "部分线路暂不可用",
+                    Icons.Outlined.Info, actionLabel = "查看来源详情", actionIcon = Icons.Outlined.Link,
+                    onAction = { onSources(null) },
+                )
             }
         }
     }
@@ -694,12 +693,11 @@ private fun AnimeDetailActions(
     val colors = MaterialTheme.colorScheme
     val episodeAction: @Composable (Modifier) -> Unit = { modifier ->
         if (episode != null && availability != null) {
-            val play = availability != AnimeEpisodeAvailability.RECENTLY_FAILED &&
-                availability != AnimeEpisodeAvailability.UPCOMING
+            val play = availability != AnimeEpisodeAvailability.UPCOMING
             val action = when (availability) {
                 AnimeEpisodeAvailability.MATCHED, AnimeEpisodeAvailability.CHECKING, AnimeEpisodeAvailability.UNMATCHED ->
                     if (progress != null) "继续观看" else "播放"
-                AnimeEpisodeAvailability.RECENTLY_FAILED -> "查看其他线路"
+                AnimeEpisodeAvailability.RECENTLY_FAILED -> "重试播放"
                 AnimeEpisodeAvailability.UPCOMING -> upcomingEpisodeLabel(episode, fullDate = true)
             }
             MotionButton(
@@ -716,8 +714,8 @@ private fun AnimeDetailActions(
                 val icon = when (availability) {
                     AnimeEpisodeAvailability.MATCHED, AnimeEpisodeAvailability.CHECKING,
                     AnimeEpisodeAvailability.UNMATCHED -> Icons.Outlined.PlayArrow
+                    AnimeEpisodeAvailability.RECENTLY_FAILED -> Icons.Outlined.Refresh
                     AnimeEpisodeAvailability.UPCOMING -> Icons.Outlined.Schedule
-                    else -> Icons.Outlined.Link
                 }
                 Icon(icon, null, Modifier.size(21.dp))
                 Spacer(Modifier.width(6.dp))
@@ -907,13 +905,12 @@ private fun AnimeEpisodeCell(
     val label = animeEpisodeLabel(episode)
     val subtitle = animeEpisodeSubtitle(episode)
     val canPlay = availability == AnimeEpisodeAvailability.MATCHED
-    val canAutoStart = availability != AnimeEpisodeAvailability.RECENTLY_FAILED &&
-        availability != AnimeEpisodeAvailability.UPCOMING
+    val canAutoStart = availability != AnimeEpisodeAvailability.UPCOMING
     val sourceState = when (availability) {
         AnimeEpisodeAvailability.MATCHED -> null
         AnimeEpisodeAvailability.CHECKING -> "查找中"
         AnimeEpisodeAvailability.UNMATCHED -> "待匹配"
-        AnimeEpisodeAvailability.RECENTLY_FAILED -> "线路暂不可用"
+        AnimeEpisodeAvailability.RECENTLY_FAILED -> "可重试"
         AnimeEpisodeAvailability.UPCOMING -> upcomingEpisodeLabel(episode)
     }
     val visibleSourceState = sourceState.takeUnless {
@@ -937,7 +934,11 @@ private fun AnimeEpisodeCell(
                 .motionPress(interaction, enabled = active, pressedScale = .97f)
                 .combinedClickable(
                     interactionSource = interaction, indication = null, enabled = active, role = Role.Button,
-                    onClickLabel = if (canAutoStart) "播放 $label" else "查看 $label 的来源",
+                    onClickLabel = when (availability) {
+                        AnimeEpisodeAvailability.UPCOMING -> "查看 $label 的来源"
+                        AnimeEpisodeAvailability.RECENTLY_FAILED -> "重试播放 $label"
+                        else -> "播放 $label"
+                    },
                     onClick = if (canAutoStart) onPlay else onSources,
                     onLongClickLabel = "本集操作", onLongClick = { menuVisible = true },
                 )
