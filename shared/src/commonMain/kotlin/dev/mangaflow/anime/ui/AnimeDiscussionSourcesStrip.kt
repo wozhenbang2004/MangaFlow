@@ -3,6 +3,8 @@ package dev.mangaflow.anime.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -12,6 +14,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
@@ -34,6 +37,7 @@ internal fun AnimeDiscussionSourcesStrip(
     onRetry: (String) -> Unit,
     onPresence: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
 ) {
     if (checks.isEmpty()) return
     var open by remember(ownerId) { mutableStateOf(false) }
@@ -50,7 +54,19 @@ internal fun AnimeDiscussionSourcesStrip(
         else -> "未找到匹配"
     }
     Box(modifier) {
-        MotionTextButton(onClick = { open = true }, enabled = enabled,
+        if (compact) MotionIconButton(onClick = { open = true }, enabled = enabled,
+            modifier = Modifier.size(44.dp).semantics {
+                contentDescription = "评论来源检查，$summary，查看各站状态"
+                stateDescription = if (open) "来源状态已展开" else "来源状态已收起"
+            }, tooltip = "评论来源检查 · $summary") {
+            Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                Icon(Icons.Outlined.Public, null, Modifier.size(20.dp), tint = colors.onSurfaceVariant)
+                if (checking > 0) MotionBusyIndicator(Modifier.align(Alignment.BottomEnd).size(8.dp),
+                    color = colors.onSurfaceVariant, strokeWidth = 1.dp)
+                else if (unavailable > 0) Icon(Icons.Outlined.ErrorOutline, null,
+                    Modifier.align(Alignment.BottomEnd).size(9.dp), tint = colors.onSurfaceVariant)
+            }
+        } else MotionTextButton(onClick = { open = true }, enabled = enabled,
             modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).semantics {
                 contentDescription = "评论来源检查，$summary，查看各站状态"
             }, contentPadding = PaddingValues(0.dp)) {
@@ -64,7 +80,7 @@ internal fun AnimeDiscussionSourcesStrip(
             else Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
         }
         CompactGlassPopover(open, backdrop, onDismiss = { open = false }, onPresenceChange = onPresence,
-            alignToStart = true, maximumWidth = 340.dp) {
+            alignToStart = !compact, maximumWidth = 340.dp) {
             AnimeSectionTitle("评论来源")
             checks.forEach { check ->
                 val status = when (check.status) {

@@ -9,8 +9,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -33,6 +33,7 @@ import dev.mangaflow.data.ReviewPage
 import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.data.ReviewStatus
 import dev.mangaflow.ui.CommunityPanel
+import dev.mangaflow.ui.DetailAction
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -56,6 +57,7 @@ internal fun AnimeEpisodeDiscussionPanel(visible: Boolean, episode: AnimeEpisode
     var error by remember(requestKey, catalogue) { mutableStateOf<String?>(null) }
     var revision by remember(requestKey) { mutableIntStateOf(0) }
     var filterOpen by remember(requestKey) { mutableStateOf(false) }
+    var filterChanged by remember(requestKey) { mutableStateOf(false) }
 
     LaunchedEffect(visible, requestKey, catalogue, revision) {
         if (!visible || !canRead) return@LaunchedEffect
@@ -80,10 +82,11 @@ internal fun AnimeEpisodeDiscussionPanel(visible: Boolean, episode: AnimeEpisode
                         AnimeQuietLabel(animeEpisodeLabel(episode) + result?.source?.reviews?.size?.let { " · $it 条" }.orEmpty())
                     }
                     if (canRead) {
-                        if (result != null || loading) MotionIconButton(onClick = { filterOpen = !filterOpen }, enabled = visible,
-                            modifier = Modifier.size(44.dp), tooltip = "筛选评论") {
-                            Icon(Icons.Outlined.Tune, "筛选评论", Modifier.size(19.dp))
-                        }
+                        if (result != null || loading) DetailAction(
+                            icon = Icons.Outlined.FilterList,
+                            description = if (filterOpen) "收起评论筛选" else if (filterChanged) "筛选评论，筛选已生效" else "筛选评论",
+                            selected = filterOpen || filterChanged, enabled = visible,
+                            onClick = { filterOpen = !filterOpen })
                         MotionIconButton(onClick = { revision++ }, enabled = visible && !loading,
                             modifier = Modifier.size(44.dp), tooltip = "刷新本集讨论") {
                             Icon(Icons.Outlined.Refresh, "刷新本集讨论", Modifier.size(19.dp))
@@ -112,7 +115,8 @@ internal fun AnimeEpisodeDiscussionPanel(visible: Boolean, episode: AnimeEpisode
                                 requested.subjectId == comments?.source?.subjectId)
                                 comments?.replies?.get(review.id).orEmpty() else emptyList())
                         }, modifier = Modifier.weight(1f), backdrop = backdrop, captureBackdrop = false, active = visible,
-                        filterOpen = filterOpen, onFilterDismiss = { filterOpen = false })
+                        filterOpen = filterOpen, onFilterDismiss = { filterOpen = false },
+                        onFilterChanged = { filterChanged = it })
                 }
             }
         }

@@ -43,6 +43,7 @@ internal fun MotionRefreshBox(
     onRefresh: () -> Unit,
     indicatorTop: Dp,
     showRefreshingIndicator: Boolean = true,
+    actionLabel: String = "刷新漫画",
     content: @Composable BoxScope.() -> Unit,
 ) {
     val state = rememberPullToRefreshState()
@@ -75,7 +76,7 @@ internal fun MotionRefreshBox(
         .pullToRefresh(isRefreshing = refreshing, state = state,
             enabled = enabled, threshold = 80.dp, onRefresh = onRefresh)
         .semantics {
-            customActions = if (enabled && !refreshing) listOf(CustomAccessibilityAction("刷新漫画") {
+            customActions = if (enabled && !refreshing) listOf(CustomAccessibilityAction(actionLabel) {
                 onRefresh(); true
             }) else emptyList()
         }) {

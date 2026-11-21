@@ -43,6 +43,8 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
     internal fun route(query: AnimeDiscoveryQuery): DownloadRouteSnapshot =
         DownloadRoutingStore.activeSourceSnapshot(providerId(query), DownloadCategory.ANIME)
 
+    internal val cacheEpoch: Long get() = cache.generation
+
     internal fun isFresh(query: AnimeDiscoveryQuery, fetchedAt: Long): Boolean =
         cache.isFresh(fetchedAt, cacheKind(query))
 

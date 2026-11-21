@@ -205,7 +205,9 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         if (progress == null) before else before.copy(dismissedResume = before.dismissedResume + (subjectId to progress.updatedAt))
     }
 
-    suspend fun clearWatchHistory(subjectId: String, removeEntry: Boolean = false) = update { before ->
+    suspend fun clearWatchHistory(subjectId: String, removeEntry: Boolean = false,
+        isCurrent: () -> Boolean = { true }) = update { before ->
+        check(isCurrent()) { "观看记录已变化，新的观看记录已保留。" }
         val entry = before.entries[subjectId] ?: return@update before
         val knownEpisodes = entry.completedEpisodeIds + listOfNotNull(entry.resume?.episodeId)
         before.copy(entries = if (removeEntry) before.entries - subjectId else before.entries +
@@ -443,12 +445,20 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("duration", progress.durationMs).put("updated", progress.updatedAt).put("completed", progress.completed)
         .put("subject", progress.subjectId)
         .put("localDownload", progress.localDownloadId)
+        .put("episodeTitle", progress.episodeTitle).put("episodeNumber", progress.episodeNumber)
+        .put("episodeKind", progress.episodeKind?.name)
 
     private fun decodeProgress(json: JSONObject) = AnimeWatchProgress(
         json.getString("episode"), json.getString("asset"), json.getString("source"),
         json.getLong("position").coerceAtLeast(0L), json.getLong("duration").coerceAtLeast(0L),
         json.getLong("updated"), json.optBoolean("completed"), json.optString("subject"),
-        json.optString("localDownload", null)?.also { require(it.matches(Regex("[a-f0-9]{64}"))) })
+        json.optString("localDownload", null)?.also { require(it.matches(Regex("[a-f0-9]{64}"))) },
+        episodeTitle = json.optString("episodeTitle"),
+        episodeNumber = if (json.isNull("episodeNumber")) null else json.getDouble("episodeNumber").takeIf { it.isFinite() },
+        episodeKind = json.optString("episodeKind").takeIf { it.isNotBlank() }?.let { name ->
+            AnimeEpisodeKind.entries.firstOrNull { it.name == name }
+        },
+    )
 
     private fun encodeSettings(value: AnimePlaybackSettings) = JSONObject()
         .put("autoPlayNext", value.autoPlayNext).put("prepareNextEpisode", value.prepareNextEpisode)

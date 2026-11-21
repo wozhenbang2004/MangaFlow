@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridScope
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
@@ -38,6 +39,8 @@ import androidx.compose.ui.window.DialogProperties
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.platform.formatInstantMillis
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 import dev.mangaflow.ui.platform.localToday
@@ -47,7 +50,7 @@ private const val FEATURED_PREVIEW = 6
 @Composable
 internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController, backdrop: HazeState,
     scrolls: AnimeDiscoveryScrolls, onOpenItem: (AnimeDiscoveryItem) -> Unit,
-    onResume: (AnimeLibraryEntry) -> Unit, active: Boolean,
+    onManage: (AnimeSubject) -> Unit, active: Boolean,
     contentBottomPadding: Dp = 24.dp) {
     val ratings = LocalAnimeRatings.current
     val browseActive = active
@@ -57,7 +60,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
     MotionTabContent(state.discoveryTab, Modifier.fillMaxSize(), contentKey = { it }, order = { it.ordinal }) { tab ->
         when (tab) {
             AnimeDiscoveryTab.HOME -> AnimeDiscoveryHome(state, controller, scrolls, contentBottomPadding,
-                onOpen = onOpenItem, onScores = ::openScores, onResume = onResume,
+                onOpen = onOpenItem, onScores = ::openScores, onManage = onManage,
                 active = browseActive && state.discoveryTab == tab)
             AnimeDiscoveryTab.SOURCES -> Unit
             else -> {
@@ -81,6 +84,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                     AnimeDiscoveryFeedGrid(key, feed, state.discoveryColumns, scrolls, contentBottomPadding,
                         modifier = Modifier.weight(1f).motionInputGate(contentActive), active = contentActive,
                         onOpen = onOpenItem, onScores = ::openScores,
+                        onManage = onManage, onRefresh = controller::refreshDiscovery,
                         onRetry = { controller.retryDiscovery(key) },
                         onMore = { controller.loadMoreDiscovery(key) },
                         onClearTag = { feed?.let { controller.configureDiscovery(tab, it.query.copy(tag = "")) } })
@@ -93,7 +97,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
 @Composable
 private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeController,
     scrolls: AnimeDiscoveryScrolls, contentBottomPadding: Dp, onOpen: (AnimeDiscoveryItem) -> Unit,
-    onScores: (AnimeDiscoveryItem) -> Unit, onResume: (AnimeLibraryEntry) -> Unit, active: Boolean) {
+    onScores: (AnimeDiscoveryItem) -> Unit, onManage: (AnimeSubject) -> Unit, active: Boolean) {
     val homeScroll = scrolls.grid("home")
     val popular = state.discoveryFeeds["home:douban:popular"]
     val featured = remember(popular?.items) {
@@ -117,25 +121,22 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
     LaunchedEffect(featured.isNotEmpty(), active) {
         if (featured.isNotEmpty() && active && !scrolls.placedHomeFeature) {
             scrolls.placedHomeFeature = true
-            if (state.resumeEntry == null && !homeScroll.isScrollInProgress && homeScroll.firstVisibleItemScrollOffset == 0 &&
+            if (!homeScroll.isScrollInProgress && homeScroll.firstVisibleItemScrollOffset == 0 &&
                 homeScroll.layoutInfo.visibleItemsInfo.firstOrNull()?.key in
                 setOf("section:home:douban:popular", "genre-shortcuts")) homeScroll.requestScrollToItem(0)
         }
     }
+    val homeFeeds = state.discoverySections.mapNotNull { state.discoveryFeeds[it.key] }
+    val loading = homeFeeds.any { it.loading }
+    MotionRefreshBox(enabled = active && !loading, refreshing = loading && homeFeeds.any { it.items.isNotEmpty() },
+        onRefresh = controller::refreshDiscovery, indicatorTop = 4.dp, actionLabel = "刷新番剧") {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val columns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
+        val inset = animeDiscoveryInset(maxWidth, state.discoveryColumns, columns)
         LazyVerticalGrid(GridCells.Fixed(columns), state = homeScroll, modifier = Modifier.fillMaxSize(),
             userScrollEnabled = active,
-            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 8.dp, bottom = contentBottomPadding),
-            horizontalArrangement = Arrangement.spacedBy(9.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            state.resumeEntry?.let { entry ->
-                item(key = "continue-watching", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeContinueWatching(entry,
-                        onResume = { if (active) onResume(entry) },
-                        onDismiss = { if (active) controller.dismissResume(entry.subject.id) },
-                        modifier = Modifier.motionInputGate(active))
-                }
-            }
+            contentPadding = PaddingValues(start = inset, end = inset, top = 8.dp, bottom = contentBottomPadding),
+            horizontalArrangement = Arrangement.spacedBy(animeDiscoveryGap(columns)), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (featured.isNotEmpty()) item(key = "featured", span = { GridItemSpan(maxLineSpan) }) {
                 AnimeFeaturedCarousel(featured, active = active, visible = active && galleryInView,
                     selectedKey = scrolls.featuredKey, onSelected = { scrolls.featuredKey = it },
@@ -148,17 +149,21 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
             }
             state.discoverySections.filter { it.key in setOf("home:douban:popular", "home:douban:japan",
                 "home:douban:china", "home:douban:movies") }.forEach { section ->
-                animeHomeMetadataSection(section, state.discoveryFeeds[section.key], columns, active, onOpen, onScores,
+                animeHomeMetadataSection(section, state.discoveryFeeds[section.key], columns, active, onOpen, onScores, onManage,
                     onMore = { controller.openDiscoverySection(section.key) },
                     onRetry = { controller.retryDiscovery(section.key) })
             }
         }
+        if (platformKind == PlatformKind.DESKTOP) DesktopVerticalScrollbar(homeScroll,
+            Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
+    }
     }
 }
 
 private fun LazyGridScope.animeHomeMetadataSection(
     section: AnimeDiscoverySection, feed: AnimeDiscoveryFeed?, columns: Int, active: Boolean,
     onOpen: (AnimeDiscoveryItem) -> Unit, onScores: (AnimeDiscoveryItem) -> Unit,
+    onManage: (AnimeSubject) -> Unit,
     onMore: () -> Unit, onRetry: () -> Unit,
 ) {
     item(key = "section:${section.key}", span = { GridItemSpan(maxLineSpan) }) {
@@ -169,6 +174,7 @@ private fun LazyGridScope.animeHomeMetadataSection(
         items(feed.items.distinctBy { it.key }.take(if (columns == 1) 3 else columns),
             key = { section.key + ":" + it.key }) { item ->
             AnimeDiscoveryCard(item, feed.query, list = columns == 1, onScores = onScores.takeIf { active },
+                onManage = item.subject?.takeIf { active }?.let { subject -> { onManage(subject) } },
                 onOpen = { if (active) onOpen(item) })
         }
     }
@@ -276,22 +282,41 @@ internal fun AnimeDiscoveryInlineStatus(text: String, retry: (() -> Unit)? = nul
 private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, preference: Int?,
     scrolls: AnimeDiscoveryScrolls, contentBottomPadding: Dp, modifier: Modifier, active: Boolean,
     onOpen: (AnimeDiscoveryItem) -> Unit, onScores: (AnimeDiscoveryItem) -> Unit,
+    onManage: (AnimeSubject) -> Unit, onRefresh: () -> Unit,
     onRetry: () -> Unit, onMore: () -> Unit, onClearTag: () -> Unit) {
-    val scroll = scrolls.grid(key)
+    val retainedScroll = scrolls.grid(key, feed?.query)
+    // The query's completed page range is restored by AnimeDiscoveryLoads before this state is used.
+    // A temporary empty/loading layout must not clamp that saved position to its single status row.
+    val loadingScroll = remember(key, feed?.query) { LazyGridState() }
+    val scroll = if (feed == null || feed.items.isEmpty()) loadingScroll else retainedScroll
     val combined = feed?.query?.combined == true
     val hasScopedErrors = combined && feed?.sourceErrors?.isNotEmpty() == true
-    LaunchedEffect(key, feed?.query) {
-        feed?.query?.let { query ->
-            val previous = scrolls.queries.put(key, query)
-            if (previous != null && previous != query) scroll.scrollToItem(0)
-        }
-    }
-    BoxWithConstraints(modifier.fillMaxSize()) {
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val pagingAvailable = feed != null && feed.items.isNotEmpty() && feed.hasMore && !feed.loading &&
+        !feed.loadingMore && feed.error == null && feed.moreError == null && !hasScopedErrors
+    val pull = rememberBottomPullLoadState(key = key to feed?.query,
+        enabled = !desktop && active && pagingAvailable, loading = feed?.loadingMore == true,
+        canScrollForward = { scroll.canScrollForward }, onLoadMore = onMore, actionLabel = "加载更多番剧")
+    Box(modifier) {
+    MotionRefreshBox(enabled = active && feed?.loading != true && feed?.loadingMore != true,
+        refreshing = feed?.loading == true && feed.items.isNotEmpty(), onRefresh = onRefresh,
+        indicatorTop = 4.dp, actionLabel = "刷新番剧") {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
         val columns = animeDiscoveryColumns(maxWidth, preference)
-        LazyVerticalGrid(GridCells.Fixed(columns), state = scroll, modifier = Modifier.fillMaxSize(),
+        val inset = animeDiscoveryInset(maxWidth, preference, columns)
+        if (desktop) AnimeBrowsePagination(key = key to feed?.query, refreshKey = feed?.fetchedAt,
+            itemCount = feed?.items?.size ?: 0, enabled = active && pagingAvailable,
+            nearEnd = {
+                val info = scroll.layoutInfo
+                val trailingKeys = feed?.items.orEmpty().takeLast(columns * 2).map { it.key }.toSet()
+                info.visibleItemsInfo.any { it.key in trailingKeys } &&
+                    (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - columns * 2 - 1
+            }, onMore = onMore)
+        LazyVerticalGrid(GridCells.Fixed(columns), state = scroll, modifier = Modifier.fillMaxSize()
+            .then(if (desktop) Modifier else Modifier.bottomPullLoad(pull)),
             userScrollEnabled = active,
-            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = contentBottomPadding),
-            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            contentPadding = PaddingValues(start = inset, end = inset, top = 4.dp, bottom = contentBottomPadding),
+            horizontalArrangement = Arrangement.spacedBy(animeDiscoveryGap(columns)), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (feed?.query?.calendar == true || feed?.loading == true && feed.items.isNotEmpty()) item(
                 key = "status", span = { GridItemSpan(maxLineSpan) }) {
                 Row(Modifier.fillMaxWidth().heightIn(min = 28.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -319,7 +344,7 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
             if (feed == null || feed.items.isEmpty()) {
                 if (feed?.error == null && !hasScopedErrors) item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
                     if (feed == null || feed.loading || feed.page == 0) AnimeDiscoveryInlineStatus("正在载入番剧")
-                    else AnimeDiscoveryInlineStatus("没有符合当前条件的番剧",
+                    else AnimeDiscoveryInlineStatus(if (feed.hasMore) "本页暂无匹配的番剧" else "没有符合当前条件的番剧",
                         onClearTag.takeIf { active && feed.query.tag.isNotBlank() }, retryLabel = "清除题材", showIssue = false)
                 }
             }
@@ -333,11 +358,13 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
                         }
                         items(shows, key = { it.key }) { item ->
                             AnimeDiscoveryCard(item, feed.query, list = columns == 1, onScores = onScores.takeIf { active },
+                                onManage = item.subject?.takeIf { active }?.let { subject -> { onManage(subject) } },
                                 onOpen = { if (active) onOpen(item) })
                         }
                     }
             } else items(feed.items, key = { it.key }) { item ->
                 AnimeDiscoveryCard(item, feed.query, list = columns == 1, onScores = onScores.takeIf { active },
+                    onManage = item.subject?.takeIf { active }?.let { subject -> { onManage(subject) } },
                     onOpen = { if (active) onOpen(item) })
             }
             if (feed != null && hasScopedErrors) item(
@@ -351,13 +378,20 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
                     AnimeQuietLabel(feed.moreError)
                 }
             }
-            if (feed?.hasMore == true && (combined || feed.moreError == null)) item(key = "more", span = { GridItemSpan(maxLineSpan) }) {
-                MotionTextButton(onClick = onMore, enabled = active && !feed.loadingMore,
+            if (feed != null && (feed.hasMore || feed.loadingMore) && (combined || feed.moreError == null)) item(key = "more", span = { GridItemSpan(maxLineSpan) }) {
+                if (desktop || hasScopedErrors || feed.moreError != null || feed.items.isEmpty()) MotionTextButton(onClick = onMore,
+                    enabled = active && !feed.loading && !feed.loadingMore,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Text(if (feed.loadingMore) "正在加载" else "加载更多")
+                    Text(if (feed.loadingMore) "正在加载" else if (feed.items.isEmpty()) "继续查找" else "加载更多")
+                } else Box(Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.Center) {
+                    BottomPullLoadIndicator(pull, Modifier.size(32.dp))
                 }
             }
         }
+        if (desktop) DesktopVerticalScrollbar(scroll,
+            Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
+    }
+    }
     }
 }
 

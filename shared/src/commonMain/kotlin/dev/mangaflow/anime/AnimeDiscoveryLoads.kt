@@ -25,12 +25,15 @@ internal class AnimeDiscoveryLoads(
         var generation = 0L
         var retryAt: Long? = null
         var recoveryAvailable = false
+        var revalidatePages = 1
         var job: Job? = null
         var recovery: Job? = null
     }
 
-    private class Slot(val query: AnimeDiscoveryQuery, val sources: List<SourceLoad>)
+    private class Slot(val query: AnimeDiscoveryQuery, val sources: List<SourceLoad>, val cacheEpoch: Long)
+    private data class RetainedKey(val key: String, val query: AnimeDiscoveryQuery)
     private val slots = mutableMapOf<String, Slot>()
+    private val retained = linkedMapOf<RetainedKey, Slot>()
     private var visibleKeys = emptySet<String>()
 
     fun visible(keys: Set<String>) {
@@ -44,22 +47,35 @@ internal class AnimeDiscoveryLoads(
     }
 
     fun reset(key: String) {
-        slots.remove(key)?.sources?.forEach { source ->
+        val previous = slots.remove(key) ?: return
+        previous.sources.forEach { source ->
+            ++source.generation
             source.job?.cancel()
             source.recovery?.cancel()
+            source.job = null
+            source.recovery = null
+            source.feed = source.feed.copy(loading = false, loadingMore = false)
         }
+        val identity = RetainedKey(key, previous.query)
+        retained.remove(identity)
+        retained[identity] = previous
+        while (retained.size > 24) retained.remove(retained.keys.first())
     }
 
     fun restorePreview(fromKey: String, key: String) {
         val from = slots[fromKey] ?: return
         val now = slot(key) ?: return
-        if (now.query != from.query) return
+        if (now.query != from.query || from.cacheEpoch != repository.cacheEpoch) return
         now.sources.zip(from.sources).forEach { (target, source) ->
+            // A one-row home preview must not replace a previously loaded multi-page list.
+            if (target.requested && target.route == source.route && target.feed.items.isNotEmpty() &&
+                target.feed.page >= source.feed.page) return@forEach
             target.feed = source.feed.copy(loading = false, loadingMore = false, moreError = null)
             target.requested = source.requested
             target.route = source.route
             target.retryAt = source.retryAt
             target.recoveryAvailable = source.recoveryAvailable
+            target.revalidatePages = source.revalidatePages
         }
         publish(key, now)
     }
@@ -75,7 +91,8 @@ internal class AnimeDiscoveryLoads(
                 feed.error != null -> source.retryAt?.let { monotonicTimeMillis() >= it } == true
                 else -> feed.fetchedAt?.let { !repository.isFresh(source.query, it) } ?: true
             }
-            if (needsFetch) load(key, slot, source, append = false, force = !routeChanged && feed.error != null)
+            if (needsFetch) load(key, slot, source, append = false, force = !routeChanged && feed.error != null,
+                preserveRange = !routeChanged && feed.items.isNotEmpty() && feed.page > 1)
             else scheduleRecovery(key, slot, source)
         }
     }
@@ -89,7 +106,8 @@ internal class AnimeDiscoveryLoads(
         val slot = slot(key) ?: return
         val failed = slot.sources.filter { it.feed.error != null || it.feed.moreError != null }
         failed.filter { it.job?.isActive != true }.forEach { source ->
-            load(key, slot, source, append = source.feed.moreError != null, force = true)
+            load(key, slot, source, append = source.feed.moreError != null, force = true,
+                preserveRange = source.revalidatePages > 1)
         }
     }
 
@@ -107,13 +125,21 @@ internal class AnimeDiscoveryLoads(
         slots[key]?.takeIf { it.query == query }?.let { return it }
         reset(key)
         val queries = listOf(query.copy(combined = false)) + listOfNotNull(animeDiscoveryPeerQuery(query))
-        return Slot(query, queries.map(::SourceLoad)).also { slots[key] = it }
+        val saved = retained.remove(RetainedKey(key, query))?.takeIf { candidate ->
+            candidate.cacheEpoch == repository.cacheEpoch && candidate.sources.map { it.query } == queries && candidate.sources.all { source ->
+                !source.requested || source.route == routeFor(source.query)
+            }
+        }
+        return (saved ?: Slot(query, queries.map(::SourceLoad), repository.cacheEpoch)).also {
+            slots[key] = it
+            if (saved != null) publish(key, it)
+        }
     }
 
     private fun routeFor(query: AnimeDiscoveryQuery) = runCatching { repository.route(query) }.getOrNull()
 
     private fun load(key: String, slot: Slot, source: SourceLoad, append: Boolean, force: Boolean,
-        allowRecovery: Boolean = true) {
+        allowRecovery: Boolean = true, preserveRange: Boolean = false) {
         val query = source.query
         val routeResult = runCatching { repository.route(query) }
         val route = routeResult.getOrNull()
@@ -121,11 +147,13 @@ internal class AnimeDiscoveryLoads(
         val paging = append && !routeChanged
         val before = if (routeChanged) AnimeDiscoveryFeed(query) else source.feed
         val page = if (paging) before.page.toLong() + 1 else 1L
+        val lastPage = if (!paging && !routeChanged && preserveRange) before.page.coerceAtLeast(1).toLong() else page
         val request = ++source.generation
         source.requested = true
         source.route = route
         source.retryAt = null
         source.recoveryAvailable = false
+        if (!paging) source.revalidatePages = lastPage.toInt()
         source.recovery?.cancel()
         source.recovery = null
         source.job?.cancel()
@@ -146,14 +174,26 @@ internal class AnimeDiscoveryLoads(
                     update { it.copy(items = cached.items, page = cached.page, hasMore = cached.hasMore,
                         fetchedAt = cached.fetchedAt) }
                 }
-                val result = repository.browse(query, page.toInt(), forceRefresh = force, route = routeResult.getOrThrow())
+                var result = repository.browse(query, page.toInt(), forceRefresh = force, route = routeResult.getOrThrow())
                 check(result.page == page.toInt()) { "来源返回了不同的页码。" }
+                val replacement = result.items.toMutableList()
+                var fetchedAt = result.fetchedAt
+                // Revalidate the loaded range as one snapshot; an incomplete refresh keeps the old range.
+                while (!paging && result.hasMore && result.page.toLong() < lastPage) {
+                    if (!ownsRequest()) return@launch
+                    val nextPage = result.page + 1
+                    result = repository.browse(query, nextPage, forceRefresh = force, route = routeResult.getOrThrow())
+                    check(result.page == nextPage) { "来源返回了不同的页码。" }
+                    replacement += result.items
+                    fetchedAt = minOf(fetchedAt, result.fetchedAt)
+                }
                 update { feed ->
-                    val items = if (paging) feed.items + result.items else result.items
+                    val items = if (paging) feed.items + result.items else replacement
                     feed.copy(items = items.distinctBy { it.key }, page = result.page, hasMore = result.hasMore,
                         loading = false, loadingMore = false, moreError = null,
-                        fetchedAt = if (paging) feed.fetchedAt else result.fetchedAt)
+                        fetchedAt = if (paging) feed.fetchedAt else fetchedAt)
                 }
+                if (ownsRequest()) source.revalidatePages = 1
             } catch (cancel: CancellationException) {
                 update { it.copy(loading = false, loadingMore = false) }
                 throw cancel
@@ -185,7 +225,8 @@ internal class AnimeDiscoveryLoads(
             if (slots[key] === slot && currentFeed(key)?.query == slot.query && source.generation == generation &&
                 source.route == routeFor(source.query) && key in visibleKeys) {
                 source.recovery = null
-                load(key, slot, source, append = false, force = true, allowRecovery = false)
+                load(key, slot, source, append = false, force = true, allowRecovery = false,
+                    preserveRange = source.revalidatePages > 1)
             }
         }
     }

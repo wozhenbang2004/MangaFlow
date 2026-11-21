@@ -2,6 +2,8 @@ package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -47,6 +49,8 @@ import coil3.network.httpHeaders
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.ui.mangaCoverCard
+import dev.mangaflow.ui.mangaFontFamily
+import dev.mangaflow.typography.MangaFontScene
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
@@ -164,6 +168,7 @@ internal fun AnimePoster(url: String, modifier: Modifier = Modifier, sourceId: S
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun AnimeSubjectRow(
     subject: AnimeSubject,
@@ -173,16 +178,21 @@ internal fun AnimeSubjectRow(
     supporting: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
     ratings: (@Composable () -> Unit)? = null,
+    onOpenLabel: String = "查看详情",
+    onLongClick: (() -> Unit)? = null,
 ) {
     val interaction = remember(subject.id) { MutableInteractionSource() }
     Row(modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
         .motionPress(interaction, pressedScale = .99f)
-        .clickable(interactionSource = interaction, indication = null, onClick = onOpen)
+        .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
+            onClickLabel = onOpenLabel, onClick = onOpen,
+            onLongClickLabel = if (onLongClick != null) "番剧操作" else null, onLongClick = onLongClick)
         .padding(vertical = 8.dp, horizontal = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
         AnimePoster(subject, Modifier.width(56.dp).height(80.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Text(subject.title, style = MaterialTheme.typography.titleSmall,
+                fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
             ratings?.invoke()
             if (subtitle.isNotBlank()) Text(subtitle, style = MaterialTheme.typography.bodySmall,

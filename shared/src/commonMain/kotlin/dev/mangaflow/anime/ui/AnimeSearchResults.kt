@@ -1,18 +1,23 @@
 package dev.mangaflow.anime.ui
 
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeUnifiedSearchState
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+import dev.mangaflow.ui.DesktopContextMenuArea
+import dev.mangaflow.ui.DesktopMenuAction
+import dev.mangaflow.ui.motion.BottomPullLoadIndicator
+import dev.mangaflow.ui.motion.BottomPullLoadState
 import dev.mangaflow.ui.motion.MotionTextButton
 
 internal fun LazyListScope.animeSearchResults(
@@ -21,6 +26,8 @@ internal fun LazyListScope.animeSearchResults(
     matchingReference: Boolean,
     onOpenSubject: (AnimeSubject) -> Unit,
     onBrowseSources: () -> Unit,
+    onManage: (AnimeSubject) -> Unit,
+    pull: BottomPullLoadState,
 ) {
     val groups = search.groups.filter { it.subject != null }
     val index = search.index
@@ -29,6 +36,7 @@ internal fun LazyListScope.animeSearchResults(
         when {
             index.loading -> AnimeMessage("正在搜索", "正在查作品资料")
             index.error != null -> AnimeMessage("搜索未完成")
+            index.canLoadMore -> AnimeMessage("本页暂无匹配的番剧", "可以继续查找后面的结果。")
             else -> AnimeMessage(if (matchingReference) "未找到对应的作品资料" else "没有找到番剧",
                 if (matchingReference) "已保留所选来源。可以换用原名或别名。" else "试试原名、别名或更短的关键词。")
         }
@@ -44,19 +52,29 @@ internal fun LazyListScope.animeSearchResults(
     }
     items(groups, key = { it.key }) { group ->
         group.subject?.let { subject ->
+            DesktopContextMenuArea(if (matchingReference) emptyList() else
+                listOf(DesktopMenuAction("番剧操作") { onManage(subject) })) {
             AnimeSubjectRow(subject, animeSubjectSummary(subject), onOpen = { onOpenSubject(subject) },
+                onLongClick = if (matchingReference) null else ({ onManage(subject) }),
                 ratings = if (matchingReference) null else ({ AnimeSubjectRatings(subject) }))
+            }
         }
     }
     if (index.canLoadMore) item(key = "search-more") {
-        MotionTextButton(onClick = controller::loadMoreCatalog,
+        if (platformKind == PlatformKind.DESKTOP || matchingReference || groups.isEmpty()) MotionTextButton(onClick = controller::loadMoreCatalog,
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
             colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)) {
-            Text("更多结果")
+            Text(if (groups.isEmpty()) "继续查找" else "更多结果")
+        } else Box(Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.Center) {
+            BottomPullLoadIndicator(pull, Modifier.size(32.dp))
         }
     }
     if (index.loading && index.page > 0) item(key = "search-more-pending") {
-        AnimeQuietLabel("正在读取下一页", Modifier.padding(12.dp))
+        if (platformKind != PlatformKind.DESKTOP && !matchingReference)
+            Box(Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.Center) {
+                BottomPullLoadIndicator(pull, Modifier.size(32.dp))
+            }
+        else AnimeQuietLabel("正在读取下一页", Modifier.padding(12.dp))
     }
     if (!matchingReference && !index.loading && (groups.isEmpty() || index.error != null)) {
         item(key = "search-source-directory") {

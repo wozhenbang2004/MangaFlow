@@ -549,7 +549,8 @@ internal fun AnimePlayerPane(
                 }
                 episodeListState.SaveableStateProvider("episodes") {
                     AnimePlayerEpisodes(detail?.episodes.orEmpty(), episode?.id, entry?.completedEpisodeIds.orEmpty(),
-                        onEpisode, episodeAvailability = { controller.episodeAvailability(it, state) },
+                        onEpisode, episodeProgress = state.episodeProgress,
+                        episodeAvailability = { controller.episodeAvailability(it, state) },
                         episodeSources = { id -> animeEpisodeSources(id,
                             controller.confirmedPlaybackLines(id, state), controller, state) },
                         onSources = onSources,
@@ -802,7 +803,8 @@ internal fun animeBytes(bytes: Long): String = when {
 @Composable
 private fun AnimePlayerEpisodes(
     episodes: List<AnimeEpisode>, currentId: String?, completed: Set<String>,
-    onEpisode: (AnimeEpisode) -> Unit, episodeAvailability: (String) -> AnimeEpisodeAvailability,
+    onEpisode: (AnimeEpisode) -> Unit, episodeProgress: Map<String, AnimeWatchProgress>,
+    episodeAvailability: (String) -> AnimeEpisodeAvailability,
     episodeSources: (String) -> AnimeEpisodeSources, onSources: (AnimeEpisode) -> Unit,
     active: Boolean, desktopRail: Boolean, modifier: Modifier = Modifier,
 ) {
@@ -910,6 +912,7 @@ private fun AnimePlayerEpisodes(
                 }
                 items(shown, key = { it.id }, contentType = { "episode" }) { episode ->
                     WatchEpisodeCell(episode, current = episode.id == currentId, watched = episode.id in completed,
+                        progress = episodeProgress[episode.id]?.takeIf { it.subjectId == episode.subjectId },
                         availability = episodeAvailability(episode.id),
                         sources = episodeSources(episode.id), onSources = { onSources(episode) },
                         enabled = active, inRail = desktopRail, onClick = { onEpisode(episode) })
@@ -923,29 +926,27 @@ private fun AnimePlayerEpisodes(
 @Composable
 private fun WatchEpisodeCell(
     episode: AnimeEpisode, current: Boolean, watched: Boolean, availability: AnimeEpisodeAvailability,
+    progress: AnimeWatchProgress?,
     sources: AnimeEpisodeSources, onSources: () -> Unit,
     enabled: Boolean, inRail: Boolean, onClick: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     val color = when {
-        inRail && current -> colors.onPrimaryContainer
+        current -> colors.primary
         watched && !current -> colors.onSurfaceVariant
         else -> colors.onSurface
     }
-    val stateLabel = if (current) "当前集" else if (watched) "已看完" else "未看完"
+    val stateLabel = listOfNotNull("当前集".takeIf { current }, animeWatchProgressDescription(progress, watched)).joinToString("，")
     val lineLabel = when (availability) {
         AnimeEpisodeAvailability.MATCHED -> null
-        AnimeEpisodeAvailability.CHECKING -> "找源中"
-        AnimeEpisodeAvailability.UNMATCHED -> "待匹配"
+        AnimeEpisodeAvailability.CHECKING, AnimeEpisodeAvailability.UNMATCHED -> null
         AnimeEpisodeAvailability.RECENTLY_FAILED -> "可重试"
         AnimeEpisodeAvailability.UPCOMING -> "待播"
     }
     val surface = when {
-        inRail && current -> colors.primaryContainer
-        inRail -> Color.Transparent
-        current -> colors.onSurface.copy(alpha = .11f)
-        else -> colors.surfaceContainerLow
+        current -> colors.primary.copy(alpha = .055f)
+        else -> Color.Transparent
     }
     Box(Modifier.fillMaxWidth().heightIn(min = if (inRail) 44.dp else 48.dp)
         .clip(RoundedCornerShape(if (inRail) 8.dp else 11.dp)).background(surface)
@@ -974,26 +975,28 @@ private fun WatchEpisodeCell(
                         ink = if (current) color else colors.onSurfaceVariant, onOpen = onSources)
                 }
                 when {
+                    progress != null || watched -> AnimeWatchProgressMark(progress, watched, size = 14.dp)
                     current -> Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp), tint = color)
                     availability == AnimeEpisodeAvailability.RECENTLY_FAILED ->
                         Icon(Icons.Outlined.CloudOff, null, Modifier.size(15.dp), tint = colors.onSurfaceVariant)
                     availability == AnimeEpisodeAvailability.UPCOMING ->
                         Text("待播", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                    watched -> Icon(Icons.Outlined.Check, null, Modifier.size(15.dp), tint = color)
                     else -> Unit
                 }
             }
-        } else Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                if (current || watched) Icon(if (current) Icons.Outlined.PlayArrow else Icons.Outlined.Check,
-                    null, Modifier.size(12.dp), tint = color)
-                Text(animeEpisodeLabel(episode), style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
-                    maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, color = color)
-            }
+        } else Column(horizontalAlignment = Alignment.Start) {
+            Text(animeEpisodeLabel(episode), style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
+                maxLines = if (episode.subjectId.startsWith("native:")) 2 else 1,
+                overflow = TextOverflow.Ellipsis, color = color)
             if (lineLabel != null && availability != AnimeEpisodeAvailability.CHECKING) Text(lineLabel, style = MaterialTheme.typography.labelSmall,
-                maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, color = color.copy(alpha = .8f))
-            AnimeEpisodeSourceBadges(sources, Modifier.fillMaxWidth(), enabled = enabled,
-                ink = color.copy(alpha = .8f), onOpen = onSources)
+                maxLines = 1, overflow = TextOverflow.Ellipsis, color = color.copy(alpha = .8f))
+            Row(Modifier.fillMaxWidth().heightIn(min = 28.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) {
+                    AnimeEpisodeSourceBadges(sources, Modifier.fillMaxWidth(), enabled = enabled,
+                        ink = color.copy(alpha = .8f), onOpen = onSources)
+                }
+                AnimeWatchProgressMark(progress, watched, size = 11.dp)
+            }
         }
     }
 }

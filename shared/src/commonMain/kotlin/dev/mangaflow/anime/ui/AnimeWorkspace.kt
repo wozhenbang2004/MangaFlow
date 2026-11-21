@@ -1,6 +1,5 @@
 package dev.mangaflow.anime.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -11,6 +10,9 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -27,6 +29,8 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.player.AnimePlayerPhase
 import dev.mangaflow.platform.LocalWindowFullscreen
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.motion.*
@@ -162,6 +166,12 @@ private fun AnimeWorkspaceContent(
     var sourceEpisode by remember { mutableStateOf<AnimeEpisode?>(null) }
     var trackingVisible by remember { mutableStateOf(false) }
     var reviewsVisible by remember { mutableStateOf(false) }
+    var recentWatchingOpen by remember { mutableStateOf(false) }
+    var pendingRecentEntry by remember { mutableStateOf<AnimeLibraryEntry?>(null) }
+    var actionSubject by remember { mutableStateOf<AnimeSubject?>(null) }
+    var pendingWorkAction by remember { mutableStateOf<AnimeWorkAction?>(null) }
+    val ratingUi = LocalAnimeRatings.current
+    val snackbar = remember { SnackbarHostState() }
     var openingSubject by remember { mutableStateOf<AnimeSubject?>(null) }
     var openingReference by remember { mutableStateOf<AnimeSourceTitle?>(null) }
     val windowFullscreen = LocalWindowFullscreen.current
@@ -181,7 +191,7 @@ private fun AnimeWorkspaceContent(
         else -> AnimeRoute("home", 0)
     }
     val overlayVisible = downloadsVisible || sourcesVisible || sourceManagerVisible || trackingVisible || reviewsVisible ||
-        storagePresent || storageModelsVisible || LocalAnimeRatings.current.obscured
+        storagePresent || storageModelsVisible || ratingUi.obscured || recentWatchingOpen || actionSubject != null
     val displayedDestination = when {
         sourceManagerVisible -> AnimeWorkspaceDestination.SOURCES
         downloadsVisible -> AnimeWorkspaceDestination.DOWNLOADS
@@ -196,7 +206,20 @@ private fun AnimeWorkspaceContent(
     LaunchedEffect(active, route.key, page, directoryOpen) {
         toolsVisible = false
         pendingTool = null
+        recentWatchingOpen = false
+        pendingRecentEntry = null
+        actionSubject = null
+        pendingWorkAction = null
         if (!active) { storageVisible = false; storageModelsVisible = false; storageDestination = null }
+    }
+    LaunchedEffect(active, state.notice) {
+        val message = state.notice
+        if (!active || message == null) {
+            snackbar.currentSnackbarData?.dismiss()
+            return@LaunchedEffect
+        }
+        snackbar.showSnackbar(message, withDismissAction = true, duration = SnackbarDuration.Short)
+        if (controller.state.value.notice == message) controller.dismissNotice()
     }
     val currentPlaybackVisibility by rememberUpdatedState(onPlaybackVisibility)
     LaunchedEffect(playing) { currentPlaybackVisibility(playing) }
@@ -326,6 +349,33 @@ private fun AnimeWorkspaceContent(
         openingSubject = entry.subject
         controller.resume(entry.subject.id)
     }
+    fun resumeEpisode(entry: AnimeLibraryEntry, progress: AnimeWatchProgress) {
+        pendingAssociation = null
+        browseCandidate = null
+        beginDetailNavigation()
+        openingSubject = entry.subject
+        controller.resumeEpisode(entry.subject.id, progress.episodeId)
+    }
+    fun showWorkActions(subject: AnimeSubject) {
+        if (!active || route.depth != 0 || actionSubject != null) return
+        focusSearchInput = false
+        pendingWorkAction = null
+        actionSubject = subject
+    }
+    fun completeWorkActions() {
+        val subject = actionSubject
+        val action = pendingWorkAction
+        actionSubject = null
+        pendingWorkAction = null
+        if (!active || route.depth != 0 || subject == null || action == null) return
+        when (action) {
+            AnimeWorkAction.OPEN -> open(subject)
+            AnimeWorkAction.FOLLOW -> controller.setFollowed(subject, true)
+            AnimeWorkAction.UNFOLLOW -> controller.setFollowed(subject, false)
+            AnimeWorkAction.RATINGS -> ratingUi.open(AnimeRatingRequest(subject.id, subject.title, subject,
+                animeSubjectRatingSeeds(subject)))
+        }
+    }
     fun playDownload(selection: AnimeDownloadSelection) {
         downloadsVisible = false
         beginDetailNavigation()
@@ -424,6 +474,8 @@ private fun AnimeWorkspaceContent(
             sourcesVisible -> dismissSources()
             trackingVisible -> trackingVisible = false
             reviewsVisible -> reviewsVisible = false
+            recentWatchingOpen -> { recentWatchingOpen = false; pendingRecentEntry = null }
+            actionSubject != null -> { actionSubject = null; pendingWorkAction = null }
             searchExpanded -> { searchExpanded = false; browseCandidate = null }
             playing && playerFullscreen -> setPlayerFullscreen(false)
             playing -> closePlayback()
@@ -473,6 +525,10 @@ private fun AnimeWorkspaceContent(
         downloadsVisible = false
         trackingVisible = false
         reviewsVisible = false
+        recentWatchingOpen = false
+        pendingRecentEntry = null
+        actionSubject = null
+        pendingWorkAction = null
         when (requestedDestination) {
             AnimeWorkspaceDestination.DOWNLOADS -> downloadsVisible = true
             AnimeWorkspaceDestination.TRACKING -> trackingVisible = true
@@ -570,6 +626,14 @@ private fun AnimeWorkspaceContent(
                                             1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f) }
                                         .motionInputGate(active && route.depth == 0 && !searchPresent && !overlayVisible),
                                         verticalAlignment = Alignment.CenterVertically) {
+                                        if (state.library.any { it.resume != null } || state.libraryReadUnavailable)
+                                            MotionIconButton(onClick = {
+                                                pendingRecentEntry = null
+                                                recentWatchingOpen = true
+                                            }, modifier = Modifier.size(44.dp), enabled = rootActive, tooltip = "最近观看") {
+                                                HistoryActionIcon(active = recentWatchingOpen, description = "最近观看",
+                                                    modifier = Modifier.size(21.dp), tint = MaterialTheme.colorScheme.onSurface)
+                                            }
                                         if (tab == 0 || directoryOpen) DiscoveryLayoutControl(preferred, actualColumns, backdrop,
                                             active && route.depth == 0 && !searchPresent && !toolsPresent && !overlayVisible,
                                             onChange = controller::setDiscoveryColumns,
@@ -594,6 +658,8 @@ private fun AnimeWorkspaceContent(
                                                         })
                                                 CompactMenuAction(Icons.Outlined.Tune, "管理片源",
                                                     onClick = { queueTool(AnimeWorkspaceTool.SOURCES) })
+                                                if (state.canUndo) CompactMenuAction(Icons.Outlined.Undo, "撤销上次修改",
+                                                    onClick = { toolsVisible = false; controller.undo() })
                                             }
                                         }
                                         Spacer(Modifier.size(44.dp))
@@ -607,13 +673,14 @@ private fun AnimeWorkspaceContent(
                                 when (shownPane) {
                                     AnimeWorkspacePane.DISCOVERY -> AnimeDiscovery(state, controller, backdrop, discoveryScrolls,
                                         onOpenItem = ::openDiscoveryItem,
-                                        onResume = ::resume, active = paneActive)
+                                        onManage = ::showWorkActions, active = paneActive)
                                     AnimeWorkspacePane.DIRECTORY -> AnimeSourceBrowsePane(controller, backdrop, discoveryScrolls,
                                         columns = state.discoveryColumns, active = paneActive,
                                         onChooseTitle = ::chooseReference, contentBottomPadding = 24.dp)
                                     AnimeWorkspacePane.LIBRARY -> AnimeLibrary(state,
                                         if (libraryViewState.filter == 2) historyScroll else libraryScroll, controller, backdrop,
                                         onOpen = ::open, onResume = ::resume,
+                                        onResumeEpisode = ::resumeEpisode,
                                         onDiscover = { tab = 0; controller.selectDiscoveryTab(AnimeDiscoveryTab.HOME) },
                                         onReview = { reviewsVisible = true }, viewState = libraryViewState,
                                         active = paneActive, contentBottomPadding = 24.dp)
@@ -663,7 +730,27 @@ private fun AnimeWorkspaceContent(
                     if (searchExpanded && search.query.isNotBlank() && search.query == query.trim() &&
                         (!search.indexOnly || search.catalogProvider != catalogProvider)) submitSearch(search.query)
                 }
-                LazyColumn(Modifier.fillMaxWidth().heightIn(max = height).motionInputGate(inputActive),
+                val desktop = platformKind == PlatformKind.DESKTOP
+                val canPage = inputActive && !matchingReference && query.trim() == search.query && search.index.canLoadMore &&
+                    search.index.items.isNotEmpty() && search.catalogProvider == catalogProvider && search.indexOnly
+                val searchPull = rememberBottomPullLoadState(
+                    key = listOf(search.query, search.catalogProvider, search.indexOnly),
+                    enabled = !desktop && canPage, loading = search.index.loading && search.index.page > 0,
+                    canScrollForward = { searchScroll.canScrollForward }, onLoadMore = controller::loadMoreCatalog,
+                    actionLabel = "加载更多番剧")
+                if (desktop) AnimeBrowsePagination(
+                    key = listOf(search.query, search.catalogProvider, search.indexOnly), refreshKey = Unit,
+                    itemCount = search.index.items.size, enabled = canPage,
+                    nearEnd = {
+                        val info = searchScroll.layoutInfo
+                        val trailingKeys = search.groups.filter { it.subject != null }.takeLast(4).map { it.key }.toSet()
+                        info.visibleItemsInfo.any { it.key in trailingKeys } &&
+                            (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 5
+                    }, onMore = controller::loadMoreCatalog)
+                Box(Modifier.fillMaxWidth().heightIn(max = height)) {
+                LazyColumn(Modifier.align(Alignment.TopCenter).widthIn(max = MangaLayout.ListWidth)
+                    .fillMaxWidth().heightIn(max = height).motionInputGate(inputActive)
+                    .then(if (desktop) Modifier else Modifier.bottomPullLoad(searchPull)),
                     state = searchScroll, userScrollEnabled = inputActive,
                     contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
                     browseCandidate?.let { candidate -> item(key = "source-association") {
@@ -699,6 +786,7 @@ private fun AnimeWorkspaceContent(
                         }
                         else -> animeSearchResults(search, controller, matchingReference,
                             onOpenSubject = { openSearchResult(it) },
+                            onManage = ::showWorkActions, pull = searchPull,
                             onBrowseSources = {
                                 browseCandidate = null
                                 searchExpanded = false
@@ -706,10 +794,30 @@ private fun AnimeWorkspaceContent(
                             })
                     }
                 }
+                if (desktop) Box(Modifier.matchParentSize()) {
+                    DesktopVerticalScrollbar(searchScroll,
+                        Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
+                }
+                }
             }
+            if (active && !playing) SnackbarHost(snackbar,
+                Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp))
         }
-        if (!playing && (state.notice != null || state.canUndo)) AnimeNotice(state.notice, state.canUndo,
-            onUndo = controller::undo, onDismiss = controller::dismissNotice)
+    }
+
+    if (recentWatchingOpen) AnimeRecentWatchingSheet(state.library, state.libraryReadUnavailable, backdrop,
+        continuationLabel = { entry -> animeContinuationLabel(entry, controller.continuationEpisode(entry.subject.id)) },
+        onChoose = { pendingRecentEntry = it }, onDismiss = {
+            val entry = pendingRecentEntry
+            pendingRecentEntry = null
+            recentWatchingOpen = false
+            if (active && route.depth == 0 && entry != null) {
+                controller.state.value.library.firstOrNull { it.subject.id == entry.subject.id }?.let(::resume)
+            }
+        })
+    actionSubject?.let { subject ->
+        AnimeWorkActionsSheet(subject, state.library.firstOrNull { it.subject.id == subject.id }?.followed == true,
+            backdrop, onDismiss = ::completeWorkActions, onChoose = { pendingWorkAction = it })
     }
 
     if (storagePresent) {
@@ -799,18 +907,4 @@ private fun AnimeWorkspaceHeader(root: Boolean, title: String, backdrop: HazeSta
 
 internal fun animeSubjectSummary(subject: AnimeSubject): String =
     listOfNotNull(subject.year?.toString(), subject.episodeCount?.takeIf { it > 0 }?.let { it.toString() + " 集" })
-        .joinToString(" · ").ifBlank { subject.originalTitle.ifBlank { "Bangumi 条目" } }
-
-@Composable
-private fun AnimeNotice(notice: String?, canUndo: Boolean, onUndo: () -> Unit, onDismiss: () -> Unit) {
-    Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerLow)
-        .navigationBarsPadding().padding(start = 16.dp, end = 4.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(notice ?: "上次改动可以撤销", Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
-            style = MaterialTheme.typography.bodySmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
-        if (canUndo && notice == null) MotionTextButton(onClick = onUndo, modifier = Modifier.heightIn(min = 44.dp)) { Text("撤销") }
-        if (notice != null) MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭提示") {
-            Icon(Icons.Outlined.Close, "关闭提示", Modifier.size(18.dp))
-        }
-    }
-}
+        .joinToString(" · ").ifBlank { subject.originalTitle }

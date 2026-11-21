@@ -1,6 +1,7 @@
 package dev.mangaflow.anime.ui
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.LazyGridState
@@ -21,6 +22,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.sources.ANILIST_PROVIDER
 import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
@@ -28,17 +30,27 @@ import dev.mangaflow.anime.sources.DOUBAN_PROVIDER
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.MangaLayout
+import dev.mangaflow.ui.DesktopContextMenuArea
+import dev.mangaflow.ui.DesktopMenuAction
 import dev.mangaflow.ui.detailMetricScore
+import dev.mangaflow.ui.mangaFontFamily
 import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.typography.MangaFontScene
+import kotlinx.coroutines.flow.collect
 import kotlin.math.roundToInt
 
 /** Root-retained positions belong to the visible feed, never to an unrelated search request. */
 internal class AnimeDiscoveryScrolls {
-    val grids = mutableMapOf<String, LazyGridState>()
-    val queries = mutableMapOf<String, AnimeDiscoveryQuery>()
+    private val grids = linkedMapOf<Any, LazyGridState>()
     var featuredKey: String? = null
     var placedHomeFeature = false
-    fun grid(key: String): LazyGridState = grids.getOrPut(key) { LazyGridState() }
+    fun grid(key: String, query: AnimeDiscoveryQuery? = null): LazyGridState {
+        val identity = if (query == null) key else key to query
+        val state = grids.remove(identity) ?: LazyGridState()
+        grids[identity] = state
+        while (grids.size > 48) grids.remove(grids.keys.first())
+        return state
+    }
 }
 
 internal fun animePreferredColumns(width: Dp, preferred: Int?): Int = when {
@@ -52,12 +64,54 @@ internal fun animePreferredColumns(width: Dp, preferred: Int?): Int = when {
 internal fun animeDiscoveryColumns(width: Dp, preferred: Int?): Int {
     val columns = animePreferredColumns(width, preferred)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val gap = animeDiscoveryGap(columns)
+    val side = MangaLayout.sidePadding(width)
     return when {
         columns == 1 -> 1
-        platformKind == PlatformKind.DESKTOP && columns == 0 ->
-            MangaLayout.automaticDesktopColumns(width, fontScale, 10.dp, 12.dp)
+        desktop && columns == 0 -> MangaLayout.automaticDesktopColumns(width, fontScale, gap, side)
         else -> MangaLayout.columns(width, columns,
-            (if (columns >= 4) 68.dp else 80.dp) * fontScale, 8.dp, 12.dp)
+            (if (desktop) 156.dp else if (columns >= 4) 68.dp else 88.dp) * fontScale, gap, side)
+    }
+}
+
+internal fun animeDiscoveryGap(columns: Int): Dp = when {
+    platformKind == PlatformKind.DESKTOP -> 12.dp
+    columns >= 4 -> 8.dp
+    else -> 10.dp
+}
+
+@Composable
+internal fun animeDiscoveryInset(width: Dp, preference: Int?, columns: Int): Dp {
+    val side = MangaLayout.sidePadding(width)
+    val preferred = animePreferredColumns(width, preference)
+    val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    val contentWidth = when {
+        columns == 1 -> MangaLayout.ListWidth
+        platformKind == PlatformKind.DESKTOP && preferred > 1 ->
+            240.dp * scale * columns + animeDiscoveryGap(columns) * (columns - 1) + side * 2
+        else -> width
+    }
+    return side + ((width - contentWidth) / 2f).coerceAtLeast(0.dp)
+}
+
+/** Adapts the ordinary manga desktop pager's one-request-per-result-range guard. */
+@Composable
+internal fun AnimeBrowsePagination(key: Any, refreshKey: Any?, itemCount: Int, enabled: Boolean,
+    nearEnd: () -> Boolean, onMore: () -> Unit) {
+    val latestCount by rememberUpdatedState(itemCount)
+    val latestEnabled by rememberUpdatedState(enabled)
+    val latestNearEnd by rememberUpdatedState(nearEnd)
+    val latestMore by rememberUpdatedState(onMore)
+    LaunchedEffect(key, refreshKey) {
+        var requestedCount = -1
+        snapshotFlow { (latestEnabled && latestCount > 0 && latestNearEnd()) to latestCount }
+            .collect { (eligible, count) ->
+                if (eligible && count > requestedCount) {
+                    requestedCount = count
+                    latestMore()
+                }
+            }
     }
 }
 
@@ -123,6 +177,7 @@ internal fun animeDiscoveryMetric(item: AnimeDiscoveryItem, query: AnimeDiscover
 @Composable
 internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQuery,
     modifier: Modifier = Modifier, list: Boolean = false, onScores: ((AnimeDiscoveryItem) -> Unit)? = null,
+    onManage: (() -> Unit)? = null,
     onOpen: () -> Unit) {
     val provider = item.discoveryProvider ?: query.provider
     val scores = observedAnimeRatingSnapshot(item.subject, animeDiscoverySourceScores(item, provider)).scores
@@ -144,7 +199,7 @@ internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQ
         }),
         captionBadge = sourceBadge,
         description = listOfNotNull(item.title, caption.takeIf(String::isNotBlank)).joinToString("，"),
-        modifier = modifier, list = list, onOpen = onOpen)
+        modifier = modifier, list = list, onManage = onManage, onOpen = onOpen)
 }
 
 internal fun animeDiscoverySourceScores(item: AnimeDiscoveryItem, provider: AnimeDiscoveryProvider): List<AnimeSourceScore> =
@@ -194,21 +249,26 @@ internal fun AnimeSourceGroupDiscoveryCard(group: AnimeSearchGroup, sources: Lis
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AnimeCompactCoverCard(key: String, title: String, cover: String, caption: String, sourceId: String,
     ratings: (@Composable () -> Unit)?, description: String, modifier: Modifier,
-    list: Boolean, captionBadge: (@Composable () -> Unit)? = null, onOpen: () -> Unit) {
+    list: Boolean, captionBadge: (@Composable () -> Unit)? = null, onManage: (() -> Unit)? = null, onOpen: () -> Unit) {
     val interaction = remember(key) { MutableInteractionSource() }
     val click = modifier.motionPress(interaction, pressedScale = .98f)
-        .clickable(interactionSource = interaction, indication = null, role = Role.Button,
-            onClickLabel = "查看$title", onClick = onOpen)
+        .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
+            onClickLabel = "查看$title", onLongClickLabel = "番剧操作".takeIf { onManage != null },
+            onLongClick = onManage, onClick = onOpen)
         .semantics(mergeDescendants = true) { contentDescription = description }
+    DesktopContextMenuArea(if (onManage != null) listOf(
+        DesktopMenuAction("查看详情", onClick = onOpen), DesktopMenuAction("番剧操作", onClick = onManage)) else emptyList()) {
     if (list) {
         Row(click.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             AnimePoster(cover, Modifier.width(52.dp).height(74.dp).clearAndSetSemantics { }, sourceId = sourceId)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text(title, Modifier.clearAndSetSemantics { }, style = MaterialTheme.typography.titleSmall, maxLines = 2,
+                Text(title, Modifier.clearAndSetSemantics { }, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                    style = MaterialTheme.typography.titleSmall, maxLines = 2,
                     overflow = TextOverflow.Ellipsis)
                 ratings?.invoke()
                 AnimeCompactCardCaption(caption, captionBadge)
@@ -217,13 +277,18 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
                 tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     } else {
-        Column(click, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AnimePoster(cover, Modifier.fillMaxWidth().aspectRatio(.7f).clearAndSetSemantics { }, sourceId = sourceId)
-            Text(title, Modifier.clearAndSetSemantics { }, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Medium,
-                maxLines = 2, minLines = 2,
-                overflow = TextOverflow.Ellipsis)
-            ratings?.invoke()
-            AnimeCompactCardCaption(caption, captionBadge)
+        Column(click) {
+            AnimePoster(cover, Modifier.fillMaxWidth().aspectRatio(2f / 3f).clearAndSetSemantics { }, sourceId = sourceId)
+            Text(title, Modifier.padding(top = 7.dp, start = 2.dp, end = 2.dp).clearAndSetSemantics { },
+                fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 20.sp),
+                fontWeight = FontWeight.Medium, maxLines = 2, minLines = 2, overflow = TextOverflow.Ellipsis)
+            if (ratings != null) Box(Modifier.fillMaxWidth().padding(top = 4.dp, start = 2.dp, end = 2.dp)) { ratings() }
+            if (caption.isNotBlank() || captionBadge != null)
+                Box(Modifier.fillMaxWidth().padding(top = 3.dp, start = 2.dp, end = 2.dp)) {
+                    AnimeCompactCardCaption(caption, captionBadge)
+                }
+        }
         }
     }
 }

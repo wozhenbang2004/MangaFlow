@@ -224,6 +224,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private var prepared: PreparedPlayback? = null
     private var rollback: PlaybackReceipt? = null
     private var resumeRequest: Pair<String, String>? = null
+    private var resumeAfterCompleted: Boolean = false
     private var restoreEpoch = 0L
     private val recoveryOptions = mutableSetOf<String>()
     private val playbackAddressRetries = mutableSetOf<PlaybackHistoryKey>()
@@ -405,6 +406,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         libraryReadUnavailable = stored.readUnavailable,
                         library = stored.entries.values.sortedWith(compareByDescending<AnimeLibraryEntry> { entry -> entry.pinned }
                             .thenByDescending { entry -> entry.updatedAt }),
+                        episodeProgress = projectEpisodeProgress(stored, it.detail),
                         settings = stored.settings,
                         searchHistory = stored.searchHistory,
                         discoveryColumns = stored.discoveryColumns,
@@ -684,10 +686,63 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     fun resume(subjectId: String) {
         val entry = library.state.value.entries[subjectId] ?: return
-        val resume = entry.resume?.takeUnless { it.completed }
-        if (resume?.localDownloadId != null) openDownload(resume.localDownloadId, entry)
-        else openDetail(entry.subject, resume?.episodeId)
+        val progress = entry.resume
+        if (progress == null) { openDetail(entry.subject, null); return }
+        val target = continuationEpisode(subjectId)
+        val completed = progress.completed
+        if (target != null && (target.id != progress.episodeId || completed)) {
+            resumeEpisode(subjectId, target.id)
+        } else if (!completed && progress.localDownloadId != null) {
+            openDownload(progress.localDownloadId, entry)
+        } else {
+            openDetail(entry.subject, progress.episodeId,
+                visitedDetail = mutableState.value.detail?.takeIf { it.subject.id == subjectId },
+                continueAfterCompleted = completed)
+        }
     }
+
+    /** The current catalogue owns ordering; no guessed episode numbers or cross-group jumps. */
+    internal fun continuationEpisode(subjectId: String): AnimeEpisode? {
+        val entry = library.state.value.entries[subjectId]
+        val detail = mutableState.value.detail?.takeIf { it.subject.id == subjectId } ?: entry?.catalogDetail
+            ?: return null
+        val progress = entry?.resume
+        if (progress == null) return detail.episodes.firstOrNull { it.kind == AnimeEpisodeKind.MAIN &&
+            it.id !in entry?.completedEpisodeIds.orEmpty() } ?: detail.episodes.firstOrNull()
+        val previous = detail.episodes.firstOrNull { it.id == progress.episodeId && it.subjectId == subjectId }
+            ?: return null
+        if (!progress.completed) return previous
+        val group = detail.episodes.filter { it.subjectId == subjectId && it.kind == previous.kind }
+        return group.getOrNull(group.indexOfFirst { it.id == previous.id } + 1) ?: previous
+    }
+
+    /** A history-row action resumes that exact episode, without the default next-episode advance. */
+    internal fun resumeEpisode(subjectId: String, episodeId: String) {
+        val stored = library.state.value
+        val entry = stored.entries[subjectId] ?: return
+        val current = mutableState.value.detail?.takeIf { it.subject.id == subjectId }
+        val known = (current ?: entry.catalogDetail)?.episodes.orEmpty()
+            .any { it.id == episodeId && it.subjectId == subjectId }
+        val progress = projectEpisodeProgress(stored, current)[episodeId]?.takeIf { it.subjectId == subjectId }
+        if (!known && progress == null) { notice("这集的观看记录已变化，请重新打开作品。"); return }
+        if (progress?.localDownloadId != null) {
+            openDownload(progress.localDownloadId, entry.copy(resume = progress))
+        } else openDetail(entry.subject, episodeId, visitedDetail = current)
+    }
+
+    private fun projectEpisodeProgress(stored: AnimeLibraryState, detail: AnimeDetail?): Map<String, AnimeWatchProgress> =
+        stored.progress.mapNotNull { (id, row) ->
+            val owner = row.subjectId.takeIf { it.isNotBlank() } ?: stored.entries.values.filter { entry ->
+                entry.resume?.episodeId == id || id in entry.completedEpisodeIds ||
+                    entry.catalogDetail?.episodes?.any { it.id == id && it.subjectId == entry.subject.id } == true ||
+                    detail?.takeIf { it.subject.id == entry.subject.id }?.episodes?.any {
+                        it.id == id && it.subjectId == entry.subject.id
+                    } == true
+            }.singleOrNull()?.subject?.id
+            if (owner == null || owner !in stored.entries ||
+                row.updatedAt <= (stored.clearedHistoryAt[owner] ?: -1L)) null
+            else id to if (row.subjectId == owner) row else row.copy(subjectId = owner)
+        }.toMap()
 
     fun sourceSubject(title: AnimeSourceTitle): AnimeSubject = AnimeSubject(
         id = "native:${title.sourceId}:${dev.mangaflow.anime.sources.animeHash(title.id + "\n" + title.url)}",
@@ -734,7 +789,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     private fun openDetail(subject: AnimeSubject, resumeEpisodeId: String?, nativeReference: AnimeSourceTitle? = null,
         visitedDetail: AnimeDetail? = null, visitedRelated: List<AnimeSubject> = emptyList(),
-        sourceCandidates: List<AnimeSourceTitle> = emptyList(), observedScores: List<AnimeSourceScore> = emptyList()) {
+        sourceCandidates: List<AnimeSourceTitle> = emptyList(), observedScores: List<AnimeSourceScore> = emptyList(),
+        continueAfterCompleted: Boolean = false) {
         // A related-title back action can reuse the exact catalogue the user saw. Media
         // bindings and source options still resolve against the current registry and library.
         val initialDetail = visitedDetail ?: library.state.value.entries[subject.id]?.catalogDetail
@@ -760,6 +816,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         ++searchGeneration
         ++previewGeneration
         resumeRequest = resumeEpisodeId?.let { subject.id to it }
+        resumeAfterCompleted = continueAfterCompleted
         val candidates = currentVideoCandidates(sourceCandidates)
         val ratingSnapshot = ratings.currentSnapshot(subject)
         val seedScores = observedScores + mutableState.value.discoveryFeeds.values.asSequence()
@@ -771,6 +828,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }).distinctBy { it.provider }
         mutableState.update { it.copy(
             detail = initialDetail, detailLoading = true, detailError = null,
+            episodeProgress = projectEpisodeProgress(library.state.value, initialDetail),
             detailScores = scores, detailScoreChecks = ratingSnapshot?.checks.orEmpty().filterValues { !it.loading },
             groupSourceCandidates = candidates, associationChoices = emptyMap(),
             nativeMetadataSearch = null,
@@ -1658,6 +1716,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             }.sortedWith(compareByDescending<AnimeEpisodeOption> { it.sourceId == preferred }.thenBy { it.sourceName })
         }
         mutableState.update { it.copy(episodeOptions = options, preferredSourceId = preferred,
+            episodeProgress = projectEpisodeProgress(library.state.value, detail),
             sourceDanmakuAvailable = active?.let(::hasSourceDanmaku) == true,
             sourceBindings = bindings,
             sourceCatalogErrors = it.sourceCatalogErrors.filterKeys { id -> bindings.any { binding -> binding.catalog.sourceId == id } },
@@ -1667,11 +1726,19 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         scheduleCatalogBootstrap()
         invalidatePreparation()
         resumeRequest?.takeIf { it.first == detail.subject.id }?.let { request ->
-            // Reuse the normal play path once the exact saved episode is present. It
-            // handles the case where matching sources have not delivered their catalogues.
-            if (episodeAvailability(request.second) == AnimeEpisodeAvailability.MATCHED) {
+            val saved = detail.episodes.firstOrNull { it.id == request.second && it.subjectId == request.first }
+                ?: return@let
+            val target = if (resumeAfterCompleted) {
+                val group = detail.episodes.filter { it.subjectId == request.first && it.kind == saved.kind }
+                group.getOrNull(group.indexOfFirst { it.id == saved.id } + 1)
+                    ?: saved.takeUnless { mutableState.value.detailLoading }
+            } else saved
+            // Consume once before starting the existing automatic play path. A confirmed
+            // catalogue identity is required; a pre-matched media line is not.
+            if (target != null && episodeAvailability(target.id) != AnimeEpisodeAvailability.UPCOMING) {
                 resumeRequest = null
-                play(request.second)
+                resumeAfterCompleted = false
+                play(target.id)
             }
         }
     }
@@ -3227,7 +3294,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     playWhenReady = refreshSnapshot?.playWhenReady
                         ?: liveSnapshot?.takeIf { it.phase == AnimePlayerPhase.READY }?.playWhenReady ?: true,
                     resolutionId = refreshResolutionId.takeIf { startupRefresh != null &&
-                        samePlaybackLine(resolvedOption, startupRefresh.option) }, useSourceStart = startupRefresh == null,
+                        samePlaybackLine(resolvedOption, startupRefresh.option) },
+                    useSourceStart = startupRefresh == null && previous?.completed != true,
                     automaticIntent = automaticIntent || manualFailed,
                     bypassMediaCache = startupRefresh != null && samePlaybackLine(resolvedOption, startupRefresh.option),
                     preferredHeight = preferredHeight)
@@ -3603,7 +3671,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     private fun progress(owner: ActivePlayback, snapshot: AnimePlayerState) = AnimeWatchProgress(
         owner.episode.id, owner.asset.id, owner.asset.sourceId, snapshot.positionMs.coerceAtLeast(0L),
-        snapshot.durationMs.coerceAtLeast(0L), wallTimeMillis(), snapshot.ended, owner.detail.subject.id, owner.localMedia?.downloadId)
+        snapshot.durationMs.coerceAtLeast(0L), wallTimeMillis(), snapshot.ended, owner.detail.subject.id, owner.localMedia?.downloadId,
+        episodeTitle = owner.episode.title, episodeNumber = owner.episode.number.takeIf { it.isFinite() },
+        episodeKind = owner.episode.kind)
 
     private fun playbackBusy(snapshot: AnimePlayerState? = playerInstance?.state?.value): Boolean =
         mutableState.value.resolving || snapshot?.isBuffering == true || snapshot?.phase == AnimePlayerPhase.OPENING ||
@@ -3843,8 +3913,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             try {
                 val startup = preferredSourceAsset(ready.asset, option.episode, target.preferredHeight)
                 ready.cacheAsset = startup
-                val resume = library.progressFor(target.subjectId, target.episodeId)?.takeUnless { it.completed }?.positionMs
-                val position = resume?.takeIf { it > 0L } ?: startup.startPositionMs?.coerceAtLeast(0L) ?: 0L
+                val previous = library.progressFor(target.subjectId, target.episodeId)
+                val resume = previous?.takeUnless { it.completed }?.positionMs
+                val position = if (previous?.completed == true) 0L else
+                    resume?.takeIf { it > 0L } ?: startup.startPositionMs?.coerceAtLeast(0L) ?: 0L
                 publish { it.copy(positionMs = position) }
                 val pauseReason = when {
                     budget.nextEpisodeBytes <= 0L -> "下一集缓存容量为 0，仅保留已解析的地址。"
@@ -4527,7 +4599,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     preferredSourceId = null, sourceGroups = emptyMap()) }
                 startPlayback(PendingPlayback(detail, offline.episode, option, offline.asset, position, request,
                     playWhenReady = continuingSnapshot?.playWhenReady ?: continuation?.playWhenReady ?: true,
-                    localMedia = offline.localMedia, useSourceStart = continuation == null),
+                    localMedia = offline.localMedia, useSourceStart = continuation == null && previous?.completed != true),
                     rememberPrevious = continuation == null,
                     inheritEnhancementSession = continuationSession,
                     explicitEnhancementPolicy = if (versionId != null && offline.localMedia.enhancedVersion)
@@ -4570,21 +4642,39 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         mutate { library.edit(subject) { it.copy(pinned = pinned) } }
     }
 
-    fun clearWatchHistory(subjectId: String) = clearEntryHistory(subjectId, removeEntry = false)
-    fun removeLibraryEntry(subjectId: String) = clearEntryHistory(subjectId, removeEntry = true)
+    internal val libraryRestoreEpoch: Long get() = library.state.value.restoreEpoch
 
-    private fun clearEntryHistory(subjectId: String, removeEntry: Boolean) {
+    fun clearWatchHistory(subjectId: String, expectedResume: AnimeWatchProgress? = null,
+        expectedRevision: Long? = null, expectedRestoreEpoch: Long? = null) =
+        clearEntryHistory(subjectId, removeEntry = false) {
+            val stored = library.state.value
+            val entry = stored.entries[subjectId]
+            (expectedRestoreEpoch == null || stored.restoreEpoch == expectedRestoreEpoch) &&
+                (expectedRevision == null || entry?.revision == expectedRevision) &&
+                (expectedResume == null && expectedRevision == null && expectedRestoreEpoch == null ||
+                    entry?.resume == expectedResume)
+        }
+    fun removeLibraryEntry(subjectId: String) { clearEntryHistory(subjectId, removeEntry = true) }
+
+    private fun clearEntryHistory(subjectId: String, removeEntry: Boolean, isCurrent: () -> Boolean = { true }): Job? {
+        if (!isCurrent()) { notice("观看记录已变化，新的观看记录已保留。"); return null }
         if (active?.detail?.subject?.id == subjectId) stopPlayback(discardCheckpoint = true)
         else playbackEpochs[subjectId] = (playbackEpochs[subjectId] ?: 0L) + 1
         if (mutableState.value.detail?.subject?.id == subjectId) cancelPlaybackResolution()
         resumeRequest = resumeRequest?.takeUnless { it.first == subjectId }
-        mutate {
-            library.clearWatchHistory(subjectId, removeEntry)
-            if (mutableState.value.detail?.subject?.id == subjectId && removeEntry) {
-                mutableState.update { it.copy(sourceCatalogs = emptyList()) }
-                rebuildOptions()
+        return scope.launch {
+            try {
+                library.awaitReady()
+                check(isCurrent()) { "观看记录已变化，新的观看记录已保留。" }
+                library.clearWatchHistory(subjectId, removeEntry, isCurrent)
+                if (mutableState.value.detail?.subject?.id == subjectId && removeEntry) {
+                    mutableState.update { it.copy(sourceCatalogs = emptyList()) }
+                    rebuildOptions()
+                }
+                notice(if (removeEntry) "已移除这部番的本机记录。" else "已清除观看位置；追番状态与已看标记保留。")
             }
-            notice(if (removeEntry) "已移除这部番的本机记录。" else "已清除观看位置；追番状态与已看标记保留。")
+            catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) { notice(failure.message ?: "操作尚未保存，请重试。") }
         }
     }
 

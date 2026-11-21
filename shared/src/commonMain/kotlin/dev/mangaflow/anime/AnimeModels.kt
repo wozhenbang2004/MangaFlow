@@ -141,6 +141,10 @@ data class AnimeWatchProgress(
     val completed: Boolean = false,
     val subjectId: String = "",
     val localDownloadId: String? = null,
+    /** Labels captured from the actual played episode, never reconstructed from its opaque ID. */
+    val episodeTitle: String = "",
+    val episodeNumber: Double? = null,
+    val episodeKind: AnimeEpisodeKind? = null,
 )
 
 data class AnimeLibraryEntry(
@@ -380,6 +384,8 @@ data class AnimeScreenState(
     val groupSourceCandidates: List<AnimeSourceTitle> = emptyList(),
     val associationChoices: Map<String, List<AnimeSourceTitle>> = emptyMap(),
     val library: List<AnimeLibraryEntry> = emptyList(),
+    /** Exact-owner, uncleared local positions; partial episodes are distinct from completed ones. */
+    val episodeProgress: Map<String, AnimeWatchProgress> = emptyMap(),
     val sourceResults: List<AnimeSourceResult> = emptyList(),
     val sourceCatalogs: List<AnimeSourceCatalog> = emptyList(),
     val sourceBindings: List<AnimeSourceBinding> = emptyList(),

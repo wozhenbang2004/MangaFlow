@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -20,8 +21,14 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.saveable.SaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,6 +43,11 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 
@@ -44,6 +56,7 @@ internal class AnimeLibraryViewState internal constructor(
     filterState: MutableIntState,
     folderState: MutableState<String?>,
     orderState: MutableIntState,
+    val positions: SaveableStateHolder,
 ) {
     var filter by filterState
     var folder by folderState
@@ -56,7 +69,8 @@ internal fun rememberAnimeLibraryViewState(): AnimeLibraryViewState {
     val filter = rememberSaveable { mutableIntStateOf(0) }
     val folder = rememberSaveable { mutableStateOf<String?>(null) }
     val order = rememberSaveable { mutableIntStateOf(0) }
-    return remember(filter, folder, order) { AnimeLibraryViewState(filter, folder, order) }
+    val positions = rememberSaveableStateHolder()
+    return remember(filter, folder, order, positions) { AnimeLibraryViewState(filter, folder, order, positions) }
 }
 
 /** Followed works, viewing history and folders share one collection and local filter row. */
@@ -69,6 +83,7 @@ internal fun AnimeLibrary(
     viewState: AnimeLibraryViewState,
     onOpen: (AnimeSubject) -> Unit,
     onResume: (AnimeLibraryEntry) -> Unit,
+    onResumeEpisode: (AnimeLibraryEntry, AnimeWatchProgress) -> Unit,
     onDiscover: () -> Unit,
     onReview: () -> Unit,
     active: Boolean = true,
@@ -78,6 +93,37 @@ internal fun AnimeLibrary(
     var optionsPresent by remember { mutableStateOf(false) }
     var selectedId by remember { mutableStateOf<String?>(null) }
     var entryPresent by remember { mutableStateOf(false) }
+    var historyId by remember { mutableStateOf<String?>(null) }
+    var pendingEntryAction by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+    val positions = viewState.positions
+    val snackbar = remember { SnackbarHostState() }
+    val removalScope = rememberCoroutineScope()
+    var pendingHistory by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val latestState by rememberUpdatedState(state)
+    val contentActive = active && !optionsPresent && !entryPresent && historyId == null
+    fun removeHistory(entry: AnimeLibraryEntry) {
+        val original = entry.resume ?: return
+        val originalEpoch = controller.libraryRestoreEpoch
+        if (entry.subject.id in pendingHistory) return
+        pendingHistory = pendingHistory + entry.subject.id
+        snackbar.currentSnackbarData?.dismiss()
+        removalScope.launch {
+            var undone = false
+            try {
+                undone = snackbar.showSnackbar("已移除观看记录", actionLabel = "撤销",
+                    withDismissAction = true, duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed
+            } finally {
+                // A newer watch or restored record must not be erased by an older swipe.
+                val current = controller.state.value.library.firstOrNull { it.subject.id == entry.subject.id }
+                if (!undone && current != null && current.resume == original && current.revision == entry.revision &&
+                    current.catalogDetail == entry.catalogDetail) withContext(NonCancellable) {
+                    controller.clearWatchHistory(entry.subject.id, expectedResume = original,
+                        expectedRevision = entry.revision, expectedRestoreEpoch = originalEpoch)?.join()
+                }
+                pendingHistory = pendingHistory - entry.subject.id
+            }
+        }
+    }
     val filterLabels = listOf("全部", "追番", "历史")
     val orderLabels = listOf("最近观看", "作品名称", "年份")
     val filter = viewState.filter.coerceIn(filterLabels.indices)
@@ -87,10 +133,17 @@ internal fun AnimeLibrary(
         if (!active) {
             optionsOpen = false
             selectedId = null
+            historyId = null
+            pendingEntryAction = null
         }
     }
+    LaunchedEffect(historyId, state.library) {
+        if (historyId != null && state.library.none { it.subject.id == historyId }) historyId = null
+    }
     val folders = state.library.map { it.folder }.filter { it.isNotBlank() }.distinct().sorted()
-    val entries = state.library.filter { entry ->
+    val entries = state.library.map { entry ->
+        if (entry.subject.id in pendingHistory) entry.copy(resume = null) else entry
+    }.filter { entry ->
         (when (filter) { 1 -> entry.followed; 2 -> entry.resume != null; else -> entry.followed || entry.resume != null }) &&
             (folder == null || entry.folder == folder)
     }.let { rows ->
@@ -102,15 +155,16 @@ internal fun AnimeLibrary(
                 .thenByDescending { it.resume?.updatedAt ?: it.updatedAt })
         }
     }
-    Column(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+    Column(Modifier.widthIn(max = MangaLayout.ListWidth).fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             MotionTabs(filter, filterLabels, onSelect = { viewState.filter = it },
-                modifier = Modifier.weight(1f).motionInputGate(active && !optionsPresent && !entryPresent),
+                modifier = Modifier.weight(1f).motionInputGate(contentActive),
                 controlHeight = 44.dp, treatment = MotionTabTreatment.Soft,
                 fullWidthIndicator = true, tooltips = listOf("全部作品", "已追番", "观看历史"))
             Box {
-                MotionIconButton(onClick = { optionsOpen = true }, enabled = active && !optionsPresent && !entryPresent,
+                MotionIconButton(onClick = { optionsOpen = true }, enabled = contentActive,
                     modifier = Modifier.size(44.dp), tooltip = "文件夹与排序") {
                     Icon(if (folder == null) Icons.Outlined.FilterList else Icons.Outlined.Folder,
                         "文件夹与排序", Modifier.size(20.dp))
@@ -142,61 +196,105 @@ internal fun AnimeLibrary(
                 style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (folder != null) MotionIconButton(onClick = { viewState.folder = null },
-                enabled = active && !optionsPresent && !entryPresent, modifier = Modifier.size(44.dp),
+                enabled = contentActive, modifier = Modifier.size(44.dp),
                 tooltip = "清除文件夹筛选") { Icon(Icons.Outlined.Close, "清除文件夹筛选", Modifier.size(16.dp)) }
         }
-        LazyColumn(Modifier.weight(1f).fillMaxWidth().motionInputGate(active && !optionsPresent && !entryPresent),
-            state = scroll, userScrollEnabled = active && !optionsPresent && !entryPresent,
-            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 6.dp, bottom = contentBottomPadding)) {
-            if (state.reviews.isNotEmpty()) item(key = "reviews") {
-                AnimeSelection("待核对 " + state.reviews.size + " 项", "状态与已看集数逐项选择", false, onReview)
-            }
-            if (state.libraryReadUnavailable) item(key = "library-unavailable") {
-                AnimeMessage("本地追番记录暂不可用",
-                    "原文件已保留，这不代表收藏或历史为空。可以继续浏览和播放，但本次进度不会保存。请检查存储空间或通过备份恢复。",
-                    action = "去发现", onAction = onDiscover)
-            }
-            if (entries.isEmpty() && !state.libraryReadUnavailable) item(key = "empty-library") {
-                val filtered = filter != 0 || folder != null
-                AnimeMessage(if (state.library.isEmpty()) "你的追番从这里开始"
-                    else if (filtered) "当前筛选下没有番剧" else "这里还没有番剧",
-                    action = if (state.library.isNotEmpty() && filtered) "查看全部" else "去发现", onAction = {
-                        if (state.library.isNotEmpty() && filtered) {
-                            viewState.filter = 0
-                            viewState.folder = null
-                        } else onDiscover()
-                    })
-            }
-            items(entries, key = { it.subject.id }) { entry ->
-                val subtitle = listOfNotNull(
-                    "置顶".takeIf { entry.pinned },
-                    animeStatusLabel(entry.status),
-                    entry.folder.takeIf { it.isNotBlank() },
-                    entry.resume?.let { if (it.completed) "已看完本集" else animeTime(it.positionMs) +
-                        (it.durationMs.takeIf { duration -> duration > 0L }?.let { duration -> " / " + animeTime(duration) } ?: "") },
-                ).joinToString(" · ")
-                AnimeSubjectRow(entry.subject, subtitle, onOpen = { onOpen(entry.subject) },
-                    ratings = { AnimeSubjectRatings(entry.subject, enabled = active) }, supporting = {
-                    val resume = entry.resume
-                    if (resume != null && !resume.completed && resume.durationMs > 0L) {
-                        AnimeWatchProgressLine((resume.positionMs.toFloat() / resume.durationMs).coerceIn(0f, 1f),
-                            Modifier.padding(top = 3.dp))
+        val positionKey = "$filter:${folder?.length ?: -1}:$folder:$order"
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            positions.SaveableStateProvider(positionKey) {
+                val position = if (filter != 1 && folder == null && order == 0) scroll else rememberLazyListState()
+                LazyColumn(Modifier.fillMaxSize().motionInputGate(contentActive),
+                    state = position, userScrollEnabled = contentActive,
+                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 6.dp, bottom = contentBottomPadding)) {
+                    if (state.reviews.isNotEmpty()) item(key = "reviews") {
+                        AnimeSelection("待核对 " + state.reviews.size + " 项", "状态与已看集数逐项选择", false, onReview)
                     }
-                }, trailing = {
-                    if (entry.resume?.completed == false) MotionIconButton(onClick = { onResume(entry) }, modifier = Modifier.size(44.dp),
-                        tooltip = "继续观看") { Icon(Icons.Outlined.PlayArrow, "继续观看", Modifier.size(23.dp)) }
-                    MotionIconButton(onClick = { entryPresent = true; selectedId = entry.subject.id }, modifier = Modifier.size(44.dp),
-                        tooltip = "管理这部番剧") { Icon(Icons.Outlined.MoreHoriz, "管理番剧", Modifier.size(19.dp)) }
-                })
+                    if (state.libraryReadUnavailable) item(key = "library-unavailable") {
+                        AnimeMessage("本地追番记录暂不可用",
+                            "原文件已保留，这不代表收藏或历史为空。可以继续浏览和播放，但本次进度不会保存。请检查存储空间或通过备份恢复。",
+                            action = "去发现", onAction = onDiscover)
+                    }
+                    if (entries.isEmpty() && !state.libraryReadUnavailable) item(key = "empty-library") {
+                        val filtered = filter != 0 || folder != null
+                        AnimeMessage(when {
+                            filter == 2 -> "还没有观看记录"
+                            filter == 1 && folder == null -> "还没有追番"
+                            filtered -> "当前筛选下没有番剧"
+                            else -> "你的追番从这里开始"
+                        }, action = if (state.library.isNotEmpty() && filtered) "查看全部" else "去发现", onAction = {
+                            if (state.library.isNotEmpty() && filtered) {
+                                viewState.filter = 0
+                                viewState.folder = null
+                            } else onDiscover()
+                        })
+                    }
+                    items(entries, key = { it.subject.id }) { entry ->
+                        val target = controller.continuationEpisode(entry.subject.id)
+                        val continueLabel = animeContinuationLabel(entry, target)
+                        val subtitle = listOfNotNull(
+                            entry.resume?.let { animeWatchLocation(entry, it) },
+                            animeStatusLabel(entry.status).takeIf { entry.followed },
+                            entry.folder.takeIf { it.isNotBlank() },
+                            "置顶".takeIf { entry.pinned },
+                        ).joinToString(" · ")
+                        SwipeToRemove(onRemove = {
+                            if (filter == 2) removeHistory(entry)
+                            else controller.setFollowed(entry.subject, false)
+                        }, enabled = contentActive && !state.libraryReadUnavailable && filter != 0,
+                            label = if (filter == 2) "移除观看记录" else "取消追番", transparentBackground = true) {
+                            AnimeSubjectRow(entry.subject, subtitle,
+                                onOpen = { if (entry.resume != null) onResume(entry) else onOpen(entry.subject) },
+                                onOpenLabel = continueLabel,
+                                onLongClick = { entryPresent = true; selectedId = entry.subject.id },
+                                ratings = { AnimeSubjectRatings(entry.subject, enabled = contentActive) },
+                                supporting = {
+                                    val resume = entry.resume
+                                    if (resume != null && !resume.completed && resume.durationMs > 0L)
+                                        AnimeWatchProgressLine((resume.positionMs.toFloat() / resume.durationMs).coerceIn(0f, 1f),
+                                            Modifier.padding(top = 3.dp))
+                                }, trailing = {
+                                    if (entry.resume != null) MotionIconButton(onClick = { historyId = entry.subject.id },
+                                        enabled = contentActive, modifier = Modifier.size(44.dp), tooltip = "逐集观看记录") {
+                                        HistoryActionIcon(active = historyId == entry.subject.id,
+                                            description = "逐集观看记录", modifier = Modifier.size(20.dp))
+                                    } else MotionIconButton(onClick = { entryPresent = true; selectedId = entry.subject.id },
+                                        enabled = contentActive, modifier = Modifier.size(44.dp), tooltip = "管理这部番剧") {
+                                        Icon(Icons.Outlined.MoreHoriz, "管理番剧", Modifier.size(19.dp))
+                                    }
+                                })
+                        }
+                    }
+                }
+                if (platformKind == PlatformKind.DESKTOP) DesktopVerticalScrollbar(position,
+                    Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp))
             }
         }
     }
+    SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp)
+        .padding(bottom = contentBottomPadding))
+    }
+
     AnimeLibraryEntryPanel(selectedId?.takeIf { active }?.let { id -> state.library.firstOrNull { it.subject.id == id } },
-        controller, backdrop, folders, onDismiss = { selectedId = null }, onClosed = { entryPresent = false })
+        controller, backdrop, folders,
+        onOpen = { pendingEntryAction = it.subject.id to false; selectedId = null },
+        onHistory = { pendingEntryAction = it.subject.id to true; selectedId = null },
+        onDismiss = { selectedId = null }, onClosed = {
+            entryPresent = false
+            val next = pendingEntryAction
+            pendingEntryAction = null
+            if (active && next != null) latestState.library.firstOrNull { it.subject.id == next.first }?.let { entry ->
+                if (next.second) historyId = entry.subject.id else onOpen(entry.subject)
+            }
+        })
+    historyId?.takeIf { active }?.let { id -> state.library.firstOrNull { it.subject.id == id } }?.let { entry ->
+        AnimeEpisodeHistorySheet(entry, state.episodeProgress, backdrop,
+            onDismiss = { historyId = null },
+            onContinue = { progress -> if (active) onResumeEpisode(entry, progress) })
+    }
 }
 
 @Composable
-private fun AnimeWatchProgressLine(fraction: Float, modifier: Modifier = Modifier) {
+internal fun AnimeWatchProgressLine(fraction: Float, modifier: Modifier = Modifier) {
     val ink = MaterialTheme.colorScheme.onSurface
     Canvas(modifier.fillMaxWidth().height(2.dp).semantics {
         contentDescription = "本集观看进度"
@@ -253,7 +351,8 @@ internal fun AnimeContinueWatching(entry: AnimeLibraryEntry, onResume: () -> Uni
 
 @Composable
 private fun AnimeLibraryEntryPanel(entry: AnimeLibraryEntry?, controller: AnimeController,
-    backdrop: HazeState, folders: List<String>, onDismiss: () -> Unit, onClosed: () -> Unit) {
+    backdrop: HazeState, folders: List<String>, onOpen: (AnimeLibraryEntry) -> Unit,
+    onHistory: (AnimeLibraryEntry) -> Unit, onDismiss: () -> Unit, onClosed: () -> Unit) {
     var retained by remember { mutableStateOf<AnimeLibraryEntry?>(null) }
     SideEffect { if (entry != null) retained = entry }
     val shown = entry ?: retained
@@ -275,6 +374,9 @@ private fun AnimeLibraryEntryPanel(entry: AnimeLibraryEntry?, controller: AnimeC
                 Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
                     when (section) {
                         0 -> {
+                            CompactMenuAction(Icons.Outlined.Info, "详情与选集", onClick = { onOpen(shown) })
+                            if (shown.resume != null) CompactMenuAction(Icons.Outlined.History, "逐集观看记录",
+                                onClick = { onHistory(shown) })
                             CompactMenuAction(Icons.Outlined.PushPin, if (shown.pinned) "取消置顶" else "置顶", onClick = {
                                 controller.setPinned(shown.subject.id, !shown.pinned); onDismiss()
                             })
