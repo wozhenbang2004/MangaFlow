@@ -518,41 +518,29 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     internal fun retrySearchIndex() = unifiedSearch.retryIndex()
     internal fun retrySearchProvider(sourceId: String) = unifiedSearch.retrySource(sourceId)
 
-    /** Fixed home slots keep independent results; changing a day or quarter only invalidates affected slots. */
+    /** Each destination keeps its query and completed range, including the single home catalogue. */
     fun ensureDiscovery(loadHome: Boolean = true) {
         val today = Instant.fromEpochMilliseconds(wallTimeMillis()).toLocalDateTime(TimeZone.currentSystemDefault()).date
         val season = AnimeSeason.entries[(today.monthNumber - 1) / 3]
         val seasonal = AnimeDiscoveryQuery(year = today.year, season = season)
         val calendar = AnimeDiscoveryQuery(calendar = true, weekday = today.dayOfWeek.isoDayNumber)
         val mainCatalog = AnimeDiscoveryQuery(provider = AnimeDiscoveryProvider.DOUBAN)
-        val sections = listOf(
-            AnimeDiscoverySection("home:douban:popular", "热门动漫", mainCatalog, AnimeDiscoveryTab.RANKING),
-            AnimeDiscoverySection("home:douban:japan", "日本动画", mainCatalog.copy(region = "日本"), AnimeDiscoveryTab.GENRES),
-            AnimeDiscoverySection("home:douban:china", "国产动画", mainCatalog.copy(region = "大陆"), AnimeDiscoveryTab.GENRES),
-            AnimeDiscoverySection("home:douban:movies", "动画电影", mainCatalog.copy(format = AnimeDiscoveryFormat.MOVIE),
-                AnimeDiscoveryTab.GENRES),
-        )
-        if (discoveryDate != today.toString() || mutableState.value.discoverySections.isEmpty()) {
+        val defaults = mapOf(AnimeDiscoveryTab.HOME to mainCatalog,
+            AnimeDiscoveryTab.RANKING to mainCatalog, AnimeDiscoveryTab.SEASON to seasonal,
+            AnimeDiscoveryTab.CALENDAR to calendar, AnimeDiscoveryTab.GENRES to mainCatalog)
+        if (discoveryDate != today.toString() || defaults.keys.any { animeDiscoveryFeedKey(it) !in mutableState.value.discoveryFeeds }) {
             discoveryDate = today.toString()
             val before = mutableState.value
             val feeds = before.discoveryFeeds.toMutableMap()
-            sections.forEach { section ->
-                if (feeds[section.key]?.query != section.query) {
-                    discoveryLoads.reset(section.key)
-                    feeds[section.key] = AnimeDiscoveryFeed(section.query)
-                }
-            }
-            mapOf(AnimeDiscoveryTab.RANKING to mainCatalog, AnimeDiscoveryTab.SEASON to seasonal,
-                AnimeDiscoveryTab.CALENDAR to calendar, AnimeDiscoveryTab.GENRES to mainCatalog).forEach { (tab, query) ->
+            defaults.forEach { (tab, query) ->
                 val key = animeDiscoveryFeedKey(tab)
                 if (key !in feeds) feeds[key] = AnimeDiscoveryFeed(query)
             }
-            mutableState.update { it.copy(discoverySections = sections, discoveryFeeds = feeds) }
+            mutableState.update { it.copy(discoveryFeeds = feeds) }
         }
         if (!loadHome) return
         val tab = mutableState.value.discoveryTab
         val keys = when (tab) {
-            AnimeDiscoveryTab.HOME -> sections.mapTo(linkedSetOf()) { it.key }
             AnimeDiscoveryTab.SOURCES -> emptySet()
             else -> setOf(animeDiscoveryFeedKey(tab))
         }
@@ -578,11 +566,17 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         discoveryOptions[tab to provider]
 
     fun configureDiscovery(tab: AnimeDiscoveryTab, query: AnimeDiscoveryQuery) {
-        if (tab == AnimeDiscoveryTab.HOME || tab == AnimeDiscoveryTab.SOURCES) return
+        if (tab == AnimeDiscoveryTab.SOURCES) return
         ensureDiscovery(loadHome = false)
         val key = animeDiscoveryFeedKey(tab)
         val tag = query.tag.trim()
         val normalized = when {
+            tab == AnimeDiscoveryTab.HOME -> query.copy(provider = AnimeDiscoveryProvider.DOUBAN,
+                tag = tag, combined = false, season = null, calendar = false, weekday = null,
+                order = query.order.takeIf { it in listOf(AnimeDiscoveryOrder.POPULARITY,
+                    AnimeDiscoveryOrder.NEWEST, AnimeDiscoveryOrder.SCORE) } ?: AnimeDiscoveryOrder.POPULARITY,
+                // Douban's default and SERIES both use tv; keep one identity for range/scroll restoration.
+                format = query.format?.takeIf { it == AnimeDiscoveryFormat.MOVIE })
             query.provider == AnimeDiscoveryProvider.DOUBAN -> query.copy(tag = tag, combined = false)
             !query.combined -> query.copy(tag = tag)
             query.order == AnimeDiscoveryOrder.TRENDING -> query.copy(provider = AnimeDiscoveryProvider.ANILIST,
@@ -599,27 +593,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         ensureDiscovery()
     }
 
-    fun openDiscoverySection(sectionKey: String) {
-        val current = mutableState.value
-        val section = current.discoverySections.firstOrNull { it.key == sectionKey } ?: return
-        val key = animeDiscoveryFeedKey(section.destination)
-        discoveryLoads.reset(key)
-        val preview = current.discoveryFeeds[sectionKey]
-        val feed = if (preview != null && preview.query == section.query && preview.page > 0)
-            preview.copy(loading = false, loadingMore = false, moreError = null)
-        else AnimeDiscoveryFeed(section.query)
-        mutableState.update { it.copy(discoveryTab = section.destination, discoveryFeeds = it.discoveryFeeds + (key to feed)) }
-        discoveryLoads.restorePreview(sectionKey, key)
-        ensureDiscovery()
-    }
-
     fun refreshDiscovery() {
         ensureDiscovery(loadHome = false)
         val current = mutableState.value
         when (current.discoveryTab) {
-            AnimeDiscoveryTab.HOME -> {
-                current.discoverySections.forEach { discoveryLoads.refresh(it.key) }
-            }
             AnimeDiscoveryTab.SOURCES -> sourceBrowse.refresh()
             else -> discoveryLoads.refresh(animeDiscoveryFeedKey(current.discoveryTab))
         }

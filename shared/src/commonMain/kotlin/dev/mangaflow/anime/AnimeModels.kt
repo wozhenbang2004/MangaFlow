@@ -372,7 +372,6 @@ data class AnimeSourceMeasurementBatch(
 data class AnimeScreenState(
     val libraryReadUnavailable: Boolean = false,
     val discoveryTab: AnimeDiscoveryTab = AnimeDiscoveryTab.HOME,
-    val discoverySections: List<AnimeDiscoverySection> = emptyList(),
     val discoveryFeeds: Map<String, AnimeDiscoveryFeed> = emptyMap(),
     val discoveryColumns: Int? = null,
     val detail: AnimeDetail? = null,

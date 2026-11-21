@@ -16,6 +16,8 @@ import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.HttpUrl
+import dev.mangaflow.net.NetworkFailureKind
+import dev.mangaflow.net.NetworkTransferException
 import dev.mangaflow.net.identity
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.wallTimeMillis
@@ -239,7 +241,8 @@ class DoubanAnimeRepository(context: PlatformContext) {
         return try {
             withTimeoutOrNull(timeoutMillis) {
                 http.request(url, stage, referer = referer, sameOriginRedirects = true)
-            } ?: throw AnimeSourceException(DOUBAN_PROVIDER, stage, "等待读取豆瓣资料超时，请稍后重试。")
+            } ?: throw AnimeSourceException(DOUBAN_PROVIDER, stage, "等待读取豆瓣资料超时，请稍后重试。",
+                cause = NetworkTransferException(NetworkFailureKind.RESPONSE_TIMEOUT, "等待读取豆瓣资料超时"))
         } finally { http.close() }
     }
 

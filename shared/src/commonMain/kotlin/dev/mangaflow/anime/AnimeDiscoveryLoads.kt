@@ -24,12 +24,14 @@ internal class AnimeDiscoveryLoads(
         var route: DownloadRouteSnapshot? = null
         var generation = 0L
         var retryAt: Long? = null
-        var recoveryAvailable = false
+        var recoveryAttempts = 0
+        var retryRequest: RetryRequest? = null
         var revalidatePages = 1
         var job: Job? = null
         var recovery: Job? = null
     }
 
+    private data class RetryRequest(val page: Long, val append: Boolean, val lastPage: Long, val error: String)
     private class Slot(val query: AnimeDiscoveryQuery, val sources: List<SourceLoad>, val cacheEpoch: Long)
     private data class RetainedKey(val key: String, val query: AnimeDiscoveryQuery)
     private val slots = mutableMapOf<String, Slot>()
@@ -37,47 +39,43 @@ internal class AnimeDiscoveryLoads(
     private var visibleKeys = emptySet<String>()
 
     fun visible(keys: Set<String>) {
-        (visibleKeys - keys).forEach { key ->
-            slots[key]?.sources?.forEach { source ->
-                source.recovery?.cancel()
-                source.recovery = null
+        val leaving = visibleKeys - keys
+        visibleKeys = keys
+        leaving.forEach { key ->
+            slots[key]?.let { slot ->
+                slot.sources.forEach { source ->
+                    source.recovery?.cancel()
+                    source.recovery = null
+                    source.feed = source.feed.copy(retryScheduled = false,
+                        retryAttempt = source.feed.retryAttempt.takeIf { source.job?.isActive == true } ?: 0)
+                }
+                publish(key, slot)
             }
         }
-        visibleKeys = keys
     }
 
     fun reset(key: String) {
         val previous = slots.remove(key) ?: return
         previous.sources.forEach { source ->
+            val interrupted = source.retryRequest?.takeIf { source.job?.isActive == true }
+            if (interrupted != null) {
+                // Changing filters may interrupt a retry; returning keeps its remaining budget.
+                source.retryAt = RETRY_DELAYS.getOrNull(source.recoveryAttempts)?.let { monotonicTimeMillis() + it }
+                if (source.retryAt == null) source.retryRequest = null
+                source.feed = source.feed.copy(error = if (interrupted.append) source.feed.error else interrupted.error,
+                    moreError = interrupted.error.takeIf { interrupted.append })
+            }
             ++source.generation
             source.job?.cancel()
             source.recovery?.cancel()
             source.job = null
             source.recovery = null
-            source.feed = source.feed.copy(loading = false, loadingMore = false)
+            source.feed = source.feed.copy(loading = false, loadingMore = false, retryScheduled = false, retryAttempt = 0)
         }
         val identity = RetainedKey(key, previous.query)
         retained.remove(identity)
         retained[identity] = previous
         while (retained.size > 24) retained.remove(retained.keys.first())
-    }
-
-    fun restorePreview(fromKey: String, key: String) {
-        val from = slots[fromKey] ?: return
-        val now = slot(key) ?: return
-        if (now.query != from.query || from.cacheEpoch != repository.cacheEpoch) return
-        now.sources.zip(from.sources).forEach { (target, source) ->
-            // A one-row home preview must not replace a previously loaded multi-page list.
-            if (target.requested && target.route == source.route && target.feed.items.isNotEmpty() &&
-                target.feed.page >= source.feed.page) return@forEach
-            target.feed = source.feed.copy(loading = false, loadingMore = false, moreError = null)
-            target.requested = source.requested
-            target.route = source.route
-            target.retryAt = source.retryAt
-            target.recoveryAvailable = source.recoveryAvailable
-            target.revalidatePages = source.revalidatePages
-        }
-        publish(key, now)
     }
 
     fun ensure(key: String) {
@@ -88,10 +86,10 @@ internal class AnimeDiscoveryLoads(
             val needsFetch = when {
                 routeChanged -> true
                 source.job?.isActive == true -> false
-                feed.error != null -> source.retryAt?.let { monotonicTimeMillis() >= it } == true
+                feed.error != null || feed.moreError != null -> false
                 else -> feed.fetchedAt?.let { !repository.isFresh(source.query, it) } ?: true
             }
-            if (needsFetch) load(key, slot, source, append = false, force = !routeChanged && feed.error != null,
+            if (needsFetch) load(key, slot, source, append = false, force = false,
                 preserveRange = !routeChanged && feed.items.isNotEmpty() && feed.page > 1)
             else scheduleRecovery(key, slot, source)
         }
@@ -139,7 +137,7 @@ internal class AnimeDiscoveryLoads(
     private fun routeFor(query: AnimeDiscoveryQuery) = runCatching { repository.route(query) }.getOrNull()
 
     private fun load(key: String, slot: Slot, source: SourceLoad, append: Boolean, force: Boolean,
-        allowRecovery: Boolean = true, preserveRange: Boolean = false) {
+        preserveRange: Boolean = false, recoveryRequest: RetryRequest? = null) {
         val query = source.query
         val routeResult = runCatching { repository.route(query) }
         val route = routeResult.getOrNull()
@@ -148,17 +146,24 @@ internal class AnimeDiscoveryLoads(
         val before = if (routeChanged) AnimeDiscoveryFeed(query) else source.feed
         val page = if (paging) before.page.toLong() + 1 else 1L
         val lastPage = if (!paging && !routeChanged && preserveRange) before.page.coerceAtLeast(1).toLong() else page
+        if (recoveryRequest != null && (routeChanged || source.retryRequest !== recoveryRequest ||
+                source.recoveryAttempts >= RETRY_DELAYS.size || page != recoveryRequest.page ||
+                paging != recoveryRequest.append || lastPage != recoveryRequest.lastPage)) return
+        if (recoveryRequest == null) {
+            source.recoveryAttempts = 0
+            source.retryRequest = null
+        } else source.recoveryAttempts++
         val request = ++source.generation
         source.requested = true
         source.route = route
         source.retryAt = null
-        source.recoveryAvailable = false
         if (!paging) source.revalidatePages = lastPage.toInt()
         source.recovery?.cancel()
         source.recovery = null
         source.job?.cancel()
         source.feed = before.copy(loading = !paging, loadingMore = paging,
-            error = if (paging) before.error else null, moreError = null)
+            error = if (paging) before.error else null, moreError = null,
+            retryScheduled = false, retryAttempt = source.recoveryAttempts.takeIf { recoveryRequest != null } ?: 0)
         publish(key, slot)
         fun ownsRequest() = slots[key] === slot && currentFeed(key)?.query == slot.query &&
             source.generation == request && routeFor(query) == route
@@ -168,6 +173,7 @@ internal class AnimeDiscoveryLoads(
             publish(key, slot)
         }
         val job = scope.launch(start = CoroutineStart.LAZY) {
+            var cancelled = false
             try {
                 require(page in 1..Int.MAX_VALUE.toLong()) { "分页位置已超出来源支持范围。" }
                 if (!paging && before.items.isEmpty()) repository.cached(query, route = route)?.let { cached ->
@@ -190,26 +196,40 @@ internal class AnimeDiscoveryLoads(
                 update { feed ->
                     val items = if (paging) feed.items + result.items else replacement
                     feed.copy(items = items.distinctBy { it.key }, page = result.page, hasMore = result.hasMore,
-                        loading = false, loadingMore = false, moreError = null,
+                        loading = false, loadingMore = false, error = null, moreError = null,
+                        retryScheduled = false, retryAttempt = 0,
                         fetchedAt = if (paging) feed.fetchedAt else fetchedAt)
                 }
-                if (ownsRequest()) source.revalidatePages = 1
+                if (ownsRequest()) {
+                    source.revalidatePages = 1
+                    source.retryRequest = null
+                    source.retryAt = null
+                    source.recoveryAttempts = 0
+                }
             } catch (cancel: CancellationException) {
-                update { it.copy(loading = false, loadingMore = false) }
+                cancelled = true
+                if (ownsRequest()) {
+                    source.retryAt = null
+                    source.retryRequest = null
+                }
+                update { it.copy(loading = false, loadingMore = false, retryScheduled = false, retryAttempt = 0) }
                 throw cancel
             } catch (failure: Exception) {
                 if (!ownsRequest()) return@launch
                 val message = failure.message ?: "这一栏暂未取得，可单独重试。"
-                val wait = discoveryRetryDelay(failure)
-                if (!paging) {
-                    source.retryAt = wait?.let { monotonicTimeMillis() + it }
-                    source.recoveryAvailable = allowRecovery && wait != null && wait <= 60_000L
+                val wait = RETRY_DELAYS.getOrNull(source.recoveryAttempts)?.let { backoff ->
+                    discoveryRetryDelay(failure, transientDelay = backoff)?.coerceAtLeast(backoff)
                 }
+                source.retryAt = wait?.let { monotonicTimeMillis() + it }
+                source.retryRequest = wait?.let { RetryRequest(page, paging, lastPage, message) }
                 update { it.copy(loading = false, loadingMore = false,
-                    error = if (paging) it.error else message, moreError = message.takeIf { paging }) }
-                scheduleRecovery(key, slot, source)
+                    error = if (paging) it.error else message, moreError = message.takeIf { paging },
+                    retryScheduled = false, retryAttempt = 0) }
             } finally {
-                if (source.generation == request) source.job = null
+                if (source.generation == request) {
+                    source.job = null
+                    if (!cancelled && ownsRequest()) scheduleRecovery(key, slot, source)
+                }
             }
         }
         source.job = job
@@ -218,16 +238,37 @@ internal class AnimeDiscoveryLoads(
 
     private fun scheduleRecovery(key: String, slot: Slot, source: SourceLoad) {
         val deadline = source.retryAt ?: return
-        if (!source.recoveryAvailable || source.recovery?.isActive == true || key !in visibleKeys) return
+        val retry = source.retryRequest ?: return
+        if (source.recoveryAttempts >= RETRY_DELAYS.size || source.job?.isActive == true ||
+            source.recovery != null || key !in visibleKeys) return
         val generation = source.generation
-        source.recovery = scope.launch {
-            delay((deadline - monotonicTimeMillis()).coerceAtLeast(1L))
-            if (slots[key] === slot && currentFeed(key)?.query == slot.query && source.generation == generation &&
-                source.route == routeFor(source.query) && key in visibleKeys) {
-                source.recovery = null
-                load(key, slot, source, append = false, force = true, allowRecovery = false,
-                    preserveRange = source.revalidatePages > 1)
+        lateinit var recovery: Job
+        recovery = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                delay((deadline - monotonicTimeMillis()).coerceAtLeast(1L))
+                if (slots[key] === slot && currentFeed(key)?.query == slot.query && source.generation == generation &&
+                    source.route == routeFor(source.query) && source.retryRequest === retry && key in visibleKeys) {
+                    source.recovery = null
+                    source.feed = source.feed.copy(retryScheduled = false, retryAttempt = 0)
+                    publish(key, slot)
+                    load(key, slot, source, append = retry.append, force = true,
+                        preserveRange = !retry.append && retry.lastPage > 1, recoveryRequest = retry)
+                }
+            } finally {
+                if (source.recovery === recovery) {
+                    source.recovery = null
+                    source.feed = source.feed.copy(retryScheduled = false, retryAttempt = 0)
+                    if (slots[key] === slot && source.generation == generation) publish(key, slot)
+                }
             }
+        }
+        source.recovery = recovery
+        source.feed = source.feed.copy(retryScheduled = true, retryAttempt = source.recoveryAttempts + 1)
+        publish(key, slot)
+        if (!recovery.start() && source.recovery === recovery) {
+            source.recovery = null
+            source.feed = source.feed.copy(retryScheduled = false, retryAttempt = 0)
+            publish(key, slot)
         }
     }
 
@@ -245,6 +286,7 @@ internal class AnimeDiscoveryLoads(
         val sourceErrors = slot.sources.mapNotNull { source ->
             (source.feed.error ?: source.feed.moreError)?.let { source.query.provider to it }
         }.toMap()
+        val scheduled = slot.sources.filter { it.feed.retryScheduled }
         publishFeed(key, previous.copy(
             items = items, page = maxOf(primary.page, peer.page),
             hasMore = slot.sources.any { it.feed.hasMore && it.feed.error == null && it.feed.moreError == null },
@@ -253,6 +295,12 @@ internal class AnimeDiscoveryLoads(
             moreError = primary.moreError ?: peer.moreError,
             fetchedAt = listOfNotNull(primary.fetchedAt, peer.fetchedAt).minOrNull(),
             sourceErrors = sourceErrors,
+            retryScheduled = scheduled.isNotEmpty(),
+            retryAttempt = (scheduled.ifEmpty { slot.sources }).maxOf { it.feed.retryAttempt },
         ))
+    }
+
+    private companion object {
+        val RETRY_DELAYS = longArrayOf(2_000L, 5_000L, 12_000L)
     }
 }

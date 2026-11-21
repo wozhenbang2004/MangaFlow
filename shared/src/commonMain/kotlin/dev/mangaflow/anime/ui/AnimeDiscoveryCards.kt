@@ -43,7 +43,6 @@ import kotlin.math.roundToInt
 internal class AnimeDiscoveryScrolls {
     private val grids = linkedMapOf<Any, LazyGridState>()
     var featuredKey: String? = null
-    var placedHomeFeature = false
     fun grid(key: String, query: AnimeDiscoveryQuery? = null): LazyGridState {
         val identity = if (query == null) key else key to query
         val state = grids.remove(identity) ?: LazyGridState()

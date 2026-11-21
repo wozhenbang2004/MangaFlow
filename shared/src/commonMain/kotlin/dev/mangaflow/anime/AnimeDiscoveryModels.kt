@@ -66,13 +66,10 @@ data class AnimeDiscoveryFeed(
     val moreError: String? = null,
     val fetchedAt: Long? = null,
     val sourceErrors: Map<AnimeDiscoveryProvider, String> = emptyMap(),
-)
-
-data class AnimeDiscoverySection(
-    val key: String,
-    val title: String,
-    val query: AnimeDiscoveryQuery,
-    val destination: AnimeDiscoveryTab,
+    /** True only while a visible source has a live recovery timer. */
+    val retryScheduled: Boolean = false,
+    /** Current scheduled/running automatic attempt (1–3), otherwise zero. */
+    val retryAttempt: Int = 0,
 )
 
 fun animeDiscoveryFeedKey(tab: AnimeDiscoveryTab): String = "browse:" + tab.name
