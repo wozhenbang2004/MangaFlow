@@ -195,6 +195,7 @@ fun SettingsScreen(
     onOpenAnimeDownloads: () -> Unit = {},
     onOpenLanReadingSync: (() -> Unit)? = null,
     onOpenMangaTracking: (() -> Unit)? = null,
+    lanReadingConflictCount: Int = 0,
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -472,11 +473,17 @@ fun SettingsScreen(
                             showAnimeSources = true
                         }
                     }
-                    SettingsDisclosure("备份与同步", if (backupBusy != null) "正在处理…" else "设备 · 漫画账号 · 阅读备份",
+                    SettingsDisclosure("备份与同步", when {
+                        backupBusy != null -> "正在处理…"
+                        lanReadingConflictCount > 0 -> "$lanReadingConflictCount 处阅读差异待确认"
+                        else -> "设备 · 漫画账号 · 阅读备份"
+                    },
                         Icons.Outlined.CloudSync, expandedSetting == "backup", { toggleSetting("backup") }) {
                         Column {
                             onOpenLanReadingSync?.let { open ->
-                                SettingsLinkRow("局域网阅读同步", "发现并配对设备 · 收藏、页码与书签", Icons.Outlined.CloudSync, onClick = open)
+                                SettingsLinkRow("局域网阅读同步", if (lanReadingConflictCount > 0)
+                                    "查看双方版本，选择继续阅读的位置" else "发现并配对设备 · 收藏、页码与书签",
+                                    Icons.Outlined.CloudSync, onClick = open)
                             }
                             onOpenMangaTracking?.let { open ->
                                 SettingsLinkRow("漫画账号同步", "Bangumi · AniList", Icons.Outlined.CloudSync, onClick = open)

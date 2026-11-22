@@ -80,6 +80,9 @@ internal data class LanReadingVersion(
     val id: String get() = "$actor:$counter"
     fun supersedes(other: LanReadingVersion): Boolean =
         (seen[other.actor] ?: 0L) >= other.counter || actor == other.actor && counter > other.counter
+
+    /** Continue this branch without implicitly acknowledging the other concurrent candidates. */
+    fun context(): Map<String, Long> = seen + (actor to counter)
 }
 
 internal data class LanReadingRecord(
@@ -87,6 +90,8 @@ internal data class LanReadingRecord(
     /** Kept even for a deletion, so source membership is checked before sending a tombstone. */
     val identity: LanReadingItem,
     val versions: List<LanReadingVersion>,
+    /** An existing difference still needs confirmation even if its live branches reach the same page. */
+    val pendingChoice: Boolean = false,
 ) {
     // RECENT has one key per book, while its versions can refer to different chapter sources.
     // Check every alternative, not just the retained identity, before exporting or applying it.
@@ -98,6 +103,7 @@ internal data class LanReadingRecord(
             .thenBy { it.counter }.thenBy { it.actor })!!
 
     fun conflicting(): Boolean {
+        if (pendingChoice && versions.size > 1) return true
         val first = versions.first().item
         return versions.drop(1).any { version ->
             if (first == null) version.item != null else !first.sameContent(version.item)
@@ -119,7 +125,11 @@ internal data class LanReadingRecord(
         }
         val remaining = values.filter { candidate -> values.none { it !== candidate && it.supersedes(candidate) } }
         require(remaining.isNotEmpty() && remaining.size <= 64) { "阅读冲突过多，请先处理已有冲突。" }
-        return copy(versions = remaining.sortedBy { it.id })
+        val merged = copy(versions = remaining.sortedBy { it.id }, pendingChoice = false)
+        // An explicit choice causally covers its candidates and leaves one version. A stale peer's
+        // flag cannot resurrect that conflict; an unseen third branch still needs confirmation.
+        return merged.copy(pendingChoice = remaining.size > 1 &&
+            (pendingChoice || other.pendingChoice || merged.conflicting()))
     }
 }
 
@@ -134,30 +144,45 @@ internal data class LanReadingLedger(
     fun capture(snapshot: LanLibrarySnapshot, sources: Set<String>, now: Long): LanReadingLedger {
         val nextBooks = books + snapshot.books
         val nextRecords = records.toMutableMap()
+        val suspended = records.filterValues { it.conflicting() && !it.allowed(nextBooks, sources) }.keys
         var sequence = counter
         (baseline.keys + snapshot.items.keys).forEach { key ->
+            // A scope change hides these candidates from transport, not from the local journal.
+            if (key in suspended) return@forEach
             val current = snapshot.items[key]
             val previous = baseline[key]
             val identity = current ?: previous ?: return@forEach
             if (!identity.allowed(nextBooks, sources)) return@forEach
+            val record = nextRecords[key]
+            val pending = record?.conflicting() == true && record.allowed(nextBooks, sources)
             // A fresh last-read time changes ordering, without making stationary chapter saves conflict.
-            val equal = if (identity.kind == LanReadingKind.RECENT) current == previous
+            // While a choice is pending, a RECENT timestamp refresh must not replace a candidate.
+            val equal = if (identity.kind == LanReadingKind.RECENT && !pending) current == previous
                 else current?.sameContent(previous) ?: (previous == null)
-            if (equal && nextRecords[key]?.allowed(nextBooks, sources) == true) return@forEach
+            if (equal && record?.allowed(nextBooks, sources) == true) return@forEach
             check(sequence < Long.MAX_VALUE) { "此设备的同步版本已用尽，请重新配对。" }
             sequence++
-            nextRecords[key] = LanReadingRecord(key, identity,
-                listOf(LanReadingVersion(actor, sequence, nextRecords[key]?.context().orEmpty(), current, now)))
+            val branch = if (pending) record!!.versions.firstOrNull { it.actor == actor } ?: record.winner() else null
+            val seen = branch?.context() ?: record?.context().orEmpty()
+            val update = LanReadingRecord(key, identity, listOf(LanReadingVersion(actor, sequence, seen, current, now)))
+            // Keep one live version per branch, not every past page. Only choose() acknowledges all
+            // candidates; ordinary reading advances the local branch (or the adopted one if new).
+            nextRecords[key] = if (pending) record!!.merge(update) else update
         }
+        val captured = baseline.filterValues { !it.allowed(nextBooks, sources) } + snapshot.items
         return copy(counter = sequence, books = nextBooks, records = nextRecords,
-            baseline = baseline.filterValues { !it.allowed(nextBooks, sources) } + snapshot.items)
+            baseline = captured.filterKeys { it !in suspended } + baseline.filterKeys { it in suspended })
     }
 
     fun merge(remote: LanReadingLedger, sources: Set<String>): LanReadingLedger {
         val nextBooks = books + remote.books.filterValues { it.allowed(sources) }
         val next = records.toMutableMap()
         remote.records.values.filter { it.allowed(nextBooks, sources) }.forEach { record ->
-            next[record.key] = next[record.key]?.merge(record) ?: record
+            val local = next[record.key]
+            // Local reading may have advanced while capture is suspended for an excluded source.
+            // Resume capture first when its scope returns; a remote choice cannot skip that fence.
+            if (local != null && local.conflicting() && !local.allowed(nextBooks, sources)) return@forEach
+            next[record.key] = local?.merge(record) ?: record
         }
         val ownCounter = next.values.flatMap { it.versions }.maxOfOrNull { version ->
             maxOf(if (version.actor == actor) version.counter else 0L, version.seen[actor] ?: 0L)
@@ -174,13 +199,15 @@ internal data class LanReadingLedger(
         val chosen = record.versions.singleOrNull { it.id == versionId } ?: error("这条冲突已变化，请重新查看。")
         check(counter < Long.MAX_VALUE)
         val version = LanReadingVersion(actor, counter + 1, record.context(), chosen.item, now)
-        return copy(counter = counter + 1, records = records + (key to record.copy(versions = listOf(version))))
+        return copy(counter = counter + 1,
+            records = records + (key to record.copy(versions = listOf(version), pendingChoice = false)))
     }
 }
 
 internal object LanReadingCodec {
     const val MAX_BYTES = 8 * 1024 * 1024
-    private const val FORMAT = "mangaflow-lan-reading-v1"
+    private const val FORMAT = "mangaflow-lan-reading-v2"
+    private const val LEGACY_LOCAL_FORMAT = "mangaflow-lan-reading-v1"
     private val actorPattern = Regex("[a-f0-9]{64}")
 
     fun encode(ledger: LanReadingLedger, local: Boolean, sources: Set<String>? = null): String {
@@ -192,7 +219,7 @@ internal object LanReadingCodec {
                     .put("native", book.sourceMangaId).put("sourceName", book.sourceName)
             }))
             .put("records", JSONArray(records.sortedBy { it.key }.map { record ->
-                JSONObject().put("identity", itemJson(record.identity))
+                JSONObject().put("identity", itemJson(record.identity)).put("pendingChoice", record.conflicting())
                     .put("versions", JSONArray(record.versions.sortedBy { it.id }.map { version ->
                         JSONObject().put("actor", version.actor).put("counter", version.counter)
                             .put("seen", JSONObject(version.seen)).put("time", version.changedAt)
@@ -209,7 +236,12 @@ internal object LanReadingCodec {
         require(payload.encodeToByteArray().size <= MAX_BYTES) { "阅读同步记录过大。" }
         require(actorPattern.matches(localActor)) { "设备身份无效。" }
         val json = JSONObject(payload)
-        require(json.getString("format") == FORMAT) { "两端漫流的阅读同步版本不兼容。" }
+        val format = json.getString("format")
+        // v1 peers may treat ordinary reading as confirmation and discard competing versions.
+        // Migrate only our durable v1 journal; never downgrade the new wire semantics.
+        require(format == FORMAT || local && format == LEGACY_LOCAL_FORMAT) {
+            "两端漫流的阅读同步版本不兼容，请将两端更新到支持保留待确认版本的版本。"
+        }
         if (local) require(json.getString("localActor") == localActor) { "同步身份已变化，请先移除旧设备配对。" }
         val books = linkedMapOf<String, LanReadingBook>()
         val bookRows = json.getJSONArray("books")
@@ -245,7 +277,8 @@ internal object LanReadingCodec {
                 LanReadingVersion(actor, counter, context, item, time)
             }
             require(decoded.distinctBy { it.id }.size == decoded.size) { "阅读版本重复。" }
-            val record = LanReadingRecord(identity.key, identity, decoded)
+            val pending = if (format == FORMAT) row.getBoolean("pendingChoice") else false
+            val record = LanReadingRecord(identity.key, identity, decoded, pending)
             records[identity.key] = record.merge(record)
         }
         val baseline = linkedMapOf<String, LanReadingItem>()

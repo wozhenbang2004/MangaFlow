@@ -8,6 +8,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.RadioButtonChecked
@@ -35,11 +36,16 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.tracking.*
 import dev.mangaflow.ui.motion.*
+import dev.mangaflow.ui.platform.NativeTrackingWebsiteLogin
+import dev.mangaflow.ui.platform.trackingWebsiteLoginSupported
 
 /** Retained Ovio panel: account, explicit identity review, then one visible sync direction. */
 @Composable
@@ -68,6 +74,10 @@ internal fun MangaTrackingSheet(
     val enabled = visible && state.ready && !busy
     var token by remember(provider, account?.ownerId) { mutableStateOf("") }
     var showCredential by remember(provider, account?.ownerId) { mutableStateOf(false) }
+    var manualCredential by remember(provider, account?.ownerId) { mutableStateOf(false) }
+    var authorization by remember { mutableStateOf<MangaTrackingAuthorization?>(null) }
+    val loginVisible by rememberUpdatedState(visible)
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     var showSearch by remember(provider, account?.ownerId, work?.id) { mutableStateOf(false) }
     var query by remember(provider, work?.id) { mutableStateOf(work?.title.orEmpty()) }
     var remoteId by remember(provider, work?.id) { mutableStateOf("") }
@@ -88,27 +98,87 @@ internal fun MangaTrackingSheet(
     val openLink: (String) -> Unit = { url ->
         externalError = runCatching { uri.openUri(url) }.exceptionOrNull()?.let { "无法打开浏览器，请检查设备的默认浏览器。" }
     }
+    val cancelWebsite: (String) -> Unit = { id ->
+        controller.cancelWebsiteAuthorization(id)
+        if (authorization?.id == id) authorization = null
+    }
+    val dismissPanel: () -> Unit = {
+        authorization?.let { cancelWebsite(it.id) }
+        token = ""; showCredential = false; manualCredential = false
+        onDismiss()
+    }
     LaunchedEffect(visible) {
-        if (!visible) { token = ""; showCredential = false; externalError = null }
+        if (!visible) {
+            authorization?.let { controller.cancelWebsiteAuthorization(it.id) }
+            authorization = null
+            token = ""; showCredential = false; manualCredential = false; externalError = null
+        }
+    }
+    DisposableEffect(authorization?.id, lifecycle) {
+        val owned = authorization
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP && owned != null && authorization?.id == owned.id) {
+                cancelWebsite(owned.id)
+            }
+        }
+        lifecycle.addObserver(observer)
+        onDispose {
+            lifecycle.removeObserver(observer)
+            owned?.let { controller.cancelWebsiteAuthorization(it.id) }
+        }
     }
     LaunchedEffect(bound?.subject?.id) { if (bound != null) showSearch = false }
 
-    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 600.dp) {
+    MotionDialog(visible, onDismissRequest = dismissPanel, maximumWidth = 600.dp) {
         LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
             role = GlassSurfaceRole.PANEL, elevation = 0.dp) {
-            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
+            val website = authorization?.takeIf { visible }
+            Column(Modifier.fillMaxWidth().then(if (website != null)
+                Modifier.height(LocalMangaWindow.current.panelHeight.coerceAtMost(720.dp))
+                else Modifier.heightIn(max = LocalMangaWindow.current.panelHeight))) {
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 6.dp),
                     verticalAlignment = Alignment.CenterVertically) {
+                    if (website != null) MotionIconButton(onClick = {
+                        cancelWebsite(website.id)
+                    }, modifier = Modifier.size(44.dp), tooltip = "返回账号同步") {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
+                    }
                     Column(Modifier.weight(1f)) {
-                        Text("漫画进度同步", style = MaterialTheme.typography.titleMedium)
-                        work?.let { Text(it.title, style = MaterialTheme.typography.bodySmall,
+                        Text(website?.let { "连接 " + it.provider.label } ?: "漫画进度同步",
+                            style = MaterialTheme.typography.titleMedium)
+                        if (website != null) TrackingHint(if (website.provider == MangaTrackingProvider.BANGUMI)
+                            "Bangumi 官方页面 · next.bgm.tv" else "AniList 官方页面 · anilist.co")
+                        else work?.let { Text(it.title, style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     }
-                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭漫画进度同步") {
+                    MotionIconButton(onClick = dismissPanel, modifier = Modifier.size(44.dp), tooltip = "关闭漫画进度同步") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
                 }
-                LazyColumn(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(20.dp),
+                if (website != null) key(website.id) {
+                    var loading by remember { mutableStateOf(true) }
+                    if (loading) Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MotionBusyIndicator(Modifier.size(18.dp))
+                        TrackingHint("正在连接官方页面…")
+                    }
+                    NativeTrackingWebsiteLogin(authorization = website,
+                        onCancel = cancelWebsite,
+                        onCredential = { id, credential ->
+                            if (loginVisible && authorization?.id == id) {
+                                controller.completeWebsiteAuthorization(id, credential)
+                                authorization = null
+                                showCredential = false; manualCredential = false; token = ""
+                            } else controller.cancelWebsiteAuthorization(id)
+                        },
+                        onLoading = { if (authorization?.id == website.id) loading = it },
+                        onError = { message ->
+                            if (loginVisible && authorization?.id == website.id) {
+                                externalError = message
+                                cancelWebsite(website.id)
+                            }
+                        }, modifier = Modifier.fillMaxWidth().weight(1f).padding(12.dp))
+                } else LazyColumn(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(20.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     item {
                         MotionTabs(providerIndex, MangaTrackingProvider.entries.map { it.label }, onSelect = {
@@ -142,28 +212,34 @@ internal fun MangaTrackingSheet(
                     }
                     if (account == null || showCredential) {
                         item {
-                            val authorizationUrl = controller.authorizationUrl(provider)
-                            if (authorizationUrl != null) {
-                                MotionOutlinedButton(onClick = { openLink(authorizationUrl) }, enabled = visible && !busy,
+                            val websiteConfigured = provider == MangaTrackingProvider.BANGUMI || state.aniListClientId.isNotBlank()
+                            if (trackingWebsiteLoginSupported() && websiteConfigured) {
+                                MotionButton(onClick = {
+                                    externalError = null; token = ""
+                                    authorization = controller.beginWebsiteAuthorization(provider)
+                                }, enabled = enabled,
                                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                                    Text(if (provider == MangaTrackingProvider.BANGUMI) "前往 Bangumi 登录并获取令牌" else "前往 AniList 登录授权")
-                                    Icon(Icons.Outlined.OpenInNew, null, Modifier.padding(start = 8.dp).size(16.dp))
+                                    Text(if (account == null) "登录 " + provider.label else "重新登录 " + provider.label)
                                 }
                                 TrackingHint(if (provider == MangaTrackingProvider.BANGUMI)
-                                    "在 Bangumi 官方页面登录，创建访问令牌后复制到下方。"
-                                else "在 AniList 官方页面登录并授权，将页面显示的访问令牌复制到下方。",
+                                    "在官网登录并确认创建授权，完成后自动连接，无需复制令牌。"
+                                else "在官网登录并同意授权，完成后自动连接。",
                                     Modifier.padding(top = 8.dp))
                             } else {
-                                TrackingHint("当前版本尚未配置 AniList 登录。已有访问令牌仍可在下方连接。")
+                                TrackingHint(if (!websiteConfigured) "当前版本尚未配置 AniList 登录，可先连接 Bangumi。"
+                                    else "当前平台暂不支持软件内登录，可使用备用方式连接。")
                             }
                         }
                         item {
-                            TrackingInput(token, { token = it }, "粘贴访问令牌", enabled = enabled, secret = true)
+                            MotionTextButton(onClick = { manualCredential = !manualCredential; token = "" }, enabled = enabled) {
+                                Text(if (manualCredential) "收起备用方式" else "使用已有授权 · 备用方式")
+                            }
                         }
-                        item {
+                        if (manualCredential) item {
+                            TrackingInput(token, { token = it }, "已有访问令牌", enabled = enabled, secret = true)
                             MotionButton(onClick = {
-                                controller.connect(provider, token); token = ""; showCredential = false
-                            }, enabled = enabled && token.isNotBlank(), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                                controller.connect(provider, token); token = ""; showCredential = false; manualCredential = false
+                            }, enabled = enabled && token.isNotBlank(), modifier = Modifier.fillMaxWidth().padding(top = 8.dp).heightIn(min = 48.dp)) {
                                 Text("连接并核对账号")
                             }
                         }

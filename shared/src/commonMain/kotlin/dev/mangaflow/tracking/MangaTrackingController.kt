@@ -6,8 +6,10 @@ import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.randomUuid
+import dev.mangaflow.platform.storage.StorageLock
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.storage.LibraryStore
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -40,6 +42,8 @@ class MangaTrackingController(
     private val store = MangaTrackingStore(applicationContext(context))
     private val diskMutex = Mutex()
     private val operationMutex = Mutex()
+    private val authorizationLock = StorageLock()
+    private var websiteAuthorization: WebsiteAuthorizationTicket? = null
     private var records = TrackingRecords()
     private var workspaceEpoch = 0L
     private var active = false
@@ -47,6 +51,11 @@ class MangaTrackingController(
     private val mutable = MutableStateFlow(MangaTrackingState(
         aniListClientId = aniListClientId.trim().takeIf { it.matches(Regex("[1-9][0-9]*")) }.orEmpty()))
     val state: StateFlow<MangaTrackingState> = mutable.asStateFlow()
+
+    private class WebsiteAuthorizationTicket(val authorization: MangaTrackingAuthorization) {
+        var accepted = false
+        var verification: Job? = null
+    }
 
     init {
         scope.launch {
@@ -88,22 +97,124 @@ class MangaTrackingController(
         if (value) startPump() else { pumpJob?.cancel(); pumpJob = null }
     }
 
-    fun authorizationUrl(provider: MangaTrackingProvider): String? = when (provider) {
-        MangaTrackingProvider.BANGUMI -> "https://next.bgm.tv/demo/access-token"
-        MangaTrackingProvider.ANILIST -> mutable.value.aniListClientId.takeIf(String::isNotBlank)?.let { clientId ->
-            "https://anilist.co/api/v2/oauth/authorize".toHttpUrlOrNull()!!.newBuilder()
-                .addQueryParameter("client_id", clientId).addQueryParameter("response_type", "token").build().toString()
+    internal fun beginWebsiteAuthorization(provider: MangaTrackingProvider): MangaTrackingAuthorization? {
+        if (!mutable.value.ready) { fail("漫画同步资料尚未就绪，请稍后重试。"); return null }
+        val state = mangaTrackingAuthorizationNonce()
+        val startUrl = when (provider) {
+            MangaTrackingProvider.BANGUMI -> MANGA_TRACKING_BANGUMI_CREATE
+            MangaTrackingProvider.ANILIST -> {
+                val clientId = mutable.value.aniListClientId.takeIf(String::isNotBlank)
+                if (clientId == null) {
+                    fail("此安装包尚未配置漫流的 AniList 应用 ID，可先使用备用令牌连接，或更新到已配置的版本。")
+                    return null
+                }
+                "https://anilist.co/api/v2/oauth/authorize".toHttpUrlOrNull()!!.newBuilder()
+                    .addQueryParameter("client_id", clientId)
+                    .addQueryParameter("response_type", "token")
+                    .addQueryParameter("redirect_uri", MANGA_TRACKING_ANILIST_CALLBACK)
+                    .addQueryParameter("state", state).build().toString()
+            }
+        }
+        val authorization = MangaTrackingAuthorization(randomUuid(), provider, startUrl,
+            if (provider == MangaTrackingProvider.ANILIST) MANGA_TRACKING_ANILIST_CALLBACK else null,
+            state, wallTimeMillis())
+        val previous = synchronized(authorizationLock) {
+            val old = websiteAuthorization
+            websiteAuthorization = WebsiteAuthorizationTicket(authorization)
+            old?.verification
+        }
+        previous?.cancel()
+        mutable.update { it.copy(error = null, message = null) }
+        return authorization
+    }
+
+    internal fun cancelWebsiteAuthorization(id: String) {
+        val previous = synchronized(authorizationLock) {
+            val current = websiteAuthorization
+            // Removing the successful website UI is normal cleanup, not cancellation of
+            // the already accepted account verification. Explicit account actions below
+            // invalidate both phases.
+            if (current == null || current.authorization.id != id || current.accepted) null
+            else { websiteAuthorization = null; current.verification }
+        }
+        previous?.cancel()
+    }
+
+    internal fun completeWebsiteAuthorization(id: String, token: String) {
+        val ticket = synchronized(authorizationLock) {
+            val current = websiteAuthorization
+            if (current == null || current.authorization.id != id || current.accepted) null
+            else if (!current.authorization.isCurrent()) {
+                websiteAuthorization = null
+                fail("本次授权已过期，请重新登录。")
+                null
+            } else { current.accepted = true; current }
+        } ?: return
+        val provider = ticket.authorization.provider
+        lateinit var verification: Job
+        verification = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                operationMutex.withLock {
+                    if (!ownsWebsiteAuthorization(ticket) || !mutable.value.ready) return@withLock
+                    mutable.update { it.copy(busy = true, checkingProvider = provider, error = null, message = null) }
+                    try {
+                        repository.connect(provider, token) { commit ->
+                            synchronized(authorizationLock) {
+                                if (websiteAuthorization !== ticket || !verification.isActive)
+                                    throw CancellationException("Website authorization is no longer current")
+                                val account = commit()
+                                connected(provider, account)
+                                account
+                            }
+                        }
+                        startPump()
+                    } catch (cancel: CancellationException) { throw cancel }
+                    catch (failure: Exception) {
+                        if (ownsWebsiteAuthorization(ticket)) fail(failure.message ?: "账号核验未完成，请重新登录。")
+                    } finally { mutable.update { it.copy(busy = false, checkingProvider = null) } }
+                }
+            } finally {
+                synchronized(authorizationLock) { if (websiteAuthorization === ticket) websiteAuthorization = null }
+            }
+        }
+        val start = synchronized(authorizationLock) {
+            if (websiteAuthorization !== ticket) false
+            else { ticket.verification = verification; true }
+        }
+        if (start) verification.start() else verification.cancel()
+    }
+
+    private fun ownsWebsiteAuthorization(ticket: WebsiteAuthorizationTicket): Boolean = synchronized(authorizationLock) {
+        // The website deadline is checked when accepting the one-use receipt. Verification
+        // may finish just after that deadline; replacement/cancellation still revokes ownership.
+        websiteAuthorization === ticket && ticket.accepted
+    }
+
+    private fun invalidateWebsiteAuthorization() {
+        val previous = synchronized(authorizationLock) {
+            val old = websiteAuthorization?.verification
+            websiteAuthorization = null
+            old
+        }
+        previous?.cancel()
+    }
+
+    private fun connected(provider: MangaTrackingProvider, account: MangaTrackingAccount) {
+        mutable.update { it.copy(accounts = it.accounts + (provider to account), reviews = it.reviews - provider,
+            candidates = it.candidates - provider, preview = null, error = null,
+            message = "已连接 " + provider.label + " · " + account.displayName) }
+    }
+
+    fun connect(provider: MangaTrackingProvider, accessToken: String) {
+        invalidateWebsiteAuthorization()
+        action(provider) {
+            connected(provider, repository.connect(provider, accessToken))
+            startPump()
         }
     }
 
-    fun connect(provider: MangaTrackingProvider, accessToken: String) = action(provider) {
-        val account = repository.connect(provider, accessToken)
-        mutable.update { it.copy(accounts = it.accounts + (provider to account), reviews = it.reviews - provider,
-            candidates = it.candidates - provider, preview = null, message = "已连接 " + provider.label + " · " + account.displayName) }
-        startPump()
-    }
-
     fun disconnect(provider: MangaTrackingProvider) {
+        invalidateWebsiteAuthorization()
         scope.launch {
             try {
                 withContext(Dispatchers.IO) { repository.disconnect(provider) }

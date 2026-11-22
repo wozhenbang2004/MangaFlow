@@ -4,6 +4,25 @@
 
 ## 漫画阅读互通与 PDF · 2026-11-22
 
+### 本轮继续：软件内授权与冲突确认
+
+用户进一步要求：「你就不能够做一个我们在我们软件里登录，然后自动……我们自动提取出 token，然后拿来用嘛。这样搞不好麻烦」「关于局域网这个，你是怎么做到的？只要连的同一个 WiFi，就可以发现设备是吗？然后呢，这个冲突你怎么处理呢？」原始消息 ID／发送时间未提供，2026-11-22 本轮固化。明确取代此前默认让用户复制／粘贴令牌的交互；账号验证、本人授权和作品对应仍保留。
+
+- **MANGA-TRACK-AUTH-01**：设置里的默认连接入口直接进入软件内的官方登录／授权页面；本次成功结果自动回传、核验账号并进入安全凭据。保留手动令牌为折叠备用方式。密码和网页登录 Cookie 不进入漫流业务层，取消／换账号／旧页面回调不能恢复已取消授权。
+- **MANGA-TRACK-AUTH-02**：Bangumi 使用官方个人令牌创建页，用户显式提交可见表单后只接回本次新令牌，省去复制粘贴；名称可预填 MangaFlow，期限沿官方表单并允许用户选择。它是官方页面适配，不冒充稳定的 OAuth 回调，不从后台代用户创建令牌或截取普通登录 Cookie。
+- **MANGA-TRACK-AUTH-03**：AniList 使用公开 client ID 的 implicit，登记精确回调 `mangaflow://oauth/anilist`；专用官方 WebView 在交回导航时接收片段，校验随机一次性 state、时限、会话与地址后消费。该路径无需本机系统 URI 注册，不打开外部浏览器；项目维护者仍须配置自己的应用 ID 与该回调，替代此前 PIN 复制方案。
+- **MANGA-SYNC-CONFLICT-01**：同一可达 IPv4 LAN 的组播发现不依赖 Wi-Fi 名称；手机 Wi-Fi 与电脑网线可以互通，访客隔离／不同网段／组播与防火墙限制明确属于连接边界。没有共享因果的首次旧历史按并发处理，不能承诺同步启用前的删除也有墓碑。
+- **MANGA-SYNC-CONFLICT-02**：真正不同的并发候选保持待确认；后续普通阅读只能延续一个分支，不能悄悄取代全部待选版本。明确选择才消解已经看见的候选，未见的第三设备分支仍独立合入。按保存时间临时采用的规则与删除优先规则公开说明，不用最大页码推断用户意图。
+- **MANGA-SYNC-CONFLICT-03**：设置现有同步入口显示待确认数量；面板显示当前采用、版本时间及足够区分的来源／页内位置／画格信息。继续阅读与章节记录仍分项，不伪称一次选择会同时改所有记录。沿现有 Motion/Ovio/Haze 组件，不在阅读中强制弹窗。
+
+本轮源码集成和有界独立审阅已完成。软件内授权复用现有 MotionDialog 内的官方网页容器，成功后回到原账号／作品面板；备用令牌默认折叠。关闭、返回和后台事件立即撤销未交付会话；已接收凭据的正常页面卸载不会取消核验，新登录／手工连接／断开则使旧核验失效。最终账号核验通过后，ticket 所有权检查与安全凭据写入在同一锁内完成。Android 使用独立 WebView Profile，Windows 复用现有 JavaFX 并统一 Copy／Tracking 窗口所有权；销毁页与清理临时数据完成后才交付凭据。
+
+独立审阅修正了真实 submit 的 capture 监听与官方 form handler 之间可能执行 microtask 的时序：观察窗口改在事件 task 之后清除，并用同一真实事件仍处于分派阶段的条件约束那一次 POST；不能退回 Promise 微任务提前关闭。依据为 [HTML 的脚本清理与微任务检查](https://html.spec.whatwg.org/multipage/webappapis.html#clean-up-after-running-script)及 [DOM 监听器调用](https://dom.spec.whatwg.org/#concept-event-listener-inner-invoke)。平台失败先显示原因再退出，10 分钟期限及清理期间过期均明确返回；Windows 清理仅允许 OpenJFX 仍持有的零字节 `.lock` 空壳，实际页面资料未清掉时不交付。锁文件依据 [OpenJFX 21.0.9+1 DirectoryLock](https://github.com/openjdk/jfx21u/blob/239ad1a089d8341b71ffb00189852036aa775df2/modules/javafx.web/src/main/java/javafx/scene/web/DirectoryLock.java)。
+
+LAN 普通阅读延续单个分支，既有差异即使后来到达相同位置也保持待确认；明确选择覆盖已见候选，未知第三设备的新分支仍可再次产生差异。越出来源范围的待确认记录暂停捕获／合入／输出，保留本机位置与旧基线，恢复范围后先记录期间变化。wire v2 拒绝会自动消掉候选的旧 v1 对端，本机 v1 日志可迁移，两端均须更新。差异列表显示时间、来源、长图／页内／画格位置，设置显示数量。
+
+本轮仅完成源码、接口接线和差异／文件完整性核对；沿原禁测、禁本地构建／编译／探测与单次 main 提交约束。真实账号往返、AniList state 回显、系统 WebView／JavaFX 实际兼容性及跨设备体验待产物验证，不据源码审阅宣称已通过。
+
 本轮用户在竞品对照后授权：「能不能局域网就直接同步了，检测到」「我们是有上滑下那个……直接切到下一张的。你没有看到有这个功能吗」「也不用说支持特别多……再简单支持一个 PDF」「Bangumi 和那个 Anilist……只要你登录这个账号就可以支持这样的同步，不只是我们的拷贝」「漫画增强功能我感觉做得不是很好用啊，可以学学他们怎么做的，全部交给你了」。原始消息 ID 未提供。上述是本轮有效范围；用户对普通漫画已有成熟度的判断与对增强效果的否定分别保留。
 
 | 要求 | 本批采用方案与验收边界 |
@@ -20,7 +39,9 @@
 
 ### AniList 发布配置
 
-需要维护者在 AniList 开发者设置注册漫流自己的应用，并把 Redirect URL 设为官方 `https://anilist.co/api/v2/oauth/pin`。将公开的数字 Client ID 设到仓库 Actions variable `MANGAFLOW_ANILIST_CLIENT_ID`，由现有 Android／多平台工作流注入；本地维护也可使用同名环境变量或 Gradle 属性 `mangaflow.aniListClientId`。生成配置不保存 client secret、不借用其他应用 ID。未配置时面板如实禁用 AniList 网页授权，允许已有访问令牌经 Viewer 验证后连接。本批没有代用户注册、配置真实应用 ID 或执行个人账号写入；这项外部前提仍开放。
+需要维护者在 AniList 开发者设置注册漫流自己的应用，并把 Redirect URL 设为 `mangaflow://oauth/anilist`。这是本轮软件内自动回传所用的精确地址，取代此前 PIN 页复制方式。专用官方 WebView 拦截该地址，校验本次 state 与 fragment，随后关闭临时会话并交给既有账号核验；不依赖操作系统 URI 注册。将公开的数字 Client ID 设到仓库 Actions variable `MANGAFLOW_ANILIST_CLIENT_ID`，由现有 Android／多平台工作流注入；本地维护也可使用同名环境变量或 Gradle 属性 `mangaflow.aniListClientId`。生成配置不保存 client secret、不借用其他应用 ID。未配置时面板如实提示，可连接 Bangumi，或展开已有授权备用入口。本批没有代用户注册、配置真实应用 ID 或执行个人账号写入；这项外部前提仍开放。
+
+授权依据来自 [AniList 官方 implicit 文档](https://github.com/AniList/docs/blob/03281c0a4bbf0c7f2097e0c935cddaed1096aa65/docs/guide/auth/implicit.md)及[原生回调说明](https://github.com/AniList/docs/blob/03281c0a4bbf0c7f2097e0c935cddaed1096aa65/docs/guide/auth/index.md)。Bangumi 页面适配按官方 [token 创建模板](https://github.com/bangumi/server-private/blob/a79f40ccd76689ba10cc8b2a3ea05c060b96abc7/templates/token/create.liquid)与 [token 路由](https://github.com/bangumi/server-private/blob/a79f40ccd76689ba10cc8b2a3ea05c060b96abc7/routes/demo/token/index.ts)的精确 origin／路径／提交结果实现；没有复制官网页面或读取普通登录会话。该页面接口非稳定第三方 OAuth 协议，官网变化时必须保留明确错误及备用入口，不能从其他页面猜测令牌。
 
 ### 源码交付与检查边界
 

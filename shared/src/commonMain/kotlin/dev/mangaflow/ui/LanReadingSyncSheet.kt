@@ -64,6 +64,7 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
                             !state.supported -> "当前支持 Android 与 Windows 之间同步。"
                             !state.enabled -> "开启后，配对设备在同一局域网中会自动重连。"
                             !state.active -> "等待漫流在前台启动局域网连接。"
+                            state.conflicts.isNotEmpty() -> "已采用默认结果，${state.conflicts.size} 处差异仍待你确认。"
                             state.lastSyncAt > 0L -> "已完成同步，后续阅读变化会自动合并。"
                             paired.isEmpty() -> "先添加一台设备，在两端核对校验码。"
                             else -> "等待已配对设备连接。"
@@ -161,8 +162,10 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
                 }
                 if (state.conflicts.isNotEmpty()) item(key = "conflicts-title") {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("${state.conflicts.size} 处阅读差异", style = MaterialTheme.typography.titleSmall)
-                        Text("不同设备离线修改过同一记录。当前结果已合并，其他版本仍保留；删除与修改冲突时优先保留删除，也可以手动选择恢复。",
+                        Text("${state.conflicts.size} 处差异待确认", style = MaterialTheme.typography.titleSmall)
+                        Text("当前已采用默认结果。继续阅读会更新相应版本，其他候选仍保留；点选一个版本后，才确认这条记录的选择。",
+                            fontSize = 12.sp, color = colors.onSurfaceVariant)
+                        Text("不同设备的阅读位置默认按记录时间选择，删除优先；时间按本机时区显示。章节位置和继续阅读分别确认。",
                             fontSize = 12.sp, color = colors.onSurfaceVariant)
                     }
                 }
@@ -172,15 +175,16 @@ internal fun LanReadingSyncSheet(controller: LanReadingSyncController, onDismiss
                             overflow = TextOverflow.Ellipsis)
                         MotionTextButton(onClick = { expanded = if (expanded == conflict.key) null else conflict.key },
                             modifier = Modifier.heightIn(min = 44.dp)) {
-                            Text("${conflict.kind} · ${if (expanded == conflict.key) "收起版本" else "选择版本"}", fontSize = 12.sp)
+                            Text("${conflict.kind} · ${if (expanded == conflict.key) "收起候选" else "查看并确认版本"}", fontSize = 12.sp)
                         }
                         if (expanded == conflict.key) conflict.choices.forEach { choice ->
                             MotionTextButton(onClick = { controller.chooseConflict(conflict.key, choice.id) },
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
                                     .semantics { selected = choice.selected }) {
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text(choice.device + if (choice.selected) " · 当前采用" else "", fontSize = 12.sp)
+                                    Text(choice.device + if (choice.selected) " · 当前采用，待确认" else " · 确认此版本", fontSize = 12.sp)
                                     Text(choice.position, fontSize = 11.sp, color = colors.onSurfaceVariant)
+                                    Text(choice.details, fontSize = 11.sp, color = colors.onSurfaceVariant)
                                 }
                                 if (choice.selected) Icon(Icons.Outlined.Check, null, Modifier.size(16.dp))
                             }

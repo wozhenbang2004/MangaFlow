@@ -1,7 +1,11 @@
 package dev.mangaflow.sync
 
+import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.applicationContext
+import dev.mangaflow.platform.formatDecimal
+import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.platform.storage.preferences
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.storage.LibraryStore
@@ -20,7 +24,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-internal data class LanReadingChoice(val id: String, val device: String, val position: String, val selected: Boolean)
+internal data class LanReadingChoice(
+    val id: String, val device: String, val position: String, val details: String, val selected: Boolean,
+)
 internal data class LanReadingConflict(val key: String, val title: String, val kind: String, val choices: List<LanReadingChoice>)
 internal data class LanReadingSyncState(
     val supported: Boolean = true,
@@ -153,6 +159,7 @@ internal class LanReadingSyncController(
     }
 
     fun chooseConflict(key: String, version: String) {
+        _state.update { it.copy(error = null) }
         scope.launch(Dispatchers.IO) {
             try {
                 transact(null, null, key to version)
@@ -210,17 +217,34 @@ internal class LanReadingSyncController(
                     ?: LanReadingLedger(ownId)
                 ledger = ledger.capture(snapshot, sources, wallTimeMillis())
                 if (remote != null) ledger = ledger.merge(remote, sources)
+                var selectionChanged = false
                 if (selection != null) {
                     val record = ledger.records[selection.first] ?: error("这条冲突已变化，请重新查看。")
                     check(record.allowed(ledger.books, sources)) { "此作品不在普通漫画同步范围。" }
-                    ledger = ledger.choose(selection.first, selection.second, wallTimeMillis())
+                    if (record.versions.none { it.id == selection.second }) selectionChanged = true
+                    else ledger = ledger.choose(selection.first, selection.second, wallTimeMillis())
                 }
-                val projection = ledger.projection(sources)
-                ledger = ledger.copy(baseline = ledger.baseline.filterValues { !it.allowed(ledger.books, sources) } + projection)
+                val suspended = ledger.records.filterValues { it.conflicting() && !it.allowed(ledger.books, sources) }.keys
+                val projection = ledger.projection(sources).mapValues { (key, value) ->
+                    val current = snapshot.items[key]
+                    // A stationary read refresh is local ordering, not confirmation of a disputed
+                    // RECENT branch. Keep its newer time without rewriting any wire candidate.
+                    if (value.kind == LanReadingKind.RECENT && ledger.records[key]?.conflicting() == true &&
+                        current != null && current.sameContent(value)) value.copy(at = maxOf(value.at, current.at))
+                    else value
+                } + snapshot.items.filterKeys { it in suspended }
+                // Source exclusions must neither export hidden candidates nor delete current local
+                // reading. Retain the old baseline so resumed scope can capture intervening edits.
+                val baseline = ledger.baseline.filterValues { !it.allowed(ledger.books, sources) } + projection
+                ledger = ledger.copy(baseline = baseline.filterKeys { it !in suspended } +
+                    ledger.baseline.filterKeys { it in suspended })
                 val saved = LanReadingCodec.encode(ledger, local = true)
                 if (library.applyLanReading(snapshot, ledger.books, projection, saved, sources, ::current)) {
                     check(current()) { "同步范围或设备授权已改变。" }
                     publishConflicts(ledger, sources)
+                    // Reading can advance the local candidate while the sheet is open/offline.
+                    // Publish that newer candidate before asking for another explicit choice.
+                    check(!selectionChanged) { "这条阅读差异已更新，请从最新候选中确认。" }
                     return@withLock LanReadingDocument(LanReadingCodec.encode(ledger, local = false, sources = sources), ::current)
                 }
             }
@@ -232,10 +256,16 @@ internal class LanReadingSyncController(
         val conflicts = ledger.records.values.filter { it.allowed(ledger.books, sources) && it.conflicting() }
             .map { record ->
                 val winner = record.winner().id
-                LanReadingConflict(record.key, ledger.books.getValue(record.identity.mangaId).title,
+                val book = ledger.books.getValue(record.identity.mangaId)
+                val layouts = record.versions.mapNotNull { it.item?.panelLayout?.takeIf(String::isNotBlank) }.distinct().sorted()
+                LanReadingConflict(record.key, book.title,
                     kindName(record.identity.kind), record.versions.map { version ->
-                        LanReadingChoice(version.id, if (version.actor == ownId) "本机" else names[version.actor] ?: "另一台设备",
-                            positionName(version.item), version.id == winner)
+                        val layout = version.item?.panelLayout.orEmpty()
+                        val layoutLabel = if (layouts.size > 1 && layout.isNotBlank())
+                            "画格布局 ${layouts.indexOf(layout) + 1}" else null
+                        LanReadingChoice(version.id, if (version.actor == ownId) "本机" else names[version.actor]
+                            ?: "另一台设备 · ${version.actor.take(6)}", positionName(version.item, layoutLabel),
+                            choiceDetails(version, record.identity, book), version.id == winner)
                     })
             }.sortedBy { it.title }
         _state.update { it.copy(conflicts = conflicts) }
@@ -252,12 +282,37 @@ private fun kindName(kind: LanReadingKind): String = when (kind) {
     LanReadingKind.PICTURE -> "图片收藏"
 }
 
-private fun positionName(value: LanReadingItem?): String = when {
+private fun positionName(value: LanReadingItem?, layoutLabel: String?): String = when {
     value == null -> "已删除"
     value.kind == LanReadingKind.FAVORITE -> "保留收藏"
     value.kind == LanReadingKind.BOOKMARK -> "第 ${value.page + 1} 页" + value.note.takeIf(String::isNotBlank)?.let { " · $it" }.orEmpty()
     value.kind == LanReadingKind.PICTURE -> value.chapterTitle + " · 第 ${value.page + 1}" +
         (if (value.lastPage > value.page) "–${value.lastPage + 1}" else "") + " 页"
-    else -> value.chapterTitle + " · 第 ${value.page + 1}/${value.pages} 页" +
-        (if (value.offset > 0) " · 页内 ${value.offset}px" else "")
+    else -> buildList {
+        if (value.chapterTitle.isNotBlank()) add(value.chapterTitle)
+        add("第 ${value.page + 1}/${value.pages} 页")
+        if (value.offset > 0) add("页内 ${value.offset} px")
+        value.longImage?.let { add("长图 ${formatDecimal(it * 100.0, 1)}%") }
+        if (value.panel >= 0) add("画格 ${value.panel + 1}")
+        layoutLabel?.let { add(it) }
+    }.joinToString(" · ")
+}
+
+private fun choiceDetails(version: LanReadingVersion, identity: LanReadingItem, book: LanReadingBook): String {
+    val value = version.item ?: identity
+    val sourceId = if (version.item == null || value.chapterId.isBlank()) book.sourceId
+        else SourceKeys.decodeChapter(value.mangaId, value.chapterId).sourceId
+    val source = if (sourceId == book.sourceId) book.sourceName.ifBlank { sourceDisplayName(sourceId) }
+        else sourceDisplayName(sourceId)
+    val at = version.item?.at?.takeIf { it > 0L }
+    val time = at ?: version.changedAt
+    val label = when {
+        version.item == null -> "删除记录"
+        at == null -> "原时间未知，收录于"
+        value.kind == LanReadingKind.FAVORITE || value.kind == LanReadingKind.PICTURE -> "收藏记录"
+        value.kind == LanReadingKind.BOOKMARK -> "书签记录"
+        else -> "阅读记录"
+    }
+    val formatted = runCatching { formatInstantMillis(time, "yyyy-MM-dd HH:mm:ss") }.getOrDefault("时间不可用")
+    return "$source · $label $formatted"
 }

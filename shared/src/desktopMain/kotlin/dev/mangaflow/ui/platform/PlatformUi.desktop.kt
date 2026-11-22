@@ -291,12 +291,18 @@ actual fun NativeWebsiteLogin(
     val receipt = remember { WebsiteLoginReceipt(onBegin, onCancel, onCredential) }
     val result = remember { runCatching {
         FxWebsiteSession(receipt,
-            onLoading = { scope.launch { loading.value(it) } },
-            onError = { scope.launch { receipt.close(); failure.value(it) } },
-            onDocument = { scope.launch { receipt.newDocument() } },
-            onDeliver = { token -> scope.launch { receipt.deliverAfterCleanup(token) } },
-            onMessage = { raw, url -> scope.launch {
-                receipt.receive(raw, url, true)?.let { token ->
+            onLoading = { owner, value -> scope.launch { if (owner.acceptsResult()) loading.value(value) } },
+            onError = { owner, message -> scope.launch {
+                receipt.close()
+                if (owner.acceptsResult()) failure.value(message)
+            } },
+            onDocument = { owner -> scope.launch { if (owner.acceptsMessage()) receipt.newDocument() } },
+            onDeliver = { owner, token -> scope.launch {
+                if (owner.acceptsResult()) receipt.deliverAfterCleanup(token) else receipt.close()
+            } },
+            onRetired = { scope.launch { receipt.close() } },
+            onMessage = { owner, raw, url -> scope.launch {
+                if (owner.acceptsMessage()) receipt.receive(raw, url, true)?.let { token ->
                     sessionCleanupAndDeliver(receipt, token)
                 }
             } })
@@ -312,42 +318,92 @@ actual fun NativeWebsiteLogin(
 }
 /** Called on the Compose dispatcher, then completes only after the isolated profile is cleared. */
 private fun sessionCleanupAndDeliver(receipt: WebsiteLoginReceipt, token: String) {
-    DesktopWebsiteSessions.active?.takeIf { it.receipt === receipt }?.deliver(token)
+    (DesktopWebsiteSessions.active as? FxWebsiteSession)?.takeIf { it.receipt === receipt }?.deliver(token)
 }
-private object DesktopWebsiteSessions {
-    @Volatile var active: FxWebsiteSession? = null
+
+/** JavaFX uses one process CookieHandler; every official login shares this ownership lane. */
+internal interface DesktopWebsiteSessionOwner {
+    /** Called synchronously on the JavaFX thread before another owner takes its cookies. */
+    fun closeForReplacement(): Boolean
 }
+
+internal object DesktopWebsiteSessions {
+    @Volatile var active: DesktopWebsiteSessionOwner? = null
+        private set
+    @Volatile var generation: Long = 0L
+        private set
+
+    fun claim(owner: DesktopWebsiteSessionOwner): Long {
+        check(Platform.isFxApplicationThread())
+        generation++
+        check(active?.closeForReplacement() != false && active == null) { "临时登录会话尚未关闭。" }
+        active = owner
+        return generation
+    }
+
+    fun release(owner: DesktopWebsiteSessionOwner) {
+        check(Platform.isFxApplicationThread())
+        if (active === owner) active = null
+    }
+
+    fun isCurrent(ticket: Long): Boolean = ticket > 0L && ticket == generation
+}
+
+/** OpenJFX retains an empty .lock until WebEngine disposal; Windows cannot unlink that handle. */
+internal fun clearDesktopWebsiteProfile(profile: File): Boolean = runCatching {
+    val root = profile.toPath()
+    if (!Files.exists(root)) return@runCatching true
+    val lock = root.resolve(".lock")
+    var cleared = true
+    Files.walk(root).use { paths ->
+        paths.sorted(Comparator.reverseOrder()).forEach { path ->
+            try { Files.deleteIfExists(path) }
+            catch (_: Exception) {
+                // No storage/cache file is exempt. Only the empty engine lock and its
+                // root directory may remain after all actual page data was removed.
+                if (path != root && (path != lock || Files.isSymbolicLink(path) ||
+                        !Files.isRegularFile(path) || Files.size(path) != 0L)) cleared = false
+            }
+        }
+    }
+    cleared && (!Files.exists(root) || Files.list(root).use { paths ->
+        paths.allMatch { it == lock && !Files.isSymbolicLink(it) && Files.isRegularFile(it) && Files.size(it) == 0L }
+    })
+}.getOrDefault(false)
+
 /** A public JVM class is necessary for JavaFX's documented JSObject.setMember bridge. */
 class DesktopAccountBridge(private val receiver: (String) -> Unit) {
     fun postMessage(value: String) { receiver(value) }
 }
 private class FxWebsiteSession(
     val receipt: WebsiteLoginReceipt,
-    private val onLoading: (Boolean) -> Unit,
-    private val onError: (String) -> Unit,
-    private val onDocument: () -> Unit,
-    private val onDeliver: (String) -> Unit,
-    private val onMessage: (String, String) -> Unit,
-) {
+    private val onLoading: (FxWebsiteSession, Boolean) -> Unit,
+    private val onError: (FxWebsiteSession, String) -> Unit,
+    private val onDocument: (FxWebsiteSession) -> Unit,
+    private val onDeliver: (FxWebsiteSession, String) -> Unit,
+    private val onRetired: () -> Unit,
+    private val onMessage: (FxWebsiteSession, String, String) -> Unit,
+) : DesktopWebsiteSessionOwner {
     val panel = JFXPanel()
     private val profile = Files.createTempDirectory("mangaflow-login-").toFile()
     private val cookies = CookieManager(null, CookiePolicy.ACCEPT_ORIGINAL_SERVER)
     private var previousCookies: CookieHandler? = null
     private var view: WebView? = null
     private var bridge: DesktopAccountBridge? = null
-    private var closed = false
+    @Volatile private var closed = false
+    @Volatile private var cancelled = false
+    @Volatile private var ownership = 0L
+    private var cleanupSucceeded = true
     private var credentialPending = false
     init {
         initializeJavaFx()
-        onLoading(true)
         Platform.runLater {
-            if (closed) return@runLater
-            val previous = DesktopWebsiteSessions.active
-            if (previous != null) previous.close()
-            DesktopWebsiteSessions.active = this
-            previousCookies = CookieHandler.getDefault()
-            CookieHandler.setDefault(cookies)
+            if (closed || cancelled) return@runLater
             runCatching {
+                ownership = DesktopWebsiteSessions.claim(this)
+                previousCookies = CookieHandler.getDefault()
+                CookieHandler.setDefault(cookies)
+                onLoading(this, true)
                 val browser = WebView()
                 view = browser
                 val engine = browser.engine
@@ -368,17 +424,17 @@ private class FxWebsiteSession(
                 engine.loadWorker.stateProperty().addListener(ChangeListener { _, _, state ->
                     if (closed) return@ChangeListener
                     when (state) {
-                        Worker.State.SCHEDULED -> onLoading(true)
+                        Worker.State.SCHEDULED -> onLoading(this, true)
                         Worker.State.SUCCEEDED -> {
                             if (!allowedWebsitePage(engine.location)) return@ChangeListener
-                            if (!isWebsiteLoginPage(engine.location)) { onLoading(false); return@ChangeListener }
-                            onDocument()
+                            if (!isWebsiteLoginPage(engine.location)) { onLoading(this, false); return@ChangeListener }
+                            onDocument(this)
                             runCatching {
                                 val window = engine.executeScript("window") as JSObject
-                                bridge = DesktopAccountBridge { raw -> onMessage(raw, engine.location) }
+                                bridge = DesktopAccountBridge { raw -> onMessage(this, raw, engine.location) }
                                 window.setMember("MangaFlowAccount", bridge)
                                 engine.executeScript(websiteObserver(receipt.nonce, "window.MangaFlowAccount"))
-                                onLoading(false)
+                                onLoading(this, false)
                             }.onFailure { fail("无法建立安全登录会话，请重新打开登录。") }
                         }
                         Worker.State.FAILED -> fail("官网登录页未能加载，请检查网络后重试。")
@@ -387,46 +443,61 @@ private class FxWebsiteSession(
                 })
                 panel.scene = Scene(StackPane(browser))
                 engine.load(CopyWebsiteEndpoints.LOGIN_PAGE)
-            }.onFailure { fail("无法打开官网登录页，请重新打开登录。") }
+            }.onFailure {
+                if (ownership == 0L) ownership = DesktopWebsiteSessions.generation
+                fail("无法打开官网登录页，请重新打开登录。")
+            }
         }
     }
     private fun cleanup(): Boolean {
-        if (closed) return !credentialPending
+        if (closed) return cleanupSucceeded
         closed = true
-        return runCatching {
-            view?.engine?.apply {
-                loadWorker.cancel()
-                runCatching { executeScript("window.MangaFlowAccount = undefined; window.localStorage.clear(); window.sessionStorage.clear();") }
-                load(null)
-            }
-            panel.scene = null
-            view = null
-            bridge = null
-            cookies.cookieStore.removeAll()
-            if (CookieHandler.getDefault() === cookies) CookieHandler.setDefault(previousCookies)
-            if (DesktopWebsiteSessions.active === this) DesktopWebsiteSessions.active = null
-            Files.walk(profile.toPath()).use { stream -> stream.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
-            true
-        }.getOrDefault(false)
+        val engine = view?.engine
+        fun clean(block: () -> Unit) { try { block() } catch (_: Exception) { cleanupSucceeded = false } }
+        clean { engine?.loadWorker?.cancel() }
+        runCatching { engine?.executeScript("window.MangaFlowAccount = undefined; window.localStorage.clear(); window.sessionStorage.clear();") }
+        clean { engine?.load(null) }
+        clean { panel.scene = null }
+        view = null
+        bridge = null
+        clean { cookies.cookieStore.removeAll() }
+        clean {
+            if (DesktopWebsiteSessions.active === this && CookieHandler.getDefault() === cookies)
+                CookieHandler.setDefault(previousCookies)
+        }
+        DesktopWebsiteSessions.release(this)
+        if (!clearDesktopWebsiteProfile(profile)) cleanupSucceeded = false
+        return cleanupSucceeded
     }
+    fun acceptsResult(): Boolean = !cancelled && DesktopWebsiteSessions.isCurrent(ownership)
+    fun acceptsMessage(): Boolean = acceptsResult() && !closed && DesktopWebsiteSessions.active === this
     fun deliver(token: String) {
+        if (!acceptsMessage() || credentialPending) return
         credentialPending = true
         Platform.runLater {
+            if (!acceptsMessage()) { credentialPending = false; return@runLater }
             val clean = cleanup()
             credentialPending = false
             if (clean) {
                 // Coroutine callbacks return to Compose, through the same receipt owner.
-                onLoading(false)
-                onDeliver(token)
-            } else onError("临时登录数据清理未完成，账号尚未保存，请重新打开登录。")
+                onLoading(this, false)
+                onDeliver(this, token)
+            } else onError(this, "临时登录数据清理未完成，账号尚未保存，请重新打开登录。")
         }
     }
     private fun fail(message: String) {
+        if (closed || cancelled) return
         cleanup()
-        onLoading(false)
-        onError(message)
+        onLoading(this, false)
+        onError(this, message)
     }
     fun close() {
+        cancelled = true
         Platform.runLater { cleanup() }
+    }
+    override fun closeForReplacement(): Boolean {
+        cancelled = true
+        onRetired()
+        return cleanup()
     }
 }

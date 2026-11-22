@@ -57,7 +57,11 @@ internal class MangaTrackingRepository(context: PlatformContext) {
         load(provider)?.account
     }
 
-    suspend fun connect(provider: MangaTrackingProvider, token: String): MangaTrackingAccount {
+    suspend fun connect(
+        provider: MangaTrackingProvider,
+        token: String,
+        commitGuard: ((() -> MangaTrackingAccount) -> MangaTrackingAccount) = { commit -> commit() },
+    ): MangaTrackingAccount {
         val clean = token.trim().removePrefix("Bearer ").trim()
         require(clean.length in 1..16_384 && clean.none { it.isWhitespace() || it.code < 0x20 }) {
             "请输入完整的访问令牌。"
@@ -67,14 +71,18 @@ internal class MangaTrackingRepository(context: PlatformContext) {
         val identity = try { identify(http, clean) } finally { http.close() }
         return withContext(Dispatchers.IO) { synchronized(lock) {
             if ((generations[provider] ?: 0L) != generation) throw accountChanged()
-            val next = generation + 1
-            writeSecret(context, secretKey(provider), JSONObject().put("token", clean)
-                .put("ownerId", identity.account.ownerId).put("displayName", identity.account.displayName).toString())
-            active.remove(provider)?.toList()?.forEach(TrackingHttp::close)
-            credentials[provider] = Credential(identity.account, clean, next)
-            generations[provider] = next
-            loaded += provider
-            identity.account
+            // A website ticket holds its ownership lock through the commit itself, so
+            // cancellation/account replacement cannot slip between a check and secret write.
+            commitGuard {
+                val next = generation + 1
+                writeSecret(context, secretKey(provider), JSONObject().put("token", clean)
+                    .put("ownerId", identity.account.ownerId).put("displayName", identity.account.displayName).toString())
+                active.remove(provider)?.toList()?.forEach(TrackingHttp::close)
+                credentials[provider] = Credential(identity.account, clean, next)
+                generations[provider] = next
+                loaded += provider
+                identity.account
+            }
         } }
     }
 

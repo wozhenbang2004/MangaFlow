@@ -363,6 +363,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     var lanReadingSyncOpen by remember { mutableStateOf(false) }
     var mangaTrackingOpen by remember { mutableStateOf(false) }
     val mangaTrackingState by model.services.mangaTracking.state.collectAsStateWithLifecycle()
+    val lanReadingSyncState by model.services.lanReadingSync.state.collectAsStateWithLifecycle()
     var shelfSyncSource by rememberSaveable { mutableStateOf<String?>(null) }
     var adultProgressOpen by remember { mutableStateOf(false) }
     var openWebDavSettings by remember { mutableStateOf(false) }
@@ -1869,6 +1870,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 if (contentProfile == ContentProfile.RESTRICTED) ContentProfile.RESTRICTED else ContentProfile.ORDINARY)
                                         },
                                         onOpenLanReadingSync = if (!restrictedMode) ({ lanReadingSyncOpen = true }) else null,
+                                        lanReadingConflictCount = if (!restrictedMode) lanReadingSyncState.conflicts.size else 0,
                                         onOpenMangaTracking = if (!restrictedMode) ({
                                             model.services.mangaTracking.openWork(null)
                                             mangaTrackingOpen = true
