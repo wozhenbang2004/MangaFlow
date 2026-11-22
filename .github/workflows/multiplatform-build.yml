@@ -23,6 +23,9 @@ permissions:
   contents: read
   actions: read
 
+env:
+  MANGAFLOW_ANILIST_CLIENT_ID: ${{ vars.MANGAFLOW_ANILIST_CLIENT_ID }}
+
 # Windows and iOS builds are expensive: new pushes must not cancel older SHAs.
 # Keep each commit's run isolated; immutable publication is checked by native_release.py.
 concurrency:

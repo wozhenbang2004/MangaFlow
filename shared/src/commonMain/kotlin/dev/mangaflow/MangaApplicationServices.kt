@@ -56,6 +56,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -131,6 +132,12 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val sourcePlugins = SourcePluginStore.get(application)
     val starterSources = StarterSourceInstaller(application, sourcePlugins, scope)
     val library = LibraryStore(application)
+    val lanReadingSync = dev.mangaflow.sync.LanReadingSyncController(application, library, scope) {
+        bodySources.entries.value.filter { !it.adult && !it.source.adult && !it.removed && it.isInstalled }
+            .mapTo(mutableSetOf()) { it.source.id }
+    }
+    val mangaTracking = dev.mangaflow.tracking.MangaTrackingController(application, library, scope,
+        aniListClientId = dev.mangaflow.tracking.MangaTrackingBuildConfig.aniListClientId)
     val adultProgressSync = dev.mangaflow.account.AdultProgressSyncController(application, library, scope) {
         bodySources.entries.value.filter { it.adult }.mapTo(mutableSetOf()) { it.source.id }
     }
@@ -163,6 +170,12 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val preparations = ChapterPreparationStore(application, repository, downloads, scope, ::awaitSourcesReady)
 
     init {
+        scope.launch {
+            ExperiencePolicyStore.get(application).state.map { it.foreground }.distinctUntilChanged().collect { active ->
+                lanReadingSync.setForeground(active)
+                mangaTracking.setActive(active)
+            }
+        }
         dev.mangaflow.enhancement.EnhancementCenter.get(application).chapters.attach(downloads) { entry ->
             when {
                 entry.manga.sourceUrl == DownloadStore.LOCAL_SOURCE_URL -> dev.mangaflow.enhancement.EnhancementContent.MANGA
@@ -199,6 +212,7 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
         }
         scope.launch {
             bodySources.entries.collect { entries ->
+                lanReadingSync.refreshSourceScope()
                 relayLink.updateSources(entries.filter { it.enabled && !it.removed && it.isInstalled }
                     .associate { it.source.id to it.source.homeUrl } +
                     if (animeOwner.isInitialized()) animeOwner.value.sourceHomes else emptyMap())

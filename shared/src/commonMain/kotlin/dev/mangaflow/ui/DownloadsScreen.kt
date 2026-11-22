@@ -60,6 +60,7 @@ import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Inventory2
+import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.ChevronRight
@@ -137,6 +138,7 @@ import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
+import dev.mangaflow.storage.localPdfImportSupported
 import dev.mangaflow.storage.ChapterPreparationPhase
 import dev.mangaflow.storage.ChapterPreparationState
 import dev.mangaflow.net.DownloadCategory
@@ -367,6 +369,17 @@ fun DownloadsScreen(
             }
             val base = documentName(context, it).substringBeforeLast('.').ifBlank { "本地漫画" }
             pendingImport = PendingLocalImport(LocalImportSource.Archive(it), base, "第 1 话")
+        }
+    }
+    val pdfPicker = rememberOpenDocumentPicker() { uri ->
+        uri?.let {
+            if (!importInputOpen.value || !localImportAllowed || !localPdfImportSupported) {
+                releasePickedDocuments(listOf(it))
+                return@rememberOpenDocumentPicker
+            }
+            val base = documentName(context, it).substringBeforeLast('.').ifBlank { "本地漫画" }
+            importError = null
+            pendingImport = PendingLocalImport(LocalImportSource.Pdf(it), base, "第 1 话")
         }
     }
     val imagePicker = rememberMultipleDocumentPicker() { uris ->
@@ -864,6 +877,10 @@ fun DownloadsScreen(
                         "application/vnd.comicbook+zip", "application/octet-stream",
                     ))
                 }
+                if (localPdfImportSupported) LocalImportChoice(Icons.Outlined.PictureAsPdf, "PDF", "按原页序", enabled = localImportAllowed) {
+                    showImportSources = false
+                    pdfPicker.launch(arrayOf("application/pdf"))
+                }
                 LocalImportChoice(Icons.Outlined.Collections, "图片", "多选", enabled = localImportAllowed) {
                     showImportSources = false
                     imagePicker.launch(arrayOf("image/*"))
@@ -878,7 +895,8 @@ fun DownloadsScreen(
                     Text("格式说明", style = MaterialTheme.typography.labelMedium, color = secondary)
                 }
                 if (showFormats) Text(
-                    "按文件名自然排序。多张图片或文件夹会合成一个章节；导入后保留原文件。",
+                    if (localPdfImportSupported) "图片按文件名自然排序，PDF 按原页序保存为图片。每次导入合成一个章节；原文件保留。"
+                    else "按文件名自然排序。多张图片或文件夹会合成一个章节；导入后保留原文件。",
                     style = MaterialTheme.typography.bodySmall, color = secondary)
             }
         }
@@ -1155,11 +1173,13 @@ private fun LocalImportDetailsDialog(
     val focus = LocalFocusManager.current
     val sourceIcon = when (displayed.source) {
         is LocalImportSource.Archive -> Icons.Outlined.Inventory2
+        is LocalImportSource.Pdf -> Icons.Outlined.PictureAsPdf
         is LocalImportSource.Images -> Icons.Outlined.Collections
         is LocalImportSource.Folder -> Icons.Outlined.FolderOpen
     }
     val sourceLabel = when (displayed.source) {
         is LocalImportSource.Archive -> "CBZ / ZIP"
+        is LocalImportSource.Pdf -> "PDF · 按原页序"
         is LocalImportSource.Images -> "${displayed.source.uris.size} 张图片"
         is LocalImportSource.Folder -> "图片文件夹"
     }
@@ -1214,7 +1234,9 @@ private fun LocalImportDetailsDialog(
                         Text(if (busy) "正在导入" else if (error != null) "重试" else "导入")
                     }
                 }
-                if (showStorageNote) Text("保存为离线章节，原文件保留。移动或删除原文件不影响已导入内容。",
+                if (showStorageNote) Text(if (displayed.source is LocalImportSource.Pdf)
+                    "PDF 按原页序保存为图片，大页面会按比例缩放。原文件保留，移动或删除原文件不影响已导入内容。"
+                    else "保存为离线章节，原文件保留。移动或删除原文件不影响已导入内容。",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             }
         }

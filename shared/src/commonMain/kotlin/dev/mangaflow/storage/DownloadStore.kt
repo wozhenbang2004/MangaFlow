@@ -286,6 +286,24 @@ class DownloadStore private constructor(context: Context) {
             extractArchive(uri, staging)
         }
 
+    suspend fun importPdf(uri: String, mangaTitle: String, chapterTitle: String): DownloadEntry =
+        importLocalChapter(mangaTitle, chapterTitle) { staging ->
+            if (!localPdfImportSupported) throw LocalPdfImportException(LocalPdfFailure.UNAVAILABLE)
+            retainReadPermission(uri)
+            val source = File(staging, ".source.pdf")
+            val pages = try {
+                // SAF streams need not be seekable. The same staged copy serves both PDF engines.
+                openDocument(context, uri).use { copyLimited(it, source, MAX_IMPORT_BYTES, pdf = true) }
+                renderLocalPdf(source, staging, LocalPdfLimits(MAX_IMPORT_PAGES, MAX_IMPORT_PAGE_BYTES, MAX_IMPORT_BYTES))
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: LocalPdfImportException) { throw failure }
+            catch (failure: IOException) { throw LocalPdfImportException(LocalPdfFailure.STORAGE, failure) }
+            catch (failure: Exception) { throw LocalPdfImportException(LocalPdfFailure.INVALID_DOCUMENT, failure) }
+            finally { source.delete() }
+            if (source.exists()) throw LocalPdfImportException(LocalPdfFailure.STORAGE)
+            pages.map { ImportedPage(it.width, it.height) }
+        }
+
     suspend fun importImages(uris: List<String>, mangaTitle: String, chapterTitle: String): DownloadEntry =
         importLocalChapter(mangaTitle, chapterTitle) { staging ->
             val documents = uris.distinct().map { uri ->
@@ -427,7 +445,7 @@ class DownloadStore private constructor(context: Context) {
     private fun retainReadPermission(uri: String) = retainDocumentPermission(context, uri)
     private fun documentName(uri: String): String = documentDisplayName(context, uri)
 
-    private suspend fun copyLimited(input: StorageInput, destination: File, limit: Long): Long {
+    private suspend fun copyLimited(input: StorageInput, destination: File, limit: Long, pdf: Boolean = false): Long {
         var copied = 0L
         destination.outputStream().use { output ->
             val buffer = ByteArray(16 * 1024)
@@ -436,10 +454,12 @@ class DownloadStore private constructor(context: Context) {
                 val count = input.read(buffer)
                 if (count < 0) break
                 copied += count
+                if (pdf && copied > limit) throw LocalPdfImportException(LocalPdfFailure.TOTAL_TOO_LARGE)
                 require(copied <= limit) { "单张图片超过可导入大小" }
                 output.write(buffer, 0, count)
             }
         }
+        if (pdf && copied <= 0L) throw LocalPdfImportException(LocalPdfFailure.INVALID_DOCUMENT)
         require(copied > 0L) { "图片文件为空" }
         return copied
     }

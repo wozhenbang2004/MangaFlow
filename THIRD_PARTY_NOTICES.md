@@ -1,5 +1,11 @@
 # Third-party notices
 
+## Local PDF import and LAN reading synchronization (2026-11-22)
+
+- Windows PDF import uses Apache PDFBox 3.0.8 and Apache JBIG2 ImageIO 3.0.5, licensed under Apache-2.0 with their bundled notices. The exact upstream license and notice texts are retained in `third_party/pdf-import/`. Sources: https://github.com/apache/pdfbox/tree/3.0.8 and https://github.com/apache/pdfbox-jbig2/tree/3.0.5. No JAI JPEG2000 codec is added; an unsupported image decoder fails the import explicitly. Android uses the system `android.graphics.pdf.PdfRenderer` API.
+- Windows service discovery uses JmDNS 3.6.5 (tag `v3.6.5`), Apache-2.0. Its exact license and notice are retained in `third_party/lan-sync/`. Source: https://github.com/jmdns/jmdns/tree/v3.6.5. Android uses system NSD. TLS and certificate generation use the existing OkHttp 5.5.1 family with `okhttp-tls` (Apache-2.0) and the platform TLS implementation; MangaFlow's reading-data protocol and paired-device UI are project code.
+- Bangumi manga collection and AniList manga-list integration implement the official API contracts at https://github.com/bangumi/api and https://docs.anilist.co/. Service access, users' authorization and catalogue identity confirmation remain separate from this software's licensing. No third-party application's client ID or secret is bundled.
+
 ## Optional image and video enhancement engines (2026-11-19)
 
 The Enhancement Center invokes optional external engine executables; their source

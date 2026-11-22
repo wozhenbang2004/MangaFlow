@@ -10,6 +10,8 @@ import dev.mangaflow.platform.storage.StorageLock
 import dev.mangaflow.platform.storage.preferences
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.storage.beginDownloadExecution
+import dev.mangaflow.storage.LocalPdfFailure
+import dev.mangaflow.storage.LocalPdfImportException
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -176,6 +178,8 @@ class ApplicationOperations private constructor(context: PlatformContext) {
                     else -> when (failure) {
                         is OperationStatusPersistenceFailure -> "任务状态未保存，已停止操作；请检查可用空间"
                         is TimeoutCancellationException -> "操作超时，请重新操作"
+                        is LocalPdfImportException -> if (kind == ApplicationOperationKind.LOCAL_IMPORT)
+                            failure.failure.userMessage else "未完成，请重新操作"
                         else -> "未完成，请重新操作"
                     }
                 }
@@ -231,7 +235,13 @@ class ApplicationOperations private constructor(context: PlatformContext) {
                 snapshot.forEach { item -> items.put(JSONObject()
                     .put("id", item.id).put("key", item.key).put("kind", item.kind.name)
                     .put("title", operationTitle(item.kind)).put("phase", item.phase.name)
-                    .put("startedAt", item.startedAt).put("finishedAt", item.finishedAt ?: 0L)) }
+                    .put("startedAt", item.startedAt).put("finishedAt", item.finishedAt ?: 0L).also { encoded ->
+                        if (item.kind == ApplicationOperationKind.LOCAL_IMPORT && item.phase == ApplicationOperationPhase.FAILED) {
+                            LocalPdfFailure.entries.firstOrNull { it.userMessage == item.message }?.let {
+                                encoded.put("localPdfFailure", it.name)
+                            }
+                        }
+                    }) }
                 disk.edit().putString("statuses", items.toString()).commit()
             } } catch (cancel: CancellationException) { throw cancel }
             catch (_: Exception) { false }
@@ -249,10 +259,12 @@ class ApplicationOperations private constructor(context: PlatformContext) {
             val phase = ApplicationOperationPhase.entries.firstOrNull { it.name == item.optString("phase") }
                 ?: return@mapNotNull null
             val interrupted = phase.active
+            val localPdfMessage = if (kind == ApplicationOperationKind.LOCAL_IMPORT && phase == ApplicationOperationPhase.FAILED)
+                LocalPdfFailure.entries.firstOrNull { it.name == item.optString("localPdfFailure") }?.userMessage else null
             ApplicationOperation(item.optString("id"), item.optString("key"), kind,
                 operationTitle(kind), if (interrupted) ApplicationOperationPhase.INTERRUPTED else phase,
                 if (interrupted || phase == ApplicationOperationPhase.INTERRUPTED)
-                    "上次操作被系统中断，请确认保存结果后重新操作" else null,
+                    "上次操作被系统中断，请确认保存结果后重新操作" else localPdfMessage,
                 item.optLong("startedAt"), item.optLong("finishedAt").takeIf { it > 0L })
         }.sortedByDescending { it.startedAt }.sortedByDescending { it.phase == ApplicationOperationPhase.INTERRUPTED }
             .take(TERMINAL_LIMIT).sortedBy { it.startedAt }

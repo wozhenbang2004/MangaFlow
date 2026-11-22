@@ -224,11 +224,12 @@ internal fun EnhancementSettingsContent(
             EnhancementScope(content, editSession) { editSession = it; notice = null }
         else if (page in setOf(EnhancementPage.QUALITY_OPTIONS, EnhancementPage.FRAME_OPTIONS,
                 EnhancementPage.MODELS, EnhancementPage.MODEL_DETAIL))
-            EnhancementQuiet(if (activeKey != null) if (anime) "应用于本次播放" else "应用于本次阅读"
+            EnhancementQuiet(if (activeKey != null) if (anime) "应用于本次播放" else "应用于这部漫画，切章和重开后保留"
                 else "应用于${content.settingsLabel}默认设置")
         if (draft.tier == QualityTier.ORIGINAL &&
             page in setOf(EnhancementPage.MODELS, EnhancementPage.MODEL_DETAIL))
-            EnhancementQuiet("画质增强当前关闭；选用模型后，可在画质页开启。")
+            EnhancementQuiet(if (anime) "画质增强当前关闭；选用模型后，可在画质页开启。"
+                else "选用模型后开启增强，按模型支持的倍率处理。")
         when (page) {
             EnhancementPage.QUALITY -> {
                 EnhancementQuality(content, draft, inventory, ::change,
@@ -257,15 +258,40 @@ internal fun EnhancementSettingsContent(
                         error = effect.phase == AnimeVideoEnhancementPhase.FAILED)
                 }
                 if (!anime && sessionKey != null) {
-                    val failure = readerState?.currentTask?.takeIf { it.phase == EnhancementTaskPhase.FAILED }
-                    if (failure != null && onCompare == null) {
-                        EnhancementQuiet("本页增强失败：${failure.reason ?: readerState?.detail ?: "尚未取得失败详情"}", error = true)
-                        if (onRetryTask != null) MotionTextButton(onClick = {
-                            if (!onRetryTask(failure.id)) notice = "本页任务已变化，请查看最新状态。"
+                    val task = readerState?.currentTask
+                    val actual = center.settings.policy(content, sessionKey)
+                    val enabled = actual.tier != QualityTier.ORIGINAL
+                    val failure = task?.takeIf { enabled && it.phase == EnhancementTaskPhase.FAILED }
+                    val stopped = task?.takeIf { enabled && it.id in readerState?.manuallyStoppedTaskIds.orEmpty() }
+                    EnhancementValue("当前画面", when {
+                        !enabled -> "原图 · 增强已关闭"
+                        readerState?.currentEnhanced == true -> "增强已就绪"
+                        failure != null -> "增强未完成 · 原图可读"
+                        stopped != null -> "增强已停止 · 原图可读"
+                        task?.phase == EnhancementTaskPhase.RUNNING -> "${task.title ?: "当前页"} · 正在增强"
+                        task?.phase in setOf(EnhancementTaskPhase.WAITING, EnhancementTaskPhase.PAUSED) -> "暂缓处理 · 原图可读"
+                        task?.phase == EnhancementTaskPhase.QUEUED -> "等待处理 · 原图可读"
+                        else -> "原图可读 · 等待增强"
+                    })
+                    if (enabled && readerState?.currentEnhanced != true) {
+                        (readerState?.detail ?: task?.reason ?: task?.progress?.detail)
+                            ?.takeIf { it.isNotBlank() }?.let { EnhancementQuiet(it, error = failure != null) }
+                        val retry = failure ?: stopped
+                        if (retry != null && onRetryTask != null) MotionTextButton(onClick = {
+                            if (!onRetryTask(retry.id)) notice = "本页任务已变化，请查看最新状态。"
                         }, contentPadding = PaddingValues(horizontal = 0.dp)) {
                             Icon(Icons.Outlined.Refresh, null, Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text("重试本页增强")
+                            Text("重试${retry.title ?: "当前页"}增强")
+                        }
+                    }
+                    if (enabled && editSession && PreparationMode.IMMEDIATE !in actual.preparation && PreparationMode.SMART !in actual.preparation) {
+                        MotionTextButton(onClick = {
+                            change(draft.copy(preparation = draft.preparation + PreparationMode.SMART))
+                        }, contentPadding = PaddingValues(horizontal = 0.dp)) {
+                            Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("开启新页面增强")
                         }
                     }
                     AnimeEnhancementNavigation(Icons.Outlined.Compare, "原图 / 增强对比",
@@ -279,9 +305,21 @@ internal fun EnhancementSettingsContent(
                 qualityFooter?.invoke()
                 if (editSession && sessionKey != null && sessions[sessionKey]?.content == content)
                     AnimeEnhancementNavigation(Icons.Outlined.RestartAlt, "恢复跟随默认设置", onClick = {
-                        revision++
-                        center.resetSessionPolicy(sessionKey)
+                        val currentRevision = ++revision
+                        pending++
+                        val receipt = center.resetSessionPolicy(sessionKey)
                         draft = center.settings.policy(content)
+                        scope.launch {
+                            try {
+                                if (!receipt.await() && currentRevision == revision)
+                                    notice = "未能恢复默认设置，请重试。"
+                            } catch (cancel: CancellationException) { throw cancel }
+                            catch (error: Exception) { if (currentRevision == revision) notice = error.message ?: "未能保存设置。" }
+                            finally {
+                                pending--
+                                if (pending == 0) draft = center.settings.policy(content, activeKey)
+                            }
+                        }
                         notice = null
                     })
             }

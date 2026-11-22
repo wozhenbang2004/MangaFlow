@@ -76,6 +76,7 @@ private fun JFileChooser.configureDocumentTypes(mimeTypes: Array<String>) {
         types.any { it in setOf("application/zip", "application/x-zip-compressed",
             "application/x-cbz", "application/vnd.comicbook+zip") } ->
             FileNameExtensionFilter("ZIP / CBZ 漫画", "zip", "cbz")
+        "application/pdf" in types -> FileNameExtensionFilter("PDF 漫画", "pdf")
         "application/json" in types -> FileNameExtensionFilter("JSON 文本", "json", "txt")
         types.any { it == "application/javascript" || it == "text/javascript" } ->
             FileNameExtensionFilter("JS 漫画源", "js")
@@ -84,7 +85,7 @@ private fun JFileChooser.configureDocumentTypes(mimeTypes: Array<String>) {
     if (filter != null) {
         addChoosableFileFilter(filter)
         // Wildcard/octet-stream/plain-text requests can contain valid files with other suffixes.
-        fileFilter = if (types.size == 1 && types.first() in setOf("application/json",
+        fileFilter = if (types.size == 1 && types.first() in setOf("application/pdf", "application/json",
             "application/javascript", "text/javascript")) filter else acceptAllFileFilter
     }
 }
@@ -103,6 +104,7 @@ actual fun rememberDocumentPicker(kind: DocumentPickerKind, onResult: (List<Stri
                         dialogTitle = when {
                             kind == DocumentPickerKind.FOLDER -> "导入漫画文件夹"
                             types.any { it.contains("zip") || it.contains("cbz") } -> "导入本地漫画"
+                            "application/pdf" in types -> "导入 PDF 漫画"
                             "image/*" in types && "video/*" in types -> "选择壁纸"
                             "image/*" in types -> "选择图片"
                             "application/json" in types -> "导入阅读备份"

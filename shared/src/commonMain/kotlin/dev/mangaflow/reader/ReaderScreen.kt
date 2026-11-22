@@ -333,6 +333,7 @@ fun ReaderScreen(
     adultSourceIds: Set<String> = emptySet(),
     onRequestNotificationPermission: () -> Unit = {},
     onChapterVisible: (Manga, Chapter) -> Unit = { _, _ -> },
+    onReadingProgress: (Manga, Chapter, Int, Int) -> Unit = { _, _, _, _ -> },
     onNearChapterEnd: (Manga, Chapter) -> Unit = { _, _ -> },
     chaptersLoading: Boolean = false,
     chaptersError: String? = null,
@@ -541,6 +542,7 @@ fun ReaderScreen(
         }
     }
     val chapterVisible by rememberUpdatedState(onChapterVisible)
+    val readingProgress by rememberUpdatedState(onReadingProgress)
     val nearChapterEnd by rememberUpdatedState(onNearChapterEnd)
     val scope = rememberCoroutineScope()
     val sourceIdentity = ReaderSourceIdentity(chapter.logicalId.ifBlank { chapter.id },
@@ -548,7 +550,8 @@ fun ReaderScreen(
     val enhancementContent = if (adultProfile) EnhancementContent.ADULT_MANGA else EnhancementContent.MANGA
     val enhancementCenter = remember(adultImageContext) { EnhancementCenter.get(adultImageContext) }
     val enhancement = remember(manga.id, sourceIdentity, enhancementContent, scope) {
-        ReaderEnhancementController(adultImageContext, enhancementContent, manga.id, chapterId, chapter.sourceId, scope)
+        ReaderEnhancementController(adultImageContext, enhancementContent, manga.id, chapterId, chapter.sourceId, scope,
+            workSourceId = manga.sourceId)
     }
     DisposableEffect(enhancement) { onDispose { enhancement.close() } }
     val enhancementDefaults by enhancementCenter.settings.state.collectAsStateWithLifecycle()
@@ -852,6 +855,14 @@ fun ReaderScreen(
             libraryStore.saveProgress(manga, chapter, pageIndex, chapterPageCount, cursor.scrollOffset,
                 panelIndex = if (preferences.panelEngine != PanelEngine.OFF) cursor.panelIndex else -1,
                 panelLayout = if (preferences.panelEngine != PanelEngine.OFF) preferences.panelLayoutKey else "")
+        }
+    }
+    // The renderer's end state includes the second page of a spread and the last guided panel.
+    // Imported/LAN progress and offscreen prefetches never produce this user-reading event.
+    LaunchedEffect(manga.id, chapterId, chapterPageCount, atChapterEnd, readingEligible, readerForeground, recentConfirmed) {
+        if (!adultProfile && readingEligible && readerForeground && recentConfirmed && atChapterEnd && chapterPageCount > 0) {
+            delay(750L)
+            readingProgress(manga, chapter, chapterPageCount - 1, chapterPageCount)
         }
     }
     // A displayed/preloaded image is not itself a confirmed reading event. The cloud
@@ -2166,7 +2177,7 @@ private fun ChapterPages(
         val atEnd by remember(list) {
             derivedStateOf {
                 val layout = list.layoutInfo
-                !restoring && endLayoutReady() && layout.visibleItemsInfo.any {
+                !restoring && endLayoutReady() && loadedPages[pages.lastIndex] == pages.last().url && layout.visibleItemsInfo.any {
                     it.index == pages.lastIndex && it.offset < layout.viewportEndOffset &&
                         it.offset + it.size <= layout.viewportEndOffset + endRevealPx
                 }

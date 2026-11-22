@@ -73,6 +73,8 @@ data class EnhancementPolicy(
 
 data class EnhancementSessionPolicy(val content: EnhancementContent, val policy: EnhancementPolicy)
 
+internal data class ReaderEnhancementScope(val content: EnhancementContent, val key: String)
+
 /** Serialized confirmed writes; a failed disk commit cannot masquerade as a saved preference. */
 class EnhancementSettingsStore(context: PlatformContext) {
     private val disk = preferences(applicationContext(context), "mangaflow_enhancement_v1")
@@ -80,6 +82,8 @@ class EnhancementSettingsStore(context: PlatformContext) {
     private val sessionLock = StorageLock()
     /** Removing a token retires every accepted write which still carries that session identity. */
     private val sessionTokens = mutableMapOf<String, Any>()
+    private val readerScopes = mutableMapOf<String, ReaderEnhancementScope>()
+    private val confirmedReaderPolicies = mutableMapOf<ReaderEnhancementScope, EnhancementPolicy?>()
     private val mutableState = MutableStateFlow(readPolicies())
     val state: StateFlow<Map<EnhancementContent, EnhancementPolicy>> = mutableState.asStateFlow()
     private val mutableSessions = MutableStateFlow<Map<String, EnhancementSessionPolicy>>(emptyMap())
@@ -92,6 +96,67 @@ class EnhancementSettingsStore(context: PlatformContext) {
     fun policy(content: EnhancementContent, sessionKey: String? = null): EnhancementPolicy =
         sessionKey?.let { mutableSessions.value[it]?.takeIf { value -> value.content == content }?.policy }
             ?: mutableState.value.getValue(content)
+
+    /** A reader session owns jobs; the work owns the user's selected picture settings. */
+    internal fun registerReaderSession(sessionKey: String, content: EnhancementContent, workId: String,
+        sourceId: String) = synchronized(sessionLock) {
+        require(content != EnhancementContent.ANIME && workId.isNotBlank())
+        val scope = readerWorkScope(content, workId, sourceId)
+        readerScopes[sessionKey] = scope
+        sessionTokens.getOrPut(sessionKey) { Any() }
+        confirmedReaderPolicyLocked(scope)?.let { saved ->
+            mutableSessions.value = mutableSessions.value + (sessionKey to EnhancementSessionPolicy(content, saved))
+        }
+    }
+
+    internal fun readerScope(sessionKey: String): ReaderEnhancementScope? =
+        synchronized(sessionLock) { readerScopes[sessionKey] }
+
+    internal fun policyForWork(content: EnhancementContent, workId: String, sourceId: String): EnhancementPolicy =
+        synchronized(sessionLock) {
+            confirmedReaderPolicyLocked(readerWorkScope(content, workId, sourceId)) ?: policy(content)
+        }
+
+    private fun confirmedReaderPolicyLocked(scope: ReaderEnhancementScope): EnhancementPolicy? {
+        if (!confirmedReaderPolicies.containsKey(scope)) confirmedReaderPolicies[scope] = decode(disk.getString(scope.key))
+        return confirmedReaderPolicies[scope]
+    }
+
+    private fun readerWorkScope(content: EnhancementContent, workId: String, sourceId: String): ReaderEnhancementScope {
+        val identity = EnhancedAssetIdentity.digest(listOf(content.directory, sourceId, workId)
+            .joinToString("") { "${it.length}:$it" })
+        return ReaderEnhancementScope(content, "reader-work:$identity")
+    }
+
+    internal suspend fun updateReaderPolicy(scope: ReaderEnhancementScope, policy: EnhancementPolicy?): Boolean =
+        withContext(Dispatchers.IO) {
+            policy?.checked()
+            writer.withLock {
+                // Preferences may expose their new memory value before commit succeeds.
+                // New chapter/download owners must see only the last confirmed policy.
+                synchronized(sessionLock) { confirmedReaderPolicyLocked(scope) }
+                val before = disk.getString(scope.key)
+                if (!runCatching { disk.edit().apply {
+                        if (policy == null) remove(scope.key) else putString(scope.key, encode(policy))
+                    }.commit() }.getOrDefault(false)) {
+                    runCatching { disk.edit().apply {
+                        if (before == null) remove(scope.key) else putString(scope.key, before)
+                    }.commit() }
+                    return@withLock false
+                }
+                synchronized(sessionLock) {
+                    confirmedReaderPolicies[scope] = policy
+                    val keys = readerScopes.filterValues { it == scope }.keys
+                    val next = mutableSessions.value.toMutableMap()
+                    keys.forEach { key ->
+                        if (policy == null) next.remove(key)
+                        else next[key] = EnhancementSessionPolicy(scope.content, policy)
+                    }
+                    mutableSessions.value = next
+                }
+                true
+            }
+        }
 
     suspend fun update(content: EnhancementContent, policy: EnhancementPolicy): Boolean = withContext(Dispatchers.IO) {
         policy.checked()
@@ -202,6 +267,7 @@ class EnhancementSettingsStore(context: PlatformContext) {
 
     fun clearSession(sessionKey: String) = synchronized(sessionLock) {
         sessionTokens.remove(sessionKey)
+        readerScopes.remove(sessionKey)
         mutableSessions.value = mutableSessions.value - sessionKey
     }
 

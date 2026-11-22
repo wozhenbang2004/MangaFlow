@@ -14,6 +14,9 @@ on:
 permissions:
   contents: read
 
+env:
+  MANGAFLOW_ANILIST_CLIENT_ID: ${{ vars.MANGAFLOW_ANILIST_CLIENT_ID }}
+
 concurrency:
   group: mangaflow-android-release
   cancel-in-progress: false

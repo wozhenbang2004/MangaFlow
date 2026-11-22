@@ -193,6 +193,8 @@ fun SettingsScreen(
     onWebDavSettingsOpened: () -> Unit = {},
     onWebDavSettingsClosed: () -> Unit = {},
     onOpenAnimeDownloads: () -> Unit = {},
+    onOpenLanReadingSync: (() -> Unit)? = null,
+    onOpenMangaTracking: (() -> Unit)? = null,
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -470,9 +472,15 @@ fun SettingsScreen(
                             showAnimeSources = true
                         }
                     }
-                    SettingsDisclosure("备份与同步", if (backupBusy != null) "正在处理…" else "本地文件 · WebDAV",
+                    SettingsDisclosure("备份与同步", if (backupBusy != null) "正在处理…" else "设备 · 漫画账号 · 阅读备份",
                         Icons.Outlined.CloudSync, expandedSetting == "backup", { toggleSetting("backup") }) {
                         Column {
+                            onOpenLanReadingSync?.let { open ->
+                                SettingsLinkRow("局域网阅读同步", "发现并配对设备 · 收藏、页码与书签", Icons.Outlined.CloudSync, onClick = open)
+                            }
+                            onOpenMangaTracking?.let { open ->
+                                SettingsLinkRow("漫画账号同步", "Bangumi · AniList", Icons.Outlined.CloudSync, onClick = open)
+                            }
                             SettingsLinkRow("导出阅读备份",
                                 if (backupBusy == "export") "正在导出…" else "书架、进度、画面收藏与阅读统计",
                                 Icons.Outlined.UploadFile) {

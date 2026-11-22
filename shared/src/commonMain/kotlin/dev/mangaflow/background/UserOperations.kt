@@ -32,10 +32,12 @@ internal object UserOperationKeys {
 
 internal sealed interface LocalImportInput {
     data class Archive(val uri: String) : LocalImportInput
+    data class Pdf(val uri: String) : LocalImportInput
     data class Images(val uris: List<String>) : LocalImportInput
     data class Folder(val uri: String) : LocalImportInput
     fun documents(): List<String> = when (this) {
         is Archive -> listOf(uri)
+        is Pdf -> listOf(uri)
         is Images -> uris
         is Folder -> listOf(uri)
     }
@@ -58,6 +60,7 @@ internal fun ApplicationOperations.importLocal(
         onTerminal = { releasePickedDocuments(acceptedInput.documents()) }) {
         when (acceptedInput) {
             is LocalImportInput.Archive -> store.importArchive(acceptedInput.uri, mangaTitle, chapterTitle)
+            is LocalImportInput.Pdf -> store.importPdf(acceptedInput.uri, mangaTitle, chapterTitle)
             is LocalImportInput.Images -> store.importImages(acceptedInput.uris, mangaTitle, chapterTitle)
             is LocalImportInput.Folder -> store.importFolder(acceptedInput.uri, mangaTitle, chapterTitle)
         }

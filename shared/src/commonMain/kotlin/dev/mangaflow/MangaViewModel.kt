@@ -3984,6 +3984,23 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         services.readingOutbox.submit(manga, chapter)
     }
 
+    fun onMangaReadingProgress(manga: Manga, chapter: Chapter, pageIndex: Int, pageCount: Int) {
+        if (_reading.value?.manga?.id != manga.id || visibleReading?.second?.id != chapter.id ||
+            manga.sourceUrl == LOCAL_SOURCE_URL) return
+        val ordinary = bodySources.entries.value.filter { !it.adult && !it.source.adult && !it.removed && it.isInstalled }
+            .mapTo(mutableSetOf()) { it.source.id }
+        if (manga.sourceId !in ordinary || chapter.sourceId !in ordinary) return
+        services.mangaTracking.reportProgress(manga, chapter, pageIndex, pageCount,
+            currentChapters = _reading.value?.chapters.orEmpty())
+    }
+
+    fun continueTrackedManga(manga: Manga, chapter: Chapter) {
+        val ordinary = bodySources.entries.value.filter { !it.adult && !it.source.adult && !it.removed && it.isInstalled }
+            .mapTo(mutableSetOf()) { it.source.id }
+        if (manga.sourceId !in ordinary || chapter.sourceId !in ordinary || manga.sourceUrl == LOCAL_SOURCE_URL) return
+        openSavedChapter(manga, chapter.id, chapter.title, fallback = chapter)
+    }
+
     private fun isCurrentAccount(version: Long) = accountRepository.sessionVersion == version &&
         _account.value.profile != null && !_account.value.busy
 

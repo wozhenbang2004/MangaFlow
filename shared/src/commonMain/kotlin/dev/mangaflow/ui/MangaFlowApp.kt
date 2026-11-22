@@ -360,6 +360,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val copyProgress by model.copyProgress.collectAsStateWithLifecycle()
     val adoptedResumeTargets by model.library.resumeTargets.collectAsStateWithLifecycle()
     var copySyncOpen by rememberSaveable { mutableStateOf(false) }
+    var lanReadingSyncOpen by remember { mutableStateOf(false) }
+    var mangaTrackingOpen by remember { mutableStateOf(false) }
+    val mangaTrackingState by model.services.mangaTracking.state.collectAsStateWithLifecycle()
     var shelfSyncSource by rememberSaveable { mutableStateOf<String?>(null) }
     var adultProgressOpen by remember { mutableStateOf(false) }
     var openWebDavSettings by remember { mutableStateOf(false) }
@@ -822,6 +825,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             profileAccountTarget = null
             profileSiteRequest = null
             copySyncOpen = false
+            lanReadingSyncOpen = false
+            mangaTrackingOpen = false
             copySyncFocus = null
             shelfSyncSource = null
             shelfSyncAfterLogin = null
@@ -869,6 +874,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         onDismiss = { adultProgressOpen = false },
         onConfigure = { openWebDavSettings = true; changeSection(Section.SETTINGS) },
     )
+    if (!restrictedMode && lanReadingSyncOpen) LanReadingSyncSheet(
+        controller = model.services.lanReadingSync, onDismiss = { lanReadingSyncOpen = false })
+    MangaTrackingSheet(visible = mangaTrackingOpen && !restrictedMode,
+        state = mangaTrackingState, controller = model.services.mangaTracking, backdrop = drawerBackdrop,
+        onContinueRead = { manga, chapter ->
+            mangaTrackingOpen = false
+            model.continueTrackedManga(manga, chapter)
+        }, onDismiss = { mangaTrackingOpen = false })
     if (profileSourcesOpen) ContentProfileSourceSheet(
         entries = profileEntries, selectedId = scopedBrowse.sourceId, backdrop = drawerBackdrop,
         onSelect = { id -> scopedBrowse.selectSource(id, keepSearch = searchExpanded || tagSearchVisible) },
@@ -1285,6 +1298,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         reviewRepository = model.reviews,
                         onBack = model::returnToMangaDetail, onRequestNotificationPermission = onRequestNotifications,
                         onChapterVisible = model::onChapterVisible,
+                        onReadingProgress = model::onMangaReadingProgress,
                         onNearChapterEnd = model::prefetchNextChapter,
                         chaptersLoading = current.session.chaptersLoading,
                         chaptersError = current.session.chaptersError,
@@ -1397,6 +1411,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     it.owner == account.profile?.username },
                                 onAdoptCloudProgress = { openCopyComparison(current.state.manga.id) },
                                 onRetryCloudProgress = { model.refreshCopyProgress(current.state.manga) },
+                                onOpenTracking = if (!restrictedMode && current.state.manga.sourceUrl != dev.mangaflow.storage.DownloadStore.LOCAL_SOURCE_URL) ({
+                                    model.services.mangaTracking.openWork(current.state.detail?.manga ?: current.state.manga,
+                                        current.state.detail?.chapters.orEmpty())
+                                    mangaTrackingOpen = true
+                                }) else null,
                                 preferredResumeChapter = adoptedResumeTargets[current.state.manga.id]
                                     ?.takeIf { it.accountOwner == account.profile?.username }
                                     ?.let { target -> current.state.detail?.chapters?.firstOrNull { it.id == target.chapterId } },
@@ -1505,6 +1524,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             derivedStateOf { desktop || !searchExpanded && (searchForeground?.value ?: 0f) <= .02f }
                         }
                         val rootActive = current.key == frame.key && !drawerVisible && !rootHandoff && !recentReadingOpen && authorWorks == null && !tagSearchVisible &&
+                            !lanReadingSyncOpen && !mangaTrackingOpen &&
                             !currentBack.gesturing && !currentBack.completed
                         val closeSearch: () -> Unit = {
                             keyboard?.hide()
@@ -1848,6 +1868,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             drawerAction = DrawerAction(DrawerValue.Closed, Section.DOWNLOADS,
                                                 if (contentProfile == ContentProfile.RESTRICTED) ContentProfile.RESTRICTED else ContentProfile.ORDINARY)
                                         },
+                                        onOpenLanReadingSync = if (!restrictedMode) ({ lanReadingSyncOpen = true }) else null,
+                                        onOpenMangaTracking = if (!restrictedMode) ({
+                                            model.services.mangaTracking.openWork(null)
+                                            mangaTrackingOpen = true
+                                        }) else null,
                                         onOpenAnimeDownloads = { navigateAnime(AnimeWorkspaceDestination.DOWNLOADS) })
                                 }
                                 }

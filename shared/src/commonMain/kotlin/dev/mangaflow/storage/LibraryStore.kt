@@ -13,6 +13,10 @@ import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.anime.AnimeLibraryStore
 import dev.mangaflow.anime.sources.lanerc.LanercSourceStore
+import dev.mangaflow.sync.LanLibrarySnapshot
+import dev.mangaflow.sync.LanReadingBook
+import dev.mangaflow.sync.LanReadingItem
+import dev.mangaflow.sync.LanReadingKind
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CancellationException
@@ -96,6 +100,8 @@ class LibraryStore(context: Context) {
     private val _history = MutableStateFlow<List<ReadingProgress>>(emptyList())
     private val _chapterHistoryRevision = MutableStateFlow(0L)
     private val _backupRestored = MutableStateFlow(0L)
+    private val _lanReadingRevision = MutableStateFlow(0L)
+    internal val lanReadingRevision: StateFlow<Long> = _lanReadingRevision.asStateFlow()
     val backupRestored: StateFlow<Long> = _backupRestored.asStateFlow()
     private val _shelfStates = MutableStateFlow<Map<String, ShelfState>>(emptyMap())
     private val _pageCollections = MutableStateFlow<List<PageCollection>>(emptyList())
@@ -111,6 +117,7 @@ class LibraryStore(context: Context) {
     private val pendingChapterPositions = mutableMapOf<String, ChapterProgress>()
     private val decodedChapterPositions = linkedMapOf<String, ChapterProgress>()
     private val pendingLongImagePositions = mutableMapOf<String, Float>()
+    private val pendingLibraryValues = mutableMapOf<String, String?>()
     private val pendingProgressRemovals = mutableMapOf<String, Long>()
     private var removalSequence = 0L
     private var progressWrite: ProgressWrite? = null
@@ -228,10 +235,12 @@ class LibraryStore(context: Context) {
         val next = additions + existing
         val importedAt = wallTimeMillis()
         val times = _favoriteAddedTimes.value + additions.associate { it.id to importedAt }
-        disk.edit().putString("favorites", JSONArray(next.map { it.toJson() }).toString())
-            .putString(FAVORITE_ADDED_TIMES_KEY, favoriteTimesJson(times)).apply()
         _favoriteAddedTimes.value = times
         _favorites.value = next
+        queueLibraryValue("favorites", JSONArray(next.map { it.toJson() }).toString())
+        queueLibraryValue(FAVORITE_ADDED_TIMES_KEY, favoriteTimesJson(times))
+        _lanReadingRevision.value++
+        startProgressWriter()
         additions.size
     }
 
@@ -244,8 +253,10 @@ class LibraryStore(context: Context) {
         val times = _favoriteAddedTimes.value.toMutableMap()
         if (removing) times.remove(manga.id) else times[manga.id] = wallTimeMillis()
         _favoriteAddedTimes.value = times
-        disk.edit().putString("favorites", JSONArray(next.map { it.toJson() }).toString())
-            .putString(FAVORITE_ADDED_TIMES_KEY, favoriteTimesJson(times)).apply()
+        queueLibraryValue("favorites", JSONArray(next.map { it.toJson() }).toString())
+        queueLibraryValue(FAVORITE_ADDED_TIMES_KEY, favoriteTimesJson(times))
+        _lanReadingRevision.value++
+        startProgressWriter()
         if (removing) {
             removeShelfStateLocked(manga.id)
             clearResumeTarget(manga.id)
@@ -260,8 +271,10 @@ class LibraryStore(context: Context) {
         _favorites.value = next
         val times = _favoriteAddedTimes.value - mangaId
         _favoriteAddedTimes.value = times
-        disk.edit().putString("favorites", JSONArray(next.map { it.toJson() }).toString())
-            .putString(FAVORITE_ADDED_TIMES_KEY, favoriteTimesJson(times)).apply()
+        queueLibraryValue("favorites", JSONArray(next.map { it.toJson() }).toString())
+        queueLibraryValue(FAVORITE_ADDED_TIMES_KEY, favoriteTimesJson(times))
+        _lanReadingRevision.value++
+        startProgressWriter()
         removeShelfStateLocked(mangaId)
         clearResumeTarget(mangaId)
     }
@@ -378,7 +391,8 @@ class LibraryStore(context: Context) {
             waitForProgressWriter()
             val root = synchronized(lock) {
                 val entries = JSONArray()
-                disk.all.entries.filter { it.key != RESUME_TARGETS_KEY }.sortedBy { it.key }.forEach { (key, value) ->
+                disk.all.entries.filter { it.key != RESUME_TARGETS_KEY && it.key != LAN_READING_LEDGER_KEY }
+                    .sortedBy { it.key }.forEach { (key, value) ->
                     val entry = JSONObject().put("key", key)
                     when (value) {
                         is String -> entry.put("type", "string").put("value", value)
@@ -433,7 +447,10 @@ class LibraryStore(context: Context) {
                     val previous = disk.all.toMap()
                     val writeFailure = try {
                         // A backup cannot restore an account-specific continuation choice.
-                        if (writeBackupValues(decoded.values - RESUME_TARGETS_KEY)) null
+                        val restoredValues = decoded.values - RESUME_TARGETS_KEY - LAN_READING_LEDGER_KEY
+                        val localLedger = previous[LAN_READING_LEDGER_KEY]
+                        if (writeBackupValues(if (localLedger == null) restoredValues else
+                                restoredValues + (LAN_READING_LEDGER_KEY to localLedger))) null
                         else IllegalStateException("无法写入备份，请检查存储空间。")
                     } catch (failure: Exception) { failure }
                     if (writeFailure != null) {
@@ -451,6 +468,7 @@ class LibraryStore(context: Context) {
                     progressWrite = null
                     pendingChapterPositions.clear()
                     pendingLongImagePositions.clear()
+                    pendingLibraryValues.clear()
                     pendingProgressRemovals.clear()
                     ignoreStoredProgress = false
                     restoreLegacyLongImages = readLegacyLongImageMigration()
@@ -465,6 +483,7 @@ class LibraryStore(context: Context) {
                     _preferences.value = readPreferences()
                     _mangaPreferences.value = readMangaPreferences()
                     _backupRestored.value++
+                    _lanReadingRevision.value++
                     info
                 }
                 decoded.animeSourcePackages?.let { packages ->
@@ -612,6 +631,204 @@ class LibraryStore(context: Context) {
 
     fun progressFor(mangaId: String): ReadingProgress? = _history.value.firstOrNull { it.manga.id == mangaId }
 
+    /** A narrow, source-checked view; whole-library backups are never a LAN payload. */
+    internal suspend fun captureLanReading(sources: Set<String>): LanLibrarySnapshot = withContext(Dispatchers.IO) {
+        awaitReady()
+        synchronized(lock) { collectLanReading(sources) }
+    }
+
+    private fun collectLanReading(sources: Set<String>): LanLibrarySnapshot {
+        val known = (_favorites.value + _history.value.map { it.manga } + _pageCollections.value.map { it.manga })
+            .associateBy(Manga::id)
+        val books = linkedMapOf<String, LanReadingBook>()
+        val items = linkedMapOf<String, LanReadingItem>()
+        fun book(id: String): LanReadingBook? {
+            if (id.startsWith("local:") || known[id]?.sourceUrl == DownloadStore.LOCAL_SOURCE_URL) return null
+            return books[id] ?: runCatching {
+                val ref = SourceKeys.decodeManga(id)
+                known[id]?.let(LanReadingBook::from) ?: LanReadingBook(id, ref.mangaId.take(256),
+                    ref.sourceId, ref.mangaId, dev.mangaflow.data.sourceDisplayName(ref.sourceId))
+            }.getOrNull()?.takeIf { it.allowed(sources) }?.also { books[id] = it }
+        }
+        fun add(item: LanReadingItem) {
+            book(item.mangaId) ?: return
+            if (item.allowed(books, sources)) items[item.key] = item
+        }
+        fun position(kind: LanReadingKind, id: String, chapter: String, value: ChapterProgress) {
+            if (value.pageCount <= 0) return
+            add(LanReadingItem(kind, id, chapter, value.chapterTitle.take(160),
+                value.pageIndex.coerceIn(0, value.pageCount - 1), value.pageCount, value.scrollOffset,
+                value.panelIndex, value.panelLayout, if (value.scrollOffset == 0)
+                    value.legacyLongImageFraction ?: readLegacyLongImageFraction(id, chapter, value.pageIndex) else null,
+                at = value.updatedAt))
+        }
+        _favorites.value.forEach { manga -> add(LanReadingItem(LanReadingKind.FAVORITE, manga.id,
+            at = _favoriteAddedTimes.value[manga.id] ?: 0L)) }
+        val keys = disk.all.keys + pendingLibraryValues.keys + pendingChapterPositions.keys
+        keys.filter { it.startsWith(CHAPTER_PROGRESS_PREFIX) }.forEach { key ->
+            val parts = splitLanStorageKey(key, CHAPTER_PROGRESS_PREFIX, chapterLength = false) ?: return@forEach
+            val id = parts.first
+            val chapter = parts.second
+            val pending = pendingChapterPositions[key]
+            val saved = pending ?: if (ignoreStoredProgress || id in pendingProgressRemovals) null
+                else readQueuedString(key)?.let(::readChapterPosition)
+            saved?.let { position(LanReadingKind.CHAPTER, id, chapter, it) }
+        }
+        _history.value.forEach { progress ->
+            position(LanReadingKind.RECENT, progress.manga.id, progress.chapterId, progress.chapterProgress())
+            val key = LanReadingItem(LanReadingKind.CHAPTER, progress.manga.id, progress.chapterId).key
+            if (key !in items) position(LanReadingKind.CHAPTER, progress.manga.id, progress.chapterId,
+                progress.chapterProgress())
+        }
+        keys.filter { it.startsWith(BOOKMARK_PREFIX) }.forEach { key ->
+            val (id, chapter) = splitLanStorageKey(key, BOOKMARK_PREFIX, chapterLength = true) ?: return@forEach
+            if (book(id) == null) return@forEach
+            bookmarksFor(id, chapter).forEach { marker ->
+                add(LanReadingItem(LanReadingKind.BOOKMARK, id, chapter, page = marker.pageIndex,
+                    note = marker.note.take(240), at = marker.updatedAt))
+            }
+        }
+        _pageCollections.value.forEach { picture ->
+            add(LanReadingItem(LanReadingKind.PICTURE, picture.manga.id, picture.chapter.id,
+                picture.chapter.title.take(160), page = picture.firstPage, lastPage = picture.lastPage,
+                at = picture.savedAt))
+        }
+        return LanLibrarySnapshot(_lanReadingRevision.value, books, items, readQueuedString(LAN_READING_LEDGER_KEY))
+    }
+
+    private fun splitLanStorageKey(key: String, prefix: String, chapterLength: Boolean): Pair<String, String>? {
+        val encoded = key.removePrefix(prefix)
+        val separator = encoded.indexOf(':')
+        if (separator <= 0) return null
+        val length = encoded.substring(0, separator).toIntOrNull() ?: return null
+        val tail = encoded.substring(separator + 1)
+        if (length <= 0 || length >= tail.length) return null
+        val id = tail.substring(0, length)
+        val chapter = tail.substring(length)
+        if (!chapterLength) return id to chapter
+        val chapterSeparator = chapter.indexOf(':')
+        if (chapterSeparator <= 0) return null
+        val chapterSize = chapter.substring(0, chapterSeparator).toIntOrNull() ?: return null
+        val value = chapter.substring(chapterSeparator + 1)
+        return if (chapterSize == value.length && chapterSize > 0) id to value else null
+    }
+
+    /** The projection and causal journal use one existing disk writer and one atomic preferences commit. */
+    internal suspend fun applyLanReading(
+        expected: LanLibrarySnapshot,
+        books: Map<String, LanReadingBook>,
+        next: Map<String, LanReadingItem>,
+        ledger: String,
+        sources: Set<String>,
+        scopeIsCurrent: () -> Boolean,
+    ): Boolean = withContext(Dispatchers.IO) {
+        backupLock.withLock {
+            awaitReady()
+            val accepted = synchronized(lock) {
+                if (_lanReadingRevision.value != expected.revision || !scopeIsCurrent()) return@synchronized false
+                require(next.all { (key, item) -> key == item.key && item.allowed(books, sources) }) {
+                    "同步记录已不属于当前普通漫画来源。"
+                }
+                val liveManga = (_favorites.value + _history.value.map { it.manga } + _pageCollections.value.map { it.manga })
+                    .associateBy(Manga::id)
+                var libraryChanged = false
+                var positionsChanged = false
+                fun manga(id: String): Manga = liveManga[id] ?: books.getValue(id).manga()
+                val favoriteItems = next.values.filter { it.kind == LanReadingKind.FAVORITE }.associateBy { it.mangaId }
+                val removedFavorites = expected.items.values.filter { it.kind == LanReadingKind.FAVORITE && it.mangaId !in favoriteItems }
+                    .mapTo(mutableSetOf()) { it.mangaId }
+                val existingFavoriteIds = _favorites.value.mapTo(mutableSetOf()) { it.id }
+                val favorites = favoriteItems.values.filter { it.mangaId !in existingFavoriteIds }
+                    .sortedByDescending { it.at }.map { manga(it.mangaId) } +
+                    _favorites.value.filterNot { it.id in removedFavorites }
+                val times = _favoriteAddedTimes.value.filterKeys { it !in removedFavorites } +
+                    favoriteItems.values.filter { it.at > 0L }.associate { it.mangaId to it.at }
+                if (favorites != _favorites.value || times != _favoriteAddedTimes.value) {
+                    libraryChanged = true
+                    _favorites.value = favorites
+                    _favoriteAddedTimes.value = times
+                    queueLibraryValue("favorites", JSONArray(favorites.map { it.toJson() }).toString())
+                    queueLibraryValue(FAVORITE_ADDED_TIMES_KEY, favoriteTimesJson(times))
+                    removedFavorites.forEach { removeShelfStateLocked(it); clearResumeTarget(it) }
+                }
+                val write = pendingWrite()
+                val chapterKeys = (expected.items.values + next.values).filter { it.kind == LanReadingKind.CHAPTER }
+                    .associateBy { it.key }
+                chapterKeys.forEach { (itemKey, identity) ->
+                    val previous = expected.items[itemKey]
+                    val value = next[itemKey]
+                    if (value?.sameContent(previous) == true || value == null && previous == null) return@forEach
+                    positionsChanged = true
+                    val key = chapterProgressKey(identity.mangaId, identity.chapterId)
+                    if (value == null) {
+                        pendingChapterPositions.remove(key)
+                        write.chapters.remove(key)
+                        queueLibraryValue(key, null)
+                    } else {
+                        val position = ChapterProgress(value.page, value.pages, value.offset, value.chapterTitle,
+                            value.at, value.panel, value.panelLayout, value.longImage)
+                        pendingChapterPositions[key] = position
+                        write.chapters[key] = position
+                        // A remote outer offset must not accumulate a legacy inner-pan offset.
+                        val legacy = longImagePositionKey(value.mangaId, value.chapterId, value.page)
+                        pendingLongImagePositions[legacy] = 0f
+                        write.longImages[legacy] = 0f
+                    }
+                }
+                val recentIds = expected.items.values.filter { it.kind == LanReadingKind.RECENT }
+                    .mapTo(mutableSetOf()) { it.mangaId }
+                val incomingRecent = next.values.filter { it.kind == LanReadingKind.RECENT }
+                recentIds += incomingRecent.map { it.mangaId }
+                val history = (_history.value.filterNot { it.manga.id in recentIds } + incomingRecent.map { value ->
+                    ReadingProgress(manga(value.mangaId), value.chapterId, value.chapterTitle, value.page,
+                        value.pages, value.offset, value.at, value.panel, value.panelLayout)
+                }).sortedByDescending { it.updatedAt }
+                if (history != _history.value) {
+                    positionsChanged = true
+                    _history.value = history
+                    write.history = history
+                }
+                val bookmarkGroups = (expected.items.values + next.values)
+                    .filter { it.kind == LanReadingKind.BOOKMARK }.map { it.mangaId to it.chapterId }.distinct()
+                bookmarkGroups.forEach { (id, chapter) ->
+                    val values = next.values.filter { it.kind == LanReadingKind.BOOKMARK && it.mangaId == id && it.chapterId == chapter }
+                        .map { ReaderBookmark(it.page, it.note, it.at) }.sortedBy { it.pageIndex }
+                    if (values != bookmarksFor(id, chapter)) persistBookmarks(id, chapter, values)
+                }
+                val managedPictures = (expected.items.values + next.values).filter { it.kind == LanReadingKind.PICTURE }
+                    .mapTo(mutableSetOf()) { it.key }
+                fun pictureKey(value: PageCollection) = LanReadingItem(LanReadingKind.PICTURE, value.manga.id,
+                    value.chapter.id, page = value.firstPage, lastPage = value.lastPage).key
+                val existingPictures = _pageCollections.value.associateBy(::pictureKey)
+                val pictures = _pageCollections.value.filterNot { pictureKey(it) in managedPictures } +
+                    next.values.filter { it.kind == LanReadingKind.PICTURE }.map { value ->
+                        existingPictures[value.key]?.let { existing ->
+                            existing.copy(chapter = existing.chapter.copy(title = value.chapterTitle), savedAt = value.at)
+                        } ?: run {
+                            val ref = SourceKeys.decodeChapter(value.mangaId, value.chapterId)
+                            val preferences = _mangaPreferences.value[value.mangaId] ?: _preferences.value
+                            PageCollection(manga(value.mangaId), Chapter(value.chapterId, value.chapterTitle, 0,
+                                sourceId = ref.sourceId, sourceMangaId = ref.mangaId, sourceChapterId = ref.chapterId),
+                                value.page, value.lastPage, mode = preferences.mode,
+                                coverAlone = preferences.coverAlone, savedAt = value.at)
+                        }
+                    }
+                val sortedPictures = pictures.sortedByDescending { it.savedAt }
+                if (sortedPictures != _pageCollections.value) persistPageCollections(sortedPictures)
+                // A stationary chapter save can have a newer local timestamp than its register.
+                // Only committed position/content changes trigger another sync; RECENT ordering
+                // remains timestamp-sensitive through the actual history comparison above.
+                if (positionsChanged) _chapterHistoryRevision.value++
+                if (libraryChanged || positionsChanged) _lanReadingRevision.value++
+                if (readQueuedString(LAN_READING_LEDGER_KEY) != ledger) queueLibraryValue(LAN_READING_LEDGER_KEY, ledger)
+                startProgressWriter()
+                true
+            }
+            if (accepted) check(flushPendingWrites()) { "阅读同步尚未写入磁盘，请检查存储空间后重试。" }
+            accepted
+        }
+    }
+
     internal suspend fun captureAdultProgress(sourceIds: Set<String>): AdultProgressSnapshot = withContext(Dispatchers.IO) {
         awaitReady()
         synchronized(lock) { collectAdultProgress(sourceIds) }
@@ -747,7 +964,7 @@ class LibraryStore(context: Context) {
         if (!stateRestored) return@synchronized null
         val key = chapterProgressKey(mangaId, chapterId)
         pendingChapterPositions[key]?.let { return@synchronized it }
-        val stored = if (ignoreStoredProgress || mangaId in pendingProgressRemovals) null else disk.getString(key, null)?.let { encoded ->
+        val stored = if (ignoreStoredProgress || mangaId in pendingProgressRemovals) null else readQueuedString(key)?.let { encoded ->
             readChapterPosition(encoded)
         }
         stored ?: progressFor(mangaId)?.takeIf { it.chapterId == chapterId }?.chapterProgress()
@@ -857,6 +1074,7 @@ class LibraryStore(context: Context) {
             // Only actual confirmed reading consumes the explicitly selected cloud target.
             if (updateRecent && manga.id in _resumeTargets.value) clearResumeTarget(manga.id)
             _chapterHistoryRevision.value++
+            _lanReadingRevision.value++
             startProgressWriter()
         }
     }
@@ -866,6 +1084,7 @@ class LibraryStore(context: Context) {
         _history.value = emptyList()
         clearResumeTargets()
         _chapterHistoryRevision.value++
+        _lanReadingRevision.value++
         pendingChapterPositions.clear()
         pendingLongImagePositions.clear()
         pendingProgressRemovals.clear()
@@ -873,7 +1092,8 @@ class LibraryStore(context: Context) {
         // while that write finishes, and new reading positions can join the clearing batch.
         progressEpoch++
         ignoreStoredProgress = true
-        progressWrite = ProgressWrite(progressEpoch, clear = true)
+        progressWrite = ProgressWrite(progressEpoch, clear = true,
+            values = pendingLibraryValues.toMutableMap())
         startProgressWriter()
     }
 
@@ -884,6 +1104,7 @@ class LibraryStore(context: Context) {
         _history.value = next
         clearResumeTarget(mangaId)
         _chapterHistoryRevision.value++
+        _lanReadingRevision.value++
         pendingChapterPositions.keys.removeAll { isProgressKeyFor(it, mangaId) }
         pendingLongImagePositions.keys.removeAll { isProgressKeyFor(it, mangaId) }
         val write = pendingWrite()
@@ -898,6 +1119,15 @@ class LibraryStore(context: Context) {
 
     /** Called under [lock]; multiple pending saves share one latest history snapshot. */
     private fun pendingWrite(): ProgressWrite = progressWrite ?: ProgressWrite(progressEpoch).also { progressWrite = it }
+
+    /** These values share the progress journal, so a LAN merge and its causal metadata commit together. */
+    private fun queueLibraryValue(key: String, value: String?) {
+        pendingLibraryValues[key] = value
+        pendingWrite().values[key] = value
+    }
+
+    private fun readQueuedString(key: String): String? =
+        if (pendingLibraryValues.containsKey(key)) pendingLibraryValues[key] else disk.getString(key, null)
 
     private fun startProgressWriter() {
         if (progressWriterRunning) return
@@ -932,6 +1162,9 @@ class LibraryStore(context: Context) {
                     disk.all.keys.filter { key -> write.removedManga.keys.any { isProgressKeyFor(key, it) } }
                         .forEach { editor.remove(it) }
                 }
+                write.values.forEach { (key, value) ->
+                    if (value == null) editor.remove(key) else editor.putString(key, value)
+                }
                 write.chapters.forEach { (key, position) -> editor.putString(key, position.toJson().toString()) }
                 write.longImages.forEach { (key, position) -> editor.putFloat(key, position) }
                 write.history?.let { history -> editor.putString("history", JSONArray(history.map { it.toJson() }).toString()) }
@@ -950,6 +1183,10 @@ class LibraryStore(context: Context) {
                         write.longImages.forEach { (key, position) ->
                             if (pendingLongImagePositions[key] == position) pendingLongImagePositions.remove(key)
                         }
+                        write.values.forEach { (key, value) ->
+                            if (pendingLibraryValues.containsKey(key) && pendingLibraryValues[key] == value)
+                                pendingLibraryValues.remove(key)
+                        }
                     } else {
                         // Retain unsaved positions for the next save; do not spin on a full disk.
                         val newer = progressWrite
@@ -960,6 +1197,12 @@ class LibraryStore(context: Context) {
                                 chapters.keys.removeAll { isProgressKeyFor(it, mangaId) }
                                 longImages.keys.removeAll { isProgressKeyFor(it, mangaId) }
                                 removedManga[mangaId] = sequence
+                            }
+                            newer?.values?.forEach { (key, value) ->
+                                // A failed older save must not overtake a newer LAN tombstone.
+                                // A later genuine save in newer.chapters is applied afterwards.
+                                if (value == null) { chapters.remove(key); longImages.remove(key) }
+                                values[key] = value
                             }
                             newer?.chapters?.let(chapters::putAll)
                             newer?.longImages?.let(longImages::putAll)
@@ -980,6 +1223,7 @@ class LibraryStore(context: Context) {
         val chapters: MutableMap<String, ChapterProgress> = linkedMapOf(),
         val longImages: MutableMap<String, Float> = linkedMapOf(),
         val removedManga: MutableMap<String, Long> = linkedMapOf(),
+        val values: MutableMap<String, String?> = linkedMapOf(),
     )
 
     fun togglePageCollection(collection: PageCollection): Unit = synchronized(lock) {
@@ -996,7 +1240,9 @@ class LibraryStore(context: Context) {
 
     private fun persistPageCollections(values: List<PageCollection>) {
         _pageCollections.value = values
-        disk.edit().putString(PAGE_COLLECTIONS_KEY, JSONArray(values.map { it.toJson() }).toString()).apply()
+        queueLibraryValue(PAGE_COLLECTIONS_KEY, JSONArray(values.map { it.toJson() }).toString())
+        _lanReadingRevision.value++
+        startProgressWriter()
     }
 
     /** Old explicit page markers become pictures once their real chapter images are available. */
@@ -1064,7 +1310,7 @@ class LibraryStore(context: Context) {
     /** Explicit page bookmarks survive ordinary history cleanup because the user created them deliberately. */
     fun bookmarksFor(mangaId: String, chapterId: String): List<ReaderBookmark> = synchronized(lock) {
         if (!stateRestored) return@synchronized emptyList()
-        val encoded = disk.getString(bookmarkKey(mangaId, chapterId), "[]") ?: "[]"
+        val encoded = readQueuedString(bookmarkKey(mangaId, chapterId)) ?: "[]"
         runCatching {
             val array = JSONArray(encoded)
             (0 until array.length()).mapNotNull { index ->
@@ -1101,16 +1347,16 @@ class LibraryStore(context: Context) {
 
     private fun persistBookmarks(mangaId: String, chapterId: String, bookmarks: List<ReaderBookmark>) {
         val key = bookmarkKey(mangaId, chapterId)
-        val editor = disk.edit()
-        if (bookmarks.isEmpty()) editor.remove(key)
-        else editor.putString(key, JSONArray(bookmarks.map { bookmark ->
+        val encoded = if (bookmarks.isEmpty()) null else JSONArray(bookmarks.map { bookmark ->
             JSONObject().apply {
                 put("pageIndex", bookmark.pageIndex)
                 put("note", bookmark.note)
                 put("updatedAt", bookmark.updatedAt)
             }
-        }).toString())
-        editor.apply()
+        }).toString()
+        queueLibraryValue(key, encoded)
+        _lanReadingRevision.value++
+        startProgressWriter()
     }
 
     /** Explicit spread corrections live separately from reading history and source image data. */
@@ -1286,6 +1532,7 @@ class LibraryStore(context: Context) {
         const val SPREAD_PREFIX = "spread_singles:"
         const val CHAPTER_PROGRESS_PREFIX = "chapter_progress:"
         const val LONG_IMAGE_POSITION_PREFIX = "long_image_position:"
+        const val LAN_READING_LEDGER_KEY = "lan_reading_ledger_v1"
     }
 }
 

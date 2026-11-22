@@ -67,6 +67,7 @@ internal class ReaderEnhancementController(
     private val chapterId: String,
     private val sourceId: String,
     parentScope: CoroutineScope,
+    workSourceId: String = sourceId,
 ) : AutoCloseable {
     val sessionKey = "reader-enhancement:${content.directory}:${randomUuid()}"
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[Job]))
@@ -120,6 +121,7 @@ internal class ReaderEnhancementController(
     private class CacheOnlyMiss : CancellationException("当前页没有已完成的增强结果")
 
     init {
+        center.settings.registerReaderSession(sessionKey, content, workId, workSourceId)
         scope.launch { center.scheduler.state.collect { synchronized(lock) { if (!closed) publishLocked() } } }
         scope.launch { center.inventory.collect {
             synchronized(lock) { if (!closed) clearFailuresLocked() }
@@ -611,7 +613,7 @@ internal class ReaderEnhancementController(
             lastAttempts.clear(); failed.clear(); cacheMisses.clear(); waitingOriginals.clear()
             details.clear(); manuallyStopped.clear()
             scope.cancel()
-            center.settings.setSessionOverride(sessionKey, content, null)
+            center.settings.clearSession(sessionKey)
             center.telemetry.endSession(sessionKey)
         }
     }

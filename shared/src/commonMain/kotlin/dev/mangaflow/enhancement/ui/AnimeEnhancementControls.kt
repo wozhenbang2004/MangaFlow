@@ -77,7 +77,7 @@ internal class EnhancementNavigation(initial: EnhancementPage = EnhancementPage.
 
 @Composable
 internal fun EnhancementScope(content: EnhancementContent, editSession: Boolean, onSelect: (Boolean) -> Unit) {
-    val sessionLabel = if (content == EnhancementContent.ANIME) "本次播放" else "本次阅读"
+    val sessionLabel = if (content == EnhancementContent.ANIME) "本次播放" else "这部漫画"
     BoxWithConstraints(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
         val stacked = maxWidth < 280.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
         if (stacked) Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {

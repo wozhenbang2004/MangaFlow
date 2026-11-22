@@ -152,6 +152,7 @@ class EnhancementCenter private constructor(context: PlatformContext) {
     fun savePolicy(content: EnhancementContent, policy: EnhancementPolicy, sessionKey: String? = null): Deferred<Boolean> {
         policy.checked()
         val receipt = CompletableDeferred<Boolean>()
+        val readerScope = sessionKey?.let(settings::readerScope)
         val sessionToken = sessionKey?.let(settings::sessionToken)
         writes.trySend {
             try {
@@ -163,8 +164,11 @@ class EnhancementCenter private constructor(context: PlatformContext) {
                     changesScope && settings.policy(trial.content, trial.sessionKey) != policy
                 } == true
                 if (changesTrial && activeTrial != null) telemetry.finishTrial(activeTrial.id, "试用设置已改变")
-                val saved = if (sessionKey == null) settings.update(content, policy)
-                    else settings.setSessionOverrideIfCurrent(sessionKey, content, policy, checkNotNull(sessionToken))
+                val saved = when {
+                    readerScope != null -> settings.updateReaderPolicy(readerScope, policy)
+                    sessionKey == null -> settings.update(content, policy)
+                    else -> settings.setSessionOverrideIfCurrent(sessionKey, content, policy, checkNotNull(sessionToken))
+                }
                 receipt.complete(saved)
             } catch (error: Exception) { receipt.completeExceptionally(error) }
         }.getOrThrow()
@@ -189,11 +193,21 @@ class EnhancementCenter private constructor(context: PlatformContext) {
         return id
     }
 
-    fun resetSessionPolicy(sessionKey: String) {
+    fun resetSessionPolicy(sessionKey: String): Deferred<Boolean> {
         telemetry.state.value.activeTrial?.takeIf { it.sessionKey == sessionKey }?.let {
             telemetry.finishTrial(it.id, "本次设置已恢复为默认值")
         }
-        settings.clearSession(sessionKey)
+        val readerScope = settings.readerScope(sessionKey)
+        if (readerScope == null) {
+            settings.clearSession(sessionKey)
+            return CompletableDeferred(true)
+        }
+        val receipt = CompletableDeferred<Boolean>()
+        writes.trySend {
+            try { receipt.complete(settings.updateReaderPolicy(readerScope, null)) }
+            catch (error: Exception) { receipt.completeExceptionally(error) }
+        }.getOrThrow()
+        return receipt
     }
 
     fun endSession(sessionKey: String) {

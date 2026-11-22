@@ -149,7 +149,12 @@ internal fun EnhancementModelList(
                 ModelChoiceRow(choice.title, summary, selected, selection != null,
                     onClick = { if (selection != null) onSelectModel(selection) else onOpenModel(choice.key) },
                     modifier = Modifier.weight(1f), failed = pending?.failed == true && selectionId == null,
-                    actionLabel = selection?.scale?.takeIf { it != policy.scale }?.let { "选用并改为 ${it}×" },
+                    actionLabel = when {
+                        selection == null -> null
+                        content != EnhancementContent.ANIME && policy.tier == QualityTier.ORIGINAL -> "选用并开启 ${selection.scale}×"
+                        selection.scale != policy.scale -> "选用并改为 ${selection.scale}×"
+                        else -> null
+                    },
                     detailsOnly = selectionId != null && selection == null,
                     guidance = modelGuidance(choice, content)?.summary)
                 MotionIconButton(onClick = { onOpenModel(choice.key) }, modifier = Modifier.size(44.dp),
@@ -414,7 +419,9 @@ internal fun EnhancementModelDetail(
             EnhancementQuiet("当前输出为 ${policy.scale}×，此模型支持 ${choice.scaleLabel}；安装就绪后可选用兼容倍率。")
     }
     if (policy.tier == QualityTier.ORIGINAL)
-        EnhancementQuiet("画质增强当前关闭；选用后可回画质页开启，模型与倍率会保留。")
+        EnhancementQuiet(if (content == EnhancementContent.ANIME)
+            "画质增强当前关闭；选用后可回画质页开启，模型与倍率会保留。"
+            else "选用后开启漫画增强；没有提前准备模式时，同时启用智能预处理。")
     if (engine != null) AnimeEnhancementNavigation(Icons.Outlined.Memory, "运行组件",
         "${engine.title} · ${engineReadinessLabel(engine.readiness)}", onClick = { onOpenEngine(engine.id) })
     EnhancementDivider()

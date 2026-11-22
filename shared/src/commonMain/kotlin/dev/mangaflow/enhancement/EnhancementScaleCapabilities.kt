@@ -134,7 +134,12 @@ internal fun enhancementOutputScales(content: EnhancementContent, policy: Enhanc
 /** A preview for an explicit model-selection action; callers alone decide whether to save it. */
 internal fun enhancementModelSelectionPolicy(content: EnhancementContent, policy: EnhancementPolicy,
     inventory: EngineInventory, modelId: String?): EnhancementPolicy? {
-    val choice = policy.copy(modelId = modelId, realtimeEnhancementEnabled =
+    val enableManga = content != EnhancementContent.ANIME && modelId != null
+    val choice = policy.copy(modelId = modelId,
+        tier = if (enableManga && policy.tier == QualityTier.ORIGINAL) QualityTier.BALANCED else policy.tier,
+        preparation = if (enableManga && PreparationMode.IMMEDIATE !in policy.preparation &&
+            PreparationMode.SMART !in policy.preparation) policy.preparation + PreparationMode.SMART else policy.preparation,
+        realtimeEnhancementEnabled =
         if (content == EnhancementContent.ANIME && policy.tier != QualityTier.ORIGINAL) true
         else policy.realtimeEnhancementEnabled)
     val scales = enhancementOutputScales(content, choice, inventory)

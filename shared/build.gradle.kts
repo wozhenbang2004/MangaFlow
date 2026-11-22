@@ -13,6 +13,22 @@ val okHttpVersion = "5.5.1"
 val media3Version = "1.11.1"
 val mediampVersion = "0.5.1"
 
+// Public OAuth application identity, never a client secret or a borrowed third-party ID.
+val mangaTrackingConfiguration = tasks.register("generateMangaTrackingConfiguration") {
+    val clientId = providers.gradleProperty("mangaflow.aniListClientId")
+        .orElse(providers.environmentVariable("MANGAFLOW_ANILIST_CLIENT_ID")).orElse("")
+    val output = layout.buildDirectory.dir("generated/manga-tracking/kotlin")
+    inputs.property("aniListClientId", clientId)
+    outputs.dir(output)
+    doLast {
+        val value = clientId.get().trim()
+        require(value.isEmpty() || value.matches(Regex("[0-9]{1,20}"))) { "AniList client ID must be a numeric application ID" }
+        val file = output.get().file("dev/mangaflow/tracking/MangaTrackingBuildConfig.kt").asFile
+        file.parentFile.mkdirs()
+        file.writeText("package dev.mangaflow.tracking\n\ninternal object MangaTrackingBuildConfig {\n    const val aniListClientId: String = \"$value\"\n}\n")
+    }
+}
+
 // Keep Java/Kotlin APIs in the base APK; native engines are signed optional assets.
 val inferenceRuntimeAars = configurations.create("inferenceRuntimeAars") {
     isCanBeConsumed = false
@@ -119,6 +135,7 @@ kotlin {
 
     applyDefaultHierarchyTemplate()
     sourceSets {
+        commonMain.get().kotlin.srcDir(mangaTrackingConfiguration)
         val nonAndroidMain = create("nonAndroidMain") { dependsOn(commonMain.get()) }
         val desktopMain = getByName("desktopMain")
         // Compile the small Java socket/crypto receiver for each JVM platform.
@@ -166,6 +183,7 @@ kotlin {
                 implementation("androidx.media3:media3-$module:$media3Version")
             }
             implementation(project.dependencies.platform("com.squareup.okhttp3:okhttp-bom:$okHttpVersion"))
+            implementation("com.squareup.okhttp3:okhttp-tls")
             implementation("androidx.core:core-ktx:1.16.0")
             implementation("androidx.activity:activity-compose:1.10.1")
             implementation("androidx.webkit:webkit:1.14.0")
@@ -201,6 +219,10 @@ kotlin {
             implementation("org.update4j:update4j:1.5.9")
             implementation("io.ktor:ktor-client-okhttp:3.6.1")
             implementation("com.squareup.okhttp3:okhttp-urlconnection")
+            implementation("com.squareup.okhttp3:okhttp-tls")
+            implementation("org.jmdns:jmdns:3.6.5")
+            implementation("org.apache.pdfbox:pdfbox:3.0.8")
+            implementation("org.apache.pdfbox:jbig2-imageio:3.0.5")
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
             implementation("com.ibm.icu:icu4j:77.1")
             implementation("io.github.darkxanter:webp-imageio:0.3.3")

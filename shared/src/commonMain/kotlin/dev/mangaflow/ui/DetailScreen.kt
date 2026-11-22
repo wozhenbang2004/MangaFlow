@@ -64,6 +64,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.CloudSync
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkBorder
@@ -240,6 +241,7 @@ fun DetailScreen(
     onContinuePreferred: (() -> Unit)? = null,
     onOriginal: (MangaTag) -> Unit = {},
     adultProfile: Boolean = false,
+    onOpenTracking: (() -> Unit)? = null,
     desktopFindRequest: Int = 0,
     onDesktopFindHandled: (Int) -> Unit = {},
 ) {
@@ -625,6 +627,7 @@ fun DetailScreen(
                         comments = activeSection == 1, commentCount = commentCount,
                         sceneColor = informationTone.copy(alpha = .80f),
                         onBack = onBack, onIntroduction = { fullIntroduction = true },
+                        onOpenTracking = onOpenTracking?.takeUnless { adultProfile },
                         onToggleFavorite = {
                             feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm)
                             onToggleFavorite()
@@ -724,6 +727,7 @@ fun DetailScreen(
                         comments = activeSection == 1, commentCount = commentCount,
                         sceneColor = Color.Transparent,
                         onBack = onBack, onIntroduction = { fullIntroduction = true },
+                        onOpenTracking = onOpenTracking?.takeUnless { adultProfile },
                         onToggleFavorite = { feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm); onToggleFavorite() }, onRetryCover = {
                             coverFailed = false
                             coverRetry++
@@ -839,6 +843,7 @@ private fun ArtworkToolbar(
     onIntroduction: () -> Unit,
     onToggleFavorite: () -> Unit,
     onRetryCover: () -> Unit,
+    onOpenTracking: (() -> Unit)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val progress = if (compact) 1f else ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)
@@ -881,6 +886,9 @@ private fun ArtworkToolbar(
             }
         }
         if (coverFailed) ArtworkAction(Icons.Outlined.Refresh, "重新加载封面", backdrop, 1f - progress, tint, glassTone, onRetryCover)
+        onOpenTracking?.let { open ->
+            ArtworkAction(Icons.Outlined.CloudSync, "漫画账号进度", backdrop, 1f - progress, tint, glassTone, open)
+        }
         ArtworkAction(if (favorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
             if (favorite) "从书架移除" else "加入书架", backdrop, 1f - progress, tint, glassTone, onToggleFavorite)
     }

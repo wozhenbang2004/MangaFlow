@@ -94,7 +94,7 @@ class ReaderChapterEnhancementStore(context: PlatformContext, private val center
                 if (prior == null) return@collect
                 complete.filter { "${it.id}:${it.createdAt}" !in prior }.forEach { entry ->
                     val content = contentFor(entry) ?: return@forEach
-                    val policy = center.settings.policy(content)
+                    val policy = center.settings.policyForWork(content, entry.manga.id, entry.manga.sourceId)
                     if (policy.enhanceAfterDownload && policy.tier != QualityTier.ORIGINAL)
                         enqueue(entry, content, policy, automatic = true)
                 }
@@ -103,7 +103,7 @@ class ReaderChapterEnhancementStore(context: PlatformContext, private val center
     }
 
     fun enqueue(entry: DownloadEntry, content: EnhancementContent,
-        policy: EnhancementPolicy = center.settings.policy(content), automatic: Boolean = false): String {
+        policy: EnhancementPolicy = center.settings.policyForWork(content, entry.manga.id, entry.manga.sourceId), automatic: Boolean = false): String {
         require(content != EnhancementContent.ANIME)
         require(entry.status == DownloadStatus.COMPLETED && entry.totalPages > 0 && entry.completedPages == entry.totalPages) {
             "原始下载完成并校验后才能整章增强"
