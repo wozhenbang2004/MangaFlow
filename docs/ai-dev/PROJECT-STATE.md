@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## 普通漫画逐页等待与预取恢复 · 2026-11-23
+
+Route/Stage：DELIVERY，基线 main `a1b243f7ebaa951036ba7d9257890ba29c64acc3`；下节 Lanerc 批次已交付，不重复其旧发布动作。用户报告每翻一页才开始加载，原本能持续提前加载；完整原话、MANGA-PREFETCH-01–03、源码依据和验收边界保存在[预取恢复合同](../design/reader-prefetch-direction.md#manga-prefetch-recovery-20261123)。本轮反馈已全部覆盖，2026-11-23 23:47 Asia/Shanghai 固化；精确消息时间／ID、实际安装版、来源与配置未提供。
+
+当前实现：同窗口已经启动的原图解析随传输一起保留，避免翻页期间可见页暂未就绪反复取消解析；下载预取按前台相同页身份和当前记录判断，没有活跃／错误所有权的暂停记录不再阻断在线预取，真实下载、源错误、需要刷新和缓存文件校验继续保留；备用来源原图 helper 对齐现有 HTTP(S) 支持。没有改动全局并发、手动页数、自动预算或前台优先级，没有增加 UI。历史核对确认前两处分别源于 11 月 14／17 日，不能称为刚刚 Lanerc 提交引入或本次设备回退的唯一根因。全局 readerWaiting／foregroundUsers 的调用与释放未发现番剧遗留路径。
+
+本轮已完整核验加载核心 2.7.10，Space HEAD `20261123T120229Z-c9747750`；没有修改全局 Skill。源码／差异核对与真正设备效果分开。Next Exact Action：完成当前有限源码核对，读最新 main 并保留并发变更，以 expected SHA 守卫一次提交，仅确认既有 Android release／Multiplatform CI 启动。若本节所在提交已交付，直接等待对应新包的真实反馈，不重复发布、不追加状态专用提交、不轮询构建完成。root 唯一负责集成／文档／发布，模块写入已收束；禁止测试、本地构建／编译、业务探测及 UI 自动化，连续翻页和实际预取吞吐仍未验证。
+
 ## Lanerc 机制补齐与连续播放 · 2026-11-23
 
 Route/Stage：DELIVERY，基线 main `047cbb521cf5d2bddacd2c4bb2057dcf4b1808d5`；下节 ANIME-FAST-01–04 已进入主线，不重复其旧提交动作。用户先追问 Lanerc 逆向所得是否完全吸收到漫流，随后明确“快去吧。去做好吧。”授权继续。两句原话、解释边界、ANIME-TRANSFER-01–05 及当前质量下限集中在[本批合同](../design/anime-redesign-20261119.md#anime-lanerc-transfer-20261123)，覆盖至本次授权，2026-11-23 21:18 Asia/Shanghai 固化；精确消息时间／ID 未提供。

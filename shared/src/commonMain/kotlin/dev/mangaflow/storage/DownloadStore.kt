@@ -698,10 +698,22 @@ class DownloadStore private constructor(context: Context) {
         val id = chapterKey(mangaId, chapterId)
         restoreChapter(id)
         val snapshot = synchronized(lock) { records[id] } ?: return@withContext page
-        val stored = snapshot.pages.getOrNull(page.index) ?: return@withContext null
-        if (stored.url.substringBefore('?') != page.url.substringBefore('?')) return@withContext null
-        // An existing download alone owns missing pages, including its frozen route.
-        localPage(snapshot, page.index)
+        val stored = snapshot.pages.getOrNull(page.index) ?: return@withContext page
+        if (pageManifestIdentity(stored) != pageManifestIdentity(page)) return@withContext page
+        localPage(snapshot, page.index)?.let { return@withContext it }
+        synchronized(lock) {
+            // File validation may update the record; decide from its current generation.
+            val current = records[id] ?: return@synchronized page
+            if (current.generation != snapshot.generation) return@synchronized null
+            // Match resolveReaderPage's explicit route fallback without claiming a writer.
+            if (current.entry.routingError) return@synchronized page
+            // Source failures must remain visible, just as in requestPage. A paused
+            // or otherwise inactive record without these failures no longer owns the GET.
+            if (transferFailures[id]?.generation == current.generation || current.entry.needsSourceRefresh ||
+                current.entry.status in setOf(DownloadStatus.FAILED, DownloadStatus.WAITING) &&
+                    current.entry.error.isNotBlank()) return@synchronized null
+            if (current.entry.status in ACTIVE_STATUSES) null else page
+        }
     }
 
     /** Called for an image when it is needed, never on every download-progress publication. */

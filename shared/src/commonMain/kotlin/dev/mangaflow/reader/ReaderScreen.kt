@@ -3109,11 +3109,12 @@ internal fun AdjacentPagePrefetch(
                 val observationWindow = (aheadTargets + behindTargets).toSet() + visiblePages
                 inspectTargets = observationWindow + previewTargets
                 inspectVisible = visiblePages
-                // A remounted current image can temporarily be unready. Keep only already
-                // running originals within the same observation window; never start new
-                // optional requests until visibleReady. Disabled/zero-budget still cancels.
+                // A remounted current image can temporarily be unready. Keep existing
+                // original resolution and transfers within the same observation window;
+                // cancelling their local lookup on every turn can starve the transfer queue.
+                // New optional requests still wait for visibleReady. Disabled/zero-budget cancels.
                 val retainedOriginals = if (retainOriginalsAcrossLayouts && window.enabled &&
-                    window.foregroundActive && window.bytes > 0L) transfers().intersect(observationWindow) else emptySet()
+                    window.foregroundActive && window.bytes > 0L) pending().intersect(observationWindow) else emptySet()
                 val running = desired + foreground + promoted + retainedOriginals
                 (pending() + checks.keys).filter { it !in running }.forEach(::stop)
                 // Preview preparation can extend beyond the original-image window when

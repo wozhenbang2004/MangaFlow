@@ -310,7 +310,8 @@ internal suspend fun prefetchOriginalPageResult(
     context: PlatformContext, page: Page, headers: Map<String, String>,
     source: String, bytes: PrefetchByteBudget, work: PrefetchWork = PrefetchWork(),
 ): OriginalPagePrefetchResult {
-    if (source == "jmcomic" || !page.url.startsWith("https:")) return OriginalPagePrefetchResult(false)
+    if (source == "jmcomic" || (!page.url.startsWith("https:") && !page.url.startsWith("http:")))
+        return OriginalPagePrefetchResult(false)
     val imageContext = imagePlatformContext(context)
     val request = readerPageRequest(context, page, headers, source)
         .prefetchPriority(bytes, source, work).size(1)
