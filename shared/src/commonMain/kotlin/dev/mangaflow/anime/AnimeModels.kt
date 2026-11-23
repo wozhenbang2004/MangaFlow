@@ -262,7 +262,11 @@ internal data class AnimePlaybackMeasurements(
     val measuredBytesPerSecond: Long? = null,
     val addressMs: Long? = null,
     val declaredQuality: String? = null,
+    val firstFrameObservedAt: Long? = null,
     val playbackObservedAt: Long? = null,
+    val durationMs: Long? = null,
+    val durationAssetId: String? = null,
+    val durationObservedAt: Long? = null,
     val addressObservedAt: Long? = null,
     /** A bounded media response is not a decoded first frame or sustained download rate. */
     val mediaObservedAt: Long? = null,
@@ -377,6 +381,8 @@ data class AnimeScreenState(
     val detail: AnimeDetail? = null,
     val detailLoading: Boolean = false,
     val detailError: String? = null,
+    /** Detail open to the first exact episode line published in this visit. */
+    val detailFirstConfirmedLineMs: Long? = null,
     val detailScores: List<AnimeSourceScore> = emptyList(),
     val detailScoreChecks: Map<AnimeDiscoveryProvider, AnimeScoreCheck> = emptyMap(),
     val nativeMetadataSearch: AnimeNativeMetadataSearch? = null,
@@ -404,6 +410,7 @@ data class AnimeScreenState(
     val sourceMeasurements: AnimeSourceMeasurementBatch? = null,
     val playbackMeasurementsRevision: Long = 0,
     val playbackFirstFrameMs: Long? = null,
+    val playbackIntentFirstFrameMs: Long? = null,
     val playbackRouteMode: DownloadRouteMode? = null,
     val resolving: Boolean = false,
     val playbackTarget: AnimePlaybackTarget? = null,

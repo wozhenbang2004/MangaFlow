@@ -516,9 +516,11 @@ internal fun AnimePlayerSettings(
                                 AnimeQuietLabel(listOfNotNull(stage, source, route).joinToString(" · "))
                                 (target?.failure?.reason ?: target?.error ?: currentMedia?.error)?.let { AnimeQuietLabel(it) }
                                 val firstFrame = state.playbackFirstFrameMs.takeIf { currentMedia != null }?.let { "$it ms" }
+                                val intentFirstFrame = state.playbackIntentFirstFrameMs.takeIf { currentMedia != null }
                                 val buffered = currentMedia?.bufferedAheadMs?.takeIf { it >= 0 }?.let { animeTime(it) }
                                 val speed = currentMedia?.downloadBytesPerSecond?.takeIf { it >= 0 }?.let(::animeSourceRate)
                                 AnimeQuietLabel("打开至首帧 ${firstFrame ?: "—"} · 前方已缓冲 ${buffered ?: "—"}")
+                                intentFirstFrame?.let { AnimeQuietLabel("发起播放至首帧 $it ms") }
                                 AnimeQuietLabel("实播传输速率 · ${speed ?: "—"}")
                                 AnimeQuietLabel("前方缓冲目标 · ${bufferSeconds(state.settings.bufferMaxMs)} 秒")
                                 AnimeQuietLabel(if (state.settings.bufferRefillNearTarget)

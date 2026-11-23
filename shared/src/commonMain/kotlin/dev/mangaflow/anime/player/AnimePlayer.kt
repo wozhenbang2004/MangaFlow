@@ -27,6 +27,8 @@ data class AnimePlayerRequest(
     val playWhenReady: Boolean = true,
     val localMedia: AnimeLocalMedia? = null,
     val bypassMediaCache: Boolean = false,
+    /** Rechecked when an online startup stalls or encounters a retryable transport failure. */
+    val hasStartupAlternative: (() -> Boolean)? = null,
 )
 
 /** Native engine construction failed before the source could be evaluated. */
@@ -209,6 +211,7 @@ data class AnimePlayerState(
     val notice: String? = null,
     /** null means this backend does not expose an actual rendered-frame acknowledgement. */
     val firstFrameRendered: Boolean? = null,
+    val firstFrameAtMillis: Long? = null,
     val tracks: List<AnimePlayerTrack> = emptyList(),
     val capabilities: Set<AnimePlayerCapability> = emptySet(),
     val videoScale: AnimeVideoScale = AnimeVideoScale.FIT,

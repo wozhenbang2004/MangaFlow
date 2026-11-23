@@ -799,7 +799,9 @@ internal class AndroidAnimePlayer(
             override fun onRenderedFirstFrame() {
                 if (!isCurrent(generation) || engine.value !== exo || nativeVideoRecoveryFailed || bufferingTimedOut) return
                 if (nativeVideoOnly) nativeVideoRestored = true
+                val renderedAt = SystemClock.elapsedRealtime()
                 publish(generation) { it.copy(firstFrameRendered = true,
+                    firstFrameAtMillis = it.firstFrameAtMillis ?: renderedAt,
                     videoEnhancement = if (nativeVideoOnly && options.videoEnhancement != AnimeVideoEnhancementMode.OFF)
                         it.videoEnhancement.copy(phase = nativeVideoFallbackPhase, detail = nativeVideoFallbackDetail)
                     else it.videoEnhancement,
@@ -1393,6 +1395,9 @@ internal class AndroidAnimePlayer(
         if (now - since < timeoutMs) return
         if (nativeVideoOnly) {
             failNativeVideoRecovery(generation, IOException("原生画面恢复未收到首帧"))
+        } else if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF && options.realtimeFrames == null &&
+            options.preparedVideoModel == null && hasStartupAlternative()) {
+            stopStalledPlayback(generation, exo, "视频轨道已就绪但未收到首帧，正在尝试本集备用线路")
         } else if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF || !recoverNativeVideo(generation, exo)) {
             val message = "视频轨道已就绪，画面未收到首帧。请重试当前播放。"
             failNativeVideoRecovery(generation, IOException(message), message)
@@ -1431,7 +1436,18 @@ internal class AndroidAnimePlayer(
         bufferingEnd = end
         val startup = state.value.firstFrameRendered == false && state.value.hasVideoTracks != false && !nativeVideoOnly
         val noProgressLimit = if (startup) 12_000L else 30_000L
-        if (since == null || (now - bufferingProgressAt < noProgressLimit && now - since < 120_000L)) return
+        if (since == null) return
+        val canSwitch = startup && now - since >= 10_000L && hasStartupAlternative()
+        if (!canSwitch && now - bufferingProgressAt < noProgressLimit && now - since < 120_000L) return
+        stopStalledPlayback(generation, exo, when {
+            canSwitch -> "这条线路起播缓冲超过 10 秒，正在尝试本集备用线路"
+            now - bufferingProgressAt >= noProgressLimit ->
+                "这条线路已 ${(noProgressLimit / 1_000L)} 秒没有收到新数据或缓冲进展，请重试或换个来源"
+            else -> "这条线路持续缓冲超过 2 分钟，暂未达到起播条件，请重试或换个来源"
+        })
+    }
+
+    private fun stopStalledPlayback(generation: Long, exo: ExoPlayer, reason: String) {
         bufferingTimedOut = true // Set before stop's synchronous callbacks can republish READY.
         clearLiveEnhancement()
         var cancelled = false
@@ -1440,14 +1456,16 @@ internal class AndroidAnimePlayer(
         catch (_: Exception) { /* A native stop failure must not hide the observed timeout. */ }
         finally {
             if (!cancelled && isCurrent(generation) && engine.value === exo) {
-                val timeout = IOException(if (now - bufferingProgressAt >= noProgressLimit)
-                    "这条线路已 ${(noProgressLimit / 1_000L)} 秒没有收到新数据或缓冲进展，请重试或换个来源"
-                    else "这条线路持续缓冲超过 2 分钟，暂未达到起播条件，请重试或换个来源")
+                val timeout = IOException(reason)
                 if (nativeVideoOnly && !nativeVideoRestored) failNativeVideoRecovery(generation, timeout)
                 else fail(generation, timeout)
             }
         }
     }
+
+    private fun hasStartupAlternative() = localLease == null && state.value.firstFrameAtMillis == null &&
+        state.value.hasVideoTracks != false && !nativeVideoOnly && (foreground || state.value.inPictureInPicture) &&
+        state.value.playWhenReady && !state.value.playbackSuppressed && request?.hasStartupAlternative?.invoke() == true
 
     private fun synchronize(generation: Long, exo: ExoPlayer) {
         if (!isCurrent(generation) || engine.value !== exo) return
@@ -1622,7 +1640,7 @@ internal class AndroidAnimePlayer(
         // A parsed HLS segment failure cannot change the entry playlist into a
         // progressive video file. Only retry transport failures here; the controller
         // owns recovery across confirmed alternatives for the same episode.
-        if (!retryableNetwork || state.value.recoveryAttempt >= options.automaticRecoveryAttempts) {
+        if (!retryableNetwork || hasStartupAlternative() || state.value.recoveryAttempt >= options.automaticRecoveryAttempts) {
             publish(generation) { it.copy(notice = it.notice.takeUnless { value -> value == recoveryNotice }) }
             recoveryNotice = null
             fail(generation, playbackFailure(error, remoteMediaPlan?.type),

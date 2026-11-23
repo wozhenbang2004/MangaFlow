@@ -704,7 +704,8 @@ internal fun AnimeSourcesPanel(
                             }
                         }
                         val candidatesExpanded = tools == AnimeSourceTools.CANDIDATES || (tools == null && bindings.isEmpty())
-                        val canInspect = associationIssues.isNotEmpty() || state.sourceAggregationTotal > 0 || state.sourceError != null
+                        val canInspect = associationIssues.isNotEmpty() || state.sourceAggregationTotal > 0 ||
+                            state.sourceError != null || state.detailFirstConfirmedLineMs != null
                         item(key = "source-tools") {
                             Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(start = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
@@ -761,6 +762,11 @@ internal fun AnimeSourcesPanel(
                             }
                         }
                         if (canInspect && aggregationExpanded) {
+                            state.detailFirstConfirmedLineMs?.let { elapsed ->
+                                item(key = "first-confirmed-line") {
+                                    AnimeQuietLabel("打开详情 → 首条已确认线路 · $elapsed ms", Modifier.padding(start = 8.dp))
+                                }
+                            }
                             if (state.sourceAggregationTotal > 0 && !state.sourceAggregationRunning) item(key = "aggregation-summary") {
                                 val unfinished = state.sourceAggregation.values.count { it.phase in setOf(
                                     AnimeAssociationPhase.UNAVAILABLE,
