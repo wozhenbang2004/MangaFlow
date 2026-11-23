@@ -51,7 +51,7 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    Text("追番账号", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    Text("追番同步", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
                     MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭追番账号") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
@@ -64,16 +64,17 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
                         }, modifier = Modifier.fillMaxWidth(), controlHeight = 44.dp)
                     }
                     item {
-                        Text("同步追番状态与正片已完成集；播放到第几分保存在本机。",
+                        Text("同步追番状态与看完的正片。看到第几分钟保存在这台设备。",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (account == null) {
+                        item { AnimeSectionTitle("连接 $accountName", "连接后可以查看这部番剧的进度差异") }
                         item {
                             AnimeTextField(token, { token = it }, accountName + " 访问令牌", secret = true,
                                 enabled = !state.syncing)
                         }
                         item {
-                            AnimeQuietLabel("使用该账号生成的访问令牌连接。连接后，先查看差异，再决定是否回写远端。")
+                            AnimeQuietLabel("在 $accountName 生成访问令牌后，粘贴到这里。")
                             MotionButton(onClick = {
                                 controller.connectTracking(provider, token.trim())
                                 token = ""
@@ -84,7 +85,15 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
                         }
                     } else {
                         item {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .045f))
+                                    .padding(start = 14.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                Icon(Icons.Outlined.AccountCircle, null, Modifier.size(22.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                     Text(account.displayName.ifBlank { account.ownerId }, style = MaterialTheme.typography.titleSmall)
                                     AnimeQuietLabel(accountName + " · 已连接")
@@ -134,8 +143,7 @@ internal fun AnimeProgressReviewPanel(visible: Boolean, state: AnimeScreenState,
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("进度差异", style = MaterialTheme.typography.titleMedium)
-                        AnimeQuietLabel("逐项选择，再应用")
+                        Text("核对追番进度", style = MaterialTheme.typography.titleLarge)
                     }
                     if (state.canUndo) MotionIconButton(onClick = controller::undo, modifier = Modifier.size(44.dp),
                         tooltip = "撤销本机改动") {
@@ -148,7 +156,7 @@ internal fun AnimeProgressReviewPanel(visible: Boolean, state: AnimeScreenState,
                 LazyColumn(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(20.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp)) {
                     item {
-                        Text("这里只处理追番状态与正片已完成集。来源和集数映射在播放来源里确认；远端读取失败会保留本机记录。",
+                        Text("选择要保留的追番状态和已看集数，然后应用到本机或同时同步到远端。",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (state.syncing) item { AnimeQuietLabel("正在核对所选内容，请稍候。") }
@@ -265,20 +273,24 @@ internal fun AnimeResumePanel(choice: AnimePlaybackChoice?, backdrop: HazeState,
         val shown = choice ?: retained
         if (shown != null) AnimePanelSurface(backdrop) {
             Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Text("切换版本，确认续看位置", style = MaterialTheme.typography.titleMedium)
-                Text(animeEpisodeLabel(shown.episode) + " · " + shown.option.episode.title,
-                    style = MaterialTheme.typography.bodyMedium)
-                AnimeQuietLabel("上次在 " + shown.previousSourceId + " 看到 " + animeTime(shown.previousPositionMs) +
-                    "；这次使用 " + shown.option.sourceName + "。")
-                Text("不同剪辑、片头或合并集可能让时间位置偏移。你可以沿用时间，也可以从头播放。",
+                val position = animeTime(shown.previousPositionMs)
+                Text("从哪里继续？", style = MaterialTheme.typography.titleLarge)
+                Text(animeEpisodeLabel(shown.episode), style = MaterialTheme.typography.titleSmall)
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .045f)).padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AnimeQuietLabel("上次看到 $position · ${animeSourceName(shown.previousSourceId)}")
+                    Text("切换至 ${shown.option.sourceName}", style = MaterialTheme.typography.bodyMedium)
+                }
+                Text("不同线路的片头或剪辑可能有差异，原时间点可能偏移。",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 MotionButton(onClick = { onChoose(true) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Text("沿用 " + animeTime(shown.previousPositionMs))
+                    Text("从 $position 继续")
                 }
                 MotionTextButton(onClick = { onChoose(false) }, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
                     Text("从头播放")
                 }
-                MotionTextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) { Text("取消切源") }
+                MotionTextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) { Text("取消") }
             }
         }
     }

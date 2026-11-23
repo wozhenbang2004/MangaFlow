@@ -1,6 +1,8 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.ErrorOutline
@@ -12,7 +14,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
@@ -46,29 +51,32 @@ internal fun AnimeDiscussionSourcesStrip(
     val matched = checks.count { it.status == AnimeDiscussionCheckStatus.READY }
     val checking = checks.count { it.status == AnimeDiscussionCheckStatus.CHECKING }
     val unavailable = checks.count { it.status == AnimeDiscussionCheckStatus.UNAVAILABLE }
-    val summary = when {
-        checking > 0 -> "$checking 站检查中"
-        unavailable > 0 -> "$unavailable 站待重试"
-        matched > 0 -> "$matched 站已匹配"
-        checks.any { it.status == AnimeDiscussionCheckStatus.WAITING } -> "等待检查"
-        else -> "未找到匹配"
-    }
+    val unmatched = checks.count { it.status == AnimeDiscussionCheckStatus.NO_MATCH }
+    val waiting = checks.size - matched - checking - unavailable - unmatched
+    val summary = listOfNotNull(
+        "$matched 站已匹配".takeIf { matched > 0 },
+        "$checking 站检查中".takeIf { checking > 0 },
+        "$unavailable 站读取失败".takeIf { unavailable > 0 },
+        "$unmatched 站未匹配".takeIf { unmatched > 0 },
+        "$waiting 站待检查".takeIf { waiting > 0 },
+    ).joinToString(" · ")
     Box(modifier) {
-        if (compact) MotionIconButton(onClick = { open = true }, enabled = enabled,
+        if (compact) MotionIconButton(onClick = { open = !open }, enabled = enabled,
             modifier = Modifier.size(44.dp).semantics {
-                contentDescription = "评论来源检查，$summary，查看各站状态"
+                contentDescription = "作品评论来源，$summary"
                 stateDescription = if (open) "来源状态已展开" else "来源状态已收起"
-            }, tooltip = "评论来源检查 · $summary") {
+            }, tooltip = "作品评论来源") {
             Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
                 Icon(Icons.Outlined.Public, null, Modifier.size(20.dp), tint = colors.onSurfaceVariant)
                 if (checking > 0) MotionBusyIndicator(Modifier.align(Alignment.BottomEnd).size(8.dp),
                     color = colors.onSurfaceVariant, strokeWidth = 1.dp)
                 else if (unavailable > 0) Icon(Icons.Outlined.ErrorOutline, null,
-                    Modifier.align(Alignment.BottomEnd).size(9.dp), tint = colors.onSurfaceVariant)
+                    Modifier.align(Alignment.BottomEnd).size(10.dp), tint = colors.error)
             }
-        } else MotionTextButton(onClick = { open = true }, enabled = enabled,
+        } else MotionTextButton(onClick = { open = !open }, enabled = enabled,
             modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).semantics {
-                contentDescription = "评论来源检查，$summary，查看各站状态"
+                contentDescription = "作品评论来源，$summary"
+                stateDescription = if (open) "来源状态已展开" else "来源状态已收起"
             }, contentPadding = PaddingValues(0.dp)) {
             Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -79,41 +87,62 @@ internal fun AnimeDiscussionSourcesStrip(
             if (checking > 0) MotionBusyIndicator(Modifier.size(13.dp))
             else Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
         }
-        CompactGlassPopover(open, backdrop, onDismiss = { open = false }, onPresenceChange = onPresence,
-            alignToStart = !compact, maximumWidth = 340.dp) {
-            AnimeSectionTitle("评论来源")
-            checks.forEach { check ->
-                val status = when (check.status) {
-                    AnimeDiscussionCheckStatus.WAITING -> "待检查"
-                    AnimeDiscussionCheckStatus.CHECKING -> "检查中"
-                    AnimeDiscussionCheckStatus.READY -> "已匹配"
-                    AnimeDiscussionCheckStatus.NO_MATCH -> "未匹配"
-                    AnimeDiscussionCheckStatus.UNAVAILABLE -> "读取失败"
+        CompactGlassPopover(open && enabled, backdrop, onDismiss = { open = false }, onPresenceChange = onPresence,
+            alignToStart = !compact, maximumWidth = 352.dp) {
+            Column(Modifier.fillMaxWidth().padding(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Column(Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("作品评论来源", style = MaterialTheme.typography.titleSmall)
+                    Text(summary, Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                 }
-                Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                    ReviewSourceMark(check.sourceId, size = 20.dp)
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(check.name, style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        Text(status, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                        if (check.message.isNotBlank()) Text(check.message,
-                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                    }
-                    if (check.status == AnimeDiscussionCheckStatus.CHECKING) {
-                        Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
-                            MotionBusyIndicator(Modifier.size(16.dp))
-                        }
-                    } else if (canRetry && check.status != AnimeDiscussionCheckStatus.WAITING) {
-                        val action = if (check.status == AnimeDiscussionCheckStatus.READY) "刷新" else "重新检查"
-                        MotionIconButton(onClick = { onRetry(check.sourceId) }, enabled = enabled,
-                            modifier = Modifier.size(44.dp), tooltip = "$action ${check.name}") {
-                            Icon(Icons.Outlined.Refresh, "$action ${check.name}", Modifier.size(18.dp))
-                        }
-                    }
+                checks.forEach { check ->
+                    AnimeDiscussionSourceRow(check,
+                        onRetry = { onRetry(check.sourceId) }.takeIf { canRetry && enabled })
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun AnimeDiscussionSourceRow(check: AnimeDiscussionSourceCheck, onRetry: (() -> Unit)?) {
+    val colors = MaterialTheme.colorScheme
+    val failure = check.status == AnimeDiscussionCheckStatus.UNAVAILABLE
+    val status = when (check.status) {
+        AnimeDiscussionCheckStatus.WAITING -> "待检查"
+        AnimeDiscussionCheckStatus.CHECKING -> "检查中"
+        AnimeDiscussionCheckStatus.READY -> "已匹配"
+        AnimeDiscussionCheckStatus.NO_MATCH -> "未找到对应作品"
+        AnimeDiscussionCheckStatus.UNAVAILABLE -> "读取失败"
+    }
+    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(12.dp))
+        .background(colors.onSurface.copy(alpha = .045f)).padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+        ReviewSourceMark(check.sourceId, size = 19.dp)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(check.name, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            val result = check.message.ifBlank { status }
+            Text(if (failure && result != status) "$status · $result" else result, style = MaterialTheme.typography.bodySmall,
+                color = if (failure) colors.error else colors.onSurfaceVariant)
+        }
+        when {
+            check.status == AnimeDiscussionCheckStatus.CHECKING ->
+                Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+                    MotionBusyIndicator(Modifier.size(16.dp))
+                }
+            onRetry != null && check.status != AnimeDiscussionCheckStatus.WAITING -> {
+                val action = when (check.status) {
+                    AnimeDiscussionCheckStatus.READY -> "刷新 ${check.name} 评论"
+                    AnimeDiscussionCheckStatus.UNAVAILABLE -> "重试 ${check.name} 评论"
+                    else -> "重新匹配 ${check.name} 作品"
+                }
+                MotionIconButton(onClick = onRetry, modifier = Modifier.size(44.dp), tooltip = action) {
+                    Icon(Icons.Outlined.Refresh, action, Modifier.size(18.dp),
+                        tint = if (failure) colors.error else colors.onSurfaceVariant)
+                }
+            }
+            else -> Unit
         }
     }
 }

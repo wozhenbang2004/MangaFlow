@@ -8,13 +8,16 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.*
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -47,37 +50,44 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
     LaunchedEffect(state.sourceId, state.sourceRevision, state.categoryKey) { filtersVisible = false }
     val contentActive = active && !sourcePresent && !filtersPresent
     Column(Modifier.fillMaxSize().motionInputGate(active)) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Box(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    source?.let { AnimeSourceMark(it.id, it.name, size = 22.dp) }
-                    Text(source?.name ?: "选择来源", Modifier.weight(1f),
-                        style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    MotionIconButton(onClick = { sourceMenu = true }, enabled = contentActive,
-                        modifier = Modifier.size(44.dp), tooltip = "切换浏览来源") {
-                        Icon(Icons.Outlined.SwapHoriz, "切换浏览来源", Modifier.size(20.dp))
+        if (state.selectedTitle == null && state.sources.isNotEmpty()) {
+            Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 10.dp, top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Box(Modifier.weight(1f)) {
+                    MotionTextButton(onClick = { sourcePresent = true; sourceMenu = true }, enabled = contentActive,
+                        modifier = Modifier.widthIn(max = 300.dp).heightIn(min = 44.dp),
+                        colors = ButtonDefaults.textButtonColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                            contentColor = MaterialTheme.colorScheme.onSurface),
+                        contentPadding = PaddingValues(horizontal = 12.dp)) {
+                        if (source != null) AnimeSourceMark(source.id, source.name, size = 20.dp)
+                        else Icon(Icons.Outlined.Public, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(source?.name ?: "选择片源", Modifier.weight(1f, fill = false),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Spacer(Modifier.width(5.dp))
+                        Icon(Icons.Outlined.ExpandMore, null, Modifier.size(17.dp))
+                    }
+                    CompactGlassPopover(sourceMenu && active, backdrop, onDismiss = { sourceMenu = false },
+                        onPresenceChange = { sourcePresent = it }, alignToStart = true) {
+                        state.sources.forEach { item ->
+                            CompactMenuAction(if (source?.id == item.id) Icons.Outlined.Check else Icons.Outlined.Public,
+                                item.name, onClick = { owner.selectSource(item.id); sourceMenu = false })
+                        }
                     }
                 }
-                CompactGlassPopover(sourceMenu && active, backdrop, onDismiss = { sourceMenu = false },
-                    onPresenceChange = { sourcePresent = it }, alignToStart = true) {
-                    AnimeQuietLabel("浏览来源", Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
-                    state.sources.forEach { item ->
-                        CompactMenuAction(if (source?.id == item.id) Icons.Outlined.Check else Icons.Outlined.Public,
-                            item.name, onClick = { owner.selectSource(item.id); sourceMenu = false })
+                if (category?.filters?.isNotEmpty() == true) {
+                    MotionIconButton(onClick = { filtersPresent = true; filtersVisible = true }, enabled = contentActive,
+                        modifier = Modifier.size(44.dp), tooltip = "筛选片源目录") {
+                        Icon(Icons.Outlined.FilterList, "筛选片源目录", Modifier.size(20.dp),
+                            tint = if (state.filters.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-            }
-            if (state.selectedTitle == null && category?.filters?.isNotEmpty() == true) {
-                MotionIconButton(onClick = { filtersPresent = true; filtersVisible = true }, enabled = contentActive, modifier = Modifier.size(44.dp), tooltip = "来源筛选") {
-                    Icon(Icons.Outlined.FilterList, "来源筛选", Modifier.size(20.dp),
-                        tint = if (state.filters.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                if (source != null) MotionIconButton(onClick = owner::refresh,
+                    enabled = contentActive && !state.loading && !state.homeLoading && !state.categoriesLoading,
+                    modifier = Modifier.size(44.dp), tooltip = "刷新当前片源") {
+                    Icon(Icons.Outlined.Refresh, "刷新当前片源", Modifier.size(20.dp))
                 }
-            }
-            if (source != null && state.selectedTitle == null) MotionIconButton(onClick = owner::refresh,
-                enabled = contentActive && !state.loading && !state.homeLoading && !state.categoriesLoading,
-                modifier = Modifier.size(44.dp), tooltip = "刷新当前来源") {
-                Icon(Icons.Outlined.Refresh, "刷新当前来源", Modifier.size(20.dp))
             }
         }
         if (state.selectedTitle == null && state.categories.isNotEmpty()) {
@@ -89,7 +99,8 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
                 onSelect = { owner.selectCategory(sections[it].first) }, active = contentActive,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         }
-        if (source == null) AnimeMessage("还没有可浏览的来源", "打开番剧菜单，选择管理片源。")
+        if (source == null && state.sources.isEmpty()) AnimeMessage("暂无可浏览的片源", "可以在番剧菜单中管理片源。")
+        else if (source == null) AnimeDiscoveryLoading("正在打开片源目录")
         else MotionTabContent(source to state,
             contentKey = { (selected, snapshot) -> selected.id + ":" + selected.revision + ":" + (snapshot.selectedTitle?.id ?: "catalog") },
             order = { (_, snapshot) -> if (snapshot.selectedTitle == null) 0 else 1 }, modifier = Modifier.weight(1f).motionInputGate(contentActive)) { (shownSource, snapshot) ->
@@ -119,18 +130,21 @@ private fun AnimeSourceCatalogue(state: AnimeSourceBrowseState, preferred: Int?,
     val scroll = scrolls.grid("source:${state.sourceId}:${state.sourceRevision}:${state.categoryKey}:$filterKey")
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val columns = animeDiscoveryColumns(maxWidth, preferred)
+        val inset = animeDiscoveryInset(maxWidth, preferred, columns)
         LazyVerticalGrid(GridCells.Fixed(columns), state = scroll, modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = contentBottomPadding),
-            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            contentPadding = PaddingValues(start = inset, end = inset, top = 6.dp, bottom = contentBottomPadding),
+            horizontalArrangement = Arrangement.spacedBy(animeDiscoveryGap(columns)), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             if (state.categoryError != null) item(key = "category-error", span = { GridItemSpan(maxLineSpan) }) {
                 AnimeDiscoveryInlineStatus(state.categoryError, onRetry)
             }
             if (latest || state.categoryKey != null) {
                 if (state.error != null) item(key = "error", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeDiscoveryInlineStatus(state.error, onRetry)
+                    AnimeDiscoveryInlineStatus(if (state.items.isEmpty()) "暂时无法读取片源目录" else "更新失败，保留上次结果",
+                        onRetry, detail = state.error)
                 }
-                if (state.items.isEmpty()) item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeDiscoveryInlineStatus(if (state.loading) "正在读取来源内容" else if (state.error == null) "没有符合条件的内容" else "")
+                if (state.items.isEmpty() && state.error == null) item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
+                    if (state.loading) AnimeDiscoveryLoading("正在载入番剧")
+                    else AnimeMessage("没有符合当前条件的番剧")
                 }
                 else items(state.items, key = { it.sourceId + ":" + it.id }) { title ->
                     AnimeSourceDiscoveryCard(title, list = columns == 1, onOpen = { onOpen(title) })
@@ -139,7 +153,7 @@ private fun AnimeSourceCatalogue(state: AnimeSourceBrowseState, preferred: Int?,
                     AnimeQuietLabel("更新中")
                 }
                 if (state.moreError != null) item(key = "more-error", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeDiscoveryInlineStatus(state.moreError, onRetry)
+                    AnimeDiscoveryInlineStatus("暂时无法取得更多番剧", onRetry, detail = state.moreError)
                 }
                 if (state.hasMore) item(key = "more", span = { GridItemSpan(maxLineSpan) }) {
                     MotionTextButton(onClick = onMore, enabled = !state.loading && !state.loadingMore,
@@ -147,16 +161,16 @@ private fun AnimeSourceCatalogue(state: AnimeSourceBrowseState, preferred: Int?,
                 }
             } else {
                 if (state.homeError != null) item(key = "home-error", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeDiscoveryInlineStatus(state.homeError, onRetry)
+                    AnimeDiscoveryInlineStatus("暂时无法读取片源目录", onRetry, detail = state.homeError)
                 }
-                if (state.home.isEmpty()) item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeDiscoveryInlineStatus(if (state.homeLoading || state.categoriesLoading) "正在读取来源内容"
-                        else if (state.homeError == null && state.categoryError == null)
-                            if (state.categories.isNotEmpty()) "选择分类继续浏览" else "来源暂无推荐" else "")
+                if (state.home.isEmpty() && state.homeError == null && state.categoryError == null) item(
+                    key = "empty", span = { GridItemSpan(maxLineSpan) }) {
+                    if (state.homeLoading || state.categoriesLoading) AnimeDiscoveryLoading("正在载入番剧")
+                    else AnimeMessage(if (state.categories.isNotEmpty()) "选择分类继续浏览" else "此片源暂无推荐")
                 }
                 state.home.forEachIndexed { index, section ->
                     item(key = "heading:$index", span = { GridItemSpan(maxLineSpan) }) {
-                        AnimeDiscoverySectionHeading(section.title, source?.name.orEmpty(), refreshing = state.homeLoading)
+                        AnimeDiscoverySectionHeading(section.title, "", refreshing = state.homeLoading)
                     }
                     items(section.items.distinctBy { it.sourceId to it.id }, key = { "section:$index:${it.sourceId}:${it.id}" }) { title ->
                         AnimeSourceDiscoveryCard(title, list = columns == 1, onOpen = { onOpen(title) })
@@ -179,32 +193,38 @@ private fun AnimeSourcePreview(title: AnimeSourceTitle, sourceName: String, vide
             contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = contentBottomPadding),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item(key = "subject", span = { GridItemSpan(maxLineSpan) }) {
-                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    AnimePoster(title.coverUrl, Modifier.width(80.dp).height(114.dp), title.sourceId)
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                        Text(title.title, style = MaterialTheme.typography.titleMedium)
-                        AnimeQuietLabel(sourceName)
-                        listOfNotNull(title.year?.toString(), title.updateText.takeIf(String::isNotBlank),
-                            title.ratingText.takeIf(String::isNotBlank)).joinToString(" · ").takeIf(String::isNotBlank)
-                            ?.let { AnimeQuietLabel(it) }
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        AnimePoster(title.coverUrl, Modifier.width(86.dp).height(124.dp), title.sourceId)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                AnimeSourceMark(title.sourceId, sourceName, size = 18.dp)
+                                AnimeQuietLabel(sourceName)
+                            }
+                            Text(title.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold,
+                                maxLines = 3, overflow = TextOverflow.Ellipsis)
+                            listOfNotNull(title.year?.toString(), title.updateText.takeIf(String::isNotBlank),
+                                title.ratingText.takeIf(String::isNotBlank)).joinToString(" · ").takeIf(String::isNotBlank)
+                                ?.let { AnimeQuietLabel(it) }
+                        }
                     }
-                }
-            }
-            item(key = "open", span = { GridItemSpan(maxLineSpan) }) {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    MotionButton(onClick = { onChooseTitle(title, videoSource) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                        Icon(if (videoSource) Icons.Outlined.PlayArrow else Icons.Outlined.Search, null, Modifier.size(18.dp))
+                    MotionButton(onClick = { onChooseTitle(title, videoSource) },
+                        modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth().heightIn(min = 48.dp)) {
+                        Text(if (videoSource) "查看详情" else "匹配对应番剧")
                         Spacer(Modifier.width(6.dp))
-                        Text(if (videoSource) "打开番剧" else "选择对应番剧")
+                        Icon(if (videoSource) Icons.AutoMirrored.Outlined.ArrowForward else Icons.Outlined.Search,
+                            null, Modifier.size(18.dp))
                     }
                 }
             }
             if (state.related.isNotEmpty() || state.relatedLoading || state.relatedError != null) {
                 item(key = "related-heading", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeDiscoverySectionHeading("相关内容", sourceName, refreshing = state.relatedLoading)
+                    AnimeDiscoverySectionHeading("相关番剧", "", refreshing = state.relatedLoading)
                 }
                 if (state.relatedError != null) item(key = "related-error", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeDiscoveryInlineStatus(state.relatedError, onRetry)
+                    AnimeDiscoveryInlineStatus("暂时无法读取相关番剧", onRetry, detail = state.relatedError)
                 }
                 items(state.related, key = { "related:${it.sourceId}:${it.id}" }) { related ->
                     AnimeSourceDiscoveryCard(related, list = columns == 1, onOpen = { onOpen(related) })

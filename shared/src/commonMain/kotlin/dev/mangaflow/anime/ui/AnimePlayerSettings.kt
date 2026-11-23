@@ -1,5 +1,6 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -21,6 +22,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -59,6 +61,8 @@ internal fun AnimePlayerSettings(
     onSources: (AnimeEpisode) -> Unit,
     initialEnhancementPage: EnhancementPage = EnhancementPage.QUALITY,
     onStorage: () -> Unit = {},
+    readingsVisible: Boolean = false,
+    onReadingsVisible: (Boolean) -> Unit = {},
 ) {
     var section by remember { mutableStateOf(initialSection) }
     val enhancementNavigation = remember { EnhancementNavigation(initialEnhancementPage) }
@@ -180,7 +184,7 @@ internal fun AnimePlayerSettings(
                         modifier = Modifier.size(44.dp), tooltip = backLabel) {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, backLabel, Modifier.size(20.dp))
                     }
-                    Text(when (section) {
+                    val panelTitle = when (section) {
                         AnimePlayerPanel.GENERAL -> "播放设置"
                         AnimePlayerPanel.VIDEO -> if (enhancementPage in enhancementTabs) "番剧体验策略" else enhancementPage.title
                         AnimePlayerPanel.VIDEO_SOURCE -> "片源与显示"
@@ -198,8 +202,15 @@ internal fun AnimePlayerSettings(
                         AnimePlayerPanel.DANMAKU_SEARCH -> "匹配本集弹幕"
                         AnimePlayerPanel.DANMAKU_DISPLAY -> "弹幕显示与时间"
                         AnimePlayerPanel.DANMAKU_ACCESS -> "弹幕服务配置"
-                    }, Modifier.weight(1f).padding(start = if (section == AnimePlayerPanel.GENERAL) 8.dp else 0.dp),
-                        style = MaterialTheme.typography.titleMedium)
+                    }
+                    Column(Modifier.weight(1f).padding(start = if (section == AnimePlayerPanel.GENERAL) 8.dp else 0.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(panelTitle, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (section == AnimePlayerPanel.GENERAL && episode != null) Text(animeEpisodeLabel(episode),
+                            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                     MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭播放设置") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
@@ -219,9 +230,21 @@ internal fun AnimePlayerSettings(
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     when (section) {
                         AnimePlayerPanel.GENERAL -> {
-                            item { AnimeQuietLabel("画面与声音") }
+                            item { AnimePlayerSettingsSection("当前播放") }
+                            item { AnimePlayerSettingLink(Icons.Outlined.Speed, "播放速度", animeSpeedLabel(playback.speed)) {
+                                show(AnimePlayerPanel.SPEED)
+                            } }
+                            if (episode != null) item {
+                                AnimePlayerSettingLink(Icons.Outlined.SwapHoriz, "播放线路",
+                                    state.selectedPlaybackOption?.sourceName?.takeIf { currentMedia != null }.orEmpty()) {
+                                    pendingSourceEpisode = episode
+                                    onDismiss()
+                                }
+                            }
                             item { AnimePlayerSettingLink(Icons.Outlined.AspectRatio, "画质与补帧",
-                                "画质、补帧与运行状态") { show(AnimePlayerPanel.VIDEO) } }
+                                currentMedia?.videoHeight?.takeIf { it > 0 }?.let { "当前视频 ${it}p" }.orEmpty()) {
+                                show(AnimePlayerPanel.VIDEO)
+                            } }
                             if (AnimePlayerCapability.VOLUME in capabilities || AnimePlayerCapability.AUDIO_TRACKS in capabilities) item {
                                 val soundSummary = listOfNotNull(
                                     if (AnimePlayerCapability.VOLUME in capabilities) (playback.volume * 100).roundToInt().toString() + "%" else null,
@@ -239,11 +262,10 @@ internal fun AnimePlayerSettings(
                                     show(AnimePlayerPanel.SUBTITLES)
                                 }
                             }
-                            item { AnimePlayerSettingLink(Icons.Outlined.ChatBubbleOutline, "弹幕", "匹配与显示") {
+                            item { AnimePlayerSettingLink(Icons.Outlined.ChatBubbleOutline, "弹幕", "") {
                                 show(AnimePlayerPanel.DANMAKU)
                             } }
-                            item { AnimeSectionTitle("观看习惯") }
-                            item { AnimePlayerSettingLink(Icons.Outlined.Speed, "速度", animeSpeedLabel(playback.speed)) { show(AnimePlayerPanel.SPEED) } }
+                            item { AnimePlayerSettingsSection("观看习惯") }
                             item { AnimePlayerSettingLink(Icons.Outlined.Bedtime, "睡眠计时", when {
                                 state.sleepAtEpisodeEnd -> "本集结束"
                                 state.sleepDeadlineMs != null -> animeTime((state.sleepDeadlineMs - wallTimeMillis()).coerceAtLeast(0L))
@@ -251,7 +273,7 @@ internal fun AnimePlayerSettings(
                             }) { show(AnimePlayerPanel.SLEEP) } }
                             item { AnimePlayerSettingLink(Icons.Outlined.SkipNext, "片头与片尾",
                                 state.settings.skipOpeningSeconds.toString() + " / " + state.settings.skipEndingSeconds + " 秒") { show(AnimePlayerPanel.SKIP) } }
-                            item { AnimeSectionTitle("连续播放") }
+                            item { AnimePlayerSettingsSection("连续播放") }
                             item { SettingsToggle("自动播放下一集", state.settings.autoPlayNext, Icons.Outlined.PlayCircleOutline,
                                 onCheckedChange = { enabled -> controller.updatePlaybackSettings { it.copy(autoPlayNext = enabled) } }) }
                             item { AnimePlayerSettingLink(Icons.Outlined.DataUsage, "播放准备",
@@ -267,7 +289,13 @@ internal fun AnimePlayerSettings(
                                     controller.player.enterPictureInPicture(); onDismiss()
                                 })
                             }
-                            item { AnimeSectionTitle("离线与高级") }
+                            item { AnimePlayerSettingsSection("画面读数与离线") }
+                            item { SettingsToggle("本次显示播放读数", readingsVisible, Icons.Outlined.QueryStats,
+                                onCheckedChange = onReadingsVisible) }
+                            item { AnimePlayerSettingLink(Icons.Outlined.Tune, "选择播放读数", "") {
+                                show(AnimePlayerPanel.VIDEO)
+                                navigateEnhancement(EnhancementPage.DISPLAY)
+                            } }
                             item { CompactMenuAction(Icons.Outlined.Download, "下载当前集",
                                 enabled = !state.resolving && state.selectedEpisodeId != null &&
                                     playback.phase in setOf(AnimePlayerPhase.READY, AnimePlayerPhase.ENDED),
@@ -590,16 +618,24 @@ internal fun AnimePlayerSettings(
 }
 
 @Composable
+private fun AnimePlayerSettingsSection(title: String) {
+    Text(title, Modifier.padding(start = 8.dp, top = 9.dp, bottom = 2.dp).semantics { heading() },
+        style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+@Composable
 private fun AnimePlayerSettingLink(icon: ImageVector, title: String, value: String, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
-    // Keep CompactMenuAction's quiet hit surface and press response, with separate text roles.
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
         .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
         .motionPress(interaction, pressedScale = .98f).heightIn(min = 56.dp)
         .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Icon(icon, null, Modifier.size(20.dp), tint = colors.onSurfaceVariant)
+        Box(Modifier.size(33.dp).clip(RoundedCornerShape(9.dp)).background(colors.surfaceContainerHigh),
+            contentAlignment = Alignment.Center) {
+            Icon(icon, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+        }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(title, style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
             if (value.isNotBlank()) Text(value, style = MaterialTheme.typography.labelSmall,

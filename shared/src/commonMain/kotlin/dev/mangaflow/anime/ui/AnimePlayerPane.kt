@@ -4,6 +4,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
@@ -16,21 +17,25 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.SaveableStateHolder
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -40,6 +45,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -53,11 +59,15 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.player.*
-import dev.mangaflow.enhancement.ui.EnhancementPage
+import dev.mangaflow.enhancement.ui.EnhancementPanelHost
+import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.reader.ReaderWindow
 import dev.mangaflow.ui.*
@@ -142,16 +152,17 @@ internal fun AnimePlayerPane(
     var episodesVisible by rememberSaveable { mutableStateOf(true) }
     var watchingTab by rememberSaveable(detail?.subject?.id) { mutableIntStateOf(0) }
     val episodeListState = key(detail?.subject?.id) { rememberSaveableStateHolder() }
+    var watchPanelOpen by remember { mutableStateOf(false) }
+    var watchPanelPresent by remember { mutableStateOf(false) }
+    var queuedEpisode by remember { mutableStateOf<AnimeEpisode?>(null) }
+    var queuedLine by remember { mutableStateOf<AnimeEpisode?>(null) }
+    var readingsVisible by rememberSaveable { mutableStateOf(false) }
     var holdingFast by remember { mutableStateOf(false) }
     var settingsVisible by remember { mutableStateOf(false) }
     var settingsPresent by remember { mutableStateOf(false) }
-    var discussionEpisode by remember(detail?.subject?.id) { mutableStateOf<AnimeEpisode?>(null) }
-    var discussionVisible by remember(detail?.subject?.id) { mutableStateOf(false) }
-    var settingsSection by remember { mutableStateOf(AnimePlayerPanel.GENERAL) }
-    var settingsEnhancementPage by remember { mutableStateOf(EnhancementPage.QUALITY) }
     var interactionEpoch by remember { mutableIntStateOf(0) }
     val requiredControls = blockingResolution || failure != null || awaitingVideo ||
-        playback.phase != AnimePlayerPhase.READY || !playback.playWhenReady || obscured || settingsPresent || discussionVisible ||
+        playback.phase != AnimePlayerPhase.READY || !playback.playWhenReady || obscured || settingsPresent || watchPanelPresent ||
         state.notice != null || touchExploration
     val forceControls = requiredControls || headerFocused || transportFocused || centerFocused || readingsHeld
     val showChrome = !playback.inPictureInPicture && (!locked || touchExploration) &&
@@ -167,20 +178,24 @@ internal fun AnimePlayerPane(
     val topInset = safeInsets.asPaddingValues().calculateTopPadding()
     val bottomInset = safeInsets.asPaddingValues().calculateBottomPadding()
     var headerHeight by remember(density, topInset) { mutableStateOf(56.dp + topInset) }
-    var footerHeight by remember(density) { mutableStateOf(96.dp) }
-    val canControl = !blockingResolution && failure == null &&
+    var footerHeight by remember(density) { mutableStateOf(56.dp) }
+    val canControl = showingCurrentPlayback && !blockingResolution && failure == null &&
         (playback.phase == AnimePlayerPhase.READY || playback.ended)
     fun interact() { controlsVisible = true; interactionEpoch++ }
     fun showSources() { interact(); onSources(episode) }
-    fun showSettings(section: AnimePlayerPanel) {
-        interact(); settingsSection = section; settingsEnhancementPage = EnhancementPage.QUALITY
-        settingsPresent = true; settingsVisible = true
-    }
-    fun showEnhancement(page: EnhancementPage) {
-        interact(); settingsSection = AnimePlayerPanel.VIDEO; settingsEnhancementPage = page
-        settingsPresent = true; settingsVisible = true
+    fun showSettings() {
+        interact()
+        settingsPresent = true
+        settingsVisible = true
     }
     fun toggleFullscreen() { interact(); onFullscreenChange(!fullscreen) }
+    fun openWatching() {
+        queuedEpisode = null
+        queuedLine = null
+        watchPanelPresent = true
+        watchPanelOpen = true
+        interact()
+    }
     fun seek(delta: Long) {
         if (playback.durationMs <= 0L || !canControl) return
         interact()
@@ -200,19 +215,23 @@ internal fun AnimePlayerPane(
     LaunchedEffect(touchExploration) {
         if (touchExploration) { locked = false; controlsVisible = true }
     }
-    LaunchedEffect(active, showChrome, focusChromeOnReveal, chromeReveal > 0f, obscured, settingsPresent, discussionVisible) {
-        if (active && showChrome && chromeReveal > 0f && focusChromeOnReveal && !obscured && !settingsPresent && !discussionVisible) {
+    LaunchedEffect(active, showChrome, focusChromeOnReveal, chromeReveal > 0f, obscured, settingsPresent, watchPanelPresent) {
+        if (active && showChrome && chromeReveal > 0f && focusChromeOnReveal && !obscured && !settingsPresent && !watchPanelPresent) {
             withFrameNanos { }
             chromeFocus.requestFocus()
             focusChromeOnReveal = false
-        } else if (!active || obscured || settingsPresent || discussionVisible) {
+        } else if (!active || obscured || settingsPresent || watchPanelPresent) {
             focusChromeOnReveal = false
         }
     }
     LaunchedEffect(canControl) { if (!canControl) { transportFocused = false; centerFocused = false } }
-    LaunchedEffect(playback.inPictureInPicture) {
-        if (playback.inPictureInPicture) {
-            settingsVisible = false; settingsPresent = false; discussionVisible = false; locked = false
+    LaunchedEffect(playback.inPictureInPicture, active) {
+        if (playback.inPictureInPicture || !active) {
+            settingsVisible = false
+            queuedEpisode = null
+            queuedLine = null
+            watchPanelOpen = false
+            locked = false
         }
     }
     MotionBackHandler(active && locked && !obscured, state = null, onBack = { locked = false; interact() })
@@ -231,16 +250,16 @@ internal fun AnimePlayerPane(
         lightChrome = !fillVideo && colors.background.luminance() > .5f,
     )
     val videoColors = colors.copy(
-        background = Color.Black, surface = Color(0xFF171A21),
-        onSurface = Color.White, onSurfaceVariant = Color.White.copy(alpha = .68f),
-        primary = Color(0xFFE4EDFF), onPrimary = Color(0xFF162744), outline = Color.White.copy(alpha = .32f),
-        inverseSurface = Color(0xFFE4EDFF), inverseOnSurface = Color(0xFF162744),
+        background = Color(0xFF101014), surface = Color(0xFF1C1D23),
+        onSurface = Color(0xFFFAF8FF), onSurfaceVariant = Color(0xFFC6C1CD),
+        primary = Color(0xFFF5EEFF), onPrimary = Color(0xFF241C31), outline = Color.White.copy(alpha = .30f),
+        inverseSurface = Color(0xFFF5EEFF), inverseOnSurface = Color(0xFF241C31),
     )
-    MaterialTheme(colorScheme = if (fillVideo) videoColors else colors) {
-      CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
-        BoxWithConstraints(modifier.fillMaxSize().focusRequester(focus)
+    CompositionLocalProvider(LocalContentColor provides colors.onSurface) {
+        BoxWithConstraints(modifier.fillMaxSize().background(if (headerOverVideo) videoColors.background else colors.surface)
+            .focusRequester(focus)
             .onPreviewKeyEvent { event ->
-                if (active && !showChrome && !locked && !obscured && !settingsPresent && !discussionVisible &&
+                if (active && !showChrome && !locked && !obscured && !settingsPresent && !watchPanelPresent &&
                     !playback.inPictureInPicture && event.key == Key.Tab && event.type == KeyEventType.KeyDown) {
                     focusChromeOnReveal = true
                     interact()
@@ -250,7 +269,7 @@ internal fun AnimePlayerPane(
             .onKeyEvent { event ->
                 // Focused buttons and the native slider get first refusal.
                     if (!active || event.isCtrlPressed || event.isAltPressed || event.isMetaPressed ||
-                    event.type != KeyEventType.KeyUp || obscured || settingsPresent || discussionVisible || playback.inPictureInPicture) false
+                    event.type != KeyEventType.KeyUp || obscured || settingsPresent || watchPanelPresent || playback.inPictureInPicture) false
                 else if (locked) { if (event.key == Key.Escape) { locked = false; true } else false }
                 else when (event.key) {
                     Key.Spacebar -> { toggle(); true }
@@ -260,8 +279,8 @@ internal fun AnimePlayerPane(
                     Key.Escape -> if (fullscreen) { onFullscreenChange(false); true } else false
                     else -> false
                 }
-            }.pointerInput(fullscreen, active, locked, obscured, settingsPresent, discussionVisible, playback.inPictureInPicture) {
-                if (!fullscreen || !active || locked || obscured || settingsPresent || discussionVisible || playback.inPictureInPicture)
+            }.pointerInput(fullscreen, active, locked, obscured, settingsPresent, watchPanelPresent, playback.inPictureInPicture) {
+                if (!fullscreen || !active || locked || obscured || settingsPresent || watchPanelPresent || playback.inPictureInPicture)
                     return@pointerInput
                 awaitPointerEventScope {
                     while (true) {
@@ -271,37 +290,38 @@ internal fun AnimePlayerPane(
                     }
                 }
             }.focusable()) {
-            val sideBySide = if (desktop) episodesVisible && maxWidth >= 736.dp
-                else maxWidth >= 650.dp && (maxWidth >= 920.dp || maxHeight < 520.dp)
-            val railWidth = if (desktop) (maxWidth * .26f).coerceIn(248.dp, 328.dp)
-                else (maxWidth * .32f).coerceIn(214.dp, 330.dp)
+            val sideBySide = episodesVisible && maxWidth >= 680.dp &&
+                (desktop || maxWidth >= 900.dp || maxHeight < 540.dp)
+            val railWidth = (maxWidth * .29f).coerceIn(234.dp, 340.dp)
             val videoWidth = if (fillVideo || !sideBySide) maxWidth else maxWidth - railWidth
             val videoTop = if (headerOverVideo) 0.dp else headerHeight
             val room = (maxHeight - videoTop - bottomInset).coerceAtLeast(1.dp)
-            val reserveEpisodes = if (room >= 368.dp) 164.dp else if (room >= 260.dp) 108.dp else 0.dp
+            val inlineWatching = !fillVideo && episodesVisible && (sideBySide || room >= 380.dp)
             val videoHeight = when {
                 fillVideo -> maxHeight
-                desktop && (sideBySide || !episodesVisible) -> minOf(room, videoWidth * .5625f)
-                sideBySide -> room
-                else -> (videoWidth * .5625f).coerceAtLeast(minOf(184.dp, room))
-                    .coerceAtMost((room - reserveEpisodes).coerceAtLeast(1.dp))
+                sideBySide || !inlineWatching -> room
+                else -> minOf((videoWidth * 9f / 16f).coerceAtLeast(204.dp), room - 156.dp)
             }
             val centralTransport = (fillVideo || sideBySide) && canControl && !playback.ended &&
                 !playback.isBuffering && !awaitingVideo && playback.hasVideoTracks != false &&
                 state.notice == null && playback.notice == null &&
                 videoHeight >= 250.dp * density.fontScale.coerceAtLeast(1f)
             val controlsTop = videoTop + videoHeight
-            // Playback tools and readings belong to the video; neither shifts the watching pane.
-            val episodeTop = controlsTop
+            val subject = detail?.subject
+            val opening = playback.phase == AnimePlayerPhase.IDLE || playback.phase == AnimePlayerPhase.OPENING || awaitingVideo
+            val showStage = blockingResolution || failure != null || opening
+            val compactStage = videoHeight - (if (headerOverVideo) headerHeight else 0.dp) - footerHeight < 108.dp
+            val showArtwork = showStage && subject?.coverUrl?.isNotBlank() == true &&
+                !(playback.firstFrameRendered == true && playback.episodeId == episode?.id) && !playback.inPictureInPicture
             val latestPlayback by rememberUpdatedState(playback)
             val latestRequiredControls by rememberUpdatedState(requiredControls)
             val latestChromeVisible by rememberUpdatedState(showChrome)
 
             // One native surface keeps its composition identity through fullscreen and size changes.
             Box(Modifier.padding(top = videoTop).width(videoWidth).height(videoHeight)
-                .background(Color.Black).pointerInput(playback.sessionGeneration, active, locked, fullscreen, canControl,
-                    state.settings.longPressSpeed, obscured, settingsPresent, discussionVisible, playback.inPictureInPicture) {
-                    if (!active || locked || obscured || settingsPresent || discussionVisible || playback.inPictureInPicture) return@pointerInput
+                .background(Color.Black).clipToBounds().pointerInput(playback.sessionGeneration, active, locked, fullscreen, canControl,
+                    state.settings.longPressSpeed, obscured, settingsPresent, watchPanelPresent, playback.inPictureInPicture) {
+                    if (!active || locked || obscured || settingsPresent || watchPanelPresent || playback.inPictureInPicture) return@pointerInput
                     var accelerated = false
                     // Children consume their own buttons; blank video and passive status layers
                     // share this parent gesture instead of competing full-size sibling hit targets.
@@ -354,15 +374,27 @@ internal fun AnimePlayerPane(
                 }, contentAlignment = Alignment.Center) {
                 AnimePlayerSurface(controller.player, Modifier.fillMaxSize())
                 AnimeDanmakuOverlay(controller, playback,
-                    visible = active && !obscured && !settingsPresent && !discussionVisible && !blockingResolution && failure == null,
+                    visible = active && !obscured && !settingsPresent && !watchPanelPresent && !blockingResolution && failure == null,
                     modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 12.dp))
-                if (!playback.inPictureInPicture && (blockingResolution || failure != null)) Box(Modifier.fillMaxSize().background(Color.Black.copy(
-                    alpha = if (playback.firstFrameRendered == true || playback.phase == AnimePlayerPhase.READY) .45f else 1f)))
+                if (showArtwork && subject != null) {
+                    val context = LocalMangaContext.current
+                    val request = remember(context, subject.coverUrl, animePosterSourceId(subject)) {
+                        ImageRequest.Builder(imagePlatformContext(context))
+                            .animeArtwork(subject.coverUrl, animePosterSourceId(subject)).build()
+                    }
+                    AsyncImage(request, contentDescription = null, contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize().graphicsLayer { alpha = .48f })
+                }
+                if (!playback.inPictureInPicture && showStage) {
+                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
+                        Color.Black.copy(alpha = .66f), Color.Black.copy(alpha = .43f), Color.Black.copy(alpha = .85f),
+                    ))))
+                }
                 val statusTop = if (headerOverVideo && chromeReveal > 0f) headerHeight else 0.dp
                 val statusBottom = if (chromeReveal > 0f) footerHeight else 0.dp
                 if (!playback.inPictureInPicture) Box(Modifier.fillMaxSize()
                     .padding(top = statusTop, bottom = statusBottom)
-                    .motionInputGate(active && !locked && !obscured && !settingsPresent && !discussionVisible),
+                    .motionInputGate(active && !locked && !obscured && !settingsPresent && !watchPanelPresent),
                     contentAlignment = Alignment.Center) {
                     MaterialTheme(colorScheme = videoColors) {
                       CompositionLocalProvider(LocalContentColor provides videoColors.onSurface) {
@@ -371,7 +403,7 @@ internal fun AnimePlayerPane(
                             sourceName = if (target == null) playbackSource else target.sourceName,
                             failure = failure, incident = incident, playback = playback,
                             optionsAvailable = optionCount,
-                            canChooseSource = episode != null, canRetry = canRetry,
+                            canChooseSource = episode != null && !compactStage, canRetry = canRetry,
                             compact = videoHeight - statusTop - statusBottom < 196.dp,
                             next = next, nextUpcoming = nextUpcoming, onRetry = onRetry, onSources = ::showSources, onEpisode = onEpisode,
                             onKeepPlayback = onKeepPlayback,
@@ -387,18 +419,18 @@ internal fun AnimePlayerPane(
                 val readingsRoom = videoHeight - statusTop - statusBottom - 16.dp
                 val readingsHeight = minOf(160.dp, if (centralTransport && chromeReveal > 0f)
                     (readingsRoom - 64.dp) * .5f else readingsRoom * .5f)
-                if (!playback.inPictureInPicture && showingCurrentPlayback && failure == null &&
+                if (readingsVisible && !playback.inPictureInPicture && showingCurrentPlayback && failure == null &&
                     !blockingResolution && !awaitingVideo && readingsHeight >= 44.dp) {
                     MaterialTheme(colorScheme = videoColors) {
                         AnimePlaybackStatus(playback, quiet = !showChrome,
-                            observing = active && !obscured && !settingsPresent && !discussionVisible,
-                            interactive = active && showChrome && !locked && !obscured && !settingsPresent && !discussionVisible,
+                            observing = active && !obscured && !settingsPresent && !watchPanelPresent,
+                            interactive = active && showChrome && !locked && !obscured && !settingsPresent && !watchPanelPresent,
                             maximumHeight = readingsHeight,
                             onInteraction = ::interact,
                             onHoldControls = { readingsHeld = it },
                             modifier = Modifier.align(Alignment.TopStart)
-                                .padding(start = 12.dp, end = 12.dp, top = statusTop + 8.dp)
-                                .widthIn(max = 440.dp).fillMaxWidth(),
+                                .padding(start = 14.dp, end = 14.dp, top = statusTop + 8.dp)
+                                .widthIn(max = 320.dp).fillMaxWidth(),
                             nextPreparation = state.nextEpisodePreparation,
                             nextPreparationEnabled = state.settings.prepareNextEpisode)
                     }
@@ -409,18 +441,19 @@ internal fun AnimePlayerPane(
                         Row(Modifier
                             .graphicsLayer { alpha = chromeReveal }
                             .onFocusChanged { centerFocused = it.hasFocus }.focusGroup()
-                            .motionInputGate(active && showChrome && !obscured && !settingsPresent && !discussionVisible),
+                            .motionInputGate(active && showChrome && !obscured && !settingsPresent && !watchPanelPresent),
                             horizontalArrangement = Arrangement.spacedBy(24.dp), verticalAlignment = Alignment.CenterVertically) {
                             if (previous != null) MotionIconButton(onClick = { interact(); onEpisode(previous) },
                                 modifier = Modifier.size(48.dp), tooltip = "上一集") {
                                 Icon(Icons.Outlined.SkipPrevious, "上一集", Modifier.size(26.dp))
                             } else Spacer(Modifier.size(48.dp))
                             MotionIconButton(onClick = ::toggle, modifier = Modifier.size(64.dp)
-                                .background(Color.Black.copy(alpha = .24f), RoundedCornerShape(32.dp)),
+                                .clip(RoundedCornerShape(32.dp))
+                                .background(Color.White.copy(alpha = .19f))
+                                .border(1.dp, Color.White.copy(alpha = .23f), RoundedCornerShape(32.dp)),
                                 tooltip = if (playback.playWhenReady && !playback.ended) "暂停 · 空格" else "播放 · 空格") {
-                                Icon(if (playback.ended) Icons.Outlined.Replay else if (playback.playWhenReady)
-                                    Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
-                                    if (playback.ended) "重播" else if (playback.playWhenReady) "暂停" else "播放", Modifier.size(36.dp))
+                                Icon(if (playback.playWhenReady) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+                                    if (playback.playWhenReady) "暂停" else "播放", Modifier.size(34.dp))
                             }
                             if (next != null) MotionIconButton(onClick = { interact(); onEpisode(next) },
                                 modifier = Modifier.size(48.dp), tooltip = "下一集") {
@@ -437,19 +470,19 @@ internal fun AnimePlayerPane(
             if (!playback.inPictureInPicture && headerReveal > 0f) {
                 val headerColors = if (headerOverVideo) videoColors else colors
                 val headerSurface = if (headerOverVideo) Modifier.background(
-                    Brush.verticalGradient(listOf(Color.Black.copy(alpha = .86f), Color.Transparent)),
+                    Brush.verticalGradient(listOf(Color.Black.copy(alpha = .86f), Color.Black.copy(alpha = .40f), Color.Transparent)),
                 ) else Modifier
                 CompositionLocalProvider(LocalContentColor provides headerColors.onSurface) {
                     Row(
-                        Modifier.align(Alignment.TopStart).width(if (desktop && !fillVideo) videoWidth else maxWidth)
+                        Modifier.align(Alignment.TopStart).width(if (!fillVideo && headerOverVideo) videoWidth else maxWidth)
                             .onSizeChanged { headerHeight = with(density) { it.height.toDp() } }
                             .graphicsLayer { alpha = headerReveal; translationY = (1f - headerReveal) * -8.dp.toPx() }
-                            .motionInputGate(active && headerInteractive && !obscured && !settingsPresent && !discussionVisible)
+                            .motionInputGate(active && headerInteractive && !obscured && !settingsPresent && !watchPanelPresent)
                             .onFocusChanged { headerFocused = it.hasFocus }.focusGroup()
                             .then(headerSurface)
                             .windowInsetsPadding(safeInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
-                            .heightIn(min = if (desktop && !fullscreen) 48.dp else 56.dp)
-                            .padding(horizontal = 8.dp, vertical = if (desktop && !fullscreen) 2.dp else 4.dp),
+                            .heightIn(min = 52.dp)
+                            .padding(start = 6.dp, end = 8.dp, top = 2.dp, bottom = if (headerOverVideo) 8.dp else 2.dp),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp),
                     ) {
                         MotionIconButton(onClick = { if (fullscreen) onFullscreenChange(false) else onBack() },
@@ -458,11 +491,10 @@ internal fun AnimePlayerPane(
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, if (fullscreen) "退出全屏" else "退出播放", Modifier.size(20.dp))
                         }
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(detail?.subject?.title ?: "播放", style = MaterialTheme.typography.titleSmall,
+                            Text(detail?.subject?.title ?: "播放", style = MaterialTheme.typography.titleMedium,
                                 modifier = Modifier.semantics { heading() }, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             val caption = listOfNotNull(episode?.let(::animeEpisodeLabel),
-                                (if (keepingCurrentVideo) currentOption?.sourceName else target?.sourceName ?: currentOption?.sourceName)
-                                    ?.takeIf { it.isNotBlank() }).joinToString(" · ")
+                                episode?.let(::animeEpisodeSubtitle)).joinToString(" · ")
                             if (caption.isNotBlank()) Text(caption, style = MaterialTheme.typography.labelSmall,
                                 color = headerColors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
@@ -470,7 +502,7 @@ internal fun AnimePlayerPane(
                             modifier = Modifier.size(44.dp), tooltip = "锁定触控") {
                             Icon(Icons.Outlined.LockOpen, "锁定触控", Modifier.size(20.dp))
                         }
-                        if (desktop && !fillVideo && detail != null) {
+                        if (desktop && !fillVideo && sideBySide && detail != null) {
                             val label = if (episodesVisible) "收起选集与评论" else "展开选集与评论"
                             MotionIconButton(onClick = { episodesVisible = !episodesVisible; interact() },
                                 modifier = Modifier.size(44.dp).semantics {
@@ -478,24 +510,29 @@ internal fun AnimePlayerPane(
                                 }, tooltip = label) {
                                 Icon(Icons.Outlined.ViewSidebar, label, Modifier.size(20.dp))
                             }
+                        } else if (desktop && !fillVideo && !episodesVisible && maxWidth >= 680.dp && detail != null) {
+                            MotionIconButton(onClick = { episodesVisible = true; interact() },
+                                modifier = Modifier.size(44.dp), tooltip = "展开选集与评论") {
+                                Icon(Icons.Outlined.ViewSidebar, "展开选集与评论", Modifier.size(20.dp))
+                            }
                         }
-                        MotionIconButton(onClick = { showSettings(AnimePlayerPanel.GENERAL) }, modifier = Modifier.size(44.dp),
+                        MotionIconButton(onClick = ::showSettings, modifier = Modifier.size(44.dp),
                             tooltip = "播放设置") {
-                            Icon(Icons.Outlined.Settings, "播放设置", Modifier.size(20.dp))
+                            Icon(Icons.Outlined.MoreHoriz, "播放设置", Modifier.size(22.dp))
                         }
                     }
                 }
             }
 
-            if (!playback.inPictureInPicture && episode != null && chromeReveal > 0f) {
+            if (!playback.inPictureInPicture && chromeReveal > 0f) {
                 val transportPlacement = if (fillVideo) Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                     else Modifier.align(Alignment.BottomStart).offset(y = controlsTop - maxHeight).width(videoWidth)
                 val panel = Modifier.background(Brush.verticalGradient(
-                    listOf(Color.Transparent, Color.Black.copy(alpha = .74f))))
+                    listOf(Color.Transparent, Color.Black.copy(alpha = .70f), Color.Black.copy(alpha = .92f))))
                 Box(transportPlacement
                     .onSizeChanged { footerHeight = with(density) { it.height.toDp() } }
                     .graphicsLayer { alpha = chromeReveal; translationY = (1f - chromeReveal) * 8.dp.toPx() }
-                    .motionInputGate(active && showChrome && !locked && !obscured && !settingsPresent && !discussionVisible)
+                    .motionInputGate(active && showChrome && !locked && !obscured && !settingsPresent && !watchPanelPresent)
                     .onFocusChanged { transportFocused = it.hasFocus }.focusGroup()
                     .then(panel), contentAlignment = Alignment.BottomCenter) {
                     MaterialTheme(colorScheme = videoColors) {
@@ -507,81 +544,117 @@ internal fun AnimePlayerPane(
                             AnimePlayerControls(controller.player, playback,
                                 previous, next, onEpisode, onToggle = ::toggle,
                                 onInteraction = ::interact, onHoldControls = { controlsHeld = it },
-                                onSettings = ::showSettings, nextPreparation = state.nextEpisodePreparation,
+                                nextPreparation = state.nextEpisodePreparation,
                                 workspaceNotice = state.notice, onDismissNotice = controller::dismissNotice,
                                 centralTransport = centralTransport, canControl = canControl,
-                                sourceName = currentOption?.sourceName ?: target?.sourceName,
-                                onSources = ::showSources, onDisplay = { showEnhancement(EnhancementPage.DISPLAY) },
+                                sourceName = currentOption?.sourceName ?: "本地播放".takeIf { showingCurrentPlayback },
+                                onSources = if (episode != null && (!showStage || compactStage)) ::showSources else null,
                                 fullscreen = fullscreen, onFullscreen = ::toggleFullscreen,
-                                onDiscussion = if (fullscreen) ({
-                                    interact(); discussionEpisode = episode; discussionVisible = true
-                                }) else null, modifier = Modifier.fillMaxWidth())
+                                onWatching = if (!inlineWatching && detail != null) ::openWatching else null,
+                                modifier = Modifier.fillMaxWidth())
                         }
                       }
                     }
                 }
             }
-            if (!fillVideo && episodesVisible) {
+            if (inlineWatching && !watchPanelPresent) {
                 val episodePanel = if (sideBySide) Modifier.align(Alignment.TopEnd).offset(y = videoTop)
-                    .width(railWidth).height(room)
-                else Modifier.offset(y = episodeTop).fillMaxWidth()
-                    .height((maxHeight - episodeTop - bottomInset).coerceAtLeast(0.dp))
-                val entry = remember(detail?.subject?.id, state.library) {
-                    state.library.firstOrNull { it.subject.id == detail?.subject?.id }
-                }
-                val watchingActive = active && !obscured && !settingsPresent && !discussionVisible
-                Column(episodePanel.background(colors.surface.copy(alpha = .94f))) {
-                    MotionTabs(watchingTab, listOf("选集", "本集评论"),
-                        onSelect = { watchingTab = it },
-                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 6.dp)
-                            .widthIn(max = 300.dp).fillMaxWidth().motionInputGate(watchingActive),
-                        controlHeight = 44.dp, compact = true, treatment = MotionTabTreatment.Underline)
-                    MotionTabContent(watchingTab, Modifier.weight(1f).fillMaxWidth(), soft = true) { tab ->
-                        episodeListState.SaveableStateProvider(tab) {
-                            val paneActive = watchingActive && tab == watchingTab
-                            if (tab == 0) AnimePlayerEpisodes(detail?.episodes.orEmpty(), episode?.id,
-                                entry?.completedEpisodeIds.orEmpty(), onEpisode, episodeProgress = state.episodeProgress,
-                                episodeAvailability = { controller.episodeAvailability(it, state) },
-                                episodeSources = { id -> animeEpisodeSources(id,
-                                    controller.confirmedPlaybackLines(id, state), controller, state) },
-                                onSources = onSources, active = paneActive, desktopRail = desktop && sideBySide,
-                                modifier = Modifier.fillMaxSize())
-                            else if (episode != null) {
-                                val focusedDetail = detail?.takeIf { it.subject.id == episode.subjectId }
-                                val reference = focusedDetail?.subject?.takeIf { it.canonicalBangumiId() != null }
-                                    ?: focusedDetail?.metadataSubject
-                                    ?: entry?.nativeMetadata.takeIf { entry?.subject?.id == episode.subjectId &&
-                                        episode.subjectId.startsWith("native:") }
-                                AnimeEpisodeDiscussionContent(paneActive, episode, focusedDetail?.episodes.orEmpty(),
-                                    reference, backdrop, controller, Modifier.fillMaxSize())
-                            } else Box(Modifier.fillMaxSize().padding(16.dp)) {
-                                AnimeQuietLabel("选择一集后查看对应讨论。")
-                            }
-                        }
-                    }
-                }
+                    .width(railWidth).height(room).windowInsetsPadding(safeInsets.only(WindowInsetsSides.Top))
+                else Modifier.offset(y = controlsTop).fillMaxWidth()
+                    .height((maxHeight - controlsTop - bottomInset).coerceAtLeast(0.dp))
+                AnimeWatchingPane(state, episode, controller, backdrop, watchingTab, { watchingTab = it }, episodeListState,
+                    onEpisode, { onSources(it) }, active && !obscured && !settingsPresent, sideBySide,
+                    episodePanel.background(colors.surface))
             }
             if (locked && !playback.inPictureInPicture) MotionIconButton(onClick = { locked = false; interact() },
                 modifier = Modifier.align(Alignment.CenterStart).padding(start = 12.dp).size(48.dp), tooltip = "解除触控锁定") {
                 Icon(Icons.Outlined.Lock, "解除触控锁定", Modifier.size(24.dp), tint = Color.White)
             }
         }
-        if (!playback.inPictureInPicture) AnimePlayerSettings(settingsVisible, settingsSection, controller, state, playback, backdrop,
+        AnimePlayerSettings(settingsVisible && !playback.inPictureInPicture, AnimePlayerPanel.GENERAL, controller, state, playback, backdrop,
             onDismiss = { settingsVisible = false; interact() }, onClosed = { settingsPresent = false },
-            onPlayDownload = onPlayDownload, onSources = onSources, initialEnhancementPage = settingsEnhancementPage,
-            onStorage = onStorage)
-        discussionEpisode?.let { focused ->
-            val focusedDetail = detail?.takeIf { it.subject.id == focused.subjectId }
-            val reference = focusedDetail?.subject?.takeIf { it.canonicalBangumiId() != null }
-                ?: focusedDetail?.metadataSubject
-                ?: state.library.firstOrNull { it.subject.id == focused.subjectId &&
-                    it.subject.id.startsWith("native:") }?.nativeMetadata
-            val currentEpisode = focusedDetail?.episodes?.firstOrNull { it.id == focused.id && it.subjectId == focused.subjectId } ?: focused
-            AnimeEpisodeDiscussionPanel(discussionVisible, currentEpisode, focusedDetail?.episodes.orEmpty(), reference,
-                backdrop, controller, onDismiss = { discussionVisible = false; interact() },
-                onClosed = { if (!discussionVisible) discussionEpisode = null })
+            onPlayDownload = onPlayDownload, onSources = onSources,
+            onStorage = onStorage, readingsVisible = readingsVisible, onReadingsVisible = { readingsVisible = it })
+        EnhancementPanelHost(watchPanelOpen && !playback.inPictureInPicture, backdrop,
+            onDismiss = { watchPanelOpen = false; interact() }, maximumWidth = 490.dp, onClosed = {
+                val wasPresent = watchPanelPresent
+                watchPanelPresent = false
+                val catalogue = detail?.episodes.orEmpty()
+                val requestedLine = queuedLine?.let { request ->
+                    catalogue.firstOrNull { it.subjectId == request.subjectId && it.id == request.id }
+                }
+                val requestedEpisode = queuedEpisode?.let { request ->
+                    catalogue.firstOrNull { it.subjectId == request.subjectId && it.id == request.id }
+                }
+                queuedLine = null
+                queuedEpisode = null
+                if (active && !obscured && !playback.inPictureInPicture) {
+                    if (requestedLine != null) onSources(requestedLine)
+                    else if (requestedEpisode != null) onEpisode(requestedEpisode)
+                    else if (wasPresent) interact()
+                }
+            }, surface = { panelModifier, body -> AnimePanelSurface(backdrop, panelModifier) { body() } }) {
+            AnimeWatchingPane(state, episode, controller, backdrop, watchingTab, { watchingTab = it }, episodeListState,
+                onEpisode = { queuedEpisode = it; watchPanelOpen = false },
+                onSources = { queuedLine = it; watchPanelOpen = false },
+                active = active && watchPanelOpen && !obscured, rail = true,
+                modifier = Modifier.fillMaxWidth().height(minOf(LocalMangaWindow.current.panelHeight, 520.dp)),
+                onClose = { watchPanelOpen = false; interact() })
         }
-      }
+    }
+}
+
+@Composable
+private fun AnimeWatchingPane(
+    state: AnimeScreenState, episode: AnimeEpisode?, controller: AnimeController, backdrop: HazeState,
+    tab: Int, onTabChange: (Int) -> Unit, episodeListState: SaveableStateHolder,
+    onEpisode: (AnimeEpisode) -> Unit, onSources: (AnimeEpisode) -> Unit, active: Boolean,
+    rail: Boolean, modifier: Modifier = Modifier, onClose: (() -> Unit)? = null,
+) {
+    val detail = state.detail
+    val entry = remember(detail?.subject?.id, state.library) {
+        state.library.firstOrNull { it.subject.id == detail?.subject?.id }
+    }
+    val colors = MaterialTheme.colorScheme
+    Column(modifier.motionInputGate(active)) {
+        if (onClose != null) Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 6.dp, top = 4.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Text(detail?.subject?.title ?: "选集", Modifier.weight(1f).semantics { heading() },
+                style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            MotionIconButton(onClick = onClose, modifier = Modifier.size(44.dp), tooltip = "关闭选集") {
+                Icon(Icons.Outlined.Close, "关闭选集", Modifier.size(20.dp))
+            }
+        }
+        Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MotionTabs(tab, listOf("选集", "本集评论"), onSelect = onTabChange,
+                modifier = Modifier.widthIn(max = 240.dp).weight(1f), controlHeight = 42.dp,
+                compact = true, treatment = MotionTabTreatment.Underline)
+            if (tab == 0 && episode != null) Text(animeEpisodeLabel(episode),
+                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 82.dp))
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(colors.outlineVariant.copy(alpha = .40f)))
+        MotionTabContent(tab, Modifier.weight(1f).fillMaxWidth(), soft = true) { item ->
+            episodeListState.SaveableStateProvider(item) {
+                val paneActive = active && item == tab
+                if (item == 0) AnimePlayerEpisodes(detail?.episodes.orEmpty(), episode?.id,
+                    entry?.completedEpisodeIds.orEmpty(), onEpisode, episodeProgress = state.episodeProgress,
+                    episodeAvailability = { controller.episodeAvailability(it, state) },
+                    episodeSources = { id -> animeEpisodeSources(id, controller.confirmedPlaybackLines(id, state), controller, state) },
+                    onSources = onSources, active = paneActive, desktopRail = rail, modifier = Modifier.fillMaxSize())
+                else if (episode != null) {
+                    val focusedDetail = detail?.takeIf { it.subject.id == episode.subjectId }
+                    val reference = focusedDetail?.subject?.takeIf { it.canonicalBangumiId() != null }
+                        ?: focusedDetail?.metadataSubject
+                        ?: entry?.nativeMetadata.takeIf { entry?.subject?.id == episode.subjectId && episode.subjectId.startsWith("native:") }
+                    AnimeEpisodeDiscussionContent(paneActive, episode, focusedDetail?.episodes.orEmpty(), reference,
+                        backdrop, controller, Modifier.fillMaxSize())
+                } else Box(Modifier.fillMaxSize().padding(16.dp)) {
+                    AnimeQuietLabel("选一集后可以查看本集评论。")
+                }
+            }
+        }
     }
 }
 
@@ -607,7 +680,7 @@ private fun AnimeVideoStatus(
     }
     when {
         resolving -> Column(Modifier.padding(horizontal = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            PlayerStageMessage(if (autoMatching) "正在查找本集线路" else "正在打开本集", sourceName)
+            PlayerStageMessage(if (autoMatching) "正在找本集线路" else "正在打开本集", sourceName, loading = true)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
                 if (canChooseSource) PlayerSwitchLine(onSources)
                 if (canKeepPlayback) MotionTextButton(onClick = onKeepPlayback, modifier = Modifier.heightIn(min = 44.dp)) {
@@ -643,14 +716,14 @@ private fun AnimeVideoStatus(
         playback.phase == AnimePlayerPhase.IDLE || playback.phase == AnimePlayerPhase.OPENING ||
             playback.phase == AnimePlayerPhase.READY && awaitingVideo ->
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                val paused = playback.phase == AnimePlayerPhase.READY && !playback.playWhenReady
                 val stage = when {
-                    playback.recoveryAttempt > 0 -> "正在重新连接视频"
-                    playback.phase != AnimePlayerPhase.READY -> "正在打开视频"
-                    !playback.playWhenReady -> "已暂停"
-                    playback.isBuffering -> "正在缓冲首帧"
-                    else -> "正在等待画面"
+                    playback.recoveryAttempt > 0 -> "正在恢复本集"
+                    paused -> "已暂停"
+                    playback.phase == AnimePlayerPhase.READY -> "正在加载画面"
+                    else -> "正在准备播放"
                 }
-                PlayerStageMessage(stage, sourceName)
+                PlayerStageMessage(stage, sourceName, loading = !paused)
                 if (canChooseSource) PlayerSwitchLine(onSources)
             }
         playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && playback.hasVideoTracks == false ->
@@ -661,15 +734,23 @@ private fun AnimeVideoStatus(
                     Text("换条线路", color = Color.White)
                 }
             }
-        showBuffering -> Text("正在缓冲", Modifier.clip(RoundedCornerShape(14.dp))
-            .background(Color.Black.copy(alpha = .72f)).padding(horizontal = 14.dp, vertical = 8.dp)
-            .semantics { liveRegion = LiveRegionMode.Polite }, color = Color.White,
-            style = MaterialTheme.typography.labelMedium)
+        showBuffering -> Row(Modifier.clip(RoundedCornerShape(18.dp))
+            .background(Color.Black.copy(alpha = .62f)).padding(horizontal = 12.dp, vertical = 7.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite }, horizontalArrangement = Arrangement.spacedBy(7.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            if (LocalMotionEnabled.current) CircularProgressIndicator(Modifier.size(12.dp),
+                color = Color.White, strokeWidth = 1.5.dp)
+            Text("正在缓冲", color = Color.White, style = MaterialTheme.typography.labelMedium)
+        }
         playback.ended -> Column(horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(6.dp)) {
             PlayerStageMessage("本集已播完", null)
             if (next != null) MotionButton(onClick = { onEpisode(next) }, shape = shape,
-                modifier = Modifier.heightIn(min = 44.dp)) { Text(if (nextUpcoming) "查看下一集" else "播放下一集") }
+                modifier = Modifier.heightIn(min = 44.dp)) {
+                Icon(Icons.Outlined.SkipNext, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(5.dp))
+                Text(if (nextUpcoming) "查看下一集" else "播放${animeEpisodeLabel(next)}")
+            }
         }
     }
 }
@@ -685,10 +766,14 @@ private fun PlayerSwitchLine(onSources: () -> Unit) {
 
 @Composable
 private fun PlayerStageMessage(title: String, detail: String?, maxLines: Int = 2,
-    incident: AnimePlaybackFailure? = null) {
-    Column(Modifier.widthIn(max = 480.dp).padding(vertical = 6.dp).semantics { liveRegion = LiveRegionMode.Polite },
+    incident: AnimePlaybackFailure? = null, loading: Boolean = false) {
+    Column(Modifier.widthIn(max = 460.dp).padding(vertical = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
         verticalArrangement = Arrangement.spacedBy(5.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (loading && LocalMotionEnabled.current) CircularProgressIndicator(Modifier.size(15.dp),
+                color = Color.White, strokeWidth = 1.5.dp)
+            Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+        }
         if (incident != null) Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             AnimeSourceMark(incident.sourceId, incident.sourceName, size = 16.dp, ink = Color.White.copy(alpha = .8f))
@@ -701,16 +786,14 @@ private fun PlayerStageMessage(title: String, detail: String?, maxLines: Int = 2
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
     previous: AnimeEpisode?, next: AnimeEpisode?, onEpisode: (AnimeEpisode) -> Unit,
     onToggle: () -> Unit, onInteraction: () -> Unit,
     onHoldControls: (Boolean) -> Unit, workspaceNotice: String?, onDismissNotice: () -> Unit,
-    onSettings: (AnimePlayerPanel) -> Unit, nextPreparation: AnimeNextEpisodePreparation?,
-    centralTransport: Boolean, canControl: Boolean,
-    sourceName: String?, onSources: () -> Unit, onDisplay: () -> Unit,
-    fullscreen: Boolean, onFullscreen: () -> Unit, onDiscussion: (() -> Unit)?,
+    nextPreparation: AnimeNextEpisodePreparation?, centralTransport: Boolean, canControl: Boolean,
+    sourceName: String?, onSources: (() -> Unit)?,
+    fullscreen: Boolean, onFullscreen: () -> Unit, onWatching: (() -> Unit)?,
     modifier: Modifier = Modifier) {
     var scrub by remember(state.sessionGeneration, state.timelineGeneration) { mutableStateOf<Long?>(null) }
     val duration = state.durationMs
@@ -754,46 +837,50 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
                 Text(animeTime(duration), style = timeStyle, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        FlowRow(Modifier.fillMaxWidth().heightIn(min = 48.dp),
-            horizontalArrangement = if (!centralTransport && canControl) Arrangement.SpaceBetween else Arrangement.End) {
-            if (!centralTransport && canControl) Row(verticalAlignment = Alignment.CenterVertically) {
-                if (previous != null) MotionIconButton(onClick = { onInteraction(); onEpisode(previous) },
-                    modifier = Modifier.size(44.dp), tooltip = "上一集") {
-                    Icon(Icons.Outlined.SkipPrevious, "上一集", Modifier.size(22.dp))
+        BoxWithConstraints(Modifier.fillMaxWidth().heightIn(min = 46.dp)) {
+            val wide = maxWidth / LocalDensity.current.fontScale.coerceAtLeast(1f) >= 380.dp
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    if (!centralTransport && canControl) {
+                        if (wide && previous != null) MotionIconButton(onClick = { onInteraction(); onEpisode(previous) },
+                            modifier = Modifier.size(44.dp), tooltip = "上一集") {
+                            Icon(Icons.Outlined.SkipPrevious, "上一集", Modifier.size(21.dp))
+                        }
+                        val playLabel = if (state.ended) "重播" else if (state.playWhenReady) "暂停" else "播放"
+                        MotionIconButton(onClick = onToggle, modifier = Modifier.size(44.dp), tooltip = "$playLabel · 空格") {
+                            Icon(if (state.ended) Icons.Outlined.Replay else if (state.playWhenReady)
+                                Icons.Outlined.Pause else Icons.Outlined.PlayArrow, playLabel, Modifier.size(28.dp))
+                        }
+                        if (next != null && !state.ended) MotionIconButton(onClick = { onInteraction(); onEpisode(next) },
+                            modifier = Modifier.size(44.dp), tooltip = nextPreparation?.takeIf { it.episodeId == next.id }
+                                ?.let { "下一集 · ${animePreparationLabel(it)}" } ?: "下一集") {
+                            Icon(Icons.Outlined.SkipNext, "下一集", Modifier.size(21.dp))
+                        }
+                    }
                 }
-                MotionIconButton(onClick = onToggle, modifier = Modifier.size(48.dp),
-                    tooltip = if (state.playWhenReady && !state.ended) "暂停 · 空格" else "播放 · 空格") {
-                    Icon(if (state.ended) Icons.Outlined.Replay else if (state.playWhenReady) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
-                        if (state.ended) "重播" else if (state.playWhenReady) "暂停" else "播放", Modifier.size(26.dp))
+                if (onSources != null) {
+                    val sourceLabel = sourceName?.let { "换线路，当前 $it" } ?: "选择播放线路"
+                    if (wide && sourceName != null) MotionTextButton(onClick = onSources,
+                        modifier = Modifier.widthIn(max = 156.dp).heightIn(min = 44.dp),
+                        contentPadding = PaddingValues(horizontal = 7.dp),
+                    ) {
+                        Icon(Icons.Outlined.SwapHoriz, sourceLabel, Modifier.size(17.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text(sourceName, style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    } else MotionIconButton(onClick = onSources, modifier = Modifier.size(44.dp), tooltip = sourceLabel) {
+                        Icon(Icons.Outlined.SwapHoriz, sourceLabel, Modifier.size(20.dp))
+                    }
                 }
-                if (next != null) MotionIconButton(onClick = { onInteraction(); onEpisode(next) },
-                    modifier = Modifier.size(44.dp),
-                    tooltip = nextPreparation?.takeIf { it.episodeId == next.id }
-                        ?.let { "下一集 · ${animePreparationLabel(it)}" } ?: "下一集") {
-                    Icon(Icons.Outlined.SkipNext, "下一集", Modifier.size(22.dp))
-                }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                MotionTextButton(onClick = { onInteraction(); onSettings(AnimePlayerPanel.SPEED) },
-                    modifier = Modifier.widthIn(min = 44.dp, max = 64.dp).heightIn(min = 44.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
-                    Text(animeSpeedLabel(state.speed), style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                val sourceLabel = sourceName?.let { "换线路，当前 $it" } ?: "选择播放线路"
-                MotionIconButton(onClick = onSources, modifier = Modifier.size(44.dp), tooltip = sourceLabel) {
-                    Icon(Icons.Outlined.SwapHoriz, sourceLabel, Modifier.size(21.dp))
-                }
-                MotionIconButton(onClick = onDisplay, modifier = Modifier.size(44.dp), tooltip = "选择观看读数") {
-                    Icon(Icons.Outlined.Tune, "选择观看读数", Modifier.size(19.dp))
-                }
-                if (onDiscussion != null) MotionIconButton(onClick = onDiscussion,
-                    modifier = Modifier.size(44.dp), tooltip = "本集评论") {
-                    Icon(Icons.Outlined.Forum, "本集评论", Modifier.size(20.dp))
+                if (onWatching != null) MotionIconButton(onClick = onWatching,
+                    modifier = Modifier.size(44.dp), tooltip = "选集与评论") {
+                    Icon(Icons.Outlined.List, "选集与评论", Modifier.size(22.dp))
                 }
                 val fullscreenLabel = if (fullscreen) "退出全屏" else "全屏播放"
                 MotionIconButton(onClick = onFullscreen, modifier = Modifier.size(44.dp), tooltip = "$fullscreenLabel · F") {
                     Icon(if (fullscreen) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen,
-                        fullscreenLabel, Modifier.size(23.dp))
+                        fullscreenLabel, Modifier.size(24.dp))
                 }
             }
         }
@@ -864,7 +951,7 @@ private fun AnimePlayerEpisodes(
             animeEpisodeLabel(it).contains(term, ignoreCase = true) || it.title.contains(term, ignoreCase = true)
         }
     }
-    LaunchedEffect(currentId, shown) {
+    LaunchedEffect(currentId, shown, lastScrolledEpisodeId) {
         if (currentId == lastScrolledEpisodeId) return@LaunchedEffect
         val index = shown.indexOfFirst { it.id == currentId }
         if (index >= 0) {
@@ -874,15 +961,25 @@ private fun AnimePlayerEpisodes(
     }
     val panelPadding = 16.dp
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-    val cellWidth = (if (fontScale > 1.32f) 90.dp else 72.dp) * fontScale
-    val panel = if (desktopRail) Modifier.background(MaterialTheme.colorScheme.surfaceContainerLow) else Modifier
-    Column(modifier.then(panel).motionInputGate(active)) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = panelPadding, end = 8.dp),
+    val cellWidth = 80.dp * fontScale
+    Column(modifier.motionInputGate(active)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(start = panelPadding, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                if (selected.isNotEmpty()) AnimeQuietLabel(
+                if (selected.isNotEmpty()) Text(
                     if (term.isBlank()) "${selected.size} 集" else "${shown.size} / ${selected.size} 集",
+                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            val currentEpisode = episodes.firstOrNull { it.id == currentId }
+            if (currentEpisode != null) MotionIconButton(onClick = {
+                if (main.isNotEmpty() && extra.isNotEmpty()) group = if (currentEpisode.kind == AnimeEpisodeKind.MAIN) 0 else 1
+                rangeChoice = -1
+                searchVisible = false
+                query = ""
+                lastScrolledEpisodeId = null
+            }, modifier = Modifier.size(44.dp), tooltip = "定位当前集") {
+                Icon(Icons.Outlined.MyLocation, "定位当前集", Modifier.size(18.dp))
             }
             if (episodes.size > 12 || searchVisible) {
                 val searchLabel = if (searchVisible) "关闭集数查找" else "查找集数"
@@ -922,9 +1019,9 @@ private fun AnimePlayerEpisodes(
         Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyVerticalGrid(if (desktopRail) GridCells.Fixed(1) else GridCells.Adaptive(cellWidth),
                 modifier = Modifier.fillMaxSize(), state = scroll, userScrollEnabled = active,
-                contentPadding = PaddingValues(start = panelPadding, end = panelPadding, top = 8.dp, bottom = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(if (desktopRail) 3.dp else 8.dp)) {
+                contentPadding = PaddingValues(start = panelPadding, end = panelPadding, top = 4.dp, bottom = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalArrangement = Arrangement.spacedBy(if (desktopRail) 3.dp else 7.dp)) {
                 if (shown.isEmpty()) item(span = { GridItemSpan(maxLineSpan) }) {
                     AnimeMessage(if (term.isBlank()) "暂无集数" else "没有匹配的集数",
                         action = if (term.isNotBlank()) "清除查找" else null, onAction = { query = "" })
@@ -964,11 +1061,12 @@ private fun WatchEpisodeCell(
         AnimeEpisodeAvailability.UPCOMING -> "待播"
     }
     val surface = when {
-        current -> colors.primary.copy(alpha = .055f)
-        else -> Color.Transparent
+        current -> colors.primary.copy(alpha = .12f)
+        inRail -> Color.Transparent
+        else -> colors.surfaceContainerLow
     }
-    Box(Modifier.fillMaxWidth().heightIn(min = if (inRail) 44.dp else 48.dp)
-        .clip(RoundedCornerShape(if (inRail) 8.dp else 11.dp)).background(surface)
+    Box(Modifier.fillMaxWidth().heightIn(min = if (inRail) 52.dp else 57.dp)
+        .clip(RoundedCornerShape(11.dp)).background(surface)
         .motionPress(interaction, enabled = enabled)
         .clickable(enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = when (availability) {
@@ -981,10 +1079,13 @@ private fun WatchEpisodeCell(
         if (inRail) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Column(Modifier.weight(1f)) {
-                    Text(animeEpisodeLabel(episode),
-                        style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis, color = color)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (current) Icon(Icons.Outlined.PlayArrow, null, Modifier.size(15.dp), tint = color)
+                        Text(animeEpisodeLabel(episode),
+                            style = MaterialTheme.typography.titleSmall.copy(fontFeatureSettings = "tnum"),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis, color = color)
+                    }
                     animeEpisodeSubtitle(episode)?.let { subtitle ->
                         Text(subtitle, style = MaterialTheme.typography.bodySmall,
                             maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -993,21 +1094,20 @@ private fun WatchEpisodeCell(
                     AnimeEpisodeSourceBadges(sources, Modifier.fillMaxWidth(), enabled = enabled,
                         ink = if (current) color else colors.onSurfaceVariant, onOpen = onSources)
                 }
-                when {
-                    progress != null || watched -> AnimeWatchProgressMark(progress, watched, size = 14.dp)
-                    current -> Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp), tint = color)
-                    availability == AnimeEpisodeAvailability.RECENTLY_FAILED ->
-                        Icon(Icons.Outlined.CloudOff, null, Modifier.size(15.dp), tint = colors.onSurfaceVariant)
-                    availability == AnimeEpisodeAvailability.UPCOMING ->
-                        Text("待播", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                    else -> Unit
+                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    AnimeWatchProgressMark(progress, watched, size = 14.dp)
+                    if (lineLabel != null) Text(lineLabel, style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant, maxLines = 1)
                 }
             }
-        } else Column(horizontalAlignment = Alignment.Start) {
-            Text(animeEpisodeLabel(episode), style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
-                maxLines = if (episode.subjectId.startsWith("native:")) 2 else 1,
-                overflow = TextOverflow.Ellipsis, color = color)
-            if (lineLabel != null && availability != AnimeEpisodeAvailability.CHECKING) Text(lineLabel, style = MaterialTheme.typography.labelSmall,
+        } else Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
+            Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (current) Icon(Icons.Outlined.PlayArrow, null, Modifier.size(12.dp), tint = color)
+                Text(animeEpisodeLabel(episode), style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
+                    maxLines = if (episode.subjectId.startsWith("native:")) 2 else 1,
+                    overflow = TextOverflow.Ellipsis, color = color)
+            }
+            if (lineLabel != null) Text(lineLabel, style = MaterialTheme.typography.labelSmall,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, color = color.copy(alpha = .8f))
             Row(Modifier.fillMaxWidth().heightIn(min = 28.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) {

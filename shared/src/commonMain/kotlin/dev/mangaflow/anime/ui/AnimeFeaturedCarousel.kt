@@ -4,6 +4,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -29,17 +30,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
@@ -61,7 +58,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import coil3.Image
 import coil3.compose.rememberAsyncImagePainter
 import coil3.request.ImageRequest
@@ -69,21 +65,18 @@ import coil3.request.crossfade
 import dev.chrisbanes.haze.HazeInput
 import dev.chrisbanes.haze.blur.HazeBlurStyle
 import dev.chrisbanes.haze.blur.hazeBlur
-import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.anime.AnimeDiscoveryItem
-import dev.mangaflow.anime.AnimeSearchGroup
 import dev.mangaflow.platform.*
 import dev.mangaflow.ui.FeaturedCoverColors
-import dev.mangaflow.ui.GlassSurfaceRole
-import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.LocalMangaWindow
-import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.mangaCoverCard
+import dev.mangaflow.ui.mangaFontFamily
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.platform.*
+import dev.mangaflow.typography.MangaFontScene
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
@@ -91,16 +84,13 @@ import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.floor
 
-/** Each gallery card retains the current source candidates or its metadata item. */
 internal data class AnimeFeaturedEntry(
     val key: String,
     val title: String,
     val coverUrl: String,
     val sourceId: String,
-    val sources: List<Pair<String, String>>,
     val caption: String,
-    val sourceGroup: AnimeSearchGroup? = null,
-    val discoveryItem: AnimeDiscoveryItem? = null,
+    val discoveryItem: AnimeDiscoveryItem,
 )
 
 /**
@@ -116,7 +106,7 @@ internal fun AnimeFeaturedCarousel(
     visible: Boolean,
     selectedKey: String?,
     onSelected: (String) -> Unit,
-    onOpenSources: (AnimeFeaturedEntry) -> Unit,
+    onOpenScores: (AnimeFeaturedEntry) -> Unit,
     onOpen: (AnimeFeaturedEntry) -> Unit,
 ) {
     if (entries.isEmpty()) return
@@ -128,24 +118,12 @@ internal fun AnimeFeaturedCarousel(
         val desktop = platformKind == PlatformKind.DESKTOP
         val fontScale = density.fontScale.coerceAtLeast(1f)
         val galleryHeight = if (window.shortHeight)
-            (window.height * .5f).coerceIn(164.dp, 220.dp)
-        else (window.height / 3f).coerceIn(220.dp, 280.dp)
-        val preferredWidth = minOf(galleryWidth,
-            (galleryWidth * .84f).coerceAtMost(if (desktop) 440.dp else 304.dp))
-        val footerHeight = if (desktop) 44.dp else 12.dp
-        val itemHeight = galleryHeight - footerHeight - 14.dp
-        val inlineInformation = preferredWidth >= 224.dp && fontScale <= 1.3f
-        val titleLines = if (window.shortHeight || fontScale > 1.3f) 1 else 2
-        val footerLineHeight = when {
-            entries.any { it.discoveryItem == null && it.sources.isNotEmpty() } -> maxOf(28.dp, (15f * fontScale).dp)
-            entries.any { it.caption.isNotBlank() } -> (15f * fontScale).dp
-            else -> 0.dp
-        }
-        val ratingLineHeight = if (entries.any { it.discoveryItem != null }) 24.dp * fontScale else 0.dp
-        val captionHeight = if (inlineInformation) 0.dp else
-            ((10f + 20f * titleLines * fontScale).dp + ratingLineHeight + footerLineHeight)
-                .coerceAtMost(itemHeight - 36.dp)
-        val artworkHeight = (itemHeight - captionHeight).coerceAtLeast(1.dp)
+            (window.height * .54f).coerceIn(166.dp, 238.dp)
+        else (window.height * .35f).coerceIn(228.dp, 312.dp)
+        val preferredWidth = minOf(galleryWidth, (galleryWidth * .89f).coerceAtMost(660.dp))
+        val footerHeight = if (desktop) 44.dp else 18.dp
+        val itemHeight = galleryHeight - footerHeight - 8.dp
+        val compactLayout = preferredWidth < 250.dp || fontScale > 1.4f
         val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
         val state = rememberPagerState(
             initialPage = entries.indexOfFirst { it.key == selectedKey }.coerceAtLeast(0),
@@ -194,7 +172,7 @@ internal fun AnimeFeaturedCarousel(
         }
         val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
         val imageWidthPx = with(density) { preferredWidth.roundToPx() }.coerceAtLeast(1)
-        val imageHeightPx = with(density) { artworkHeight.roundToPx() }.coerceAtLeast(1)
+        val imageHeightPx = with(density) { itemHeight.roundToPx() }.coerceAtLeast(1)
         Column(Modifier.fillMaxWidth().height(galleryHeight)
             .onPreviewKeyEvent { event ->
                 if (!active || entries.size <= 1 || event.type != KeyEventType.KeyDown ||
@@ -212,28 +190,26 @@ internal fun AnimeFeaturedCarousel(
                 }
             }.focusGroup()) {
             HorizontalPager(state = state, pageSize = PageSize.Fixed(preferredWidth),
-                contentPadding = PaddingValues(start = edgePadding, end = edgePadding, top = 6.dp, bottom = 8.dp),
+                contentPadding = PaddingValues(start = edgePadding, end = edgePadding, top = 2.dp, bottom = 6.dp),
                 pageSpacing = 10.dp,
                 beyondViewportPageCount = if (visible && currentCoverReady) 1 else 0,
                 flingBehavior = fling, userScrollEnabled = active,
                 key = { entries[it].key },
-                modifier = Modifier.fillMaxWidth().height(itemHeight + 14.dp)
+                modifier = Modifier.fillMaxWidth().height(itemHeight + 8.dp)
                     .semantics { stateDescription = "番剧 " + (state.currentPage + 1) + " / " + entries.size }) { index ->
                 val emphasis = { (1f - abs(index - position.value)).coerceIn(0f, 1f) }
-                AnimeFeaturedCard(entries[index], captionHeight, titleLines, inlineInformation,
-                    imageWidthPx, imageHeightPx, color = colors[index], atmosphere = atmosphere,
+                AnimeFeaturedCard(entries[index], compactLayout, imageWidthPx, imageHeightPx, atmosphere = atmosphere,
                     onColor = { extracted[entries[index].coverUrl] = it },
                     onReady = { readyCovers[entries[index].coverUrl] = true },
                     modifier = Modifier.fillMaxWidth().height(itemHeight).graphicsLayer {
                         val scale = if (motion) .92f + .08f * emphasis() else 1f
                         scaleX = scale; scaleY = scale
                         alpha = .72f + .28f * emphasis()
-                    }.mangaCoverCard(22.dp),
-                    emphasis = emphasis,
+                    }.mangaCoverCard(20.dp),
                     offset = { if (motion) (index - position.value).coerceIn(-1f, 1f) *
                         (if (rtl) -1f else 1f) else 0f },
-                    enabled = active, sourcesEnabled = active && index == state.settledPage && !state.isScrollInProgress,
-                    onOpenSources = onOpenSources, onOpen = onOpen)
+                    enabled = active, scoresEnabled = active && index == state.settledPage && !state.isScrollInProgress,
+                    onOpenScores = onOpenScores, onOpen = onOpen)
             }
             Row(Modifier.fillMaxWidth().height(footerHeight), verticalAlignment = Alignment.CenterVertically) {
                 if (desktop) MotionIconButton(onClick = { selectPage(state.currentPage - 1) },
@@ -268,33 +244,27 @@ internal fun AnimeFeaturedCarousel(
 @Composable
 private fun AnimeFeaturedCard(
     entry: AnimeFeaturedEntry,
-    captionHeight: Dp,
-    titleLines: Int,
-    inlineInformation: Boolean,
+    compactLayout: Boolean,
     imageWidthPx: Int,
     imageHeightPx: Int,
-    color: State<Color>,
     atmosphere: State<Color>,
     onColor: (Color) -> Unit,
     onReady: () -> Unit,
     modifier: Modifier,
-    emphasis: () -> Float,
     offset: () -> Float,
     enabled: Boolean,
-    sourcesEnabled: Boolean,
-    onOpenSources: (AnimeFeaturedEntry) -> Unit,
+    scoresEnabled: Boolean,
+    onOpenScores: (AnimeFeaturedEntry) -> Unit,
     onOpen: (AnimeFeaturedEntry) -> Unit,
 ) {
     val context = LocalMangaContext.current
-    val scores = observedAnimeRatingSnapshot(entry.discoveryItem?.subject,
-        entry.discoveryItem?.sourceScores.orEmpty(), enabled = enabled).scores
-    val playbackSources = entry.sources.takeIf { entry.discoveryItem == null }.orEmpty()
+    val item = entry.discoveryItem
+    val scores = observedAnimeRatingSnapshot(item.subject, item.sourceScores, enabled = scoresEnabled).scores
     val motion = LocalMotionEnabled.current
     val interaction = remember(entry.key) { MutableInteractionSource() }
-    val heroBackdrop = rememberHazeState()
     val atmosphereBlur = remember {
         HazeBlurStyle {
-            blurRadius(18.dp)
+            blurRadius(16.dp)
             backgroundColor(Color.Transparent)
             colorEffects(emptyList())
             noiseFactor(0f)
@@ -316,120 +286,67 @@ private fun AnimeFeaturedCard(
             .softwareBitmap().size(imageWidthPx, imageHeightPx)
             .crossfade(if (motion) MangaMotion.Quick else 0).build()
     }
-    // The sharp poster and blurred field share the same bounded decode.
     val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Fit,
         onSuccess = { decoded = it.result.image; latestOnReady() })
-    val surface = if (color.value.luminance() > .28f) lerp(color.value, Color.White, .56f)
-        else lerp(color.value, Color.Black, .22f)
-    val onDark = surface.luminance() <= .5f
-    val ink by animateColorAsState(if (onDark) Color.White else Color(0xFF222329),
-        if (motion) tween(420, easing = MangaMotion.EnterEasing) else snap(), label = "anime-featured-ink")
-    val information = {
-        val t = ((emphasis() - .55f) / .45f).coerceIn(0f, 1f)
-        t * t * (3f - 2f * t)
-    }
-    Box(modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button,
-        enabled = enabled, onClickLabel = "查看" + entry.title, onClick = { onOpen(entry) })
-        .semantics(mergeDescendants = true) {
-            contentDescription = listOf(entry.title, entry.caption)
-                .filter(String::isNotBlank).joinToString("，")
-        }.motionPress(interaction, enabled = enabled, pressedScale = .985f)) {
-        BoxWithConstraints(Modifier.matchParentSize()) {
-            val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-            val intrinsic = painter.intrinsicSize
-            val aspect = if (intrinsic.width.isFinite() && intrinsic.height.isFinite() &&
-                intrinsic.width > 0f && intrinsic.height > 0f)
-                intrinsic.width / intrinsic.height else 2f / 3f
-            val pictureHeight = (maxHeight - if (inlineInformation) 12.dp else captionHeight + 10.dp)
-                .coerceAtLeast(1.dp)
-            val pictureRoom = if (inlineInformation)
-                minOf(maxWidth * .52f, (maxWidth - 24.dp - 88.dp * fontScale).coerceAtLeast(1.dp))
-            else (maxWidth - 12.dp).coerceAtLeast(1.dp)
-            val posterWidth = minOf(pictureRoom, pictureHeight * aspect)
-            val posterHeight = posterWidth / aspect
-            val posterLeft = if (inlineInformation) 6.dp + (pictureRoom - posterWidth) / 2f
-                else (maxWidth - posterWidth) / 2f
-            val posterTop = 6.dp + (pictureHeight - posterHeight) / 2f
-            val infoLeft = if (inlineInformation) 6.dp + pictureRoom + 12.dp else 0.dp
-            val infoTop = if (inlineInformation) 6.dp else maxHeight - captionHeight
-            val infoWidth = (maxWidth - infoLeft - if (inlineInformation) 8.dp else 0.dp).coerceAtLeast(1.dp)
-            val infoHeight = if (inlineInformation) maxHeight - 12.dp else captionHeight
-            val mergeStart = ((if (inlineInformation) infoLeft - 24.dp else infoTop - 4.dp) /
-                (if (inlineInformation) maxWidth else maxHeight)).coerceIn(0f, .94f)
-            val mergeEnd = ((if (inlineInformation) infoLeft + 8.dp else infoTop + 12.dp) /
-                (if (inlineInformation) maxWidth else maxHeight)).coerceIn(mergeStart + .01f, 1f)
-            val shape = remember { RoundedCornerShape(22.dp) }
-            Box(Modifier.matchParentSize().clip(shape).mangaHazeSource(heroBackdrop)
-                .drawBehind { drawRect(lerp(surface, atmosphere.value, .12f)) }) {
-                Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
-                    modifier = Modifier.matchParentSize().graphicsLayer {
-                        scaleX = 1.16f; scaleY = 1.16f
-                        translationX = offset() * 10.dp.toPx()
-                        alpha = if (modernPlatformBlur) .48f else .18f
-                    }.hazeBlur(input = HazeInput.Content, style = atmosphereBlur))
-                Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
-                    modifier = Modifier.matchParentSize().graphicsLayer { alpha = 1f - emphasis() })
-                Box(Modifier.matchParentSize().drawBehind {
-                    val startColor = surface.copy(alpha = .02f)
-                    val endColor = surface.copy(alpha = .70f * emphasis())
-                    drawRect(if (inlineInformation)
-                        Brush.horizontalGradient(0f to startColor, mergeStart to startColor,
-                            mergeEnd to surface.copy(alpha = .38f * emphasis()), 1f to endColor)
-                    else Brush.verticalGradient(0f to startColor, mergeStart to startColor,
-                        mergeEnd to surface.copy(alpha = .38f * emphasis()), 1f to endColor))
-                })
-            }
-            LiquidGlassSurface(heroBackdrop, Modifier.matchParentSize().graphicsLayer {
-                alpha = information()
-                compositingStrategy = CompositingStrategy.Offscreen
-            }.drawWithContent {
-                drawContent()
-                drawRect(if (inlineInformation)
-                    Brush.horizontalGradient(0f to Color.Transparent, mergeStart to Color.Transparent,
-                        mergeEnd to Color.Black, 1f to Color.Black)
-                else Brush.verticalGradient(0f to Color.Transparent, mergeStart to Color.Transparent,
-                    mergeEnd to Color.Black, 1f to Color.Black), blendMode = BlendMode.DstIn)
-            }, cornerRadius = 22.dp, role = GlassSurfaceRole.GALLERY,
-                softCard = false, surfaceColor = surface, elevation = 0.dp) {}
-            if (decoded == null) Icon(Icons.Outlined.Tv, null,
-                tint = ink.copy(alpha = .22f), modifier = Modifier.offset(posterLeft, posterTop)
-                    .size(posterWidth, posterHeight).padding(20.dp))
-            Image(painter, contentDescription = null, contentScale = ContentScale.Fit,
-                modifier = Modifier.offset(posterLeft, posterTop).size(posterWidth, posterHeight)
-                    .graphicsLayer {
-                        translationX = offset() * 4.dp.toPx()
-                        alpha = emphasis()
-                    }.clip(RoundedCornerShape(16.dp)))
-            Box(Modifier.offset(infoLeft, infoTop).size(infoWidth, infoHeight).graphicsLayer {
-                alpha = information()
-                translationY = if (motion) (1f - information()) * 4.dp.toPx() else 0f
-            }) {
-                Column(Modifier.fillMaxSize().padding(horizontal = if (inlineInformation) 2.dp else 12.dp)
-                    .padding(vertical = if (inlineInformation) 6.dp else 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(if (inlineInformation) 8.dp else 2.dp,
-                        if (inlineInformation) Alignment.CenterVertically else Alignment.Bottom)) {
-                    if (inlineInformation && playbackSources.isNotEmpty()) AnimeSourceBadge(playbackSources, ink = ink, compact = true,
-                        enabled = sourcesEnabled, onClick = { onOpenSources(entry) })
-                    Text(entry.title, Modifier.clearAndSetSemantics { }, color = ink,
-                        style = MaterialTheme.typography.titleSmall.copy(fontSize = 14.sp, lineHeight = 20.sp),
-                        fontWeight = FontWeight.Medium, minLines = if (inlineInformation) 1 else titleLines,
-                        maxLines = if (inlineInformation) titleLines + 1 else titleLines, overflow = TextOverflow.Ellipsis)
-                    if (entry.discoveryItem != null) Box(Modifier.fillMaxWidth().heightIn(min = 22.dp * fontScale)) {
-                        AnimeRatingBadges(entry.key, scores, Modifier.fillMaxWidth(), foreground = ink,
-                            onExpand = ({ onOpenSources(entry.copy(discoveryItem = entry.discoveryItem.copy(sourceScores = scores))) })
-                                .takeIf { sourcesEnabled })
-                    }
-                    if ((!inlineInformation && playbackSources.isNotEmpty()) || entry.caption.isNotBlank()) Row(verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (!inlineInformation && playbackSources.isNotEmpty()) AnimeSourceBadge(playbackSources, ink = ink, compact = true,
-                            enabled = sourcesEnabled, onClick = { onOpenSources(entry) })
-                        if (entry.caption.isNotBlank()) Text(entry.caption,
-                            Modifier.weight(1f, fill = false).clearAndSetSemantics { }, color = ink.copy(alpha = .76f),
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, lineHeight = 15.sp),
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                }
-            }
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    val ink = Color.White
+    val information: @Composable ColumnScope.() -> Unit = {
+        Text(entry.title, Modifier.clearAndSetSemantics { }, color = ink,
+            fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+            style = if (compactLayout) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (entry.caption.isNotBlank()) Text(entry.caption, Modifier.clearAndSetSemantics { },
+            color = ink.copy(alpha = .78f), style = MaterialTheme.typography.labelSmall,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (scores.isNotEmpty()) AnimeRatingBadges(entry.key, scores, Modifier.fillMaxWidth(), foreground = ink,
+            onExpand = ({ onOpenScores(entry.copy(discoveryItem = item.copy(sourceScores = scores))) }).takeIf { scoresEnabled })
+        if (!compactLayout) Row(verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.padding(top = 4.dp).clearAndSetSemantics { }) {
+            Text("查看详情", color = ink, style = MaterialTheme.typography.labelMedium)
+            Icon(Icons.AutoMirrored.Outlined.ArrowForward, null, Modifier.size(14.dp), tint = ink)
         }
+    }
+    BoxWithConstraints(modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button,
+        enabled = enabled, onClickLabel = "查看详情", onClick = { onOpen(entry) })
+        .semantics(mergeDescendants = true) {
+            contentDescription = listOf(entry.title, entry.caption).filter(String::isNotBlank).joinToString("，")
+        }.motionPress(interaction, enabled = enabled, pressedScale = .985f)) {
+        val fieldWidth = maxWidth
+        val fieldHeight = maxHeight
+        val posterHeight = if (compactLayout) (fieldHeight * .47f).coerceAtLeast(1.dp)
+            else (fieldHeight - 24.dp).coerceAtLeast(1.dp)
+        val night = Color(0xFF15161A)
+        Box(Modifier.matchParentSize().drawBehind { drawRect(lerp(night, atmosphere.value, .25f)) }) {
+            Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize().graphicsLayer {
+                    scaleX = 1.12f; scaleY = 1.12f
+                    translationX = offset() * 9.dp.toPx()
+                    alpha = if (modernPlatformBlur) .40f else .23f
+                }.hazeBlur(input = HazeInput.Content, style = atmosphereBlur))
+            Box(Modifier.matchParentSize().drawBehind {
+                val opaque = night.copy(alpha = .92f)
+                val edge = night.copy(alpha = .14f)
+                val falloff = if (compactLayout) Brush.verticalGradient(0f to edge, .39f to edge, .70f to opaque)
+                else Brush.horizontalGradient(0f to opaque, .30f to opaque, .71f to edge,
+                    startX = if (rtl) size.width else 0f, endX = if (rtl) 0f else size.width)
+                drawRect(falloff)
+            })
+        }
+        val posterWidth = minOf(if (compactLayout) fieldWidth - 24.dp else fieldWidth * .43f,
+            posterHeight * .76f).coerceAtLeast(1.dp)
+        Box(Modifier.align(if (compactLayout) Alignment.TopCenter else Alignment.CenterEnd)
+            .padding(top = if (compactLayout) 8.dp else 0.dp, end = if (compactLayout) 0.dp else 12.dp)
+            .size(posterWidth, posterHeight).clip(RoundedCornerShape(12.dp))
+            .background(ink.copy(alpha = .07f)), contentAlignment = Alignment.Center) {
+            if (decoded == null) Icon(Icons.Outlined.Tv, null, Modifier.size(25.dp), tint = ink.copy(alpha = .52f))
+            Image(painter, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+        }
+        Column(Modifier.align(if (compactLayout) Alignment.BottomStart else Alignment.CenterStart)
+            .width(if (compactLayout) fieldWidth else fieldWidth * .56f)
+            .padding(horizontal = if (compactLayout) 10.dp else 16.dp)
+            .padding(bottom = if (compactLayout) 8.dp else 0.dp),
+            verticalArrangement = Arrangement.spacedBy(if (compactLayout) 3.dp else 6.dp),
+            content = information)
     }
 }

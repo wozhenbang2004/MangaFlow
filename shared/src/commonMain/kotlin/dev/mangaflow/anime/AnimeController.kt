@@ -2473,7 +2473,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
     }
 
-    private fun optionKey(option: AnimeEpisodeOption): String {
+    internal fun optionKey(option: AnimeEpisodeOption): String {
         val episode = option.episode
         val url = if (option.sourceId == "anime-age") animeContentIdentity(episode.url) else episode.url
         return listOf(option.sourceId, option.catalog.id, option.catalog.url, episode.id, episode.group,

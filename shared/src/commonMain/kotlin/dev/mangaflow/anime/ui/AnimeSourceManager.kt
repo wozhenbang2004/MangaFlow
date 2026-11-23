@@ -1,10 +1,14 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
@@ -14,6 +18,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
@@ -31,7 +37,7 @@ private val preparingPhases = setOf(
 )
 
 private enum class AnimeSourceManagerTab(val label: String) {
-    VIDEO("视频"), BROWSE("浏览"), DANMAKU("弹幕")
+    VIDEO("播放"), BROWSE("番剧资料"), DANMAKU("弹幕")
 }
 
 /** Catalogue presence, successful preparation and actual playback are distinct. */
@@ -60,8 +66,22 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
         returnSourceId = null
         selectedId = source.id
     }
+    fun closeManager() {
+        pendingBrowse = null
+        onDismiss()
+    }
+    fun goUp() {
+        when {
+            selected != null -> {
+                selectedId = returnSourceId
+                returnSourceId = null
+            }
+            moreVideoSources -> moreVideoSources = false
+            else -> closeManager()
+        }
+    }
 
-    MotionDialog(visible, onDismissRequest = { pendingBrowse = null; onDismiss() }, maximumWidth = 640.dp,
+    MotionDialog(visible, onDismissRequest = ::goUp, maximumWidth = 640.dp,
         onClosed = {
             selectedId = null
             returnSourceId = null
@@ -76,18 +96,13 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                 val nested = selected != null || moreVideoSources
                 Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    if (nested) MotionIconButton(onClick = {
-                        if (selected != null) {
-                            selectedId = returnSourceId
-                            returnSourceId = null
-                        } else moreVideoSources = false
-                    }, modifier = Modifier.size(44.dp), tooltip = "返回来源目录") {
+                    if (nested) MotionIconButton(onClick = ::goUp, modifier = Modifier.size(44.dp), tooltip = "返回来源目录") {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
                     }
-                    Text(selected?.displayName ?: if (moreVideoSources) "更多来源" else "来源管理",
+                    Text(selected?.displayName ?: if (moreVideoSources) "更多播放来源" else "管理番剧来源",
                         Modifier.weight(1f).padding(start = if (nested) 0.dp else 8.dp),
-                        style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    MotionIconButton(onClick = { pendingBrowse = null; onDismiss() }, modifier = Modifier.size(44.dp),
+                        style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    MotionIconButton(onClick = ::closeManager, modifier = Modifier.size(44.dp),
                         tooltip = "关闭来源管理") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
@@ -155,10 +170,10 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                                 verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 item(key = "active-video-header") {
                                 AnimeSectionTitle("已启用 · ${active.size}", subtitle = "用于搜索和剧集匹配") {
-                                        if (remaining > 0 || references.isNotEmpty()) {
-                                            MotionTextButton(onClick = { moreVideoSources = true }) { Text("更多来源") }
-                                        }
+                                    if (remaining > 0 || references.isNotEmpty()) {
+                                        MotionTextButton(onClick = { moreVideoSources = true }) { Text("管理其他来源") }
                                     }
+                                }
                                 }
                                 sourceManagerRows(active, state, ::openSource, fixedBuiltIns.keys)
                                 if (active.isEmpty()) item { AnimeMessage("暂无已启用的视频来源") }
@@ -233,10 +248,30 @@ private val SourcePreparationState.retryableFailure: Boolean get() = phase == So
 
 private fun LazyListScope.sourceManagerRows(sources: List<LanercSourceListing>, state: AnimeScreenState,
     onSelect: (LanercSourceListing) -> Unit, fixedBuiltInIds: Set<String> = emptySet()) {
-    items(sources, key = { it.bundledAlternativeId ?: it.id }) { source ->
+    items(sources, key = { it.id }) { source ->
         val native = source.id in BUNDLED_ANIME_SOURCE_IDS || source.id in fixedBuiltInIds
-        AnimeSelection(source.displayName, animeSourceManagerLabel(source, state, native),
-            selected = source.active && source.kind != LanercSourceKind.DANMAKU, onClick = { onSelect(source) })
+        val colors = MaterialTheme.colorScheme
+        val interaction = remember { MutableInteractionSource() }
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 57.dp)
+                .clip(RoundedCornerShape(12.dp)).background(colors.onSurface.copy(alpha = .045f))
+                .clickable(interactionSource = interaction, indication = null, role = Role.Button,
+                    onClickLabel = "管理 ${source.displayName}", onClick = { onSelect(source) })
+                .motionPress(interaction, pressedScale = .99f)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(Modifier.width(34.dp), contentAlignment = Alignment.Center) {
+                AnimeSourceMark(source.id, source.displayName, size = 18.dp)
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(source.displayName, style = MaterialTheme.typography.titleSmall,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                AnimeQuietLabel(animeSourceManagerLabel(source, state, native))
+            }
+            Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+        }
     }
 }
 

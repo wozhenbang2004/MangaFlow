@@ -1,6 +1,7 @@
 package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -9,6 +10,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.QueryStats
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -100,11 +102,14 @@ internal fun AnimePlaybackStatus(
         holdControls(interactive && (expanded || focused || summaryScroll.isScrollInProgress || detailScroll.isScrollInProgress))
         onDispose { holdControls(false) }
     }
-    Column(modifier.heightIn(max = maximumHeight).clip(RoundedCornerShape(10.dp))
-        .background(Color.Black.copy(alpha = if (quiet) .24f else .46f))
+    val shape = RoundedCornerShape(13.dp)
+    Column(modifier.heightIn(max = maximumHeight).clip(shape)
+        .background(Color.Black.copy(alpha = if (quiet) .30f else .60f))
+        .border(1.dp, Color.White.copy(alpha = if (quiet) .09f else .15f), shape)
         .onFocusChanged { focused = it.hasFocus }) {
-        Row(Modifier.fillMaxWidth().heightIn(min = if (quiet) 24.dp else 44.dp).padding(start = 8.dp),
-            verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().heightIn(min = if (quiet) 26.dp else 44.dp).padding(start = 9.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            Icon(Icons.Outlined.QueryStats, null, Modifier.size(13.dp), tint = Color.White.copy(alpha = .75f))
             Text(readouts.joinToString("  ·  ") { it.value },
                 Modifier.weight(1f).horizontalScroll(summaryScroll, enabled = interactive)
                     .padding(end = 8.dp, top = 3.dp, bottom = 3.dp)

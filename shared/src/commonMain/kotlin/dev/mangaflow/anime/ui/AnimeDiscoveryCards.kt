@@ -28,6 +28,7 @@ import dev.mangaflow.anime.sources.ANILIST_PROVIDER
 import dev.mangaflow.anime.sources.BANGUMI_PROVIDER
 import dev.mangaflow.anime.sources.DOUBAN_PROVIDER
 import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.MangaLayout
 import dev.mangaflow.ui.DesktopContextMenuArea
@@ -161,8 +162,11 @@ private fun animeDecimal(value: Double): String {
 }
 
 internal fun animeDiscoveryMetric(item: AnimeDiscoveryItem, query: AnimeDiscoveryQuery): String? = when {
-    query.calendar -> item.airWeekday?.takeIf { it in 1..7 }
-        ?.let { "周" + listOf("一", "二", "三", "四", "五", "六", "日")[it - 1] + "放送" }
+    (query.calendar || query.season != null) && item.nextAiringAt != null && item.nextAiringAt > 0L -> {
+        val episode = item.nextEpisode?.takeIf { it > 0 }?.let { "第 ${it} 集 · " }.orEmpty()
+        episode + formatInstantMillis(item.nextAiringAt, "M月d日 HH:mm") + " 计划放送"
+    }
+    query.calendar -> null
     query.order == AnimeDiscoveryOrder.POPULARITY -> item.popularity?.let {
         val source = item.discoveryProvider?.takeIf { query.combined }?.let(::animeDiscoveryProviderLabel)
         listOfNotNull(source, "人气 " + animeCompactCount(it)).joinToString(" ")
@@ -180,8 +184,11 @@ internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQ
     onOpen: () -> Unit) {
     val provider = item.discoveryProvider ?: query.provider
     val scores = observedAnimeRatingSnapshot(item.subject, animeDiscoverySourceScores(item, provider)).scores
-    val caption = listOfNotNull(animeDiscoveryMetric(item, query), item.year?.toString(),
-        item.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).take(2).joinToString(" · ")
+    val schedule = animeDiscoveryMetric(item, query)
+    val caption = if (schedule != null && (query.calendar || query.season != null)) schedule
+    else listOfNotNull(schedule, item.year?.toString(),
+        "电影".takeIf { item.format == AnimeDiscoveryFormat.MOVIE }
+            ?: item.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).take(2).joinToString(" · ")
     val rated = item.copy(sourceScores = scores)
     val showScores = onScores?.let { open -> { open(rated) } }
     val sourceBadge: (@Composable () -> Unit)? = if (provider != AnimeDiscoveryProvider.DOUBAN && scores.isEmpty() && showScores != null) {
@@ -262,12 +269,12 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
     DesktopContextMenuArea(if (onManage != null) listOf(
         DesktopMenuAction("查看详情", onClick = onOpen), DesktopMenuAction("番剧操作", onClick = onManage)) else emptyList()) {
     if (list) {
-        Row(click.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            AnimePoster(cover, Modifier.width(52.dp).height(74.dp).clearAndSetSemantics { }, sourceId = sourceId)
+        Row(click.fillMaxWidth().padding(vertical = 4.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            AnimePoster(cover, Modifier.width(58.dp).height(84.dp).clearAndSetSemantics { }, sourceId = sourceId)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text(title, Modifier.clearAndSetSemantics { }, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                    style = MaterialTheme.typography.titleSmall, maxLines = 2,
+                    style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 2,
                     overflow = TextOverflow.Ellipsis)
                 ratings?.invoke()
                 AnimeCompactCardCaption(caption, captionBadge)
@@ -278,10 +285,10 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
     } else {
         Column(click) {
             AnimePoster(cover, Modifier.fillMaxWidth().aspectRatio(2f / 3f).clearAndSetSemantics { }, sourceId = sourceId)
-            Text(title, Modifier.padding(top = 7.dp, start = 2.dp, end = 2.dp).clearAndSetSemantics { },
+            Text(title, Modifier.padding(top = 8.dp, start = 2.dp, end = 2.dp).clearAndSetSemantics { },
                 fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 20.sp),
-                fontWeight = FontWeight.Medium, maxLines = 2, minLines = 2, overflow = TextOverflow.Ellipsis)
+                fontWeight = FontWeight.SemiBold, maxLines = 2, minLines = 2, overflow = TextOverflow.Ellipsis)
             if (ratings != null) Box(Modifier.fillMaxWidth().padding(top = 4.dp, start = 2.dp, end = 2.dp)) { ratings() }
             if (caption.isNotBlank() || captionBadge != null)
                 Box(Modifier.fillMaxWidth().padding(top = 3.dp, start = 2.dp, end = 2.dp)) {
@@ -299,7 +306,7 @@ private fun AnimeCompactCardCaption(caption: String, badge: (@Composable () -> U
         badge?.invoke()
         if (caption.isNotBlank()) Text(caption, Modifier.weight(1f, fill = false).clearAndSetSemantics { },
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1, overflow = TextOverflow.Ellipsis)
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 

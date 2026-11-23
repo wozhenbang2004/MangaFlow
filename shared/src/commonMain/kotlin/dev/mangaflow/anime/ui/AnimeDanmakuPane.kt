@@ -1,15 +1,18 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.anime.*
@@ -58,16 +61,21 @@ internal fun AnimeDanmakuPane(section: AnimePlayerPanel, controller: AnimeContro
                 item { SettingsToggle("显示弹幕", state.settings.enabled, Icons.Outlined.Subtitles,
                     onCheckedChange = { control.updateSettings(state.settings.copy(enabled = it)) }) }
                 item {
-                    AnimeSectionTitle(state.selectionLabel ?: "还没有匹配弹幕",
-                        if (state.loading) "正在读取弹幕" else if (state.selectionLabel != null) state.totalCount.toString() + " 条弹幕" else
-                            current?.let { animeEpisodeLabel(it) + " · " + it.title })
+                    val matched = state.selectionLabel
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainerLow).padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        AnimeSectionTitle(if (state.loading) "正在加载本集弹幕" else matched ?: "本集还没有弹幕",
+                            if (state.loading) matched else if (matched != null) "${state.totalCount} 条弹幕" else
+                                current?.let(::animeEpisodeLabel))
+                        if (screen.sourceDanmakuAvailable) MotionTextButton(onClick = controller::loadCurrentSourceDanmaku,
+                            enabled = !state.loading, modifier = Modifier.heightIn(min = 44.dp)) {
+                            Text("使用当前线路的弹幕")
+                        }
+                    }
                 }
-                item { CompactMenuAction(Icons.Outlined.Search, "匹配当前集弹幕", enabled = state.ownerKey != null,
-                    onClick = { onSection(AnimePlayerPanel.DANMAKU_SEARCH) }) }
-                if (screen.sourceDanmakuAvailable) item {
-                    CompactMenuAction(Icons.Outlined.Tv, "使用当前来源的本集弹幕", enabled = !state.loading,
-                        onClick = controller::loadCurrentSourceDanmaku)
-                }
+                item { CompactMenuAction(Icons.Outlined.Search, if (state.selectionLabel == null) "匹配本集弹幕" else "更换弹幕来源",
+                    enabled = state.ownerKey != null, onClick = { onSection(AnimePlayerPanel.DANMAKU_SEARCH) }) }
                 item { CompactMenuAction(Icons.Outlined.Tune, "显示、偏移与屏蔽词",
                     onClick = { onSection(AnimePlayerPanel.DANMAKU_DISPLAY) }) }
                 item { CompactMenuAction(Icons.Outlined.Key, if (state.configured) "弹幕服务 · 已配置" else "配置弹幕服务",
@@ -77,7 +85,7 @@ internal fun AnimeDanmakuPane(section: AnimePlayerPanel, controller: AnimeContro
                 }
             }
             AnimePlayerPanel.DANMAKU_SEARCH -> {
-                item { AnimeQuietLabel("核对季度与集名后选择，弹幕不会按片名自动套到当前视频。") }
+                item { AnimeQuietLabel("请选择和当前视频一致的季度及集数。") }
                 if (!state.configured) item {
                     AnimeMessage("先配置弹幕服务", "填写你自己的弹弹play应用凭据后，可通过官方服务搜索剧集。",
                         action = "配置服务", onAction = { onSection(AnimePlayerPanel.DANMAKU_ACCESS) })

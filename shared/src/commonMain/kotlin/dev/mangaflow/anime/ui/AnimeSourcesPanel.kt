@@ -6,6 +6,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -26,8 +27,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -77,6 +80,8 @@ internal fun AnimeSourcesPanel(
     var lineDetails by remember(subject?.id, focusEpisode?.id, sourceDetails) { mutableStateOf<AnimeEpisodeOption?>(null) }
     var groupDetails by remember(subject?.id, focusEpisode?.id, sourceDetails) { mutableStateOf<Boolean?>(null) }
     var tools by remember(subject?.id, focusEpisode?.id) { mutableStateOf<AnimeSourceTools?>(null) }
+    var cataloguesExpanded by remember(subject?.id, focusEpisode?.id) { mutableStateOf(false) }
+    var allEpisodeLines by remember(subject?.id, focusEpisode?.id) { mutableStateOf(false) }
     val manageExpanded = tools == AnimeSourceTools.SEARCH
     val aggregationExpanded = tools == AnimeSourceTools.DIAGNOSTICS
     fun toggleTool(tool: AnimeSourceTools) { tools = if (tools == tool) null else tool }
@@ -90,6 +95,7 @@ internal fun AnimeSourcesPanel(
     var pendingSourceWork by remember(subjectId) { mutableStateOf<AnimeSourceTitle?>(null) }
     var presentedOwner by remember { mutableStateOf<String?>(null) }
     SideEffect { if (visible) presentedOwner = subjectId }
+    val presenting = visible || presentedOwner != null
     fun openPreview(title: AnimeSourceTitle) {
         requestedPreview = title
         controller.previewSource(title)
@@ -102,14 +108,18 @@ internal fun AnimeSourcesPanel(
     var allPreviewEpisodes by remember(previewKey) { mutableStateOf(false) }
     val sourceScroll = key(subjectId, focusEpisode?.id) { rememberLazyListState() }
     val previewScroll = key(previewKey) { rememberLazyListState() }
-    val bindings = remember(state.sourceBindings, subjectId) {
-        state.sourceBindings.filter { it.subjectId == subjectId }.distinctBy { it.catalog.sourceId }
+    val bindings = remember(presenting, state.sourceBindings, subjectId) {
+        if (presenting) state.sourceBindings.filter { it.subjectId == subjectId }.distinctBy { it.catalog.sourceId }
+        else emptyList()
     }
     val linkedKeys = remember(bindings) { bindings.map { it.catalog.referenceKey() }.toSet() }
     val boundIds = remember(bindings) { bindings.map { it.catalog.sourceId }.toSet() }
-    val catalogs = remember(state.sourceCatalogs) { state.sourceCatalogs.associateBy { it.title.referenceKey() } }
+    val catalogs = remember(presenting, state.sourceCatalogs) {
+        if (presenting) state.sourceCatalogs.associateBy { it.title.referenceKey() } else emptyMap()
+    }
     val excludedSourceIds = state.library.firstOrNull { it.subject.id == subjectId }?.excludedSourceIds.orEmpty()
-    val pending = remember(state.groupSourceCandidates, state.associationChoices, boundIds, excludedSourceIds) {
+    val pending = remember(presenting, state.groupSourceCandidates, state.associationChoices, boundIds, excludedSourceIds) {
+        if (!presenting) emptyList() else
         (state.groupSourceCandidates + state.associationChoices.values.flatten()).distinctBy { it.referenceKey() }.filterNot {
             it.sourceId in boundIds || it.sourceId in excludedSourceIds
         }
@@ -129,7 +139,7 @@ internal fun AnimeSourcesPanel(
     } == true
     val failedPreview = requestedPreview?.takeIf { preview == null && !state.previewLoading && state.sourceError != null }
     val previewing = preview != null || state.previewLoading || failedPreview != null
-    val episodeLines = focusEpisode?.let { controller.confirmedPlaybackLines(it.id, state) }.orEmpty()
+    val episodeLines = focusEpisode?.takeIf { presenting }?.let { controller.confirmedPlaybackLines(it.id, state) }.orEmpty()
         .filter { it.catalog.referenceKey() in linkedKeys }
     val workSamples = if (visible && focusEpisode == null) controller.workPlaybackMeasurements(state) else emptyMap()
     val rankedLines = if (visible) focusEpisode?.let { controller.rankedPlaybackLines(it.id) }.orEmpty() else emptyList()
@@ -156,11 +166,12 @@ internal fun AnimeSourcesPanel(
         }
     }
     val matchesBySource = remember(state.episodeOptions, linkedKeys) {
-        state.episodeOptions.values.flatMap { lines ->
+        if (linkedKeys.isEmpty()) emptyMap() else state.episodeOptions.values.flatMap { lines ->
             lines.filter { it.confirmed && it.catalog.referenceKey() in linkedKeys }.map { it.sourceId }.distinct()
         }.groupingBy { it }.eachCount()
     }
-    val workLineCounts = remember(state.episodeOptions, linkedKeys) {
+    val workLineCounts = remember(state.episodeOptions, linkedKeys, focusEpisode == null) {
+        if (linkedKeys.isEmpty() || focusEpisode != null) emptyMap() else
         state.episodeOptions.values.flatten().filter { it.confirmed && it.catalog.referenceKey() in linkedKeys }
             .map { Triple(it.sourceId, it.catalog.referenceKey(), it.episode.group) }
             .distinct().groupingBy { it.first }.eachCount()
@@ -168,7 +179,7 @@ internal fun AnimeSourcesPanel(
     val associationIssues = state.sourceAggregation.filter { (id, progress) ->
         id !in boundIds && id !in candidateSourceIds && progress.phase != AnimeAssociationPhase.LINKED
     }
-    val automaticEpisode = focusEpisode ?: subjectId?.let(controller::continuationEpisode)
+    val automaticEpisode = if (presenting) focusEpisode ?: subjectId?.let(controller::continuationEpisode) else null
     val canAutoPlay = automaticEpisode != null && controller.hasAutomaticPlaybackLine(automaticEpisode.id)
     val measurementBatch = state.sourceMeasurements?.takeIf {
         it.subjectId == subjectId && it.episodeId == focusEpisode?.id
@@ -222,6 +233,8 @@ internal fun AnimeSourcesPanel(
             expandedSource = null
             sourceDetails = null
             tools = null
+            cataloguesExpanded = false
+            allEpisodeLines = false
             searchDiagnosticsExpanded = false
             websiteError = null
             if (owner != null && owner == controller.state.value.detail?.subject?.id) {
@@ -245,14 +258,15 @@ internal fun AnimeSourcesPanel(
                         Text(when {
                             previewLinked || openAsNative || state.previewLoading || failedPreview != null -> "来源目录"
                             previewing -> "确认作品关联"
-                            else -> "播放来源"
-                        }, style = MaterialTheme.typography.titleMedium)
-                        val context = listOfNotNull(subject?.title, focusEpisode?.takeUnless { previewing }?.let(::animeEpisodeLabel))
-                            .joinToString(" · ")
-                        if (context.isNotBlank()) Text(context, style = MaterialTheme.typography.labelSmall,
+                            focusEpisode != null -> "播放线路"
+                            else -> "作品来源"
+                        }, style = MaterialTheme.typography.titleLarge)
+                        val context = if (previewing) subject?.title else listOfNotNull(
+                            focusEpisode?.let(::animeEpisodeLabel), subject?.title).joinToString(" · ")
+                        if (!context.isNullOrBlank()) Text(context, style = MaterialTheme.typography.bodySmall,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    if (!previewing && subjectId != null) {
+                    if (!previewing && subjectId != null && (focusEpisode == null || aggregationExpanded)) {
                         if (measuring && measurementBatch?.manual == true) Box(Modifier.size(44.dp).semantics { contentDescription = "正在探测来源画质与媒体网络" },
                             contentAlignment = Alignment.Center) { MotionBusyIndicator(Modifier.size(17.dp), strokeWidth = 1.5.dp) }
                         else MotionIconButton(onClick = {
@@ -269,7 +283,7 @@ internal fun AnimeSourcesPanel(
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭来源") {
+                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭线路面板") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
                 }
@@ -369,15 +383,90 @@ internal fun AnimeSourcesPanel(
                     }
                 } else {
                     LazyColumn(Modifier.weight(1f, fill = false), state = sourceScroll,
-                        contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 5.dp, bottom = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (bindings.isNotEmpty()) item(key = "source-availability") {
-                            val sourceCount = if (focusEpisode == null) matchesBySource.size
-                                else episodeLines.map { it.sourceId }.distinct().size
-                            val lineCount = if (focusEpisode == null) workLineCounts.values.sum() else episodeLines.size
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (focusEpisode != null) {
+                            item(key = "episode-auto") {
+                                val availability = controller.episodeAvailability(focusEpisode.id, state)
+                                val finding = state.autoMatching || (!canAutoPlay && availability == AnimeEpisodeAvailability.CHECKING)
+                                val status = when {
+                                    availability == AnimeEpisodeAvailability.UPCOMING -> "本集尚未放送"
+                                    state.autoMatching -> "正在查找本集线路"
+                                    recovering && episodeLines.isNotEmpty() -> "可自动尝试其他本集线路"
+                                    recovering -> "上一条线路未能播放"
+                                    activeLine != null -> "当前使用 ${activeLine.sourceName}"
+                                    episodeLines.isNotEmpty() && state.sourceAggregationRunning -> "更多线路仍在核对"
+                                    episodeLines.isNotEmpty() -> "${episodeLines.size} 条线路已对应本集"
+                                    finding -> "正在核对可用来源"
+                                    else -> "点按后查找本集并尝试播放"
+                                }
+                                AnimeLineChoice(
+                                    title = if (recovering) "自动重试" else "自动选线",
+                                    detail = status,
+                                    icon = if (recovering) Icons.Outlined.Refresh else Icons.Outlined.PlayArrow,
+                                    active = true,
+                                    busy = state.autoMatching,
+                                    enabled = !state.autoMatching && availability != AnimeEpisodeAvailability.UPCOMING,
+                                    onClick = { onAutomaticPlay(focusEpisode) },
+                                )
+                            }
+                            if (episodeLines.isNotEmpty()) {
+                                item(key = "episode-lines-heading") {
+                                    AnimeSectionTitle("手动选线", modifier = Modifier.padding(top = 10.dp, start = 4.dp))
+                                }
+                                val visibleLines = if (allEpisodeLines) episodeLines else episodeLines.take(8)
+                                items(visibleLines, key = { "line:" + controller.optionKey(it) }) { option ->
+                                    val failure = controller.recentPlaybackLineFailure(focusEpisode.id, option, state)
+                                    val enabled = controller.canAttemptPlaybackLine(focusEpisode.id, option, state)
+                                    val current = option == activeLine && !recovering
+                                    val status = when {
+                                        current -> "当前线路"
+                                        !enabled -> "暂不可用"
+                                        failure != null -> "最近播放失败，可重试"
+                                        option == recommendedLine -> "自动首选"
+                                        else -> "已对应本集"
+                                    }
+                                    val group = option.episode.group.takeIf(String::isNotBlank)?.let(::animeSourceGroupLabel)
+                                    AnimeLineChoice(
+                                        title = option.sourceName,
+                                        detail = listOfNotNull(group, option.episode.edition.takeIf(String::isNotBlank), status)
+                                            .distinct().joinToString(" · "),
+                                        sourceId = option.sourceId,
+                                        icon = when {
+                                            current -> Icons.Outlined.Check
+                                            failure != null -> Icons.Outlined.Refresh
+                                            else -> Icons.Outlined.PlayArrow
+                                        },
+                                        active = current,
+                                        enabled = enabled && !current,
+                                        actionLabel = if (failure != null) "重试 ${option.sourceName}" else "用 ${option.sourceName} 播放本集",
+                                        onClick = { onPlay(focusEpisode.id, option) },
+                                    )
+                                }
+                                if (episodeLines.size > 8) item(key = "episode-more-lines") {
+                                    AnimeSourceDisclosure(allEpisodeLines,
+                                        if (allEpisodeLines) "收起其余线路" else "查看全部 ${episodeLines.size} 条线路") {
+                                        allEpisodeLines = !allEpisodeLines
+                                    }
+                                }
+                            } else if (!state.sourceAggregationRunning && !manageExpanded) {
+                                item(key = "episode-find-source") {
+                                    MotionTextButton(onClick = { toggleTool(AnimeSourceTools.SEARCH) }) {
+                                        Text("手动查找片源")
+                                    }
+                                }
+                            }
+                            if (bindings.isNotEmpty()) item(key = "source-catalogues") {
+                                AnimeSourceDisclosure(cataloguesExpanded, "来源目录与集数校正") {
+                                    cataloguesExpanded = !cataloguesExpanded
+                                }
+                            }
+                        }
+                        if (focusEpisode == null && bindings.isNotEmpty()) item(key = "source-availability") {
+                            val sourceCount = matchesBySource.size
+                            val lineCount = workLineCounts.values.sum()
                             AnimeQuietLabel(when {
-                                sourceCount > 0 -> "${if (focusEpisode == null) "已对应" else "本集已对应"} $sourceCount 个来源 · $lineCount 条线路"
-                                focusEpisode != null -> "已关联 ${bindings.size} 个来源 · 本集待对应"
+                                sourceCount > 0 -> "已对应 $sourceCount 个来源 · $lineCount 条线路"
                                 else -> "已关联 ${bindings.size} 个来源 · 选集待对应"
                             }, Modifier.padding(start = 8.dp, bottom = 2.dp))
                         }
@@ -421,7 +510,7 @@ internal fun AnimeSourcesPanel(
                             if (outcomes.isNotEmpty()) AnimeQuietLabel(outcomes.joinToString(" · "),
                                 Modifier.padding(start = 8.dp, bottom = 2.dp))
                         }
-                        if (automaticEpisode != null) item(key = "automatic-play") {
+                        if (focusEpisode == null && automaticEpisode != null) item(key = "automatic-play") {
                             val availability = controller.episodeAvailability(automaticEpisode.id, state)
                             val finding = state.autoMatching || (!canAutoPlay && availability == AnimeEpisodeAvailability.CHECKING)
                             when {
@@ -440,11 +529,11 @@ internal fun AnimeSourcesPanel(
                                     })
                                 }
                             }
-                        } else if (bindings.isEmpty()) item(key = "no-bindings") {
+                        } else if (focusEpisode == null && bindings.isEmpty()) item(key = "no-bindings") {
                             AnimeQuietLabel(if (state.sourceAggregationRunning) "正在核对片源" else "暂无已关联的片源",
                                 Modifier.padding(8.dp))
                         }
-                        items(orderedBindings, key = { "bound:" + it.catalog.referenceKey() }) { binding ->
+                        if (focusEpisode == null || cataloguesExpanded) items(orderedBindings, key = { "bound:" + it.catalog.referenceKey() }) { binding ->
                             val title = binding.catalog
                             val sourceId = title.sourceId
                             val name = animeSourceName(sourceId, state)
@@ -703,15 +792,17 @@ internal fun AnimeSourcesPanel(
                                 }
                             }
                         }
-                        val candidatesExpanded = tools == AnimeSourceTools.CANDIDATES || (tools == null && bindings.isEmpty())
-                        val canInspect = associationIssues.isNotEmpty() || state.sourceAggregationTotal > 0 ||
-                            state.sourceError != null || state.detailFirstConfirmedLineMs != null
+                        val candidatesExpanded = tools == AnimeSourceTools.CANDIDATES ||
+                            (tools == null && focusEpisode == null && bindings.isEmpty())
+                        val canInspect = focusEpisode != null || associationIssues.isNotEmpty() ||
+                            state.sourceAggregationTotal > 0 || state.sourceError != null || state.detailFirstConfirmedLineMs != null
                         item(key = "source-tools") {
                             Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(start = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 if (state.sourceAggregationRunning) {
-                                    val progress = (if (matchesBySource.isNotEmpty()) "后台核对 " else "核对 ") +
-                                        "${state.sourceAggregationCompleted}/${state.sourceAggregationTotal}"
+                                    val progress = if (aggregationExpanded)
+                                        "核对 ${state.sourceAggregationCompleted}/${state.sourceAggregationTotal}"
+                                    else if (episodeLines.isNotEmpty()) "继续核对其他来源" else "核对来源中"
                                     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                         MotionBusyIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
@@ -719,11 +810,12 @@ internal fun AnimeSourcesPanel(
                                             overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                 } else Spacer(Modifier.weight(1f))
-                                if (pending.isNotEmpty() && bindings.isNotEmpty()) AnimeSourceTool(Icons.Outlined.Link,
+                                if (pending.isNotEmpty() && (focusEpisode != null || bindings.isNotEmpty())) AnimeSourceTool(Icons.Outlined.Link,
                                     "候选片源，${pending.size} 个", selected = candidatesExpanded, count = pending.size,
                                     onClick = { toggleTool(AnimeSourceTools.CANDIDATES) })
-                                AnimeSourceTool(Icons.Outlined.Search, "手动查找片源", selected = manageExpanded,
-                                    onClick = { toggleTool(AnimeSourceTools.SEARCH) })
+                                if (focusEpisode == null || episodeLines.isNotEmpty() || manageExpanded || state.sourceAggregationRunning)
+                                    AnimeSourceTool(Icons.Outlined.Search, "手动查找片源", selected = manageExpanded,
+                                        onClick = { toggleTool(AnimeSourceTools.SEARCH) })
                                 if (canInspect) AnimeSourceTool(Icons.Outlined.Info, "核对详情", selected = aggregationExpanded,
                                     onClick = { toggleTool(AnimeSourceTools.DIAGNOSTICS) })
                                 if (state.canUndo) MotionIconButton(onClick = controller::undo, modifier = Modifier.size(44.dp),
@@ -887,6 +979,47 @@ internal fun AnimeSourcesPanel(
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
+    }
+}
+
+@Composable
+private fun AnimeLineChoice(
+    title: String,
+    detail: String,
+    icon: ImageVector,
+    active: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    sourceId: String? = null,
+    busy: Boolean = false,
+    actionLabel: String? = null,
+) {
+    val colors = MaterialTheme.colorScheme
+    val interaction = remember { MutableInteractionSource() }
+    val shape = RoundedCornerShape(16.dp)
+    val ink = if (active) colors.primary else colors.onSurfaceVariant
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 60.dp).clip(shape)
+            .background(if (active) colors.primary.copy(alpha = .10f) else colors.onSurface.copy(alpha = .045f))
+            .clickable(enabled = enabled, interactionSource = interaction, indication = null,
+                role = Role.Button, onClickLabel = actionLabel, onClick = onClick)
+            .motionPress(interaction, enabled = enabled, pressedScale = .985f)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (sourceId != null) Box(Modifier.width(34.dp), contentAlignment = Alignment.Center) {
+            AnimeSourceMark(sourceId, title, size = 20.dp)
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(title, style = MaterialTheme.typography.titleSmall, color = colors.onSurface,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(detail, modifier = if (sourceId == null) Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+                else Modifier, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        if (busy) MotionBusyIndicator(Modifier.size(18.dp), strokeWidth = 1.5.dp)
+        else Icon(icon, null, Modifier.size(22.dp), tint = ink)
     }
 }
 

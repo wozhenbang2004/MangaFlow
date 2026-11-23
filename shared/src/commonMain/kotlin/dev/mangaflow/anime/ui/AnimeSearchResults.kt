@@ -3,13 +3,18 @@ package dev.mangaflow.anime.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.anime.AnimeController
+import dev.mangaflow.anime.AnimeDiscoveryFormat
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeUnifiedSearchState
 import dev.mangaflow.platform.PlatformKind
@@ -32,31 +37,45 @@ internal fun LazyListScope.animeSearchResults(
     val groups = search.groups.filter { it.subject != null }
     val index = search.index
     val provider = animeDiscoveryProviderLabel(search.catalogProvider)
-    if (groups.isEmpty()) item(key = "search-status") {
+    if (groups.isEmpty() && index.error == null) item(key = "search-status") {
         when {
-            index.loading -> AnimeMessage("正在搜索", "正在查作品资料")
-            index.error != null -> AnimeMessage("搜索未完成")
-            index.canLoadMore -> AnimeMessage("本页暂无匹配的番剧", "可以继续查找后面的结果。")
-            else -> AnimeMessage(if (matchingReference) "未找到对应的作品资料" else "没有找到番剧",
-                if (matchingReference) "已保留所选来源。可以换用原名或别名。" else "试试原名、别名或更短的关键词。")
+            index.loading -> AnimeDiscoveryLoading("正在查找番剧")
+            index.canLoadMore -> AnimeMessage("本页暂无匹配")
+            else -> AnimeMessage(if (matchingReference) "未找到对应的番剧" else "没有找到匹配的番剧",
+                if (matchingReference) "已保留所选来源。试试原名或别名。" else "试试原名、别名或更短的关键词。")
         }
     }
     if (groups.isNotEmpty()) item(key = "search-summary") {
-        AnimeSectionTitle("${groups.size} 部番剧")
+        AnimeDiscoverySectionHeading("作品", provider, refreshing = index.loading && index.page == 0)
     }
     index.error?.let { message ->
         item(key = "search-issue:index") {
-            AnimeDiscoveryInlineStatus("$provider · $message", retry = controller::retrySearchIndex,
-                retryLabel = if (index.page > 0) "重试下一页" else "重试搜索")
+            AnimeDiscoveryInlineStatus(if (index.page > 0) "暂时无法取得更多作品" else "暂时无法搜索番剧",
+                retry = controller::retrySearchIndex, retryLabel = if (index.page > 0) "重试下一页" else "重试",
+                detail = "$provider · $message")
         }
     }
     items(groups, key = { it.key }) { group ->
         group.subject?.let { subject ->
             DesktopContextMenuArea(if (matchingReference) emptyList() else
                 listOf(DesktopMenuAction("番剧操作") { onManage(subject) })) {
-            AnimeSubjectRow(subject, animeSubjectSummary(subject), onOpen = { onOpenSubject(subject) },
-                onLongClick = if (matchingReference) null else ({ onManage(subject) }),
-                ratings = if (matchingReference) null else ({ AnimeSubjectRatings(subject) }))
+                val original = subject.originalTitle.takeIf { it.isNotBlank() && !it.equals(subject.title, ignoreCase = true) }
+                val metadata = listOfNotNull(subject.year?.toString(),
+                    "电影".takeIf { subject.format == AnimeDiscoveryFormat.MOVIE }
+                        ?: subject.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).joinToString(" · ")
+                AnimeSubjectRow(subject, metadata, onOpen = { onOpenSubject(subject) },
+                    onOpenLabel = if (matchingReference) "选择这部番剧" else "查看详情",
+                    onLongClick = if (matchingReference) null else ({ onManage(subject) }),
+                    ratings = if (matchingReference) null else ({ AnimeSubjectRatings(subject) }),
+                    supporting = original?.let { title ->
+                        { Text(title, style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    },
+                    trailing = {
+                        Icon(Icons.Outlined.ChevronRight, null, Modifier.size(19.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    })
             }
         }
     }

@@ -4,11 +4,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
@@ -35,30 +33,16 @@ import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.data.ReviewStatus
 import dev.mangaflow.ui.CommunityPanel
 import dev.mangaflow.ui.DetailAction
-import dev.mangaflow.ui.LocalMangaWindow
-import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.motionInputGate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
-@Composable
-internal fun AnimeEpisodeDiscussionPanel(visible: Boolean, episode: AnimeEpisode, catalogue: List<AnimeEpisode>,
-    metadata: AnimeSubject?, backdrop: HazeState, controller: AnimeController, onDismiss: () -> Unit, onClosed: () -> Unit) {
-    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 660.dp, onClosed = onClosed) {
-        AnimePanelSurface(backdrop) {
-            AnimeEpisodeDiscussionContent(visible, episode, catalogue, metadata, backdrop, controller,
-                Modifier.fillMaxWidth().height(LocalMangaWindow.current.panelHeight), onDismiss = onDismiss)
-        }
-    }
-}
-
-/** Inline watching and fullscreen discussion use the same exact episode request and comment feed. */
+/** Inline and expanded watching panes share the same exact episode request. */
 @Composable
 internal fun AnimeEpisodeDiscussionContent(visible: Boolean, episode: AnimeEpisode, catalogue: List<AnimeEpisode>,
-    metadata: AnimeSubject?, backdrop: HazeState, controller: AnimeController, modifier: Modifier = Modifier,
-    onDismiss: (() -> Unit)? = null) {
+    metadata: AnimeSubject?, backdrop: HazeState, controller: AnimeController, modifier: Modifier = Modifier) {
     val discussion by controller.discussion.state.collectAsStateWithLifecycle()
     val referenceId = metadata?.takeIf { it.canonicalBangumiId() != null }?.id
     val contextKey = discussion.takeIf { it.subjectId == episode.subjectId }?.episodeContextKey
@@ -95,7 +79,6 @@ internal fun AnimeEpisodeDiscussionContent(visible: Boolean, episode: AnimeEpiso
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 6.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             Column(Modifier.weight(1f)) {
-                if (onDismiss != null) AnimeSectionTitle("本集评论")
                 AnimeQuietLabel(animeEpisodeLabel(episode) + result?.source?.reviews?.size?.let { " · $it 条" }.orEmpty())
             }
             if (canRead) {
@@ -109,17 +92,14 @@ internal fun AnimeEpisodeDiscussionContent(visible: Boolean, episode: AnimeEpiso
                     Icon(Icons.Outlined.Refresh, "刷新本集讨论", Modifier.size(19.dp))
                 }
             }
-            if (onDismiss != null) MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭本集讨论") {
-                Icon(Icons.Outlined.Close, "关闭本集讨论", Modifier.size(20.dp))
-            }
         }
         val comments = result
         val failure = error
         if (!canRead || comments == null && !loading) {
             Column(Modifier.padding(16.dp)) {
                 if (failure != null) AnimeDiscoveryInlineStatus(failure, retry = if (visible) ({ revision++ }) else null)
-                else AnimeQuietLabel(if (referenceId == null || contextKey == null) "可在作品简介补充对应季度的 Bangumi 资料。"
-                    else "这集尚未关联到准确的 Bangumi 集记录。")
+                else AnimeMessage("本集评论暂不可用", if (referenceId == null || contextKey == null)
+                    "可在作品详情关联对应季度的 Bangumi 条目。" else "这集还没有匹配到对应的 Bangumi 记录。")
             }
         } else {
             val source = comments?.source?.copy(loadingMore = loading, reviewsError = failure)
