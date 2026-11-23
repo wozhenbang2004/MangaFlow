@@ -44,11 +44,18 @@ class AnimeSourceRepository(context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
     val extensions = LanercSourceStore.get(context)
     private val nativeProviders: List<AnimeProvider> = listOf(TvtFunProvider(), AgeProvider(), GiriGiriProvider(), LmmProvider())
+    private val reads = AnimeSourceReadCache(context) { id -> provider(id)?.revision }
     internal val builtInVideoSources = nativeProviders.associate { it.id to it.name }
     val providers: List<AnimeProvider> get() = nativeProviders + extensions.state.value.mapNotNull(::extensionProvider)
 
     fun provider(id: String): AnimeProvider? = nativeProviders.firstOrNull { it.id == id }
         ?: extensions.state.value.firstOrNull { it.id == id }?.let(::extensionProvider)
+
+    internal suspend fun search(provider: AnimeProvider, query: String, page: Int = 1,
+        forceRefresh: Boolean = false): List<AnimeSourceTitle> = reads.search(provider, query, page, forceRefresh)
+
+    internal suspend fun catalog(provider: AnimeProvider, title: AnimeSourceTitle,
+        forceRefresh: Boolean = false): AnimeSourceCatalog = reads.catalog(provider, title, forceRefresh)
 
     private fun extensionProvider(listing: LanercSourceListing): AnimeProvider? {
         if (!listing.installed || !listing.enabled || listing.kind != LanercSourceKind.VIDEO) return null

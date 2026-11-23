@@ -169,6 +169,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private var catalogGeneration = 0L
     private val catalogRequests = mutableMapOf<String, Long>()
     private var detailJob: Job? = null
+    private data class EpisodeOptionsInput(val detail: AnimeDetail, val bindings: List<AnimeSourceBinding>,
+        val catalogs: List<AnimeSourceCatalog>, val sourceNames: Map<String, String>,
+        val sourceOwners: Map<String, Pair<String?, DownloadRouteSnapshot?>>)
+    private var episodeOptionsJob: Job? = null
+    private var episodeOptionsGeneration = 0L
+    private var appliedEpisodeOptions: EpisodeOptionsInput? = null
+    private var projectedEpisodeMembers = emptyMap<String, Pair<AnimeSourceCatalog, Set<AnimeSourceEpisode>>>()
     private data class DetailRatingRequest(val subject: AnimeSubject, val ownerId: String,
         val generation: Long, val route: DownloadRouteSnapshot)
     private val detailRatingJobs = mutableMapOf<AnimeDiscoveryProvider, Job>()
@@ -207,8 +214,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private val catalogueCandidates = mutableMapOf<String, SourceCatalogueCandidate>()
     private var cataloguePriority = emptyList<String>()
     private var catalogueJob: Job? = null
+    private var catalogueRebuildRequested = false
     private val associationPermits = Semaphore(4)
     private val associationScriptPermits = Semaphore(2)
+    // Leave capacity for a discovered work's catalogue while other sources are still searching.
+    private val associationSearchPermits = Semaphore(3)
+    private val associationScriptSearchPermits = Semaphore(1)
     private var boundCatalogJob: Job? = null
     private var relatedJob: Job? = null
     private var prepareJob: Job? = null
@@ -644,7 +655,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val current = mutableState.value
         val subject = current.detail?.subject ?: return
         openDetail(subject, resumeRequest?.takeIf { it.first == subject.id }?.second,
-            sourceCandidates = current.groupSourceCandidates, observedScores = current.detailScores)
+            sourceCandidates = current.groupSourceCandidates, observedScores = current.detailScores, forceSourceRefresh = true)
     }
 
     /** Search grouping supplies candidates, never a persisted work/episode association. */
@@ -778,7 +789,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private fun openDetail(subject: AnimeSubject, resumeEpisodeId: String?, nativeReference: AnimeSourceTitle? = null,
         visitedDetail: AnimeDetail? = null, visitedRelated: List<AnimeSubject> = emptyList(),
         sourceCandidates: List<AnimeSourceTitle> = emptyList(), observedScores: List<AnimeSourceScore> = emptyList(),
-        continueAfterCompleted: Boolean = false) {
+        continueAfterCompleted: Boolean = false, forceSourceRefresh: Boolean = false) {
         // A related-title back action can reuse the exact catalogue the user saw. Media
         // bindings and source options still resolve against the current registry and library.
         val initialDetail = visitedDetail ?: library.state.value.entries[subject.id]?.catalogDetail
@@ -859,7 +870,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     val revision = discoverySourceRevision(sourceId)
                     check(nativeOpeningReference == null || reference.sourceRevision == null || reference.sourceRevision == revision) { "来源已更新，请重新搜索。" }
                     val provider = sources.provider(sourceId) ?: error("这个来源已停用或未安装。")
-                    val catalog = provider.catalog(reference)
+                    val catalog = withTimeoutOrNull(15_000L) { sources.catalog(provider, reference, forceRefresh = forceSourceRefresh) }
+                        ?: error("来源目录读取超时，请重试。")
                     check(catalog.title.sourceId == sourceId && catalog.title.id == reference.id && catalog.title.url == reference.url) {
                         "原始目录身份已变化，请重新搜索。"
                     }
@@ -924,7 +936,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         // Source catalogues have independent ownership and do not wait for the metadata service.
         boundCatalogJob = scope.launch {
             try { library.awaitLoaded(); sources.extensions.ready.await()
-                if (currentDetail(generation, subject.id)) startSourceAggregation(initialDetail)
+                if (currentDetail(generation, subject.id)) startSourceAggregation(initialDetail, force = forceSourceRefresh)
             }
             catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) { if (currentDetail(generation, subject.id)) notice(failure.message ?: "来源目录未能读取。") }
@@ -1377,7 +1389,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (current()) publishAssociation(sourceId, AnimeAssociationProgress(AnimeAssociationPhase.SEARCHING))
         try {
             val provider = sources.provider(sourceId) ?: error("这个来源当前不可用，可以解除关联。")
-            val received = withTimeoutOrNull(15_000) { provider.catalog(binding.catalog) }
+            val received = withTimeoutOrNull(15_000) { sources.catalog(provider, binding.catalog, forceRefresh = true) }
                 ?: error("来源目录刷新超时，已保留现有目录。")
             val catalog = retainPartialCatalog(mutableState.value.sourceCatalogs.firstOrNull { it.title == binding.catalog }, received)
             check(catalog.title.sourceId == sourceId && catalog.title.id == binding.catalog.id &&
@@ -1425,10 +1437,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         sources.providers.forEach { requestSourceSearch(it.id, append = false) }
     }
 
-    fun retrySourceSearch(sourceId: String) = requestSourceSearch(sourceId, append = false)
+    fun retrySourceSearch(sourceId: String) = requestSourceSearch(sourceId, append = false, forceRefresh = true)
     fun loadMoreSourceSearch(sourceId: String) = requestSourceSearch(sourceId, append = true)
 
-    private fun requestSourceSearch(sourceId: String, append: Boolean) {
+    private fun requestSourceSearch(sourceId: String, append: Boolean, forceRefresh: Boolean = false) {
         val detail = mutableState.value.detail ?: return
         val provider = sources.provider(sourceId) ?: return
         if (sourceQuery.isBlank()) sourceQuery = detail.subject.title
@@ -1450,7 +1462,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             fun current() = generation == searchGeneration && sourceSearchRequests[sourceId] == request &&
                 currentDetail(owner, detail.subject.id)
             try {
-                val items = provider.search(keyword, page).distinctBy { it.id to it.url }
+                val items = sources.search(provider, keyword, page, forceRefresh).distinctBy { it.id to it.url }
                 check(items.all { it.sourceId == sourceId }) { "来源搜索返回了不同来源的条目。" }
                 if (!current()) return@launch
                 val added = if (append) items.filter { item -> previous.items.none { it.id == item.id && it.url == item.url } } else items
@@ -1486,7 +1498,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         previewJob = scope.launch {
             try {
                 val provider = sources.provider(title.sourceId) ?: error("这个来源尚未安装。")
-                val catalog = provider.catalog(title)
+                val catalog = sources.catalog(provider, title)
                 check(catalog.title.sourceId == title.sourceId && catalog.title.id == title.id && catalog.title.url == title.url) {
                     "来源返回了不同的作品目录，请重新搜索。"
                 }
@@ -1649,68 +1661,153 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     private fun rebuildOptions() {
-        var detail = mutableState.value.detail ?: return
-        val nativeSource = detail.subject.externalIds["native-source"]
-        val nativeBinding = library.state.value.bindings.firstOrNull { it.subjectId == detail.subject.id && it.catalog.sourceId == nativeSource }
-        val nativeCatalog = mutableState.value.sourceCatalogs.firstOrNull { it.title.sourceId == nativeSource }
-        if (nativeBinding != null && nativeCatalog != null && nativeBinding.selectedGroup != null) {
-            detail = nativeDetail(detail.subject, nativeCatalog, nativeBinding.selectedGroup)
-            mutableState.update { it.copy(detail = detail) }
+        val snapshot = mutableState.value
+        val baseline = snapshot.detail ?: return
+        val stored = library.state.value
+        val bindings = stored.bindings.filter { it.subjectId == baseline.subject.id }
+        val names = bindings.mapNotNull { binding -> sources.provider(binding.catalog.sourceId)?.let {
+            it.id to it.name
+        } }.toMap()
+        val sourceOwners = names.keys.associateWith { discoverySourceRevision(it) to playbackHistoryRoute(it) }
+        val input = EpisodeOptionsInput(baseline, bindings, snapshot.sourceCatalogs, names, sourceOwners)
+        val owner = detailGeneration
+        val epoch = stored.restoreEpoch
+        val request = ++episodeOptionsGeneration
+        episodeOptionsJob?.cancel()
+        if (input == appliedEpisodeOptions) {
+            mutableState.update { it.copy(episodeOptionsLoading = false) }
+            finishOptionsRebuild(baseline)
+            return
         }
-        val bindings = library.state.value.bindings.filter { it.subjectId == detail.subject.id }
-        val catalogs = mutableState.value.sourceCatalogs
+        // Keep already usable lines while another source arrives, but remove changed or
+        // unbound mappings immediately; a background calculation must not extend their life.
+        val previous = appliedEpisodeOptions
+        val unchangedSources = if (previous == null || !sameEpisodeMappingDetail(previous.detail, baseline)) emptySet() else bindings.mapNotNull { binding ->
+            val id = binding.catalog.sourceId
+            id.takeIf { id in names && previous.sourceOwners[id] == sourceOwners[id] && previous.bindings.firstOrNull { it.catalog.sourceId == id } == binding &&
+                previous.catalogs.firstOrNull { it.title.sourceId == id } ==
+                    input.catalogs.firstOrNull { it.title.sourceId == id } }
+        }.toSet()
         val preferred = bindings.firstOrNull { it.preferred }?.catalog?.sourceId
-        val options = detail.episodes.associate { canonical ->
-            canonical.id to bindings.flatMap bindingLoop@ { binding ->
-                val catalog = catalogs.firstOrNull {
-                    it.title.sourceId == binding.catalog.sourceId && it.title.id == binding.catalog.id && it.title.url == binding.catalog.url
-                } ?: return@bindingLoop emptyList()
-                if (binding.automatic && nativeSource != binding.catalog.sourceId &&
-                    !autoPlaySubjectCandidate(detail.subject, catalog.title)) return@bindingLoop emptyList()
-                val automaticGroups = autoPlayGroups(detail, canonical, catalog, binding.selectedGroup)
-                fun mappingStillMatches(episode: AnimeSourceEpisode): Boolean =
-                    detail.subject.canonicalDoubanId() == null || !binding.automatic ||
-                        autoPlayEpisodeMatches(detail, canonical, catalog, episode)
-                val mappedGroup = binding.episodeMappings[canonical.id]?.let { id ->
-                    catalog.episodes.singleOrNull { it.id == id && it.group == binding.selectedGroup && mappingStillMatches(it) }?.group
-                }
-                val groups = when {
-                    mappedGroup != null -> if (binding.automatic && mappedGroup in automaticGroups)
-                        automaticGroups else listOf(mappedGroup)
-                    binding.selectedGroup == null -> automaticGroups
-                    !binding.automatic -> listOf(binding.selectedGroup)
-                    nativeSource == binding.catalog.sourceId -> {
-                        // Preserve the canonical native group; only audited equivalent tracks may
-                        // extend it, never silently replace a disappeared default with another group.
-                        if (automaticGroups.size > 1 && binding.selectedGroup in automaticGroups) automaticGroups
-                        else listOf(binding.selectedGroup)
+        mutableState.update { state -> state.copy(
+            episodeOptions = state.episodeOptions.mapValues { (_, options) -> options.filter { it.sourceId in unchangedSources } },
+            episodeOptionsLoading = true, preferredSourceId = preferred, sourceBindings = bindings,
+            sourceGroups = bindings.mapNotNull { binding -> binding.selectedGroup?.let { binding.catalog.sourceId to it } }.toMap(),
+            sourceCatalogErrors = state.sourceCatalogErrors.filterKeys { id -> bindings.any { it.catalog.sourceId == id } },
+        ) }
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            // Binding persistence and its catalogue receipt can arrive in the same UI turn.
+            yield()
+            try {
+                val (detail, options, members) = withContext(Dispatchers.Default) {
+                    val nativeSource = baseline.subject.externalIds["native-source"]
+                    val nativeBinding = bindings.firstOrNull { it.catalog.sourceId == nativeSource }
+                    val nativeCatalog = input.catalogs.firstOrNull { it.title.sourceId == nativeSource }
+                    val detail = if (nativeBinding?.selectedGroup != null && nativeCatalog != null)
+                        nativeDetail(baseline.subject, nativeCatalog, nativeBinding.selectedGroup) else baseline
+                    val matchers = bindings.mapNotNull { binding ->
+                        val catalog = input.catalogs.firstOrNull { it.title.sourceId == binding.catalog.sourceId &&
+                            it.title.id == binding.catalog.id && it.title.url == binding.catalog.url } ?: return@mapNotNull null
+                        if (binding.catalog.sourceId !in names || binding.automatic && nativeSource != binding.catalog.sourceId &&
+                            !autoPlaySubjectCandidate(detail.subject, catalog.title)) return@mapNotNull null
+                        binding.catalog.sourceId to AnimeEpisodeMatcher(detail, catalog)
+                    }.toMap()
+                    val explicitEpisodes = matchers.mapValues { (sourceId, matcher) ->
+                        matcher.groupedEpisodes.mapValues { (_, rows) -> rows.groupBy { episode ->
+                            if (sourceId == nativeSource) nativeEpisodeId(detail.subject, episode) else episode.id
+                        } }
                     }
-                    else -> automaticGroups
-                }
-                groups.flatMap groupLoop@ { group ->
-                    val inGroup = catalog.episodes.filter { it.group == group }
-                    val intrinsic = nativeSource == binding.catalog.sourceId
-                    val explicit = if (intrinsic) inGroup.singleOrNull { nativeEpisodeId(detail.subject, it) == canonical.id }
-                        else binding.episodeMappings[canonical.id]?.let { id ->
-                            inGroup.singleOrNull { it.id == id && mappingStillMatches(it) }
-                        }
-                    val matches = explicit?.let(::listOf) ?: if ((intrinsic && groups.size == 1) || !canonical.number.isFinite()) emptyList() else inGroup.filter {
-                        autoPlayEpisodeMatches(detail, canonical, catalog, it)
+                    val options = detail.episodes.associate { canonical ->
+                        currentCoroutineContext().ensureActive()
+                        canonical.id to bindings.flatMap bindingLoop@ { binding ->
+                            val matcher = matchers[binding.catalog.sourceId] ?: return@bindingLoop emptyList()
+                            val catalog = input.catalogs.first { it.title.sourceId == binding.catalog.sourceId &&
+                                it.title.id == binding.catalog.id && it.title.url == binding.catalog.url }
+                            val automaticGroups = matcher.groups(canonical, binding.selectedGroup)
+                            fun mappingStillMatches(episode: AnimeSourceEpisode): Boolean =
+                                detail.subject.canonicalDoubanId() == null || !binding.automatic || matcher.matches(canonical, episode)
+                            val mappedGroup = binding.episodeMappings[canonical.id]?.let { id ->
+                                matcher.groupedEpisodes[binding.selectedGroup].orEmpty()
+                                    .singleOrNull { it.id == id && mappingStillMatches(it) }?.group
+                            }
+                            val groups = when {
+                                mappedGroup != null -> if (binding.automatic && mappedGroup in automaticGroups)
+                                    automaticGroups else listOf(mappedGroup)
+                                binding.selectedGroup == null -> automaticGroups
+                                !binding.automatic -> listOf(binding.selectedGroup)
+                                nativeSource == binding.catalog.sourceId -> {
+                                    if (automaticGroups.size > 1 && binding.selectedGroup in automaticGroups) automaticGroups
+                                    else listOf(binding.selectedGroup)
+                                }
+                                else -> automaticGroups
+                            }
+                            val offered = groups.flatMap { group ->
+                                val intrinsic = nativeSource == binding.catalog.sourceId
+                                val explicitId = if (intrinsic) canonical.id else binding.episodeMappings[canonical.id]
+                                val explicit = explicitEpisodes[binding.catalog.sourceId]?.get(group)?.get(explicitId)
+                                    ?.filter { intrinsic || mappingStillMatches(it) }?.singleOrNull()
+                                val matches = explicit?.let(::listOf) ?: if ((intrinsic && groups.size == 1) ||
+                                    !canonical.number.isFinite()) emptyList() else matcher.matchingEpisodes(canonical, group)
+                                matches.map { episode -> AnimeEpisodeOption(binding.catalog.sourceId,
+                                    names.getValue(binding.catalog.sourceId), binding.catalog, episode,
+                                    confirmed = explicit != null || matches.size == 1) }
+                            }
+                            // Expand equivalent routes once here, not on every cell composition or
+                            // playback-status read. Manual, non-numbered mappings remain exact.
+                            offered.flatMap { base ->
+                                if (!base.confirmed || (base.sourceId != "anime-age" && base.sourceId != "anime-tvtfun" &&
+                                    !hasLmmCatalogWorkId(catalog.title)) || !matcher.matches(canonical, base.episode)) listOf(base)
+                                else {
+                                    val equivalent = matcher.groups(canonical, base.episode.group)
+                                    if (equivalent.size < 2 || base.episode.group !in equivalent) listOf(base)
+                                    else listOf(base) + equivalent.filterNot { it == base.episode.group }.mapNotNull { group ->
+                                        matcher.matchingEpisodes(canonical, group).singleOrNull()?.let { base.copy(episode = it) }
+                                    }
+                                }
+                            }.distinctBy(::optionKey)
+                        }.sortedWith(compareByDescending<AnimeEpisodeOption> { it.sourceId == preferred }.thenBy { it.sourceName })
                     }
-                    matches.map { episode -> AnimeEpisodeOption(binding.catalog.sourceId,
-                        sources.provider(binding.catalog.sourceId)?.name ?: binding.catalog.sourceId,
-                        binding.catalog, episode, confirmed = explicit != null || matches.size == 1) }
+                    Triple(detail, options, input.catalogs.associate { catalog ->
+                        catalog.title.sourceId to (catalog to catalog.episodes.toSet())
+                    })
                 }
-            }.sortedWith(compareByDescending<AnimeEpisodeOption> { it.sourceId == preferred }.thenBy { it.sourceName })
+                if (request != episodeOptionsGeneration || !currentDetail(owner, baseline.subject.id) ||
+                    library.state.value.restoreEpoch != epoch) return@launch
+                if (mutableState.value.detail != baseline || mutableState.value.sourceCatalogs != input.catalogs ||
+                    library.state.value.bindings.filter { it.subjectId == baseline.subject.id } != bindings ||
+                    sourceOwners.any { (id, ownership) -> sources.provider(id) == null ||
+                        ownership != (discoverySourceRevision(id) to playbackHistoryRoute(id)) }) {
+                    rebuildOptions()
+                    return@launch
+                }
+                appliedEpisodeOptions = input.copy(detail = detail)
+                projectedEpisodeMembers = members
+                mutableState.update { it.copy(detail = detail, episodeOptions = options, episodeOptionsLoading = false,
+                    episodeProgress = projectEpisodeProgress(library.state.value, detail),
+                    sourceDanmakuAvailable = active?.let(::hasSourceDanmaku) == true) }
+                finishOptionsRebuild(detail)
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) {
+                if (request == episodeOptionsGeneration && currentDetail(owner, baseline.subject.id) &&
+                    library.state.value.restoreEpoch == epoch) mutableState.update {
+                    it.copy(episodeOptionsLoading = false,
+                        sourceError = failure.message ?: "剧集对应未能完成，已保留可用线路，请重试。")
+                }
+            }
         }
-        mutableState.update { it.copy(episodeOptions = options, preferredSourceId = preferred,
-            episodeProgress = projectEpisodeProgress(library.state.value, detail),
-            sourceDanmakuAvailable = active?.let(::hasSourceDanmaku) == true,
-            sourceBindings = bindings,
-            sourceCatalogErrors = it.sourceCatalogErrors.filterKeys { id -> bindings.any { binding -> binding.catalog.sourceId == id } },
-            sourceGroups = bindings.mapNotNull { binding ->
-                binding.selectedGroup?.let { group -> binding.catalog.sourceId to group }
-            }.toMap()) }
+        episodeOptionsJob = job
+        job.start()
+    }
+
+    private fun sameEpisodeMappingDetail(left: AnimeDetail, right: AnimeDetail): Boolean {
+        fun identity(subject: AnimeSubject) = subject.copy(coverUrl = "", description = "", tags = emptyList(),
+            airWeekday = null, rating = null, rank = null, ratingCount = null)
+        return identity(left.subject) == identity(right.subject) && left.episodes == right.episodes &&
+            left.metadataSubject?.let { it.id to it.canonicalBangumiId() } ==
+                right.metadataSubject?.let { it.id to it.canonicalBangumiId() }
+    }
+
+    private fun finishOptionsRebuild(detail: AnimeDetail) {
         scheduleCatalogBootstrap()
         invalidatePreparation()
         resumeRequest?.takeIf { it.first == detail.subject.id }?.let { request ->
@@ -1721,8 +1818,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 group.getOrNull(group.indexOfFirst { it.id == saved.id } + 1)
                     ?: saved.takeUnless { mutableState.value.detailLoading }
             } else saved
-            // Consume once before starting the existing automatic play path. A confirmed
-            // catalogue identity is required; a pre-matched media line is not.
             if (target != null && episodeAvailability(target.id) != AnimeEpisodeAvailability.UPCOMING) {
                 resumeRequest = null
                 resumeAfterCompleted = false
@@ -1768,6 +1863,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     private fun cancelSourceAggregation() {
+        ++episodeOptionsGeneration
+        episodeOptionsJob?.cancel()
+        episodeOptionsJob = null
+        appliedEpisodeOptions = null
+        projectedEpisodeMembers = emptyMap()
         ++associationGeneration
         associationEpisodeId = null
         associationJobs.values.forEach { it.cancel() }
@@ -1777,9 +1877,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         associationCandidates.clear()
         catalogueJob?.cancel()
         catalogueJob = null
+        catalogueRebuildRequested = false
         catalogueCandidates.clear()
         cataloguePriority = emptyList()
         mutableState.update { it.copy(sourceAggregation = emptyMap(), sourceAggregationRunning = false,
+            episodeOptionsLoading = false,
             associationChoices = emptyMap(),
             sourceAggregationCompleted = 0, sourceAggregationTotal = 0) }
     }
@@ -1821,56 +1923,83 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private fun scheduleCatalogBootstrap() {
         val snapshot = mutableState.value
         val detail = snapshot.detail ?: return
-        if (detail.subject.canonicalDoubanId() == null || snapshot.detailLoading || catalogueJob?.isActive == true) return
+        if (detail.subject.canonicalDoubanId() == null) return
+        if (catalogueJob?.isActive == true) {
+            catalogueRebuildRequested = true
+            return
+        }
+        val owner = detailGeneration
+        val epoch = library.state.value.restoreEpoch
+        catalogueRebuildRequested = false
         val job = scope.launch(start = CoroutineStart.LAZY) {
-            // Let this scheduling turn register every provider before comparing priority.
-            yield()
-            val live = mutableState.value
-            val baseline = live.detail?.takeIf { it.subject.id == detail.subject.id } ?: return@launch
-            val bindings = library.state.value.bindings.filter { it.subjectId == detail.subject.id }
-            val ordered = catalogueCandidates.values.sortedWith(compareByDescending<SourceCatalogueCandidate> { candidate ->
-                bindings.any { it.catalog.sourceId == candidate.catalog.title.sourceId && it.preferred }
-            }.thenBy { candidate -> cataloguePriority.indexOf(candidate.catalog.title.sourceId).takeIf { it >= 0 } ?: Int.MAX_VALUE }
-                .thenBy { it.catalog.title.sourceId })
-            val chosen = ordered.firstNotNullOfOrNull { candidate ->
-                val sourceId = candidate.catalog.title.sourceId
-                if (!catalogueCurrent(candidate, baseline.subject.id) ||
-                    sourceId in library.state.value.entries[baseline.subject.id]?.excludedSourceIds.orEmpty()) null
-                else projectAnimeSourceCatalogue(baseline, candidate.catalog,
-                    bindings.singleOrNull { it.catalog.sourceId == sourceId })?.let { candidate to it }
-            } ?: return@launch
-            val (candidate, projection) = chosen
-            val sourceId = candidate.catalog.title.sourceId
-            val binding = bindings.singleOrNull { it.catalog.sourceId == sourceId }
-            if (baseline.episodes == projection.episodes && binding?.episodeMappings == projection.mappings) return@launch
-            val next = baseline.copy(episodes = projection.episodes)
-            fun valid() = catalogueCurrent(candidate, next.subject.id) && mutableState.value.detail == baseline &&
-                !mutableState.value.detailLoading && sourceId !in library.state.value.entries[next.subject.id]?.excludedSourceIds.orEmpty()
             try {
-                library.editPlaybackAssociation(next.subject, editBindings = { saved ->
-                    check(valid()) { "来源或作品已变化，未替换统一目录。" }
-                    val previous = saved.singleOrNull { it.catalog.sourceId == sourceId }
-                    check(previous == binding) { "来源选择已经变化，未覆盖新的选择。" }
-                    saved.filterNot { it.catalog.sourceId == sourceId } +
-                        (previous ?: AnimeSourceBinding(next.subject.id, candidate.catalog.title.copy(sourceRevision = candidate.revision),
-                            preferred = saved.isEmpty(), automatic = true)).copy(
-                            selectedGroup = projection.group, episodeMappings = projection.mappings)
-                }, transform = { entry ->
-                    check(valid()) { "作品已变化，未替换统一目录。" }
-                    entry.copy(catalogDetail = next)
-                })
-                if (!valid()) return@launch
-                mutableState.update { it.copy(detail = next,
-                    sourceCatalogs = it.sourceCatalogs.filterNot { row -> row.title.sourceId == sourceId } + candidate.catalog,
-                    sourceCatalogErrors = it.sourceCatalogErrors - sourceId) }
-                rebuildOptions()
-                publishAssociation(sourceId, AnimeAssociationProgress(AnimeAssociationPhase.LINKED))
-                if (catalogueCurrent(candidate, next.subject.id)) startSourceAggregation(next)
-                if (currentDetail(candidate.owner, next.subject.id) && mutableState.value.detail == next)
-                    metadata.cacheCatalogDetail(next)
-            } catch (cancel: CancellationException) { throw cancel }
-            catch (failure: Exception) {
-                if (catalogueCurrent(candidate, next.subject.id)) notice(failure.message ?: "统一选集未能保存，请重试。")
+                // Let this scheduling turn register every provider before comparing priority.
+                yield()
+                val live = mutableState.value
+                val baseline = live.detail?.takeIf { it.subject.id == detail.subject.id } ?: return@launch
+                val bindings = library.state.value.bindings.filter { it.subjectId == detail.subject.id }
+                val ordered = catalogueCandidates.values.sortedWith(compareByDescending<SourceCatalogueCandidate> { candidate ->
+                    bindings.any { it.catalog.sourceId == candidate.catalog.title.sourceId && it.preferred }
+                }.thenBy { candidate -> cataloguePriority.indexOf(candidate.catalog.title.sourceId).takeIf { it >= 0 } ?: Int.MAX_VALUE }
+                    .thenBy { it.catalog.title.sourceId })
+                val eligible = ordered.filter { candidate ->
+                    catalogueCurrent(candidate, baseline.subject.id) && candidate.catalog.title.sourceId !in
+                        library.state.value.entries[baseline.subject.id]?.excludedSourceIds.orEmpty()
+                }
+                val chosen = withContext(Dispatchers.Default) {
+                    eligible.firstNotNullOfOrNull { candidate ->
+                        currentCoroutineContext().ensureActive()
+                        projectAnimeSourceCatalogue(baseline, candidate.catalog,
+                            bindings.singleOrNull { it.catalog.sourceId == candidate.catalog.title.sourceId })
+                            ?.let { candidate to it }
+                    }
+                } ?: return@launch
+                val (candidate, projection) = chosen
+                val sourceId = candidate.catalog.title.sourceId
+                val binding = bindings.singleOrNull { it.catalog.sourceId == sourceId }
+                if (baseline.episodes == projection.episodes && binding?.episodeMappings == projection.mappings) return@launch
+                val next = baseline.copy(episodes = projection.episodes)
+                fun valid() = catalogueCurrent(candidate, next.subject.id) && mutableState.value.detail == baseline &&
+                    sourceId !in library.state.value.entries[next.subject.id]?.excludedSourceIds.orEmpty()
+                if (!valid()) {
+                    catalogueRebuildRequested = true
+                    return@launch
+                }
+                try {
+                    library.editPlaybackAssociation(next.subject, editBindings = { saved ->
+                        check(valid()) { "来源或作品已变化，未替换统一目录。" }
+                        val previous = saved.singleOrNull { it.catalog.sourceId == sourceId }
+                        check(previous == binding) { "来源选择已经变化，未覆盖新的选择。" }
+                        saved.filterNot { it.catalog.sourceId == sourceId } +
+                            (previous ?: AnimeSourceBinding(next.subject.id, candidate.catalog.title.copy(sourceRevision = candidate.revision),
+                                preferred = saved.isEmpty(), automatic = true)).copy(
+                                selectedGroup = projection.group, episodeMappings = projection.mappings)
+                    }, transform = { entry ->
+                        check(valid()) { "作品已变化，未替换统一目录。" }
+                        entry.copy(catalogDetail = next)
+                    })
+                    if (!valid()) return@launch
+                    mutableState.update { it.copy(detail = next,
+                        sourceCatalogs = it.sourceCatalogs.filterNot { row -> row.title.sourceId == sourceId } + candidate.catalog,
+                        sourceCatalogErrors = it.sourceCatalogErrors - sourceId) }
+                    rebuildOptions()
+                    publishAssociation(sourceId, AnimeAssociationProgress(AnimeAssociationPhase.LINKED))
+                    if (catalogueCurrent(candidate, next.subject.id)) startSourceAggregation(next)
+                    if (currentDetail(candidate.owner, next.subject.id) && mutableState.value.detail == next)
+                        metadata.cacheCatalogDetail(next)
+                } catch (cancel: CancellationException) { throw cancel }
+                catch (failure: Exception) {
+                    if (catalogueCurrent(candidate, next.subject.id)) notice(failure.message ?: "统一选集未能保存，请重试。")
+                }
+            } finally {
+                val running = currentCoroutineContext()[Job]
+                if (catalogueJob === running) {
+                    catalogueJob = null
+                    val rerun = catalogueRebuildRequested
+                    catalogueRebuildRequested = false
+                    if (rerun && running?.isActive == true && currentDetail(owner, detail.subject.id) &&
+                        library.state.value.restoreEpoch == epoch) scheduleCatalogBootstrap()
+                }
             }
         }
         catalogueJob = job
@@ -2018,8 +2147,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         }
                         // Each request rejoins the queue; one slow source cannot own
                         // a slot while searching every alias/page and then its catalogue.
-                        return if (provider is LanercProvider) associationScriptPermits.withPermit { admitted() }
-                            else admitted()
+                        suspend fun sourceSlot(): T? = if (provider is LanercProvider)
+                            associationScriptPermits.withPermit { admitted() } else admitted()
+                        return if (!searching) sourceSlot()
+                            else if (provider is LanercProvider) associationScriptSearchPermits.withPermit {
+                                associationSearchPermits.withPermit { sourceSlot() }
+                            } else associationSearchPermits.withPermit { sourceSlot() }
                     }
                     suspend fun findCatalogues() {
                         if (!current()) return
@@ -2039,7 +2172,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                     report(AnimeAssociationPhase.LINKED)
                                     return@aggregation true
                                 }
-                                val catalog = readSource(15_000L) { provider.catalog(existing.catalog) }
+                                val catalog = readSource(15_000L) { sources.catalog(provider, existing.catalog, forceRefresh = force || retryFailed) }
                                     ?: error("来源目录读取超时，请重试。")
                                 check(catalog.title.sourceId == sourceId && catalog.title.id == existing.catalog.id &&
                                     catalog.title.url == existing.catalog.url) { "来源目录身份不一致。" }
@@ -2084,7 +2217,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                 val key = title.id to title.url
                                 if (earlyCatalogueAttempts.size >= 2 || !earlyCatalogueAttempts.add(key)) return false
                                 val catalog = try {
-                                    readSource(if (provider is LanercProvider) 8_000L else 6_000L) { provider.catalog(title) }
+                                    readSource(if (provider is LanercProvider) 8_000L else 6_000L) {
+                                        sources.catalog(provider, title, forceRefresh = force || retryFailed)
+                                    }
                                 } catch (cancel: CancellationException) { throw cancel }
                                 catch (_: Exception) { null } ?: return false
                                 if (!current() || catalog.title.sourceId != sourceId || catalog.title.id != title.id ||
@@ -2108,7 +2243,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                         if (!current()) return@recall false
                                         val page = try {
                                             readSource(if (provider is LanercProvider) 6_000L else 5_000L, searching = true) {
-                                                provider.search(keyword, pageNumber)
+                                                sources.search(provider, keyword, pageNumber, forceRefresh = force || retryFailed)
                                             }
                                                 ?.also { searchSucceeded = true } ?: run {
                                                 searchFailure = "来源搜索超时，本次搜索尚未完成。"
@@ -2168,7 +2303,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             val verified = possible.mapNotNull { title ->
                                 val catalog = earlyCatalogues[title.id to title.url] ?: try {
                                     readSource(if (provider is LanercProvider) 8_000L else 6_000L) {
-                                        provider.catalog(title)
+                                        sources.catalog(provider, title, forceRefresh = force || retryFailed)
                                     }
                                         ?: error("来源目录读取超时，请重试。")
                                 } catch (cancel: CancellationException) { throw cancel }
@@ -2277,23 +2412,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         snapshot: AnimeScreenState = mutableState.value): List<AnimeEpisodeOption> {
         val offered = snapshot.episodeOptions[episodeId].orEmpty().filter { it.confirmed }
         val detail = snapshot.detail ?: return emptyList()
-        val episode = detail.episodes.firstOrNull { it.id == episodeId } ?: return emptyList()
-        return offered.flatMap { base ->
-            if (sources.provider(base.sourceId) == null || !stillBound(detail.subject.id, base.catalog))
-                return@flatMap emptyList()
-            val catalog = snapshot.sourceCatalogs.firstOrNull {
-                it.title.sourceId == base.sourceId && it.title.id == base.catalog.id && it.title.url == base.catalog.url
-            } ?: return@flatMap emptyList()
-            if (base.episode !in catalog.episodes) return@flatMap emptyList()
-            if ((base.sourceId != "anime-age" && base.sourceId != "anime-tvtfun" && !hasLmmCatalogWorkId(catalog.title)) ||
-                !autoPlayEpisodeMatches(detail, episode, catalog, base.episode)) return@flatMap listOf(base)
-            val groups = autoPlayGroups(detail, episode, catalog, base.episode.group)
-            if (groups.size < 2 || base.episode.group !in groups) return@flatMap listOf(base)
-            listOf(base) + groups.filterNot { it == base.episode.group }.mapNotNull { group ->
-                catalog.episodes.singleOrNull { it.group == group &&
-                    autoPlayEpisodeMatches(detail, episode, catalog, it) }?.let { base.copy(episode = it) }
-            }
-        }.distinctBy { optionKey(it) }
+        if (detail.episodes.none { it.id == episodeId }) return emptyList()
+        return offered.filter { option ->
+            sources.provider(option.sourceId) != null && stillBound(detail.subject.id, option.catalog) &&
+                snapshot.sourceCatalogs.any { catalog -> catalog.title.sourceId == option.sourceId &&
+                    catalog.title.id == option.catalog.id && catalog.title.url == option.catalog.url &&
+                    (projectedEpisodeMembers[option.sourceId]?.takeIf { it.first === catalog }?.second
+                        ?.contains(option.episode) ?: (option.episode in catalog.episodes)) }
+        }.distinctBy(::optionKey)
     }
 
     internal fun episodeAvailability(episodeId: String,
@@ -2306,7 +2432,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (options.isEmpty() && airDate != null && airDate >
             Instant.fromEpochMilliseconds(wallTimeMillis()).toLocalDateTime(TimeZone.currentSystemDefault()).date)
             return AnimeEpisodeAvailability.UPCOMING
-        if (snapshot.detailLoading || snapshot.sourceAggregationRunning) return AnimeEpisodeAvailability.CHECKING
+        if (snapshot.detailLoading || snapshot.sourceAggregationRunning || snapshot.episodeOptionsLoading)
+            return AnimeEpisodeAvailability.CHECKING
         return if (options.isEmpty()) AnimeEpisodeAvailability.UNMATCHED else AnimeEpisodeAvailability.RECENTLY_FAILED
     }
 
@@ -2757,8 +2884,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     sourceMeasurementsEnqueue = ::enqueue
                     enqueue()
                     // A manual click also owns sources that finish associating during this batch.
-                    if (sourceMeasurementsUserRequested && mutableState.value.sourceAggregationRunning) {
-                        mutableState.first { !current() || !it.sourceAggregationRunning }
+                    if (sourceMeasurementsUserRequested && (mutableState.value.sourceAggregationRunning ||
+                            mutableState.value.episodeOptionsLoading)) {
+                        mutableState.first { !current() || (!it.sourceAggregationRunning && !it.episodeOptionsLoading) }
                         enqueue()
                     }
                 }
@@ -2946,7 +3074,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     val remaining = autoPlaybackDeadline - monotonicTimeMillis()
                     if (remaining <= 0L) return null
                     return withTimeoutOrNull(remaining) {
-                        state.first { nextLineAvailable(it) || !it.sourceAggregationRunning }
+                        state.first { nextLineAvailable(it) || (!it.sourceAggregationRunning && !it.episodeOptionsLoading) }
                     }
                 }
                 startSourceAggregation(detail, episodeId = episodeId)
@@ -3449,7 +3577,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private fun prepareDetailOpeningAddresses() {
         val snapshot = mutableState.value
         val detail = snapshot.detail ?: return
-        if (!foreground || active != null || snapshot.detailLoading || snapshot.resolving ||
+        if (!foreground || active != null || (snapshot.detailLoading && detail.episodes.isEmpty()) || snapshot.resolving ||
             snapshot.autoMatching || snapshot.pendingPlayback != null || resumeRequest != null) return
         val episode = continuationEpisode(detail.subject.id) ?: run { releaseOpeningAddresses(); return }
         if (episodeAvailability(episode.id, snapshot) == AnimeEpisodeAvailability.UPCOMING) {
@@ -4232,7 +4360,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         val hasAlternative = automaticPlaybackLines(owner.episode.id).any { optionKey(it) !in recoveryOptions }
         val discovery = mutableState.value
-        if (!hasAlternative && associationEpisodeId == owner.episode.id && !discovery.sourceAggregationRunning &&
+        if (!hasAlternative && associationEpisodeId == owner.episode.id && !discovery.sourceAggregationRunning && !discovery.episodeOptionsLoading &&
             !canRetryPlaybackDiscovery(discovery)) {
             val reason = if (hasRetryableAssociation(discovery))
                 "本集有来源尚未完成核对，可在来源面板查看并重试。"

@@ -398,6 +398,7 @@ data class AnimeScreenState(
     val sourceError: String? = null,
     val playbackRecoveryStopReason: String? = null,
     val episodeOptions: Map<String, List<AnimeEpisodeOption>> = emptyMap(),
+    val episodeOptionsLoading: Boolean = false,
     val selectedEpisodeId: String? = null,
     val selectedPlaybackOption: AnimeEpisodeOption? = null,
     val sourceMeasurements: AnimeSourceMeasurementBatch? = null,
