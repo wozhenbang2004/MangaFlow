@@ -11,8 +11,9 @@ import kotlinx.coroutines.withContext
 /**
  * Original data-only adapters for public HTML contracts observed 2026-11-16.
  * No third-party JavaScript, extracted keys, account sessions or challenge bypass is bundled.
- * Direct/public player pages use the existing restricted resolver. Encrypted or challenged
- * lines remain unavailable; directory support does not promise playback or measured speed.
+ * Direct/public player pages and declared public parser forms use the existing restricted
+ * resolver. Unrecognized encrypted or challenged lines remain unavailable; directory
+ * support does not promise playback or measured speed.
  */
 internal class BundledHtmlAnimeProvider(
     override val id: String,
@@ -134,7 +135,9 @@ internal class BundledHtmlAnimeProvider(
             AnimePlaybackAsset(id = "$id:${animeHash(episode.id + "\n" + animeContentIdentity(stream.url))}",
                 sourceId = id, sourceEpisodeId = episode.id, url = stream.url, route = http.route,
                 title = episode.title, edition = episode.edition, mimeType = stream.mimeType,
-                headers = mapOf("User-Agent" to AnimeHttp.USER_AGENT, "Referer" to stream.referer),
+                // An explicit public parser omission must not become an empty Referer header.
+                headers = mapOf("User-Agent" to AnimeHttp.USER_AGENT) +
+                    stream.referer.takeIf(String::isNotBlank)?.let { mapOf("Referer" to it) }.orEmpty(),
                 subtitles = stream.subtitles, sourceRevision = revision)
         } finally { http.close() }
     }

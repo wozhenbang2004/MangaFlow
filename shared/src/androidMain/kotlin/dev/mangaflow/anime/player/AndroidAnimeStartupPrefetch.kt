@@ -258,12 +258,15 @@ private class StartupCacheReader(
         if (completedRange in completed) return StartupStoreResult(true)
         val allowance = minOf(known ?: remaining, remaining)
         if (allowance <= 0L) return StartupStoreResult(false, "原片预读达到字节预算")
-        val prefixLength = minOf(STARTUP_PREFIX_BYTES.toLong(), known ?: allowance, allowance).toInt()
-        val cachedPrefix = cachedPrefixIsValid(key, checked, offset, prefixLength, audio, mp4Only)
+        val imagePrefixedTransport = !mp4Only && usesImagePrefixedAnimeHls(asset.sourceId)
+        val prefixLimit = if (imagePrefixedTransport) ANIME_HLS_IMAGE_INSPECTION_LIMIT else ANIME_STARTUP_MEDIA_PREFIX_BYTES
+        val prefixLength = minOf(prefixLimit.toLong(), known ?: allowance, allowance).toInt()
+        val cachedPrefix = cachedPrefixIsValid(key, checked, offset, prefixLength, audio, mp4Only, imagePrefixedTransport)
         if (!cachedPrefix && owner.cache.isCached(key, offset, prefixLength.toLong()))
             return StartupStoreResult(false, "已有媒体片段的开头无法核对，交由播放器继续准备")
         val verified = DataSource.Factory {
-            VerifiedStartupMediaSource(upstream.createDataSource(), offset, cachedPrefix, audio, mp4Only)
+            VerifiedStartupMediaSource(upstream.createDataSource(), offset, cachedPrefix, audio, mp4Only,
+                imagePrefixedTransport, prefixLimit)
         }
         val source = animeCacheDataSource(asset, owner, verified).createDataSource()
         val spec = DataSpec.Builder().setUri(checked).setPosition(offset).setLength(allowance)
@@ -314,19 +317,21 @@ private class StartupCacheReader(
     }
 
     private fun cachedPrefixIsValid(key: String, uri: Uri, offset: Long, size: Int,
-        audio: Boolean, mp4Only: Boolean): Boolean {
-        if (size <= 0 || !owner.cache.isCached(key, offset, size.toLong())) return false
+        audio: Boolean, mp4Only: Boolean, imagePrefixedTransport: Boolean): Boolean {
+        if (size <= 0) return false
+        val available = owner.cache.getCachedLength(key, offset, size.toLong()).coerceAtLeast(0L).toInt()
+        if (available <= 0) return false
         val source = CacheDataSource.Factory().setCache(owner.cache).setCacheKeyFactory { key }.createDataSource()
         return try {
-            val bytes = ByteArray(size)
-            source.open(DataSpec.Builder().setUri(uri).setPosition(offset).setLength(size.toLong()).build())
+            val bytes = ByteArray(available)
+            source.open(DataSpec.Builder().setUri(uri).setPosition(offset).setLength(available.toLong()).build())
             var read = 0
-            while (read < size) {
-                val count = source.read(bytes, read, size - read)
+            while (read < available) {
+                val count = source.read(bytes, read, available - read)
                 if (count == C.RESULT_END_OF_INPUT) break
                 read += count
             }
-            validStartupPrefix(bytes, read, audio, mp4Only)
+            isAnimeStartupMediaPrefix(bytes, read, audio, mp4Only, imagePrefixedTransport)
         } catch (_: IOException) { false }
         finally { source.close() }
     }
@@ -365,8 +370,10 @@ private class VerifiedStartupMediaSource(
     private val cachedPrefix: Boolean,
     private val audio: Boolean,
     private val mp4Only: Boolean,
+    private val imagePrefixedTransport: Boolean,
+    prefixLimit: Int,
 ) : DataSource by source {
-    private val prefix = ByteArray(STARTUP_PREFIX_BYTES)
+    private val prefix = ByteArray(prefixLimit)
     private var size = 0
     private var position = 0
 
@@ -388,7 +395,7 @@ private class VerifiedStartupMediaSource(
             if (count == C.RESULT_END_OF_INPUT) break
             size += count
         }
-        if (!validStartupPrefix(prefix, size, audio, mp4Only))
+        if (!isAnimeStartupMediaPrefix(prefix, size, audio, mp4Only, imagePrefixedTransport))
             throw IOException("未识别到可预读的媒体片段，保留正常播放")
         return length
     }
@@ -402,7 +409,6 @@ private class VerifiedStartupMediaSource(
     }
 }
 
-private const val STARTUP_PREFIX_BYTES = 5 * 188
 private fun checkedUri(uri: Uri): Uri = Uri.parse(animeMediaUrl(uri.toString()).toString())
 private fun millisToMicros(value: Long): Long = value.coerceIn(0L, Long.MAX_VALUE / 1_000L) * 1_000L
 private fun boundedEnd(start: Long, length: Long): Long = start + minOf(length, Long.MAX_VALUE - start)
@@ -413,23 +419,4 @@ private fun HlsPlaylist.declaresEncryption(): Boolean = tags.any { tag ->
     // never described as an independently usable, unencrypted prepared window.
     tag.startsWith("#EXT-X-SESSION-KEY:") ||
         tag.startsWith("#EXT-X-KEY:") && tag.substringAfter(':').trim() != "METHOD=NONE"
-}
-
-private fun validStartupPrefix(bytes: ByteArray, size: Int, audio: Boolean, mp4Only: Boolean): Boolean {
-    val mp4 = size >= 8 && bytes.decodeToString(4, 8) in setOf("ftyp", "styp", "moof", "sidx", "moov")
-    if (mp4Only) return mp4
-    if (isAnimeStartupVideoPrefix(bytes, size)) return true
-    if (!audio) return false
-    var offset = 0
-    if (size >= 10 && bytes.decodeToString(0, 3) == "ID3") {
-        if ((6..9).any { bytes[it].toInt() and 0x80 != 0 }) return false
-        val tagSize = (6..9).fold(0) { value, index -> (value shl 7) or (bytes[index].toInt() and 0x7f) }
-        offset = 10 + tagSize
-    }
-    if (offset < 0 || size - offset < 7) return false
-    val first = bytes[offset].toInt() and 0xff
-    val second = bytes[offset + 1].toInt() and 0xff
-    val adts = first == 0xff && second and 0xf6 == 0xf0
-    val ac3 = first == 0x0b && second == 0x77
-    return adts || ac3
 }

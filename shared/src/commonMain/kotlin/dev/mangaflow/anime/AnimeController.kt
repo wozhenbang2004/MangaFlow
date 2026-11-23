@@ -1802,7 +1802,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private fun sameEpisodeMappingDetail(left: AnimeDetail, right: AnimeDetail): Boolean {
         fun identity(subject: AnimeSubject) = subject.copy(coverUrl = "", description = "", tags = emptyList(),
             airWeekday = null, rating = null, rank = null, ratingCount = null)
-        return identity(left.subject) == identity(right.subject) && left.episodes == right.episodes &&
+        val sameEpisodes = left.episodes.size == right.episodes.size && left.episodes.indices.all { index ->
+            val before = left.episodes[index]
+            val after = right.episodes[index]
+            before == after || before.copy(title = after.title, durationMs = after.durationMs,
+                airDate = after.airDate) == after
+        }
+        return identity(left.subject) == identity(right.subject) && sameEpisodes &&
             left.metadataSubject?.let { it.id to it.canonicalBangumiId() } ==
                 right.metadataSubject?.let { it.id to it.canonicalBangumiId() }
     }
@@ -2344,19 +2350,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                     AnimeAssociationCandidateCheck(catalog.title, AnimeAssociationPhase.UNAVAILABLE, catalogNotice))
                                 return@aggregation true
                             }
-                            val liveDetail = mutableState.value.detail ?: return@aggregation false
-                            val requested = focusFor(liveDetail)
-                            val groups = requested?.let { autoPlayGroups(liveDetail, it, catalog) }.orEmpty()
-                            // Work identity has already passed. Episode/route coverage must not
-                            // send a confirmed work back to the work-association prompt.
-                            val episodeStatus = when {
-                                groups.isNotEmpty() -> null
-                                requested == null -> "作品已关联，正在核对统一选集。"
-                                catalog.episodes.none { it.number != null } -> "作品已关联，来源未标集号，本集尚未对应。"
-                                catalog.episodes.any { autoPlayEpisodeMatches(liveDetail, requested, catalog, it) } ->
-                                    "作品已关联，本集线路尚未对应。"
-                                else -> "作品已关联，目录中暂无本集。"
-                            }
                             library.editPlaybackAssociation(detail.subject, editBindings = { bindings ->
                                 check(current() && sourceId !in library.state.value.entries[detail.subject.id]?.excludedSourceIds.orEmpty()) {
                                     "来源选择已变化，自动关联已停止。"
@@ -2372,7 +2365,27 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             } + catalog, sourceCatalogErrors = state.sourceCatalogErrors - sourceId) }
                             stageCatalogue(catalog)
                             rebuildOptions()
-                            report(AnimeAssociationPhase.LINKED, episodeStatus)
+                            // Save the verified work before calculating its episode coverage.
+                            // One matcher serves this immutable catalogue off the UI thread.
+                            val liveDetail = mutableState.value.detail ?: return@aggregation false
+                            val requested = focusFor(liveDetail)
+                            val episodeStatus = withContext(Dispatchers.Default) {
+                                val matcher = AnimeEpisodeMatcher(liveDetail, catalog)
+                                val groups = requested?.let { matcher.groups(it) }.orEmpty()
+                                when {
+                                    groups.isNotEmpty() -> null
+                                    requested == null -> "作品已关联，正在核对统一选集。"
+                                    catalog.episodes.none { it.number != null } -> "作品已关联，来源未标集号，本集尚未对应。"
+                                    catalog.episodes.any { matcher.matches(requested, it) } ->
+                                        "作品已关联，本集线路尚未对应。"
+                                    else -> "作品已关联，目录中暂无本集。"
+                                }
+                            }
+                            if (!current() || !stillBound(detail.subject.id, catalog.title)) return@aggregation false
+                            val latestDetail = mutableState.value.detail
+                            report(AnimeAssociationPhase.LINKED, episodeStatus.takeIf {
+                                latestDetail == liveDetail && latestDetail?.let(::focusFor) == requested
+                            })
                             true
                         }
                         if (loaded != true) report(AnimeAssociationPhase.UNAVAILABLE, "来源暂未完成，已保留现有目录。")
@@ -4077,12 +4090,16 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val detail = mutableState.value.detail?.takeIf { it.subject.id == owner.detail.subject.id } ?: return null
         val episodes = detail.episodes.filter { it.kind == owner.episode.kind }
         val index = episodes.indexOfFirst { it.id == owner.episode.id }
+        // End-of-episode playback may await this exact next episode's pending sources.
+        // Do not consume the one end action merely because correspondence is still loading.
         return episodes.getOrNull(index + 1)?.takeIf { next -> index >= 0 &&
-            episodeAvailability(next.id) == AnimeEpisodeAvailability.MATCHED }
+            episodeAvailability(next.id) != AnimeEpisodeAvailability.UPCOMING }
     }
 
     private fun prepareNext(owner: ActivePlayback, timelineGeneration: Long) {
-        val next = nextEpisode(owner) ?: return
+        val next = nextEpisode(owner)?.takeIf {
+            episodeAvailability(it.id) == AnimeEpisodeAvailability.MATCHED
+        } ?: return
         val subjectId = owner.detail.subject.id
         val option = defaultPreparationOption(subjectId, next.id) ?: return
         val catalog = mutableState.value.sourceCatalogs.firstOrNull { it.title.sourceId == option.catalog.sourceId &&

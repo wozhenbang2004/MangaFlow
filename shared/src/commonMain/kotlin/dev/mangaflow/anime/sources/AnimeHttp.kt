@@ -6,6 +6,7 @@ import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.net.FormBody
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.net.MediaType.Companion.toMediaType
@@ -57,7 +58,17 @@ internal class AnimeHttp(
         allowNotFound: Boolean = false,
         sameOriginRedirects: Boolean = false,
         headers: Map<String, String> = emptyMap(),
+        formPayload: Map<String, String>? = null,
     ): AnimeHttpResponse {
+        // Public parser forms share the routed, cancellable request path. They cannot
+        // carry account credentials, change the JSON contract or replay across redirects.
+        require(formPayload == null || payload == null && token == null && method == "POST" && sameOriginRedirects) {
+            "来源公开表单只能匿名提交到已确认的同站点接口。"
+        }
+        require(formPayload == null || formPayload.size in 1..16 &&
+            formPayload.entries.sumOf { it.key.length + it.value.length } <= 32_768 &&
+            formPayload.all { (name, value) -> name.matches(Regex("[A-Za-z0-9_]{1,64}")) &&
+                value.none { it.code < 0x20 || it.code == 0x7f } }) { "来源公开表单格式无效。" }
         // Source signatures are scoped to one origin, including every followed redirect.
         require(headers.isEmpty() || sameOriginRedirects) { "来源协议请求头只能用于同站点接口。" }
         require(headers.size <= 32 && headers.keys.map { it.lowercase() }.distinct().size == headers.size)
@@ -66,6 +77,9 @@ internal class AnimeHttp(
             require(name.lowercase() !in RESERVED_HEADERS && value.length <= 8192 &&
                 value.none { it.code < 0x20 && it != '\t' || it.code == 0x7f }) { "来源协议请求头无效。" }
         }
+        val body = formPayload?.let { fields ->
+            FormBody.Builder().apply { fields.forEach { (name, value) -> add(name, value) } }.build()
+        } ?: payload?.toString()?.toRequestBody("application/json".toMediaType())
         var current = animePublicUrl(url.toString())
         val origin = "${current.scheme}://${current.host}:${current.port}"
         var remainingRedirects = 5
@@ -82,7 +96,7 @@ internal class AnimeHttp(
             token?.let { request.header("Authorization", "Bearer $it") }
             if (method != "GET") request.header("Origin", "${current.scheme}://${current.host}")
             headers.forEach { (name, value) -> request.header(name, value) }
-            request.method(method, payload?.toString()?.toRequestBody("application/json".toMediaType()))
+            request.method(method, body)
             val response = try {
                 client.execute(request.build(), maximumBytes = 8L * 1024 * 1024)
             } catch (cancel: CancellationException) {

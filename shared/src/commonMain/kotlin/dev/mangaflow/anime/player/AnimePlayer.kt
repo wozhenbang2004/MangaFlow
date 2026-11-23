@@ -603,6 +603,34 @@ internal fun isAnimeStartupVideoPrefix(bytes: ByteArray, size: Int = bytes.size)
     return mp4 || transport || matroska
 }
 
+internal const val ANIME_STARTUP_MEDIA_PREFIX_BYTES = 5 * 188
+
+/** Optional preparation accepts the same proved container/audio headers on every platform. */
+internal fun isAnimeStartupMediaPrefix(
+    bytes: ByteArray,
+    size: Int = bytes.size,
+    audio: Boolean = false,
+    mp4Only: Boolean = false,
+    imagePrefixedTransport: Boolean = false,
+): Boolean {
+    if (mp4Only) return size >= 8 && bytes.decodeToString(4, 8) in setOf("ftyp", "styp", "moof", "sidx", "moov")
+    if (isAnimeStartupVideoPrefix(bytes, size)) return true
+    if (imagePrefixedTransport && animeHlsTransportOffset(bytes, size) > 0) return true
+    if (!audio) return false
+    var offset = 0
+    if (size >= 10 && bytes.decodeToString(0, 3) == "ID3") {
+        if ((6..9).any { bytes[it].toInt() and 0x80 != 0 }) return false
+        val tagSize = (6..9).fold(0) { value, index -> (value shl 7) or (bytes[index].toInt() and 0x7f) }
+        offset = 10 + tagSize
+    }
+    if (offset < 0 || size - offset < 7) return false
+    val first = bytes[offset].toInt() and 0xff
+    val second = bytes[offset + 1].toInt() and 0xff
+    val adts = first == 0xff && second and 0xf6 == 0xf0
+    val ac3 = first == 0x0b && second == 0x77
+    return adts || ac3
+}
+
 internal fun readablePlayerError(failure: Throwable): String {
     val message = failure.message?.takeIf { it.isNotBlank() } ?: "播放器暂时无法打开这个资源，请重试或换一条线路"
     return message.replace(Regex("https?://[^\\s]+"), "来源地址")

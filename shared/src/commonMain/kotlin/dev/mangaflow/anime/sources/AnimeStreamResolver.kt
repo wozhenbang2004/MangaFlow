@@ -75,7 +75,7 @@ internal class AnimeStreamResolver(private val http: AnimeHttp, private val same
         }
 
         anonymousPages.dmbusPublicMedia(response.url, response.text)?.let { target ->
-            return ResolvedAnimeStream(target, animeMediaType(target), mediaReferer(pageUrl), subtitles)
+            return ResolvedAnimeStream(target.url, animeMediaType(target.url), target.referer, subtitles)
         }
         if (akiDeclaredPage) {
             anonymousPages.akiPublicMedia(response.url, response.text)?.let { target ->

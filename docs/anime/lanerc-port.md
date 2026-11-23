@@ -1,5 +1,29 @@
 # Lanerc feature transfer into MangaFlow
 
+<a id="lanerc-continuity-transfer-20261123"></a>
+
+## 公开解析与连续播放补齐 · 2026-11-23
+
+本轮从 main `047cbb521cf5d2bddacd2c4bb2057dcf4b1808d5` 继续，要求及原话见 [ANIME-TRANSFER-01–05](../design/anime-redesign-20261119.md#anime-lanerc-transfer-20261123)。已核对当前真实代码：`AutomaticAnimeSources` 使用 6 个原生替代（AniCh、AkiAnime、DMBus、金牌、yzx、LMM85）和 10 个自动准备的视频脚本，另有豆瓣浏览、弹幕脚本；这些数量不等于可播放率。现有主目录、逐源增量、同集恢复、真实下一集媒体缓存和可选首帧准备已经存在，不能继续套用早期“只有地址”“只登记目录”的结论。
+
+### 固定 DMBus 公开脚本与原生协议
+
+本轮只读下载并核对 [公开 dmbus.js](https://js.z1i.cn/js/dmbus.js)，SHA-256 `1268c4dce7b4e79d36a0516331f69eb472694f0591954eff9d621370ec7fdeb3` 与 `LanercSourceDirectory` 固定记录相同。实际阅读 `okok` 的公开字符表／Base64 转换以及 `play` 的 `index.php → api.php` 提交和返回处理；没有执行该脚本或调用业务／媒体端点。
+
+`AnonymousPlayerPages` 在既有直链和 `__HHJX_BOOTSTRAP__ /api/parse` 之后接回旧协议。仅 `anime-native-dmbus` 当前选集链实际读取的 HTTPS `hhjx.hhplayer.com:443/index.php?url=…` 可进入；同一内联脚本须提供唯一的双引号 `url`、`t` 和 `key = OKOK(...)` 字面量。`url`、`t` 按旧脚本合同作为字符串使用，不套用新 bootstrap 的 URL 相等／Unix 秒规则；格式、数量和长度有界，参数不缓存、不跨集复用。52 项公开字符映射与固定脚本逐项静态核对，不能解释为提取账号密钥或执行任意页面脚本。
+
+表单沿现有 `AnimeHttp`、`FormBody`、路由、取消和错误处理发送到固定同源 `/api.php`，正文为 `url/t/key/act=0/play=1`；JSON 与表单互斥，禁止账号 token／Cookie，请求不重放 POST 重定向。调用前后核对来源路由。200 结果仍须提供可识别的公共媒体地址；主机相对 `/cache/...` 按解析站 origin 补齐，原媒体 HTTP(S) 与签名保持。`link`／`youku` 等需网页继续解析的结果保持明确不支持。
+
+媒体 Referer 继承固定脚本语义：有效的显式声明优先；缺失或为 `never` 时，同源媒体回退当前播放器页，跨源媒体不带该头。沿既有隐私规则移除解析页／声明 Referer 的 query 与 fragment，避免 opaque 参数进入媒体头；原生 provider 只在非空时添加 Referer。旧新协议各自的准入规则保持分开，登录／挑战页仍在提交之前被拒绝。不同 HHJX 域名、其他动态脚本、未知参数格式和网页嗅探不是本次新能力。
+
+### 关联、连播和真实预缓存
+
+- `AnimeController` 对紧邻逻辑下一集启动已有有界自动关联／开播流程，避免结束时暂未 `MATCHED` 就永久消费自动连播动作；不跳过缺集，预准备继续要求 `MATCHED`。作品身份先保存，覆盖提示随后用一次后台 matcher 计算，晚到提示复核详情／聚焦集和当前源归属；集名、时长、日期的纯资料更新保持原有可用映射。
+- Android 预读复用既有容器／音频头和 `animeHlsTransportOffset`，只对原来支持的 Lanerc／LMM85 图片前缀 HLS 扩大头部检查至既有 256 KiB 图片边界加 5 个 TS 包。缓存保存原字节，检查读取仍计入原预算；未识别的内容交由正常播放处理，不标成已备媒体。
+- Windows／非 Android bridge 的 HLS 与普通文件预读在写入准备缓存前核对媒体头，已缓存内容也须能核对。分离音视频仅在双方明确提供可解析的清单起点时间时计共同可用范围；未知时间或选轨保持时长未知，实际已缓存字节仍可供正常播放。连续片段不越过 discontinuity，播放／预解码主路径与阈值保持不变。
+
+本批源码集成与独立只读审阅完成，差异空白检查无诊断。已核对 main 的构建发布入口；没有新增／运行测试、本地编译／构建、媒体探测或设备操作。Android／Windows 新包的解析成功、真实首帧、连播和设备表现均待用户反馈；未知 ENC1 包、受保护源会话、四个漫画适配以及下文完整产品库存的开放项没有被本批关闭。
+
 ## 公开媒体协议与目录声明解析 · 2026-11-21
 
 本批使用 [11 月 21 日逐界面逆向报告](https://chatgpt.com/space/page_f79f848277cc81919ffc39a7f21b79d1) 的同番同集对照，实施合同与原话见 [ANIME-REBUILD-01–07](../design/anime-redesign-20261119.md#anime-rebuild-20261121)。已核对公开 `manguo`、`gugu`、`07` 和 `23` 脚本内容与仓库固定摘要；没有读取报告中引用的用户本机 D: 文件，也没有从缺失的媒体样本补造 CDN 域名。

@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import okio.Buffer
 import okio.IOException
+import kotlin.time.Instant
 
 internal interface AnimeLoopbackConnection {
     fun read(buffer: ByteArray): Int
@@ -472,21 +473,25 @@ internal class AnimeStreamBridge private constructor(
 
     private data class WarmResponse(val url: HttpUrl, val bytes: ByteArray, val contentType: String?)
 
-    private suspend fun readWarmResource(resource: Resource, maximumBytes: Long): WarmResponse? {
+    private suspend fun readWarmResource(resource: Resource, maximumBytes: Long, audio: Boolean = false): WarmResponse? {
         if (maximumBytes <= 0L) return null
+        fun verified(bytes: ByteArray) = resource.kind !in setOf(Kind.MEDIA, Kind.AUTO) ||
+            isAnimeStartupMediaPrefix(bytes, audio = audio, imagePrefixedTransport = resource.imagePrefixedTransport)
         val stored = runCatching { cache?.read(asset, resource.url.toString(), null) }.getOrNull()
         if (stored != null) {
             try {
                 if (stored.total > maximumBytes) return null
                 val body = Buffer()
-                val bytes = ByteArray(64 * 1024)
+                val chunk = ByteArray(64 * 1024)
                 while (true) {
                     currentCoroutineContext().ensureActive()
-                    val count = stored.read(bytes)
+                    val count = stored.read(chunk)
                     if (count < 0) break
-                    body.write(bytes, 0, count)
+                    body.write(chunk, 0, count)
                 }
-                return WarmResponse(resource.url, body.readByteArray(), stored.contentType)
+                val bytes = body.readByteArray()
+                if (bytes.size.toLong() != stored.total || !verified(bytes)) return null
+                return WarmResponse(resource.url, bytes, stored.contentType)
             } finally { stored.close() }
         }
         var url = resource.url
@@ -507,6 +512,7 @@ internal class AnimeStreamBridge private constructor(
                 if (!accepted || body.size == 0L ||
                     response.header("Content-Length")?.toLongOrNull()?.let { it != body.size } == true) return null
                 val bytes = body.readByteArray()
+                if (!verified(bytes)) return null
                 if (resource.kind in setOf(Kind.MEDIA, Kind.AUTO)) {
                     // A fully received chunked resource has a known byte length even without an upstream header.
                     val complete = response.copy(headers = response.headers.filterKeys { !it.equals("Content-Length", true) } +
@@ -539,11 +545,13 @@ internal class AnimeStreamBridge private constructor(
             response = readWarmResource(resource, minOf(playlistBudget, remaining)) ?: return null
             remaining -= response.bytes.size
         }
-        val segment = parseAnimeHlsDownload(response.url, response.bytes.decodeToString()).resources.firstOrNull { it.name.startsWith("segment-") }
+        val mediaPlaylist = response.bytes.decodeToString()
+        val segment = parseAnimeHlsDownload(response.url, mediaPlaylist).resources.firstOrNull { it.name.startsWith("segment-") }
             ?: return null
         val segmentUrl = checkedUrl(segment.url)
-        val media = readWarmResource(resource.copy(url = segmentUrl, kind = Kind.MEDIA), remaining) ?: return null
-        if (!isAnimeStartupVideoPrefix(media.bytes)) return null
+        val media = readWarmResource(resource.copy(url = segmentUrl, kind = Kind.MEDIA,
+            imagePrefixedTransport = usesImagePrefixedAnimeHls(asset.sourceId) &&
+                isIndependentAnimeHlsSegmentPlaylist(mediaPlaylist)), remaining) ?: return null
         return AnimeBufferedStartup(segmentUrl, media.bytes, media.contentType ?: "application/octet-stream", validUntil)
     }
 
@@ -563,13 +571,35 @@ internal class AnimeStreamBridge private constructor(
             val range = "bytes=0-${request.maximumBytes - 1L}"
             val initial = owner.read(asset, primary.toString(), range)
             if (initial != null) {
-                try { return AnimeStartupCacheResult(initial.end - initial.start + 1L) }
+                try {
+                    val prefix = Buffer()
+                    val chunk = ByteArray(ANIME_STARTUP_MEDIA_PREFIX_BYTES)
+                    while (prefix.size < ANIME_STARTUP_MEDIA_PREFIX_BYTES) {
+                        currentCoroutineContext().ensureActive()
+                        val count = initial.read(chunk)
+                        if (count < 0) break
+                        prefix.write(chunk, 0, count)
+                    }
+                    return if (isAnimeStartupMediaPrefix(prefix.readByteArray()))
+                        AnimeStartupCacheResult(initial.end - initial.start + 1L)
+                    else AnimeStartupCacheResult(0L, detail = "已有文件片段的媒体头无法核对，交由播放器准备")
+                }
                 finally { initial.close() }
             }
             var url = primary
             repeat(9) {
                 var writer: AnimeStreamCacheWriter? = null
                 var accepted = false
+                var representation: NetworkResponse? = null
+                val prefix = Buffer()
+                var verified = false
+                fun writeVerifiedPrefix() {
+                    val bytes = prefix.readByteArray()
+                    require(isAnimeStartupMediaPrefix(bytes)) { "未识别到可预读的视频文件，未写入准备缓存" }
+                    verified = true
+                    writer = owner.write(asset, primary.toString(), checkNotNull(representation))
+                    writer?.append(bytes, bytes.size)
+                }
                 try {
                     val builder = Request.Builder().url(url).get().header("Accept-Encoding", "identity").header("Range", range)
                     scopedHeaders(Resource(primary, asset.headers, primary, Kind.MEDIA), url).forEach { (name, value) -> builder.header(name, value) }
@@ -577,9 +607,17 @@ internal class AnimeStreamBridge private constructor(
                         val length = response.header("Content-Length")?.toLongOrNull()
                         accepted = response.code in setOf(200, 206) && length != null && length in 1L..request.maximumBytes &&
                             response.header("Content-Encoding")?.equals("identity", true) != false
-                        if (accepted) writer = owner.write(asset, primary.toString(), response)
+                        if (accepted) representation = response
                         accepted
-                    }, onChunk = { bytes, count -> check(current()) { "预读身份已过期" }; writer?.append(bytes, count) })
+                    }, onChunk = { bytes, count ->
+                        check(current()) { "预读身份已过期" }
+                        if (verified) writer?.append(bytes, count)
+                        else {
+                            prefix.write(bytes, 0, count)
+                            if (prefix.size >= ANIME_STARTUP_MEDIA_PREFIX_BYTES) writeVerifiedPrefix()
+                        }
+                    })
+                    if (accepted && !verified && prefix.size > 0L) writeVerifiedPrefix()
                     writer?.close(); writer = null
                     if (response.code in setOf(301, 302, 303, 307, 308)) {
                         url = checkedRedirect(url, response.header("Location"))
@@ -598,25 +636,37 @@ internal class AnimeStreamBridge private constructor(
         var resource = Resource(primary, asset.headers, primary, Kind.MANIFEST)
         suspend fun playlist(value: Resource): WarmResponse? {
             if (!current()) return null
-            val response = readWarmResource(value, minOf(256L * 1024L, remaining)) ?: return null
-            remaining -= response.bytes.size
+            val allowance = minOf(256L * 1024L, remaining)
+            remaining -= allowance
+            val response = readWarmResource(value, allowance) ?: return null
+            remaining += allowance - response.bytes.size
             return response
         }
         var response = playlist(resource) ?: return AnimeStartupCacheResult(0L)
         val text = response.bytes.decodeToString()
+        val lines = text.trimStart('\uFEFF').lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+        if (lines.firstOrNull() != "#EXTM3U")
+            return AnimeStartupCacheResult(0L, detail = "来源没有返回可预读的 HLS 清单")
+        if (lines.any { it.startsWith("#EXT-X-SESSION-KEY:") || it.startsWith("#EXT-X-CONTENT-STEERING:") })
+            return AnimeStartupCacheResult(0L, detail = "当前 HLS 含受保护内容或动态分流，交由播放器准备")
         var audio: Resource? = null
+        var exactNativeSelection = true
         if (text.contains("#EXT-X-STREAM-INF:")) {
-            val lines = text.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
             val variants = lines.withIndex().filter { it.value.startsWith("#EXT-X-STREAM-INF:") }
             if (variants.size != 1) return AnimeStartupCacheResult(0L,
                 detail = "多画质主清单由播放器选择；当前不把任意画质的片段算作下一集已备")
             fun attribute(line: String, name: String) = Regex("(?:^|,)$name=\"([^\"]+)\"")
                 .find(line.substringAfter(':'))?.groupValues?.get(1)
             val variant = variants.single()
+            if (attribute(variant.value, "VIDEO") != null)
+                return AnimeStartupCacheResult(0L, detail = "当前 HLS 使用独立视频轨，交由播放器准备")
             attribute(variant.value, "AUDIO")?.let { group ->
-                val selected = lines.filter { it.startsWith("#EXT-X-MEDIA:") &&
-                    it.contains("TYPE=AUDIO") && attribute(it, "GROUP-ID") == group && it.contains("DEFAULT=YES") }
-                    .singleOrNull() ?: return AnimeStartupCacheResult(0L, detail = "未能确定下一集的默认音轨")
+                val candidates = lines.filter { it.startsWith("#EXT-X-MEDIA:") &&
+                    it.contains("TYPE=AUDIO") && attribute(it, "GROUP-ID") == group }
+                if (candidates.size > 1) exactNativeSelection = false
+                val selected = candidates.filter { it.contains("DEFAULT=YES") }.singleOrNull()
+                    ?: candidates.singleOrNull()
+                    ?: return AnimeStartupCacheResult(0L, detail = "未能确定下一集的默认音轨")
                 attribute(selected, "URI")?.let { uri ->
                     val url = response.url.resolve(uri)?.let { checkedUrl(it.toString()) } ?: return AnimeStartupCacheResult(0L)
                     audio = resource.copy(url = url)
@@ -629,11 +679,15 @@ internal class AnimeStreamBridge private constructor(
             response = playlist(resource) ?: return AnimeStartupCacheResult(0L)
         }
         val resident = mutableSetOf<String>()
-        suspend fun retain(media: Resource): Boolean {
+        suspend fun retain(media: Resource, audio: Boolean = false): Boolean {
             if (!current()) return false
             if (media.url.toString() in resident) return true
-            val body = readWarmResource(media, remaining) ?: return false
-            remaining -= body.bytes.size
+            // Failed/invalid reads may already have consumed data. Do not refund
+            // unknown bytes and spend the same allowance again on another track.
+            val allowance = remaining
+            remaining = 0L
+            val body = readWarmResource(media, allowance, audio) ?: return false
+            remaining = allowance - body.bytes.size
             val actual = owner.read(asset, media.url.toString(), null) ?: return false
             try {
                 if (actual.total != body.bytes.size.toLong()) return false
@@ -642,43 +696,65 @@ internal class AnimeStreamBridge private constructor(
                 return true
             } finally { actual.close() }
         }
-        suspend fun mediaWindow(resource: Resource, response: WarmResponse): Long {
-            val plan = parseAnimeHlsDownload(response.url, response.bytes.decodeToString())
+        suspend fun mediaWindow(resource: Resource, response: WarmResponse, positionMs: Long,
+            audio: Boolean = false): Long {
+            val mediaPlaylist = response.bytes.decodeToString()
+            val plan = parseAnimeHlsDownload(response.url, mediaPlaylist)
+            val inspectImagePrefix = usesImagePrefixedAnimeHls(asset.sourceId) &&
+                isIndependentAnimeHlsSegmentPlaylist(mediaPlaylist)
             val byName = plan.resources.associateBy { it.name }
             var initialization: String? = null
             var cursor = 0L
             var duration = 0L
-            var preparedUntil = request.positionMs
+            var preparedUntil = positionMs
+            val targetEnd = positionMs + minOf(request.targetDurationMs, Long.MAX_VALUE - positionMs)
             for (line in plan.playlist.lineSequence()) {
                 when {
+                    // The download plan preserves discontinuities but does not map their
+                    // native timestamps. Only the preceding continuous range is proved.
+                    line == "#EXT-X-DISCONTINUITY" -> return (preparedUntil - positionMs).coerceAtLeast(0L)
                     line.startsWith("#EXT-X-MAP:") -> initialization = Regex("URI=\"([^\"]+)\"").find(line)?.groupValues?.get(1)
                     line.startsWith("#EXTINF:") -> duration = (line.substringAfter(':').substringBefore(',').toDouble() * 1000).toLong()
                     line.isNotBlank() && !line.startsWith('#') -> {
+                        if (duration <= 0L || duration > Long.MAX_VALUE - cursor)
+                            return (preparedUntil - positionMs).coerceAtLeast(0L)
                         val end = cursor + duration
-                        if (end > request.positionMs && cursor < request.positionMs + request.targetDurationMs) {
+                        if (end > positionMs && cursor < targetEnd) {
                             if (initialization != null) {
-                                val init = byName[initialization] ?: return preparedUntil - request.positionMs
-                                if (!retain(resource.copy(url = checkedUrl(init.url), kind = Kind.MEDIA))) return preparedUntil - request.positionMs
+                                val init = byName[initialization] ?: return preparedUntil - positionMs
+                                if (!retain(resource.copy(url = checkedUrl(init.url), kind = Kind.MEDIA))) return preparedUntil - positionMs
                             }
-                            val segment = byName[line] ?: return preparedUntil - request.positionMs
-                            if (!retain(resource.copy(url = checkedUrl(segment.url), kind = Kind.MEDIA))) return preparedUntil - request.positionMs
+                            val segment = byName[line] ?: return preparedUntil - positionMs
+                            if (!retain(resource.copy(url = checkedUrl(segment.url), kind = Kind.MEDIA,
+                                    imagePrefixedTransport = inspectImagePrefix), audio)) return preparedUntil - positionMs
                             preparedUntil = end
                         }
                         cursor = end
-                        if (cursor >= request.positionMs + request.targetDurationMs) break
+                        if (cursor >= targetEnd) break
                     }
                 }
             }
-            return (preparedUntil - request.positionMs).coerceAtLeast(0L)
+            return (preparedUntil - positionMs).coerceAtLeast(0L)
         }
-        var duration = mediaWindow(resource, response)
+        // Read both manifests before assigning their bounded media-byte allowance.
+        // A rendition's EXTINF sum alone is not a shared audio/video time origin.
+        val audioList = audio?.let { playlist(it) }
+        val audioPosition = audioList?.let { track -> shiftedStartupPosition(request.positionMs,
+            startupTimelineOrigin(response.bytes.decodeToString()), startupTimelineOrigin(track.bytes.decodeToString())) }
+        val alignedAudio = audio == null || audioPosition != null
+        var duration = mediaWindow(resource, response, request.positionMs)
         if (audio != null) {
             val track = checkNotNull(audio)
-            val audioList = playlist(track)
-            duration = minOf(duration, if (audioList == null) 0L else mediaWindow(track, audioList))
+            duration = minOf(duration, if (audioList == null) 0L else
+                mediaWindow(track, audioList, audioPosition ?: request.positionMs, audio = true))
         }
-        return if (current()) AnimeStartupCacheResult(bytes, duration,
-            if (duration < request.targetDurationMs) "实际已备范围受本次字节额度或可用存储限制" else null)
+        return if (current()) AnimeStartupCacheResult(bytes, duration.takeIf { exactNativeSelection && alignedAudio },
+            when {
+                !alignedAudio -> "已缓存候选原片；分离音轨的共同时间轴尚不能核对，实际续看位置交由首帧预解码确认"
+                !exactNativeSelection -> "已缓存候选音轨；实际选轨由播放器决定，可播放时长仍未知"
+                duration < request.targetDurationMs -> "实际已备范围受连续时间轴、字节额度或可用存储限制"
+                else -> null
+            })
         else AnimeStartupCacheResult(0L, detail = "预读身份已过期")
     }
 
@@ -745,6 +821,26 @@ internal class AnimeStreamBridge private constructor(
             }
         }
     }
+}
+
+/** A date before the first segment describes the playlist's actual zero point. */
+private fun startupTimelineOrigin(text: String): Long? {
+    for (raw in text.trimStart('\uFEFF').lineSequence()) {
+        val line = raw.trim()
+        if (line.startsWith("#EXT-X-PROGRAM-DATE-TIME:"))
+            return runCatching { Instant.parse(line.substringAfter(':')).toEpochMilliseconds() }.getOrNull()
+        if (line.isNotBlank() && !line.startsWith('#')) return null
+    }
+    return null
+}
+
+private fun shiftedStartupPosition(positionMs: Long, videoOrigin: Long?, audioOrigin: Long?): Long? {
+    if (videoOrigin == null || audioOrigin == null) return null
+    if (audioOrigin > 0L && videoOrigin < Long.MIN_VALUE + audioOrigin ||
+        audioOrigin < 0L && videoOrigin > Long.MAX_VALUE + audioOrigin) return null
+    val shift = videoOrigin - audioOrigin
+    if (shift > 0L && positionMs > Long.MAX_VALUE - shift) return null
+    return (positionMs + shift).takeIf { it >= 0L }
 }
 
 private fun checkedUrl(value: String): HttpUrl {

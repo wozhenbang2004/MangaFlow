@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Lanerc 机制补齐与连续播放 · 2026-11-23
+
+Route/Stage：DELIVERY，基线 main `047cbb521cf5d2bddacd2c4bb2057dcf4b1808d5`；下节 ANIME-FAST-01–04 已进入主线，不重复其旧提交动作。用户先追问 Lanerc 逆向所得是否完全吸收到漫流，随后明确“快去吧。去做好吧。”授权继续。两句原话、解释边界、ANIME-TRANSFER-01–05 及当前质量下限集中在[本批合同](../design/anime-redesign-20261119.md#anime-lanerc-transfer-20261123)，覆盖至本次授权，2026-11-23 21:18 Asia/Shanghai 固化；精确消息时间／ID 未提供。
+
+当前实现与独立源码审阅已完成：本集结束时逻辑下一集可等待已有找源流程，预准备仍须已对应；作品关联先保存，集覆盖说明复用单个后台 matcher 并丢弃过期提示；集名／时长／日期刷新不撤下未变线路。DMBus 补入固定公开脚本中 HHJX `/index.php → /api.php` 的表单链；Android 图片前缀 HLS 预读与既有提取器对齐，Windows 预读核对媒体头并按有依据的共同连续时间报告。原始脚本摘要、准确协议及剩余能力边界见[Lanerc 移植记录](../anime/lanerc-port.md#lanerc-continuity-transfer-20261123)。全部写入已冻结，`git diff --check` 无诊断；这些不代表设备验收。
+
+本轮完整加载并核验的开发核心为 2.7.10，Space HEAD `20261123T120229Z-c9747750`，核心 SHA-256 `0fa355a7b138c17a0fe9a8b41b72c0d704793bb9e3f413d2d8948e098e89c691`；没有修改全局 Skill，也未宣称其他端整包同步。实际 CI 入口只读核对：main push 触发 Android release 和 Multiplatform；Android build 排除 main，push 不触发手动 full_lint，可执行测试任务禁用。签名和归档完整性校验仍保留。
+
+Next Exact Action：读取最新 main，保留并发修改，以 expected SHA 守卫一次提交，回读提交并只确认上述正常 CI 启动。若本节所在实现已进入 main 且 CI 已启动，不重复发布或追加状态专用提交，不等待构建完成。禁止测试、本地编译／构建、业务／媒体探测和 UI 自动化。root 唯一负责集成、文档与主线发布；运行、首帧、连续播放和新包体验未验证。未确认协议／登录与验证能力、四个漫画适配及其他完整产品差距仍按移植记录保持开放，不能说“完全吸收”。
+
 ## 番剧详情与关联性能 · 2026-11-23
 
 Route/Stage：DELIVERY，源码集成与独立只读审阅已完成、准备单批主线交付；当前批次从 main `edc61f93128b23c98c68e88d905a355d69894a04` 修复进入番剧卡住、来源关联慢；前轮软件内授权/LAN批次已交付，不重复执行旧 Next Action。原话、源码依据、ANIME-FAST-01–04及验收边界见[番剧性能合同](../design/anime-redesign-20261119.md#anime-detail-performance-20261123)。用户原话已覆盖本轮完整反馈，2026-11-23固化；精确消息ID/发送时刻未提供。
