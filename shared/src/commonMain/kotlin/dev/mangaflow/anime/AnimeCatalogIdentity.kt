@@ -34,7 +34,7 @@ internal fun animeMetadataSubjectCandidate(primary: AnimeSubject, candidate: Ani
 }
 
 private val catalogueScope = Regex(
-    """第[一二三四五六七八九十百0-9]+(?:[季期部章]|クール)|(?:^|[^a-z0-9])(?:season|part|cour)\s*[0-9]+|(?:^|[^a-z0-9])[0-9]+(?:st|nd|rd|th)\s+season|(?:final|last)\s+season|(?:篇|編|前半|後半|后半|終章|终章|完結|完结)|\s+[2-9]$|(?:\s|[\u3400-\u9fff])[ivx]{1,4}$""",
+    """第[一二三四五六七八九十百0-9]+(?:[季期部章]|クール)|(?:^|[^a-z0-9])(?:season|part|cour)\s*[0-9]+|(?:^|[^a-z0-9])[0-9]+(?:st|nd|rd|th)\s+season|(?:final|last)\s+season|年番\s*[一二三四五六七八九十0-9]+|(?:篇|編|前半|後半|后半|終章|终章|完結|完结)|\s+[2-9]$|(?:\s|[\u3400-\u9fff])[ivx]{1,4}$""",
     RegexOption.IGNORE_CASE,
 )
 

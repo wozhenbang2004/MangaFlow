@@ -47,6 +47,16 @@ private data class AnimeDetailVisit(
     val candidates: List<AnimeSourceTitle>, val scores: List<AnimeSourceScore>,
 )
 private data class AnimeSourceAssociation(val title: AnimeSourceTitle, val subjectId: String)
+private data class AnimeSearchOpening(val group: AnimeSearchGroup, val version: AnimeSourceTitle?)
+
+private fun AnimeSourceTitle.sameSearchReference(other: AnimeSourceTitle): Boolean =
+    sourceId == other.sourceId && id == other.id && url == other.url && sourceRevision == other.sourceRevision
+
+private fun AnimeUnifiedSearchState.currentReferences(group: AnimeSearchGroup): List<AnimeSourceTitle> {
+    val live = sources.associateBy { it.providerId }
+    return group.sources.filter { title -> live[title.sourceId]?.items?.contains(title) == true }
+}
+
 internal enum class AnimeWorkspaceDestination(val label: String, val icon: ImageVector) {
     HOME("发现", Icons.Outlined.Explore), LIBRARY("追番", Icons.Outlined.Bookmarks),
     HISTORY("观看历史", Icons.Outlined.History), RANKING("榜单", Icons.Outlined.Leaderboard),
@@ -164,6 +174,7 @@ private fun AnimeWorkspaceContent(
     var storageModelsVisible by remember { mutableStateOf(false) }
     var storageDestination by remember { mutableStateOf<String?>(null) }
     var browseCandidate by remember { mutableStateOf<AnimeSourceTitle?>(null) }
+    var searchVersionChoice by remember { mutableStateOf<AnimeSearchGroup?>(null) }
     var pendingAssociation by remember { mutableStateOf<AnimeSourceAssociation?>(null) }
     var sourceEpisode by remember { mutableStateOf<AnimeEpisode?>(null) }
     var trackingVisible by remember { mutableStateOf(false) }
@@ -176,6 +187,7 @@ private fun AnimeWorkspaceContent(
     val snackbar = remember { SnackbarHostState() }
     var openingSubject by remember { mutableStateOf<AnimeSubject?>(null) }
     var openingReference by remember { mutableStateOf<AnimeSourceTitle?>(null) }
+    var openingSearch by remember { mutableStateOf<AnimeSearchOpening?>(null) }
     val windowFullscreen = LocalWindowFullscreen.current
     var layoutFullscreen by rememberSaveable { mutableStateOf(false) }
     val playerFullscreen = windowFullscreen?.active ?: layoutFullscreen
@@ -193,7 +205,8 @@ private fun AnimeWorkspaceContent(
         else -> AnimeRoute("home", 0)
     }
     val overlayVisible = downloadsVisible || sourcesVisible || sourceManagerVisible || trackingVisible || reviewsVisible ||
-        storagePresent || storageModelsVisible || ratingUi.obscured || recentWatchingOpen || actionSubject != null
+        storagePresent || storageModelsVisible || ratingUi.obscured || recentWatchingOpen || actionSubject != null ||
+        searchVersionChoice != null
     val displayedDestination = when {
         sourceManagerVisible -> AnimeWorkspaceDestination.SOURCES
         downloadsVisible -> AnimeWorkspaceDestination.DOWNLOADS
@@ -206,6 +219,7 @@ private fun AnimeWorkspaceContent(
     }
     val rootActive = active && route.depth == 0 && !searchPresent && !toolsPresent && !layoutPresent && !overlayVisible
     LaunchedEffect(active, route.key, page, directoryOpen) {
+        searchVersionChoice = null
         toolsVisible = false
         pendingTool = null
         recentWatchingOpen = false
@@ -297,14 +311,16 @@ private fun AnimeWorkspaceContent(
     }
     fun submitSearch(term: String) {
         val next = term.trim()
-        val provider = if (browseCandidate != null) AnimeDiscoveryProvider.BANGUMI else AnimeDiscoveryProvider.DOUBAN
+        val matchingReference = browseCandidate != null
+        val provider = if (matchingReference) AnimeDiscoveryProvider.BANGUMI else AnimeDiscoveryProvider.DOUBAN
         val previous = controller.searchState.value
-        if (previous.query != next || !previous.indexOnly || previous.catalogProvider != provider)
+        if (previous.query != next || previous.indexOnly != matchingReference || previous.catalogProvider != provider)
             searchScroll.requestScrollToItem(0)
-        controller.search(next, indexOnly = true, provider = provider)
+        controller.search(next, indexOnly = matchingReference, provider = provider)
     }
     fun beginDetailNavigation() {
         openingReference = null
+        openingSearch = null
         if (route.depth == 0) {
             detailHistory.clear()
             returnToSearch = searchExpanded
@@ -336,6 +352,7 @@ private fun AnimeWorkspaceContent(
             if (candidates.isNotEmpty()) controller.stageSearchCandidates(previous.detail.subject.id, candidates)
         } else {
             openingSubject = null
+            openingSearch = null
             controller.closeDetail()
             if (returnToSearch) {
                 focusSearchInput = false
@@ -432,16 +449,43 @@ private fun AnimeWorkspaceContent(
             controller.openDiscoveryItem(item)
         } else item.reference?.let { chooseReference(it, false) }
     }
-    fun openSearchResult(subject: AnimeSubject) {
-        val group = if (browseCandidate == null)
-            controller.searchState.value.groups.firstOrNull { it.subject?.id == subject.id } else null
+    fun openSearchResult(visibleGroup: AnimeSearchGroup, chosenVersion: AnimeSourceTitle? = null) {
+        if (!active || !searchExpanded || route.depth != 0) return
+        val current = controller.searchState.value
+        if (current.query != query.trim() || current.indexOnly != (browseCandidate != null)) return
+        val matched = when {
+            chosenVersion != null -> current.groups.singleOrNull { group ->
+                group.sources.any { it.sameSearchReference(chosenVersion) }
+            }
+            visibleGroup.subject != null -> current.groups.firstOrNull { it.subject?.id == visibleGroup.subject.id }
+            else -> current.groups.firstOrNull { it.key == visibleGroup.key && it.sources.any { source ->
+                visibleGroup.sources.any { source.sameSearchReference(it) }
+            } }
+        } ?: return
+        val group = matched.copy(sources = current.currentReferences(matched))
         pendingAssociation = null
-        if (group == null) open(subject)
-        else {
-            beginDetailNavigation()
-            openingSubject = subject
-            controller.openSearchGroup(group)
+        if (current.indexOnly) {
+            group.subject?.let(::open)
+            return
         }
+        val version = chosenVersion?.let { chosen ->
+            controller.currentVideoCandidates(group.sources).firstOrNull { it.sameSearchReference(chosen) } ?: return
+        }
+        // Keep an explicitly chosen native version even if metadata arrived while the picker was closing.
+        val requestedGroup = if (version == null) group else group.copy(subject = null)
+        val primary = version ?: controller.searchOpeningReference(requestedGroup)
+        val subject = primary?.let(controller::sourceSubject) ?: requestedGroup.subject
+        if (subject == null) {
+            if (controller.currentVideoCandidates(group.sources).isNotEmpty()) {
+                focusSearchInput = false
+                searchVersionChoice = group
+            }
+            return
+        }
+        beginDetailNavigation()
+        openingSubject = subject
+        openingSearch = AnimeSearchOpening(requestedGroup, primary)
+        controller.openSearchGroup(requestedGroup, preferredReference = primary)
     }
     fun dismissSources() {
         sourcesVisible = false
@@ -489,6 +533,7 @@ private fun AnimeWorkspaceContent(
             reviewsVisible -> reviewsVisible = false
             recentWatchingOpen -> { recentWatchingOpen = false; pendingRecentEntry = null }
             actionSubject != null -> { actionSubject = null; pendingWorkAction = null }
+            searchVersionChoice != null -> searchVersionChoice = null
             searchExpanded -> { searchExpanded = false; browseCandidate = null }
             playing && playerFullscreen -> setPlayerFullscreen(false)
             playing -> closePlayback()
@@ -529,8 +574,10 @@ private fun AnimeWorkspaceContent(
         controller.closeDetail()
         pendingAssociation = null
         browseCandidate = null
+        searchVersionChoice = null
         sourceEpisode = null
         openingSubject = null
+        openingSearch = null
         recheckRequest = null
         searchExpanded = false
         returnToSearch = false
@@ -752,7 +799,9 @@ private fun AnimeWorkspaceContent(
                                 state.detailError ?: openingSubject?.title ?: openingReference?.title,
                                 action = if (state.detailLoading) null else "重试",
                                 onAction = {
-                                    openingReference?.let(controller::openCatalogueReference)
+                                    val result = openingSearch
+                                    if (result != null) controller.openSearchGroup(result.group, preferredReference = result.version)
+                                    else openingReference?.let(controller::openCatalogueReference)
                                         ?: openingSubject?.let(controller::open)
                                 })
                         }
@@ -776,24 +825,24 @@ private fun AnimeWorkspaceContent(
                     .padding(horizontal = 8.dp, vertical = 2.dp)) { height, inputActive ->
                 val matchingReference = browseCandidate != null
                 val catalogProvider = if (matchingReference) AnimeDiscoveryProvider.BANGUMI else AnimeDiscoveryProvider.DOUBAN
-                LaunchedEffect(searchExpanded, catalogProvider, search.query, search.indexOnly, search.catalogProvider) {
+                LaunchedEffect(searchExpanded, matchingReference, catalogProvider, search.query, search.indexOnly, search.catalogProvider) {
                     if (searchExpanded && search.query.isNotBlank() && search.query == query.trim() &&
-                        (!search.indexOnly || search.catalogProvider != catalogProvider)) submitSearch(search.query)
+                        (search.indexOnly != matchingReference || search.catalogProvider != catalogProvider)) submitSearch(search.query)
                 }
                 val desktop = platformKind == PlatformKind.DESKTOP
-                val canPage = inputActive && !matchingReference && query.trim() == search.query && search.index.canLoadMore &&
-                    search.index.items.isNotEmpty() && search.catalogProvider == catalogProvider && search.indexOnly
+                val canPage = inputActive && !matchingReference && query.trim() == search.query && search.canPageSearch &&
+                    search.groups.isNotEmpty() && search.catalogProvider == catalogProvider && !search.indexOnly
                 val searchPull = rememberBottomPullLoadState(
                     key = listOf(search.query, search.catalogProvider, search.indexOnly),
-                    enabled = !desktop && canPage, loading = search.index.loading && search.index.page > 0,
+                    enabled = !desktop && canPage, loading = search.searchLoadingMore,
                     canScrollForward = { searchScroll.canScrollForward }, onLoadMore = controller::loadMoreCatalog,
                     actionLabel = "加载更多番剧")
                 if (desktop) AnimeBrowsePagination(
                     key = listOf(search.query, search.catalogProvider, search.indexOnly), refreshKey = Unit,
-                    itemCount = search.index.items.size, enabled = canPage,
+                    itemCount = search.groups.size, enabled = canPage && !search.grouping && !search.searchLoadingFirst,
                     nearEnd = {
                         val info = searchScroll.layoutInfo
-                        val trailingKeys = search.groups.filter { it.subject != null }.takeLast(4).map { it.key }.toSet()
+                        val trailingKeys = search.groups.takeLast(4).map { it.key }.toSet()
                         info.visibleItemsInfo.any { it.key in trailingKeys } &&
                             (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 5
                     }, onMore = controller::loadMoreCatalog)
@@ -842,17 +891,11 @@ private fun AnimeWorkspaceContent(
                                 Text("搜索「${query.trim()}」", maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
-                        search.catalogProvider != catalogProvider || !search.indexOnly -> item {
-                            AnimeMessage("正在搜索", "正在查作品资料")
+                        search.catalogProvider != catalogProvider || search.indexOnly != matchingReference -> item {
+                            AnimeDiscoveryLoading("正在查找番剧")
                         }
                         else -> animeSearchResults(search, controller, matchingReference,
-                            onOpenSubject = { openSearchResult(it) },
-                            onManage = ::showWorkActions, pull = searchPull,
-                            onBrowseSources = {
-                                browseCandidate = null
-                                searchExpanded = false
-                                openDirectory()
-                            })
+                            onOpenGroup = { openSearchResult(it) }, onManage = ::showWorkActions, pull = searchPull)
                     }
                 }
                 if (desktop) Box(Modifier.matchParentSize()) {
@@ -864,6 +907,13 @@ private fun AnimeWorkspaceContent(
             if (active && !playing) SnackbarHost(snackbar,
                 Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp))
         }
+    }
+
+    searchVersionChoice?.let { choice ->
+        AnimeSearchVersionSheet(controller.currentVideoCandidates(search.currentReferences(choice)), controller,
+            sourceName = { animeSourceName(it, state) }, backdrop = backdrop,
+            onDismiss = { searchVersionChoice = null },
+            onChoose = { openSearchResult(choice, it) })
     }
 
     if (recentWatchingOpen) AnimeRecentWatchingSheet(state.library, state.libraryReadUnavailable, backdrop,

@@ -15,12 +15,15 @@ internal fun projectAnimeSourceCatalogue(
     val subject = detail.subject
     if (subject.canonicalDoubanId() == null || catalog.notice != null || catalog.episodes.isEmpty()) return null
     val explicit = binding?.automatic == false
-    if (!explicit && !autoPlaySubjectMatches(subject, catalog.title)) return null
-    val groups = catalog.episodes.groupBy { it.group }
-    val movieLines = if (explicit) emptyMap() else autoPlayMovieEpisodes(subject, catalog, binding?.selectedGroup)
+    val annualGroups = if (explicit) emptyMap() else animeAnnualCatalogueGroups(subject, catalog)
+    if (!explicit && annualGroups.isEmpty() && !autoPlaySubjectMatches(subject, catalog.title)) return null
+    val groups = annualGroups.ifEmpty { catalog.episodes.groupBy { it.group } }
+    val movieLines = if (explicit || annualGroups.isNotEmpty()) emptyMap()
+        else autoPlayMovieEpisodes(subject, catalog, binding?.selectedGroup)
     fun valid(rows: List<AnimeSourceEpisode>): Boolean {
         if (rows.isEmpty() || rows.map { it.id }.distinct().size != rows.size || rows.any { it.id.isBlank() }) return false
         if (explicit) return rows.all { it.number == null || it.number.isFinite() }
+        if (annualGroups.isNotEmpty()) return true
         if (rows.size == 1 && movieLines[rows.single().group] == rows.single()) return true
         if (rows.any { it.kind != AnimeEpisodeKind.MAIN || it.number == null || !it.number.isFinite() || it.number <= 0.0 }) return false
         val numbers = rows.map { requireNotNull(it.number) }.sorted()
@@ -33,6 +36,10 @@ internal fun projectAnimeSourceCatalogue(
         binding?.selectedGroup != null -> return null
         movieLines.isNotEmpty() -> movieLines.keys.sorted().first()
         groups.size == 1 -> groups.keys.single()
+        annualGroups.isNotEmpty() -> {
+            if (annualGroups.values.map { it.first().edition }.distinct().size != 1) return null
+            annualGroups.keys.sorted().maxByOrNull { annualGroups.getValue(it).size } ?: return null
+        }
         !explicit && (catalog.sameWorkRoutes || hasLmmCatalogWorkId(catalog.title)) &&
             groups.values.all(::valid) && groups.values.map { rows ->
             rows.map { Triple(it.kind, it.number, it.edition) }.sortedBy { it.second }

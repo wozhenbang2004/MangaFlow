@@ -53,6 +53,7 @@ internal data class AnimeUnifiedSearchState(
     val index: AnimeSearchIndex = AnimeSearchIndex(),
     val sources: List<AnimeSourceResult> = emptyList(),
     val groups: List<AnimeSearchGroup> = emptyList(),
+    val grouping: Boolean = false,
 )
 
 /** Application-main-scope owner. A query has one independent cursor and request per provider. */
@@ -61,6 +62,7 @@ internal class AnimeUnifiedSearch(
     private val metadata: AnimeMetadataRepository,
     private val repository: AnimeSourceRepository,
     private val douban: DoubanAnimeRepository,
+    private val sourceOrder: (String) -> Double,
 ) {
     private data class Route(val snapshot: DownloadRouteSnapshot?, val error: String? = null) {
         fun requireAvailable() = checkNotNull(snapshot) { error ?: "网络线路不可用。" }
@@ -80,9 +82,13 @@ internal class AnimeUnifiedSearch(
     private val sourceTerms = mutableMapOf<String, String>()
     private val firstPageAttempts = mutableMapOf<String, Set<String>>()
     private val overlappingPages = mutableSetOf<String>()
+    private val pausedSources = linkedSetOf<String>()
+    private var sourcesPaused = false
     private var sourceKeys = emptyMap<String, Source>()
     private var indexRoute: Route? = null
     private var indexJob: Job? = null
+    private var groupingJob: Job? = null
+    private var groupingRevision = 0L
     private var firstPageIndexTerms = emptyList<String>()
     private var firstPageIndexSubject: AnimeSubject? = null
     private var generation = 0L
@@ -93,16 +99,28 @@ internal class AnimeUnifiedSearch(
         if (query != current.query || provider != current.catalogProvider) {
             generation++
             indexJob?.cancel()
+            groupingRevision++
+            groupingJob?.cancel()
             sourceJobs.values.forEach { it.cancel() }
             sourceJobs.clear()
             sourceTerms.clear()
             firstPageAttempts.clear()
             overlappingPages.clear()
+            pausedSources.clear()
             sourceKeys = emptyMap()
             indexRoute = null
             mutableState.value = AnimeUnifiedSearchState(query = query, indexOnly = indexOnly, catalogProvider = provider)
-        } else if (indexOnly != current.indexOnly) mutableState.value = current.copy(indexOnly = indexOnly)
+        } else if (indexOnly != current.indexOnly) publish(current.copy(indexOnly = indexOnly), regroup = true)
+        sourcesPaused = false
         reconcile()
+        resumeSourceRequests()
+    }
+
+    private fun resumeSourceRequests() {
+        sourcesPaused = false
+        val resume = pausedSources.toList()
+        pausedSources.clear()
+        resume.forEach { id -> repository.provider(id)?.let(::requestSource) }
     }
 
     fun reconcile() {
@@ -117,7 +135,7 @@ internal class AnimeUnifiedSearch(
             firstPageIndexTerms = emptyList()
             firstPageIndexSubject = null
         }
-        val available = if (search.indexOnly) emptyList() else repository.providers
+        val available = if (search.indexOnly) emptyList() else repository.providers.sortedBy { sourceOrder(it.id) }
         val providers = available.mapNotNull { provider ->
             sourceKey(provider)?.let { provider to it }
         }
@@ -131,6 +149,7 @@ internal class AnimeUnifiedSearch(
             firstPageAttempts.remove(it)
         }
         overlappingPages.removeAll(refreshed + removed)
+        pausedSources.removeAll(removed)
         sourceKeys = nextKeys
         val current = mutableState.value
         val retained = current.sources.associateBy { it.providerId }
@@ -144,6 +163,7 @@ internal class AnimeUnifiedSearch(
     }
 
     fun loadMore() {
+        resumeSourceRequests()
         val state = mutableState.value
         if (state.index.canLoadMore) requestIndex()
         if (state.indexOnly) return
@@ -154,7 +174,27 @@ internal class AnimeUnifiedSearch(
     fun retryIndex() = requestIndex(forceRefresh = true)
 
     fun retrySource(sourceId: String) {
-        repository.provider(sourceId)?.let(::requestSource)
+        repository.provider(sourceId)?.let { requestSource(it, emptyList(), forceRefresh = true) }
+    }
+
+    fun retryFailed() {
+        resumeSourceRequests()
+        val current = mutableState.value
+        if (current.index.error != null) retryIndex()
+        current.sources.filter { it.error != null }.forEach { retrySource(it.providerId) }
+    }
+
+    /** A settled player can leave the search snapshot available for Back. */
+    fun pauseSourceRequests() {
+        val current = mutableState.value
+        if (current.indexOnly || current.query.isBlank()) return
+        sourcesPaused = true
+        val paused = current.sources.filter { it.loading || it.loadingMore }.map { it.providerId }.toSet()
+        pausedSources += paused
+        paused.forEach { sourceJobs.remove(it)?.cancel() }
+        publish(current.copy(sources = current.sources.map { source ->
+            if (source.providerId in paused) source.copy(loading = false, loadingMore = false, queued = false) else source
+        }))
     }
 
     private fun requestIndex(forceRefresh: Boolean = false) {
@@ -237,11 +277,15 @@ internal class AnimeUnifiedSearch(
         if (newTerms.isNotEmpty()) requestSource(provider, newTerms)
     }
 
-    private fun requestSource(provider: AnimeProvider, newTerms: List<String>) {
+    private fun requestSource(provider: AnimeProvider, newTerms: List<String>, forceRefresh: Boolean = false) {
         val state = mutableState.value
         val key = sourceKeys[provider.id] ?: return
         val previous = state.sources.firstOrNull { it.providerId == provider.id } ?: return
         if (state.query.isBlank() || previous.loading || previous.loadingMore) return
+        if (sourcesPaused) {
+            pausedSources += provider.id
+            return
+        }
         val owner = generation
         val lateRetry = newTerms.isNotEmpty()
         if (lateRetry && previous.page > 1) return
@@ -254,8 +298,10 @@ internal class AnimeUnifiedSearch(
         publishSource(waiting)
         // Register the exact job before it can start on the immediate main dispatcher.
         val job = scope.launch(start = CoroutineStart.LAZY) {
+            val requestOwner = coroutineContext[Job]
             fun current(): Boolean {
-                if (owner != generation || sourceKeys[provider.id] != key) return false
+                if (sourcesPaused || sourceJobs[provider.id] !== requestOwner ||
+                    owner != generation || sourceKeys[provider.id] != key) return false
                 if (repository.provider(provider.id)?.let(::sourceKey) == key) return true
                 reconcile()
                 return false
@@ -266,7 +312,7 @@ internal class AnimeUnifiedSearch(
                     if (!current()) return@withPermit null
                     publishSource(waiting.copy(queued = false))
                     withTimeoutOrNull(SEARCH_TIMEOUT_MILLIS) {
-                        searchPage(provider, term, page, newTerms, expected, attempted)
+                        searchPage(provider, term, page, newTerms, expected, attempted, forceRefresh)
                     }
                         ?: error("搜索超时，请重试。")
                 }
@@ -327,12 +373,12 @@ internal class AnimeUnifiedSearch(
 
     private suspend fun searchPage(
         provider: AnimeProvider, term: String, page: Int, newTerms: List<String>, expected: AnimeSubject?,
-        attempted: MutableSet<String>,
+        attempted: MutableSet<String>, forceRefresh: Boolean,
     ): SearchPageResult {
         val firstRequest = newTerms.isEmpty()
         if (firstRequest) {
             attempted += term
-            val found = provider.search(term, page)
+            val found = repository.search(provider, term, page, forceRefresh)
             if (page > 1 || found.isNotEmpty()) return SearchPageResult(term, found)
         }
         val alternatives = if (firstRequest) {
@@ -344,7 +390,7 @@ internal class AnimeUnifiedSearch(
         for (candidate in alternatives) {
             if (!attempted.add(candidate)) continue
             val found = try {
-                withTimeoutOrNull(SEARCH_ALIAS_TIMEOUT_MILLIS) { provider.search(candidate, page) }
+                withTimeoutOrNull(SEARCH_ALIAS_TIMEOUT_MILLIS) { repository.search(provider, candidate, page, forceRefresh) }
                     ?: error("来源别名搜索超时，请重试。")
             } catch (cancel: CancellationException) {
                 throw cancel
@@ -379,9 +425,26 @@ internal class AnimeUnifiedSearch(
     }
 
     private fun publish(state: AnimeUnifiedSearchState, regroup: Boolean = false) {
-        mutableState.value = if (regroup) state.copy(groups = if (state.indexOnly)
-            state.index.items.map { AnimeSearchGroup("subject:${it.id}", it) }
-        else groupAnimeSearch(state.index.items, state.sources, state.groups, state.query)) else state
+        if (!regroup) {
+            mutableState.value = state
+            return
+        }
+        val revision = ++groupingRevision
+        groupingJob?.cancel()
+        if (state.indexOnly) {
+            mutableState.value = state.copy(groups = state.index.items.map { AnimeSearchGroup("subject:${it.id}", it) },
+                grouping = false)
+            return
+        }
+        mutableState.value = state.copy(grouping = true)
+        groupingJob = scope.launch {
+            val groups = withContext(Dispatchers.Default) {
+                groupAnimeSearch(state.index.items, state.sources, state.groups, state.query)
+            }
+            if (revision == groupingRevision) {
+                mutableState.value = mutableState.value.copy(groups = groups, grouping = false)
+            }
+        }
     }
 
     private fun sourceKey(provider: AnimeProvider): Source? = runCatching {

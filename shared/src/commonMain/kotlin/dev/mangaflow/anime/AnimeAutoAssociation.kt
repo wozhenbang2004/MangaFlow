@@ -114,6 +114,7 @@ internal fun animeWorkTitlesConflict(
 
 /** Presentation-only title hint. A conflicting year is a review candidate, not an automatic identity. */
 internal fun autoPlayTitleCandidate(subject: AnimeSubject, title: AnimeSourceTitle): Boolean {
+    if (animeAnnualCatalogueCandidate(subject, title)) return true
     val names = animeCatalogueNames(subject)
     if (animeWorkTitlesConflict(names, listOf(title.title), requireMatchingEdition = true)) return false
     val titleKey = animeWorkTitleKey(title.title)
@@ -137,7 +138,8 @@ internal fun autoPlaySearchKeywords(subject: AnimeSubject): List<String> {
             else listOf(raw, "$base 第${ordinal[season]}季", "$base 第${season}季", base)
         }
     }
-    return (names + names.flatMap { bodySourceSearchTerms(it) } + variants)
+    return (listOfNotNull(animeAnnualCatalogueSearchTitle(subject)) + names +
+        names.flatMap { bodySourceSearchTerms(it) } + variants)
         .map(String::trim).filter { it.length in 1..500 }.distinct().take(6)
 }
 
@@ -155,7 +157,7 @@ internal fun autoPlaySubjectMatches(subject: AnimeSubject, title: AnimeSourceTit
 
 /** Candidate recall may lack a year; only detailed evidence can promote it into a binding. */
 internal fun autoPlaySubjectCandidate(subject: AnimeSubject, title: AnimeSourceTitle): Boolean =
-    autoPlaySubjectEvidence(subject, title, requireEvidence = false)
+    autoPlaySubjectEvidence(subject, title, requireEvidence = false) || animeAnnualCatalogueCandidate(subject, title)
 
 internal fun autoPlaySubjectHasSharedId(subject: AnimeSubject, title: AnimeSourceTitle): Boolean =
     autoPlaySubjectMatches(subject, title) && sharesAuthoritativeAnimeId(subject, title)
@@ -245,16 +247,18 @@ private fun autoSeasonCatalogOffset(detail: AnimeDetail, catalog: AnimeSourceCat
     return start - starts.single()
 }
 
-/** Exact year or shared-ID evidence remains authoritative; complete explicit
- * season structure is an additional, narrower path for yearless provider data. */
+/** Fetched catalogue structure can establish an independently verified season scope. */
 internal fun autoPlayCatalogSubjectMatches(detail: AnimeDetail, catalog: AnimeSourceCatalog): Boolean =
-    autoPlaySubjectMatches(detail.subject, catalog.title) || autoSeasonCatalogOffset(detail, catalog) != null
+    autoPlaySubjectMatches(detail.subject, catalog.title) || autoSeasonCatalogOffset(detail, catalog) != null ||
+        animeAnnualCatalogueGroups(detail.subject, catalog).isNotEmpty()
 
 /** Explain work identity separately from episode/route coverage, using the fetched catalogue. */
 internal fun animeCatalogIdentityIssue(detail: AnimeDetail, catalog: AnimeSourceCatalog): String? {
     if (autoPlayCatalogSubjectMatches(detail, catalog)) return null
     val subject = detail.subject
     val title = catalog.title
+    if (animeAnnualCatalogueCandidate(subject, title))
+        return "全集目录尚未确认年番这一季的正片范围。"
     if (conflictingAnimeIds(animeAuthoritativeIds(animeSubjectIds(subject)), animeAuthoritativeIds(title.externalIds)))
         return "来源的作品编号与当前资料不同，请核对版本。"
     if (subject.year != null && title.year != null && subject.year != title.year)
@@ -406,6 +410,10 @@ internal class AnimeEpisodeMatcher(private val detail: AnimeDetail, private val 
     val groupedEpisodes: Map<String, List<AnimeSourceEpisode>> by lazy { catalog.episodes.groupBy { it.group } }
     private val subjectMatches by lazy { autoPlaySubjectMatches(detail.subject, catalog.title) }
     private val seasonOffset by lazy { autoSeasonCatalogOffset(detail, catalog) }
+    private val annualCatalogue by lazy { animeAnnualCatalogueCandidate(detail.subject, catalog.title) }
+    private val annualGroups by lazy { animeAnnualCatalogueGroups(detail.subject, catalog).mapValues { (_, rows) ->
+        rows.associateBy { it.number }
+    } }
     private val singleMainEpisode by lazy { detail.episodes.singleOrNull { it.kind == AnimeEpisodeKind.MAIN } }
     private val detailEpisodes by lazy { detail.episodes.toSet() }
     private val metadataOwner by lazy { detail.metadataSubject?.takeIf { it.canonicalBangumiId() != null }?.id }
@@ -468,7 +476,7 @@ internal class AnimeEpisodeMatcher(private val detail: AnimeDetail, private val 
     }
 
     private fun numbering(requested: AnimeEpisode): Numbering = numberings.getOrPut(requested) {
-        if (requested.kind != AnimeEpisodeKind.MAIN) Numbering(requested.number, null)
+        if (requested.kind != AnimeEpisodeKind.MAIN || annualCatalogue) Numbering(requested.number, null)
         else {
             val local = subjectEpisodeNumber(requested)
             val offset = if (local == null) seasonOffset else null
@@ -482,7 +490,14 @@ internal class AnimeEpisodeMatcher(private val detail: AnimeDetail, private val 
         autoPlayMovieEpisodes(detail.subject, catalog, selectedGroup)
     }
 
+    private fun annualEpisode(requested: AnimeEpisode, group: String): AnimeSourceEpisode? {
+        if (requested.kind != AnimeEpisodeKind.MAIN || requested.subjectId != detail.subject.id ||
+            requested !in detailEpisodes || animeAnnualSeasonNumber(requested.number) == null) return null
+        return annualGroups[group]?.get(requested.number)
+    }
+
     fun matches(requested: AnimeEpisode, episode: AnimeSourceEpisode): Boolean {
+        if (annualCatalogue) return annualEpisode(requested, episode.group) == episode
         if (episode.kind != requested.kind) return false
         if (episode.number != null && episode.number == episodeNumber(requested)) return true
         if (requested.kind != AnimeEpisodeKind.MAIN || requested.subjectId != detail.subject.id ||
@@ -492,6 +507,7 @@ internal class AnimeEpisodeMatcher(private val detail: AnimeDetail, private val 
 
     /** Preserve source order and the film fallback; ordinary numbered series use one lookup. */
     fun matchingEpisodes(requested: AnimeEpisode, group: String): List<AnimeSourceEpisode> {
+        if (annualCatalogue) return listOfNotNull(annualEpisode(requested, group))
         val rows = groupedEpisodes[group].orEmpty()
         val number = episodeNumber(requested)
         if (!number.isFinite() || requested.kind == AnimeEpisodeKind.MAIN &&
@@ -509,6 +525,12 @@ internal class AnimeEpisodeMatcher(private val detail: AnimeDetail, private val 
 
     private fun buildGroups(requested: AnimeEpisode, selectedGroup: String?): List<String> {
         if (catalog.notice != null || catalog.episodes.isEmpty()) return emptyList()
+        if (annualCatalogue) {
+            val matches = annualGroups.keys.mapNotNull { group -> annualEpisode(requested, group) }
+            val edition = if (selectedGroup == null) matches.map { it.edition }.distinct().singleOrNull()
+                else annualGroups[selectedGroup]?.values?.firstOrNull()?.edition
+            return matches.filter { edition != null && it.edition == edition }.map { it.group }
+        }
         if (requested.kind == AnimeEpisodeKind.MAIN && requested.subjectId == detail.subject.id &&
             singleMainEpisode == requested) {
             val movieLines = movieEpisodes(selectedGroup)
