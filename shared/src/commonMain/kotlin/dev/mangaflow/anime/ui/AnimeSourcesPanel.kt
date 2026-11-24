@@ -39,6 +39,8 @@ import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 
@@ -163,6 +165,7 @@ internal fun AnimeSourcesPanel(
             controller.lineLookupVisit(subjectId, focusId) else null
     }
     var lookupAttached by remember(lookupVisit) { mutableStateOf(false) }
+    var unfinishedExpanded by remember(subjectId, focusId, detailVisit) { mutableStateOf(false) }
     DisposableEffect(controller, lookupVisit) {
         lookupAttached = lookupVisit?.let(controller::attachLineLookup) == true
         onDispose { lookupVisit?.let(controller::releaseLineLookup) }
@@ -186,6 +189,31 @@ internal fun AnimeSourcesPanel(
             }
         }
     }
+    val compactPlaybackCoverage = platformKind == PlatformKind.DESKTOP && overVideo && focusId != null &&
+        subjectId != null && focusEpisode?.subjectId == subjectId
+    val episodeCoverage = if (presenting && focusId != null) {
+        val confirmedSources = episodeLines.mapTo(mutableSetOf()) { it.sourceId }
+        state.sourceAggregation.filter { (id, progress) ->
+            id !in confirmedSources && (progress.episodeId == null || progress.episodeId == focusId)
+        }
+    } else emptyMap()
+    val unfinishedSources = if (compactPlaybackCoverage) {
+        val unlisted = state.sourceExtensions.filterNot { it.installed && it.enabled }.mapTo(mutableSetOf()) { it.id }
+        val playing = state.selectedPlaybackOption?.takeIf { state.selectedEpisodeId == focusId }?.sourceId
+        val manual = manualTarget?.manualOption?.sourceId
+        episodeCoverage.filter { (id, progress) ->
+            id !in excludedSourceIds && id !in unlisted && id != playing && id != manual &&
+                (progress.phase.checking || progress.phase == AnimeAssociationPhase.PAUSED ||
+                    progress.phase == AnimeAssociationPhase.UNAVAILABLE)
+        }.keys
+    } else emptySet()
+    val visibleBindings = if (compactPlaybackCoverage) orderedBindings.filter { binding ->
+        val id = binding.catalog.sourceId
+        // Do not unmount a source the owner already opened when a late check changes its status.
+        val inUse = id == sourceDetails || id == expandedSource
+        if (id in unfinishedSources) unfinishedExpanded || (cataloguesExpanded && inUse)
+        else cataloguesExpanded || (unfinishedExpanded && inUse)
+    } else if (focusEpisode == null || cataloguesExpanded) orderedBindings else emptyList()
     val matchesBySource = remember(state.episodeOptions, linkedKeys) {
         if (linkedKeys.isEmpty()) emptyMap() else state.episodeOptions.values.flatMap { lines ->
             lines.filter { it.confirmed && it.catalog.referenceKey() in linkedKeys }.map { it.sourceId }.distinct()
@@ -246,6 +274,7 @@ internal fun AnimeSourcesPanel(
             sourceDetails = null
             tools = null
             cataloguesExpanded = false
+            unfinishedExpanded = false
             allEpisodeLines = false
             searchDiagnosticsExpanded = false
             websiteError = null
@@ -438,17 +467,16 @@ internal fun AnimeSourcesPanel(
                                     onClick = { onAutomaticPlay(focusEpisode) },
                                 )
                             }
-                            val confirmedSources = episodeLines.mapTo(mutableSetOf()) { it.sourceId }
-                            val otherCoverage = state.sourceAggregation.filter { (id, progress) ->
-                                id !in confirmedSources && (progress.episodeId == null || progress.episodeId == focusId)
-                            }.values
+                            val otherCoverage = episodeCoverage.values
                             val checkingSources = otherCoverage.count { it.phase.checking }
                             val pausedSources = otherCoverage.count { it.phase == AnimeAssociationPhase.PAUSED }
                             val failedSources = otherCoverage.count { it.phase == AnimeAssociationPhase.UNAVAILABLE }
                             val canContinue = lookupAttached && lookupVisit?.let(controller::canContinueLineLookup) == true
                             val checkingEpisode = state.episodeOptionsLoading && !state.detailLoading
-                            if (episodeLines.isNotEmpty() || checkingSources > 0 || pausedSources > 0 ||
-                                failedSources > 0 || canContinue || checkingEpisode) item(key = "episode-source-coverage") {
+                            val showCoverage = episodeLines.isNotEmpty() || canContinue || checkingEpisode ||
+                                if (compactPlaybackCoverage) unfinishedSources.isNotEmpty()
+                                else checkingSources > 0 || pausedSources > 0 || failedSources > 0
+                            if (showCoverage) item(key = "episode-source-coverage") {
                                 Column(Modifier.padding(start = 8.dp, end = 8.dp)) {
                                     val coverage = buildList {
                                         add("已确认 ${episodeLines.size} 条")
@@ -457,8 +485,21 @@ internal fun AnimeSourcesPanel(
                                         if (pausedSources > 0) add("$pausedSources 个来源已暂停")
                                         if (failedSources > 0) add("$failedSources 个来源未查完")
                                     }
-                                    AnimeQuietLabel(coverage.joinToString(" · "),
-                                        Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                                    if (compactPlaybackCoverage && unfinishedSources.isNotEmpty()) {
+                                        Box(Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
+                                            AnimeSourceDisclosure(unfinishedExpanded, "还有 ${unfinishedSources.size} 个来源没查完") {
+                                                unfinishedExpanded = !unfinishedExpanded
+                                            }
+                                        }
+                                    } else {
+                                        val summary = when {
+                                            !compactPlaybackCoverage -> coverage.joinToString(" · ")
+                                            canContinue -> "还有来源可以继续核对"
+                                            checkingEpisode -> "正在核对本集"
+                                            else -> "已确认 ${episodeLines.size} 条线路"
+                                        }
+                                        AnimeQuietLabel(summary, Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                                    }
                                     if (canContinue && lookupVisit != null) MotionTextButton(onClick = {
                                         controller.continueLineLookup(lookupVisit)
                                     }, enabled = visible, modifier = Modifier.heightIn(min = 44.dp)) {
@@ -522,7 +563,8 @@ internal fun AnimeSourcesPanel(
                                     }
                                 }
                             }
-                            if (bindings.isNotEmpty()) item(key = "source-catalogues") {
+                            if (bindings.any { !compactPlaybackCoverage || it.catalog.sourceId !in unfinishedSources })
+                                item(key = "source-catalogues") {
                                 AnimeSourceDisclosure(cataloguesExpanded, "来源目录与集数校正") {
                                     cataloguesExpanded = !cataloguesExpanded
                                 }
@@ -601,7 +643,7 @@ internal fun AnimeSourcesPanel(
                             AnimeQuietLabel(if (state.sourceAggregationRunning) "正在核对片源" else "暂无已关联的片源",
                                 Modifier.padding(8.dp))
                         }
-                        if (focusEpisode == null || cataloguesExpanded) items(orderedBindings, key = { "bound:" + it.catalog.referenceKey() }) { binding ->
+                        items(visibleBindings, key = { "bound:" + it.catalog.referenceKey() }) { binding ->
                             val title = binding.catalog
                             val sourceId = title.sourceId
                             val name = animeSourceName(sourceId, state)
@@ -932,12 +974,17 @@ internal fun AnimeSourcesPanel(
                                     tooltip = "撤销上次改动") { Icon(Icons.Outlined.Undo, "撤销上次改动", Modifier.size(18.dp)) }
                             }
                         }
-                        if (pending.isNotEmpty() && candidatesExpanded) {
+                        val visibleCandidates = when {
+                            candidatesExpanded -> pending
+                            compactPlaybackCoverage && unfinishedExpanded -> pending.filter { it.sourceId in unfinishedSources }
+                            else -> emptyList()
+                        }
+                        if (visibleCandidates.isNotEmpty()) {
                             item(key = "pending-heading") {
                                 Text("候选片源", Modifier.padding(start = 8.dp, top = 6.dp),
                                     style = MaterialTheme.typography.labelLarge)
                             }
-                            items(pending, key = { "pending:" + it.referenceKey() }) { title ->
+                            items(visibleCandidates, key = { "pending:" + it.referenceKey() }) { title ->
                                 val name = animeSourceName(title.sourceId, state)
                                 val progress = state.sourceAggregation[title.sourceId]
                                 val check = progress?.candidateChecks?.firstOrNull { it.title.referenceKey() == title.referenceKey() }
@@ -963,7 +1010,8 @@ internal fun AnimeSourcesPanel(
                                     })
                             }
                         }
-                        if (canInspect && aggregationExpanded) {
+                        val showDiagnostics = canInspect && aggregationExpanded
+                        if (showDiagnostics) {
                             state.detailFirstConfirmedLineMs?.let { elapsed ->
                                 item(key = "first-confirmed-line") {
                                     AnimeQuietLabel("打开详情 → 首条已确认线路 · $elapsed ms", Modifier.padding(start = 8.dp))
@@ -977,7 +1025,14 @@ internal fun AnimeSourcesPanel(
                                     Modifier.padding(start = 8.dp))
                             }
                             state.sourceError?.let { error -> item(key = "source-error") { AnimeQuietLabel(error) } }
-                            items(associationIssues.entries.toList(), key = { "aggregation-result:" + it.key }) { (sourceId, progress) ->
+                        }
+                        val visibleIssues = when {
+                            showDiagnostics -> associationIssues
+                            compactPlaybackCoverage && unfinishedExpanded -> associationIssues.filterKeys { it in unfinishedSources }
+                            else -> emptyMap()
+                        }
+                        if (visibleIssues.isNotEmpty()) {
+                            items(visibleIssues.entries.toList(), key = { "aggregation-result:" + it.key }) { (sourceId, progress) ->
                                 Row(Modifier.fillMaxWidth().heightIn(min = 38.dp).padding(horizontal = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     val name = animeSourceName(sourceId, state)
@@ -994,6 +1049,8 @@ internal fun AnimeSourcesPanel(
                                         }
                                 }
                             }
+                        }
+                        if (showDiagnostics) {
                             item(key = "retry-source-aggregation") {
                                 MotionTextButton(onClick = controller::retrySourceAggregation,
                                     enabled = !state.sourceAggregationRunning, modifier = Modifier.heightIn(min = 44.dp)) {

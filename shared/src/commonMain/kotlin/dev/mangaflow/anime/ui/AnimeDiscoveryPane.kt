@@ -151,7 +151,10 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                             onConfigure = { nextTab, query ->
                                 val live = controller.state.value
                                 // A settling gesture cannot act on a different open feed.
-                                if (!showFilters && live.discoveryTab == tab &&
+                                val targetKey = animeDiscoveryFeedKey(nextTab)
+                                val sameTarget = !useAnimeBroadcastDial || (tabActive &&
+                                    live.discoveryFeeds[targetKey]?.query == state.discoveryFeeds[targetKey]?.query)
+                                if (sameTarget && !showFilters && live.discoveryTab == tab &&
                                     live.discoveryFeeds[key]?.query == feed?.query) {
                                     controller.configureDiscovery(nextTab, query)
                                 }
@@ -862,6 +865,11 @@ private fun AnimeDiscoveryQuery.animeQuarterIndex(): Int? =
 private fun AnimeDiscoveryQuery.withAnimeQuarter(index: Int): AnimeDiscoveryQuery =
     copy(year = index / 4, season = AnimeSeason.entries[index % 4])
 
+private const val FirstAnimeQuarter = 4
+private const val AnimeQuarterCount = 9998 * 4
+private val useAnimeBroadcastDial: Boolean
+    get() = platformKind == PlatformKind.ANDROID || platformKind == PlatformKind.DESKTOP
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AnimeBroadcastControls(activeTab: AnimeDiscoveryTab, today: LocalDate,
@@ -896,12 +904,25 @@ private fun AnimeBroadcastControls(activeTab: AnimeDiscoveryTab, today: LocalDat
 
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         val center = selected ?: season.year?.let { it * 4 + current % 4 } ?: current
-        val quarters = remember(center) { (center - 1..center + 1).filter { it / 4 in 1..9998 } }
-        val quarterLabels = remember(quarters) { quarters.map { animeDiscoverySeasonTitle(season.withAnimeQuarter(it)) } }
-        BoxWithConstraints(Modifier.fillMaxWidth().semantics { contentDescription = "季度" }) {
-            AnimeBroadcastRail(quarterLabels, quarters.indexOf(center), selected != null, maxWidth,
-                owner = Triple(activeTab, if (inWeek) calendar else season, current), enabled = enabled,
-                onSelect = { index -> openQuarter(quarters[index]) })
+        if (useAnimeBroadcastDial) {
+            AnimeBroadcastDial("季度", "上一个季度", "下一个季度",
+                noSelection = if (inWeek) "当前显示周表" else animeDiscoverySeasonTitle(season),
+                pageCount = AnimeQuarterCount, anchor = (center - FirstAnimeQuarter).coerceIn(0, AnimeQuarterCount - 1),
+                selectionVisible = !inWeek && selected != null, owner = Triple(activeTab, calendarQuery, seasonQuery),
+                active = enabled, pageKey = { it + FirstAnimeQuarter }, mark = { page ->
+                    val quarter = page + FirstAnimeQuarter
+                    val year = quarter / 4
+                    val name = animeSeasonLabel(AnimeSeason.entries[quarter % 4])
+                    AnimeDialMark("$year", name, "$year 年$name" + if (quarter == current) "，本季" else "")
+                }, onSelect = { openQuarter(it + FirstAnimeQuarter) })
+        } else {
+            val quarters = remember(center) { (center - 1..center + 1).filter { it / 4 in 1..9998 } }
+            val quarterLabels = remember(quarters) { quarters.map { animeDiscoverySeasonTitle(season.withAnimeQuarter(it)) } }
+            BoxWithConstraints(Modifier.fillMaxWidth().semantics { contentDescription = "季度" }) {
+                AnimeBroadcastRail(quarterLabels, quarters.indexOf(center), selected != null, maxWidth,
+                    owner = Triple(activeTab, if (inWeek) calendar else season, current), enabled = enabled,
+                    onSelect = { index -> openQuarter(quarters[index]) })
+            }
         }
 
         // Only the live weekly feed owns dated controls. A seasonal list never presents
@@ -936,7 +957,10 @@ private fun AnimeBroadcastControls(activeTab: AnimeDiscoveryTab, today: LocalDat
                 AnimeBroadcastAction("回到本季", enabled) { openQuarter(current) }
             }
         }
-        if (inWeek) AnimeWeeklyDays(today, calendar.weekday, enabled, ::openWeek)
+        if (inWeek) {
+            if (useAnimeBroadcastDial) AnimeWeeklyDial(today, calendar, enabled, ::openWeek)
+            else AnimeWeeklyDays(today, calendar.weekday, enabled, ::openWeek)
+        }
     }
 }
 
@@ -1006,6 +1030,23 @@ private fun AnimeBroadcastRail(labels: List<String>, selected: Int, selectionVis
         treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = height,
         track = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = .9f),
         selectionVisible = selectionVisible, scrubPosition = position, itemContent = itemContent)
+}
+
+@Composable
+private fun AnimeWeeklyDial(today: LocalDate, calendar: AnimeDiscoveryQuery, active: Boolean, onSelect: (Int) -> Unit) {
+    val weekStart = today.animeWeekStart()
+    val days = remember(weekStart) { animeWeekdays.indices.map { weekStart.plusDays(it.toLong()) } }
+    AnimeBroadcastDial("本周日期", "前一天", "后一天", noSelection = "当前显示全周",
+        pageCount = days.size, anchor = ((calendar.weekday ?: today.dayOfWeek.isoDayNumber) - 1).coerceIn(days.indices),
+        selectionVisible = calendar.weekday != null, owner = weekStart to calendar, active = active,
+        pageKey = { days[it].toString() }, mark = { index ->
+            val date = days[index]
+            val weekday = animeWeekdays[index]
+            AnimeDialMark(weekday + if (date == today) " · 今" else "", "${date.monthNumber}/${date.dayOfMonth}",
+                "${date.monthNumber}月${date.dayOfMonth}日 $weekday" + if (date == today) "，今天" else "")
+        }, onSelect = { index ->
+            if (localToday().animeWeekStart() == weekStart) onSelect(index + 1)
+        })
 }
 
 @Composable

@@ -49,6 +49,9 @@ private class DesktopAnimePlayer(
     private var statisticsJob: Job? = null
     private var statisticsHandle: MPVHandle? = null
     private var statisticsRevision = 0L
+    private data class BufferTarget(val forwardBytes: Long, val backBytes: Long,
+        val durationMs: Int, val refillMs: Int, val pauseWaitMs: Int)
+    private var appliedBufferTarget: Pair<MPVHandle, BufferTarget>? = null
     private val frameWindow = AnimePlaybackFrameWindow()
     private val videoRenderingActive = MutableStateFlow(false)
     private var windowOwnsVideo = false
@@ -91,7 +94,8 @@ private class DesktopAnimePlayer(
                 if (windowOwnsVideo != suspended) {
                     windowOwnsVideo = suspended
                     invalidateSpatialReadout()
-                    applyVideoEnhancement()
+                    val clearConfirmed = applyVideoEnhancement()
+                    check(!suspended || clearConfirmed) { "无法确认实时增强已退出，请重新打开视频后再使用增强窗口" }
                 }
             },
             update = { window, issue -> mutableState.value = state.value.copy(preparedVideoWindow = window, preparedVideoIssue = issue) },
@@ -210,10 +214,11 @@ private class DesktopAnimePlayer(
     }
 
     override fun onMediaOpeningNative() {
+        enhancementMediaReady = false
+        appliedBufferTarget = null
         onlinePreparation.clear()
         statisticsRevision++
         warming = true
-        enhancementMediaReady = false
         publish(nativeGeneration) { it.copy(playbackViewportSize = viewportSize, nativeVideoStatistics = null) }
         applyVideoEnhancement()
         applyBufferPolicy()
@@ -379,24 +384,38 @@ private class DesktopAnimePlayer(
         applyVideoEnhancement()
     }
 
-    private fun applyVideoEnhancement() {
+    private fun applyVideoEnhancement(): Boolean {
         val handle = engine.value?.impl as? MPVHandle
         val nativeHandle = handle.takeUnless { windowOwnsVideo }
         val nativeReady = enhancementMediaReady && !windowOwnsVideo
+        val nativeModel = options.enhancementModel.takeIf { wantsNativeModel }
         if ((nativeHandle == null || !nativeReady || options.realtimeFrames == null) && state.value.realtimeMotion != null)
             publish(nativeGeneration) { it.copy(realtimeMotion = null) }
-        enhancement.configure(
-            handle = handle.takeUnless { wantsNativeModel || windowOwnsVideo },
+        fun configureNativeGraph() = nativeEnhancement.configure(
+            nativeHandle, nativeGeneration, options.videoEnhancement, nativeReady, nativeModel, options.realtimeFrames,
+        )
+        // Retire the old DirectML spatial graph before accepting a shader install.
+        // An independent, requested frame interpolation graph can still coexist.
+        if (nativeModel == null) configureNativeGraph()
+        val clearConfirmed = enhancement.configure(
+            handle = handle,
             generation = nativeGeneration,
             mode = options.videoEnhancement,
             scale = options.enhancementScale,
-            model = options.enhancementModel.takeUnless { wantsNativeModel },
-            mediaReady = enhancementMediaReady && !windowOwnsVideo,
+            model = options.enhancementModel.takeIf { nativeModel == null },
+            mediaReady = enhancementMediaReady,
+            allowShaders = nativeModel == null && !windowOwnsVideo,
         )
-        nativeEnhancement.configure(
-            nativeHandle, nativeGeneration, options.videoEnhancement, nativeReady,
-            options.enhancementModel.takeIf { wantsNativeModel }, options.realtimeFrames,
-        )
+        if (nativeModel != null) {
+            if (clearConfirmed) configureNativeGraph()
+            else {
+                nativeEnhancement.release()
+                publish(nativeGeneration) { it.copy(videoEnhancement = AnimeVideoEnhancementState(
+                    options.videoEnhancement, AnimeVideoEnhancementPhase.FAILED, "无法确认增强已关闭，请重新打开视频",
+                ), realtimeMotion = null) }
+            }
+        }
+        return clearConfirmed
     }
 
     override fun setForegroundNative(foreground: Boolean, backgroundAudio: Boolean) {
@@ -423,14 +442,21 @@ private class DesktopAnimePlayer(
             else -> options.bufferMaxMs
         }
         val minimum = if (inactive || warming) 0 else options.effectiveBufferRefillMs
+        val desired = BufferTarget(options.bufferForwardBytes, options.bufferBackBytes, target, minimum,
+            if (warming) options.bufferStartMs else options.bufferRebufferMs)
+        // Model-only reconfiguration also invokes the foreground policy. Do not
+        // re-enter the native handle on Main for six already accepted buffer values.
+        val applied = appliedBufferTarget
+        if (applied != null && applied.first === handle && applied.second == desired) return
         val accepted = listOf(
-            handle.setPropertyString("demuxer-max-bytes", options.bufferForwardBytes.toString()),
-            handle.setPropertyString("demuxer-max-back-bytes", options.bufferBackBytes.toString()),
-            handle.setPropertyDouble("cache-secs", target / 1000.0),
+            handle.setPropertyString("demuxer-max-bytes", desired.forwardBytes.toString()),
+            handle.setPropertyString("demuxer-max-back-bytes", desired.backBytes.toString()),
+            handle.setPropertyDouble("cache-secs", desired.durationMs / 1000.0),
             handle.setPropertyDouble("demuxer-readahead-secs", 0.0),
-            handle.setPropertyDouble("demuxer-hysteresis-secs", minimum / 1000.0),
-            handle.setPropertyDouble("cache-pause-wait", (if (warming) options.bufferStartMs else options.bufferRebufferMs) / 1000.0),
+            handle.setPropertyDouble("demuxer-hysteresis-secs", desired.refillMs / 1000.0),
+            handle.setPropertyDouble("cache-pause-wait", desired.pauseWaitMs / 1000.0),
         ).all { it }
+        appliedBufferTarget = if (accepted) handle to desired else null
         if (!accepted) mutableState.value = state.value.copy(
             capabilities = state.value.capabilities - AnimePlayerCapability.BUFFER_CONTROL,
             notice = "当前桌面内核未接受全部缓冲参数，仍可继续播放",
@@ -440,14 +466,17 @@ private class DesktopAnimePlayer(
     override fun releaseNative() {
         statisticsRevision++
         frameWindow.reset()
+        appliedBufferTarget = null
+        enhancementMediaReady = false
+        enhancement.release()
+        // The closing backend cannot be handed back to the realtime consumer.
+        windowOwnsVideo = false
         onlinePreparation.clear()
         videoRenderingActive.value = false
         statisticsJob?.cancel()
         statisticsJob = null
         statisticsHandle = null
         nativeEnhancement.release()
-        enhancement.release()
-        enhancementMediaReady = false
         mutableState.value = state.value.copy(nativeVideoStatistics = null, sourceFps = null, droppedFrames = null, bufferMetrics = null,
             frameMetrics = null, playbackViewportSize = null,
             videoEnhancement = AnimeVideoEnhancementState(

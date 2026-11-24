@@ -22,7 +22,7 @@ import kotlinx.serialization.json.longOrNull
 import org.openani.mediamp.mpv.MPVHandle
 import java.io.File
 
-/** Owns only this player's shader list. Mutations/publication stay on Main; native observations use IO. */
+/** Owns only this player's shader list. Revisions and publication stay on Main. */
 internal class DesktopAnimeVideoEnhancement(
     private val context: PlatformContext,
     private val scope: CoroutineScope,
@@ -30,46 +30,84 @@ internal class DesktopAnimeVideoEnhancement(
     private val isCurrentSession: (MPVHandle, Long, AnimeVideoEnhancementMode) -> Boolean,
     private val update: (Long, AnimeVideoEnhancementState) -> Unit,
 ) {
-    private var handle: MPVHandle? = null
-    private var generation = -1L
-    private var mode = AnimeVideoEnhancementMode.OFF
-    private var scale = 2
-    private var model: EngineModel? = null
-    private var mediaReady = false
+    private data class Selection(
+        val owner: ShaderOwner?, val generation: Long, val mode: AnimeVideoEnhancementMode,
+        val mediaReady: Boolean, val scale: Int, val model: EngineModel?, val allowShaders: Boolean,
+    )
+
+    /** One lock for each actual mpv handle, retained across toggles on that handle. */
+    private class ShaderOwner(val handle: MPVHandle) {
+        @Volatile var ticket: Any? = null
+        private var ownsList = false
+
+        fun replace(current: Any, argument: String, expected: String): Boolean = synchronized(this) {
+            if (current !== ticket) return@synchronized false
+            // One native publication, not a transient empty graph or an incomplete preset.
+            // Keep ownership even if the mutation succeeds but its readback fails.
+            ownsList = true
+            check(handle.command("raw", "no-osd", "change-list", "glsl-shaders", "set", argument)) {
+                "The renderer did not accept the enhancement shader list"
+            }
+            if (current !== ticket) return@synchronized false
+            check(handle.getPropertyString("glsl-shaders") == expected) {
+                "The renderer did not confirm the complete shader list"
+            }
+            true
+        }
+
+        /** Without a ticket, this is the same-handle boundary before a different native consumer. */
+        fun clear(current: Any? = null): Boolean = synchronized(this) {
+            if (current != null && current !== ticket) return@synchronized false
+            if (!ownsList) return@synchronized true
+            val cleared = try {
+                if (handle.command("raw", "no-osd", "change-list", "glsl-shaders", "clr", "") &&
+                    handle.getPropertyString("glsl-shaders") == "") true
+                else handle.setPropertyString("glsl-shaders", "") && handle.getPropertyString("glsl-shaders") == ""
+            } catch (_: Exception) { false }
+            if (cleared) ownsList = false
+            cleared
+        }
+    }
+
+    private var selection: Selection? = null
     private var monitoring: Job? = null
-    private var ownsShaders = false
+    private var cleanupConfirmed = true
 
-    fun configure(handle: MPVHandle?, generation: Long, mode: AnimeVideoEnhancementMode, mediaReady: Boolean, scale: Int = 2,
-        model: EngineModel? = null) {
-        if (this.handle === handle && this.generation == generation && this.mode == mode &&
-            this.mediaReady == mediaReady && this.scale == scale && this.model == model) return
+    fun configure(handle: MPVHandle?, generation: Long, mode: AnimeVideoEnhancementMode, mediaReady: Boolean,
+        scale: Int, model: EngineModel?, allowShaders: Boolean): Boolean {
+        val previous = selection
+        val oldOwner = previous?.owner
+        val owner = handle?.let { if (oldOwner != null && oldOwner.handle === it) oldOwner else ShaderOwner(it) }
+        val next = Selection(owner, generation, mode, mediaReady, scale, model, allowShaders)
+        if (next == previous) return cleanupConfirmed
 
+        oldOwner?.ticket = null
         monitoring?.cancel()
         monitoring = null
-        val previousHandle = this.handle
-        val cleared = clearOwnedShaders()
-        this.handle = handle
-        this.generation = generation
-        this.mode = mode
-        this.scale = scale
-        this.model = model
-        this.mediaReady = mediaReady
-        // A replaced backend is closed by the existing session owner. Its failed
-        // cleanup must not transfer ownership or errors to a different backend.
-        if (previousHandle !== handle) ownsShaders = false
-        if (!cleared && previousHandle === handle) {
+        selection = next
+        val wantsShaders = mediaReady && allowShaders && mode != AnimeVideoEnhancementMode.OFF
+        val sameHandleBoundary = owner != null && owner === oldOwner &&
+            (!wantsShaders || previous?.generation != generation || !cleanupConfirmed)
+        // A native graph handoff or a new media open must not overtake a queued
+        // shader command. The ordinary eligible GLSL -> GLSL switch skips this fence.
+        cleanupConfirmed = !sameHandleBoundary || checkNotNull(owner).clear()
+        if (!cleanupConfirmed) {
             update(generation, state(mode, AnimeVideoEnhancementPhase.FAILED,
                 "无法确认增强已关闭，请重新打开视频"))
-            return
+            return false
         }
         if (mode == AnimeVideoEnhancementMode.OFF) {
             update(generation, state(mode, AnimeVideoEnhancementPhase.OFF))
-            return
+            return true
         }
+        val ticket = if (owner != null && wantsShaders) Any() else null
+        owner?.ticket = ticket
         update(generation, state(mode, AnimeVideoEnhancementPhase.WAITING, "等待视频画面"))
-        if (handle == null || !mediaReady) return
+        if (owner == null || ticket == null || owner.ticket !== ticket) return true
 
         monitoring = scope.launch(Dispatchers.Main.immediate) {
+            fun current() = owner.ticket === ticket && isCurrentSession(owner.handle, generation, mode)
+            suspend fun clearCurrent(): Boolean = withContext(Dispatchers.IO) { owner.clear(ticket) }
             try {
                 val paths = withContext(Dispatchers.IO) { DesktopAnime4KShaderStore.prepare(context, mode, scale, model) }
                 check(paths.isNotEmpty()) { "No enhancement shader was prepared" }
@@ -81,17 +119,20 @@ internal class DesktopAnimeVideoEnhancement(
                     else -> null
                 }
                 val appliedModel = model?.title ?: anime4kSize?.let { "Anime4K $it/$it" }
-                // append accepts a single literal path, even with ':' / ';' / '\\'.
-                // mpv's string getter prints this list with the platform separator.
-                val expectedList = paths.joinToString(File.pathSeparator)
+                // mpv's OPT_PATHLIST parser only unescapes the native separator.
+                // Preserve Windows drive colons and path backslashes; the getter prints unescaped paths.
+                val separator = File.pathSeparator
+                val argument = paths.joinToString(separator) { it.replace(separator, "\\$separator") }
+                val expectedList = paths.joinToString(separator)
                 var configured = false
                 var lastSampleTime: Double? = null
                 var budgetOverruns = 0
-                while (isCurrentSession(handle, generation, mode)) {
+                while (current()) {
                     // Property reads synchronize with mpv's engine and may wait behind GPU work.
-                    val observed = withContext(Dispatchers.IO) { readObservation(handle, anime4kSize, model) }
-                    if (!isCurrentSession(handle, generation, mode) || this@DesktopAnimeVideoEnhancement.handle !== handle)
-                        return@launch
+                    val observed = withContext(Dispatchers.IO) {
+                        readObservation(owner.handle, anime4kSize, model, inspectGraph = configured)
+                    }
+                    if (!current()) return@launch
                     val width = observed.width
                     val height = observed.height
                     val gamma = observed.gamma
@@ -110,33 +151,28 @@ internal class DesktopAnimeVideoEnhancement(
                         else -> null
                     }
                     if (unavailable != null) {
-                        check(clearOwnedShaders()) { "Cannot clear the current shader list" }
+                        val cleared = clearCurrent()
+                        if (!current()) return@launch
+                        check(cleared) { "Cannot clear the current shader list" }
                         configured = false
+                        lastSampleTime = null
+                        budgetOverruns = 0
                         update(generation, state(mode, unavailable.first, unavailable.second, width, height))
                     } else {
-                        var shaderList = observed.shaderList
-                        if (!configured) {
-                            // Mediamp desktop's libmpv GPU renderer consumes these
-                            // hooks. Keep its existing VO, color management and hwdec.
-                            ownsShaders = true
-                            check(clearShaderList(handle)) { "Cannot reset the shader list" }
-                            for (path in paths) {
-                                check(handle.command("change-list", "glsl-shaders", "append", path)) {
-                                    "The renderer did not accept an enhancement shader"
-                                }
-                            }
-                            configured = true
-                            shaderList = withContext(Dispatchers.IO) { handle.getPropertyString("glsl-shaders") }
-                            if (!isCurrentSession(handle, generation, mode) || this@DesktopAnimeVideoEnhancement.handle !== handle)
-                                return@launch
-                        }
-                        check(shaderList == expectedList) {
-                            "The renderer did not confirm the complete shader list"
-                        }
+                        // The pre-swap observation can belong to the previous graph.
                         val sample = observed.shaderPasses
+                        if (!configured) {
+                            val replaced = withContext(Dispatchers.IO) { owner.replace(ticket, argument, expectedList) }
+                            if (!replaced || !current()) return@launch
+                            configured = true
+                        } else {
+                            check(observed.shaderList == expectedList) {
+                                "The renderer did not confirm the complete shader list"
+                            }
+                        }
                         if (sample == null) {
                             update(generation, state(mode, AnimeVideoEnhancementPhase.CONFIGURED,
-                                "着色器已加载。当前渲染器未提供可读的增强计数。", width, height)
+                                "着色器配置已确认，暂无可读的增强输出记录。", width, height)
                                 .copy(modelName = appliedModel))
                         } else {
                             val frameTime = observed.videoPts
@@ -146,7 +182,9 @@ internal class DesktopAnimeVideoEnhancement(
                                 budgetOverruns = if (sample.nanos > 1_000_000_000.0 / sourceFps * .85) budgetOverruns + 1 else 0
                             }
                             if (budgetOverruns >= 3) {
-                                check(clearOwnedShaders()) { "无法关闭已超出预算的模型" }
+                                val cleared = clearCurrent()
+                                if (!current()) return@launch
+                                check(cleared) { "无法关闭已超出预算的模型" }
                                 update(generation, state(mode, AnimeVideoEnhancementPhase.UNAVAILABLE,
                                     "实际 GPU pass 耗时超过帧预算，原画继续播放", width, height))
                                 return@launch
@@ -175,39 +213,28 @@ internal class DesktopAnimeVideoEnhancement(
                 throw cancel
             } catch (_: Exception) {
                 currentCoroutineContext().ensureActive()
-                if (isCurrentSession(handle, generation, mode) && this@DesktopAnimeVideoEnhancement.handle === handle) {
-                    val restored = clearOwnedShaders()
+                if (current()) {
+                    val restored = clearCurrent()
+                    if (!current()) return@launch
                     update(generation, state(mode, AnimeVideoEnhancementPhase.FAILED,
                         if (restored) "画质模型暂不可用，已恢复原始画质"
                         else "无法确认增强已关闭，请重新打开视频"))
                 }
             }
         }
+        return true
     }
 
     fun release() {
+        // This exact backend is about to close. Don't enqueue a second native mutation.
+        // MediaMP's registry keeps an already entered JNI call safe across that close;
+        // queued work loses its ticket, which cannot apply to a new handle.
+        selection?.owner?.ticket = null
+        selection = null
         monitoring?.cancel()
         monitoring = null
-        clearOwnedShaders()
-        // The caller immediately releases this native player, including its GPU
-        // context; failed cleanup here cannot survive into the next session.
-        handle = null
-        ownsShaders = false
-        mediaReady = false
-        generation = -1L
+        cleanupConfirmed = true
     }
-
-    private fun clearOwnedShaders(): Boolean {
-        if (!ownsShaders) return true
-        val current = handle ?: return false
-        return clearShaderList(current).also { if (it) ownsShaders = false }
-    }
-
-    private fun clearShaderList(handle: MPVHandle): Boolean = try {
-        val cleared = handle.command("change-list", "glsl-shaders", "clr", "")
-        if (cleared && handle.getPropertyString("glsl-shaders") == "") true
-        else handle.setPropertyString("glsl-shaders", "") && handle.getPropertyString("glsl-shaders") == ""
-    } catch (_: Exception) { false }
 
     private fun positiveDimension(handle: MPVHandle, property: String): Int? =
         handle.getPropertyLongOrNull(property)?.takeIf { it in 1..Int.MAX_VALUE.toLong() }?.toInt()
@@ -219,12 +246,13 @@ internal class DesktopAnimeVideoEnhancement(
         val shaderList: String?, val shaderPasses: ShaderPasses?, val videoPts: Double?, val sourceFps: Double?,
     )
 
-    private fun readObservation(handle: MPVHandle, anime4kSize: String?, model: EngineModel?): Observation {
+    private fun readObservation(handle: MPVHandle, anime4kSize: String?, model: EngineModel?,
+        inspectGraph: Boolean): Observation {
         val width = positiveDimension(handle, "video-params/w")
         val height = positiveDimension(handle, "video-params/h")
         val gamma = handle.getPropertyString("video-params/gamma")?.lowercase()
         val output = handle.getPropertyString("current-vo")
-        val shaderList = handle.getPropertyString("glsl-shaders")
+        val shaderList = if (inspectGraph) handle.getPropertyString("glsl-shaders") else null
         val passes = if (width != null && height != null &&
             gamma in SDR_TRANSFERS && output == "libmpv" && !shaderList.isNullOrBlank()) {
             val fresh = readFreshPasses(handle)

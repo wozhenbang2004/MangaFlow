@@ -256,6 +256,16 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     )
     private val associationSignatures = mutableMapOf<String, AssociationSignature>()
     private val associationCandidates = mutableMapOf<String, Pair<String?, List<AnimeSourceTitle>>>()
+    private data class StartupDiscoveryLead(
+        val sourceId: String, val revision: String, val route: DownloadRouteSnapshot, val network: String,
+        val preferredHeight: Int, val directory: AnimeSourceTitle?, val group: String?,
+        val sameWorkingDirectory: Boolean, val startupOrder: Double,
+    )
+    private data class AdmittedStartupDirectory(
+        val lead: StartupDiscoveryLead, val subjectId: String, val detailOwner: Long, val restoreEpoch: Long,
+        val attempt: Long, val catalogRequest: Long,
+    )
+    private var admittedStartupDirectory: AdmittedStartupDirectory? = null
     private class EpisodeLineLookup(val visit: EpisodeLineLookupVisit, val sourceIds: Set<String>) {
         val attempts = mutableMapOf<String, Long>()
         var timeout: Job? = null
@@ -2538,8 +2548,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         mutableState.update { it.copy(playbackTarget = AnimePlaybackTarget(episode, option,
             exactSavedPosition = exactSavedPosition), autoMatching = false) }
-        if (option == null && !hasAutomaticPlaybackLine(episodeId)) {
-            autoAssociateAndPlay(episodeId)
+        val preferredGrace = option == null && !exactSavedPosition && active == null &&
+            detail.subject.externalIds["native-source"] == null && explicitPlaybackSource(detail.subject.id) == null &&
+            preparedForEpisode(detail.subject.id, episodeId) == null
+        if (option == null && (!hasAutomaticPlaybackLine(episodeId) ||
+                preferredGrace && pendingStartupDirectory(episodeId, mutableState.value) != null)) {
+            autoAssociateAndPlay(episodeId, preferredDiscoveryGrace = preferredGrace)
         } else {
             resolveAndPlay(episodeId, option)
         }
@@ -2564,6 +2578,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         associationSignatures.clear()
         associationAttempts.clear()
         associationCandidates.clear()
+        admittedStartupDirectory = null
         catalogueJob?.cancel()
         catalogueJob = null
         catalogueRebuildRequested = false
@@ -2734,6 +2749,69 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             candidate.route == playbackHistoryRoute(id) && sources.provider(id) != null
     }
 
+    /** Pick one early read across the whole provider pool, not a weak binding's tie-break. */
+    private fun startupDiscoveryLead(subjectId: String, candidates: List<String>,
+        bindings: Map<String, AnimeSourceBinding>): StartupDiscoveryLead? {
+        val entry = library.state.value.entries[subjectId]
+        val recent = currentWorkingSource(subjectId)
+        val network = playbackNetworkClass()
+        val height = mutableState.value.settings.preferredSourceHeight
+        return candidates.asSequence().mapNotNull { id ->
+            if (id in entry?.excludedSourceIds.orEmpty()) return@mapNotNull null
+            val revision = discoverySourceRevision(id) ?: return@mapNotNull null
+            val route = playbackHistoryRoute(id) ?: return@mapNotNull null
+            val binding = bindings[id]
+            val directory = binding?.catalog?.takeIf { it.sourceRevision == revision }
+            val selectedGroup = binding?.selectedGroup?.takeIf { directory != null }
+            val exactRecent = recent?.takeIf {
+                it.sourceId == id && directory != null && directory.id == it.catalogId && directory.url == it.catalogUrl &&
+                    (selectedGroup == null || selectedGroup == it.group)
+            }
+            val group = selectedGroup ?: exactRecent?.group
+            fun health(group: String) = lineHealth.estimate(animeLineHealthKey(id, group, revision, route, height, network))
+            val groupHealth = group?.takeIf(String::isNotBlank)?.let(::health)
+                ?.takeIf { it.startupSucceeded + it.startupFailed > 0 }
+            val startup = groupHealth ?: health("")
+            if (exactRecent == null && (startup == null || startup.startupSucceeded <= startup.startupFailed))
+                return@mapNotNull null
+            StartupDiscoveryLead(id, revision, route, network, height, directory, group, exactRecent != null,
+                healthOrder(startup?.copy(addressP50Ms = null)))
+        }.minWithOrNull(compareByDescending<StartupDiscoveryLead> { it.sameWorkingDirectory }
+            .thenBy { it.startupOrder })
+    }
+
+    /** An actual admitted catalogue read, never an unbound prediction or another episode's line. */
+    private fun pendingStartupDirectory(episodeId: String, snapshot: AnimeScreenState): AdmittedStartupDirectory? {
+        val visit = admittedStartupDirectory ?: return null
+        val lead = visit.lead
+        val directory = lead.directory ?: return null
+        val detail = snapshot.detail?.takeIf { it.subject.id == visit.subjectId } ?: return null
+        val stored = library.state.value
+        if (!foreground || active != null || detail.episodes.none { it.id == episodeId } ||
+            visit.detailOwner != detailGeneration || visit.restoreEpoch != stored.restoreEpoch ||
+            associationAttempts[lead.sourceId] != visit.attempt || catalogRequests[lead.sourceId] != visit.catalogRequest ||
+            detail.subject.externalIds["native-source"] != null ||
+            explicitPlaybackSource(visit.subjectId) != null || sources.provider(lead.sourceId) == null ||
+            lead.route != playbackHistoryRoute(lead.sourceId) || lead.revision != discoverySourceRevision(lead.sourceId) ||
+            lead.network != playbackNetworkClass() || lead.preferredHeight != snapshot.settings.preferredSourceHeight ||
+            lead.sourceId in stored.entries[visit.subjectId]?.excludedSourceIds.orEmpty()) return null
+        val binding = stored.bindings.singleOrNull { it.subjectId == visit.subjectId && it.catalog.sourceId == lead.sourceId &&
+            it.catalog.id == directory.id && it.catalog.url == directory.url && it.catalog.sourceRevision == lead.revision &&
+            (it.selectedGroup == null || it.selectedGroup == lead.group) } ?: return null
+        // A successful source on a different work gets a head start, never a playback wait.
+        if (!lead.sameWorkingDirectory && episodeId !in binding.episodeMappings) return null
+        if (automaticPlaybackLines(episodeId, snapshot).any { it.sourceId == lead.sourceId &&
+                it.catalog.id == directory.id && it.catalog.url == directory.url &&
+                (lead.group == null || it.episode.group == lead.group) }) return null
+        val phase = snapshot.sourceAggregation[lead.sourceId]?.phase
+        return visit.takeIf {
+            phase == AnimeAssociationPhase.SEARCHING && associationJobs[lead.sourceId]?.isActive == true ||
+                phase == AnimeAssociationPhase.LINKED && snapshot.episodeOptionsLoading &&
+                snapshot.sourceCatalogs.any { catalog -> catalog.title.sourceId == lead.sourceId &&
+                    catalog.title.id == directory.id && catalog.title.url == directory.url && catalog.notice == null }
+        }
+    }
+
     /** Detail-owned discovery, independent of player preparation and its cancellation. */
     private fun startSourceAggregation(
         requestedDetail: AnimeDetail,
@@ -2773,16 +2851,30 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             .associateBy { it.catalog.sourceId }
         // A retired native catalogue is not rematched by title. Reopen only other exact
         // associations already saved for its retained episode list.
-        val providers = sources.providers.filter { !retiredOrigin || it.id in savedBindings }
+        val availableProviders = sources.providers.filter { !retiredOrigin || it.id in savedBindings }
+        // Native origin and saved explicit pins keep their unchanged scheduling, not just their final rank.
+        val startupLead = if (!force && !retryFailed && onlySourceId == null && lookup == null && active == null &&
+            foreground && nativeOrigin == null && savedBindings.values.none { it.preferredExplicitly }) {
+            val readySources = focus?.let { episode -> automaticPlaybackLines(episode.id).mapTo(hashSetOf()) { it.sourceId } }
+                .orEmpty()
+            startupDiscoveryLead(detail.subject.id, availableProviders.map { it.id }.filter { id ->
+                id !in readySources &&
+                    mutableState.value.sourceAggregation[id]?.phase.let { phase ->
+                        phase == null || phase == AnimeAssociationPhase.QUEUED || phase == AnimeAssociationPhase.SEARCHING
+                    }
+            }, savedBindings)
+        } else null
+        val providers = availableProviders
             .sortedWith(compareBy<dev.mangaflow.anime.sources.AnimeProvider> { provider ->
                 when {
                     // The first catalogue stored an implicit preference for display. It
                     // does not earn recurring request priority like a real user pin.
                     provider.id == nativeOrigin || savedBindings[provider.id]?.preferredExplicitly == true -> 0
-                    provider.id in savedBindings -> 1
-                    associationCandidates[provider.id]?.second?.any { autoPlaySubjectHasSharedId(detail.subject, it) } == true -> 2
-                    associationCandidates[provider.id]?.second?.any { autoPlaySubjectCandidate(detail.subject, it) } == true -> 3
-                    else -> 4
+                    provider.id == startupLead?.sourceId -> 1
+                    provider.id in savedBindings -> 2
+                    associationCandidates[provider.id]?.second?.any { autoPlaySubjectHasSharedId(detail.subject, it) } == true -> 3
+                    associationCandidates[provider.id]?.second?.any { autoPlaySubjectCandidate(detail.subject, it) } == true -> 4
+                    else -> 5
                 }
             }.thenBy { searchSourceOrder(it.id) })
         cataloguePriority = providers.map { it.id }
@@ -2859,7 +2951,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 publishAssociation(sourceId, AnimeAssociationProgress(phase, message, scopedEpisode, checks.take(12)))
             }
             report(AnimeAssociationPhase.QUEUED)
-            associationJobs[sourceId] = scope.launch {
+            val lead = startupLead?.takeIf { it.sourceId == sourceId && it.revision == revision && it.route == route }
+            // Start this contender's first read before the ordinary FIFO acquires. It still
+            // needs the existing global/search/script permits and never preempts live reads.
+            associationJobs[sourceId] = scope.launch(start = if (lead != null) CoroutineStart.UNDISPATCHED else CoroutineStart.DEFAULT) {
                 try {
                     library.awaitLoaded()
                     if (!current()) return@launch
@@ -2869,12 +2964,17 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     }
                     var remainingSourceMs = 35_000L
                     var remainingSearchMs = 14_000L
-                    suspend fun <T> readSource(timeoutMs: Long, searching: Boolean = false, read: suspend () -> T): T? {
+                    suspend fun <T> readSource(timeoutMs: Long, searching: Boolean = false,
+                        boundDirectory: AnimeSourceTitle? = null, read: suspend () -> T): T? {
                         suspend fun admitted(): T? = associationPermits.withPermit {
                             if (!current()) return@withPermit null
                             val remaining = minOf(remainingSourceMs,
                                 if (searching) remainingSearchMs else remainingSourceMs)
                             if (remaining <= 0L) return@withPermit null
+                            if (lead != null && boundDirectory != null && boundDirectory == lead.directory) {
+                                admittedStartupDirectory = AdmittedStartupDirectory(lead, detail.subject.id, owner, epoch,
+                                    attempt, catalogRequest)
+                            }
                             report(AnimeAssociationPhase.SEARCHING)
                             val started = monotonicTimeMillis()
                             try { withTimeoutOrNull(minOf(timeoutMs, remaining)) { read() } }
@@ -2913,7 +3013,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                                     report(AnimeAssociationPhase.LINKED)
                                     return@aggregation true
                                 }
-                                val catalog = readSource(15_000L) { sources.catalog(provider, existing.catalog, forceRefresh = force || retrySource) }
+                                val catalog = readSource(15_000L, boundDirectory = existing.catalog) {
+                                    sources.catalog(provider, existing.catalog, forceRefresh = force || retrySource)
+                                }
                                     ?: error("来源目录读取超时，请重试。")
                                 check(catalog.title.sourceId == sourceId && catalog.title.id == existing.catalog.id &&
                                     catalog.title.url == existing.catalog.url) { "来源目录身份不一致。" }
@@ -3980,7 +4082,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     /** Wait for progressive discovery, never cancel the other sources when one can start. */
     private fun autoAssociateAndPlay(episodeId: String, attempted: Set<String> = emptySet(),
-        lastFailure: AnimePlaybackFailure? = null) {
+        lastFailure: AnimePlaybackFailure? = null, preferredDiscoveryGrace: Boolean = false) {
         val detail = mutableState.value.detail ?: return
         val episode = detail.episodes.firstOrNull { it.id == episodeId } ?: return
         clearPreparation()
@@ -3991,6 +4093,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         pending = null
         cancelPendingResume()
         val exactSavedPosition = hasExactSavedPosition(episode)
+        val preferredUntil = playbackIntent?.takeIf { preferredDiscoveryGrace &&
+            it.subjectId == detail.subject.id && it.episodeId == episodeId }
+            ?.let { minOf(it.startedAt + ANIME_STARTUP_HEDGE_DELAY_MS, autoPlaybackDeadline) }
         mutableState.update { it.copy(resolving = true, autoMatching = true,
             pendingPlayback = null, playbackTarget = AnimePlaybackTarget(episode, exactSavedPosition = exactSavedPosition)) }
         autoPlayJob = scope.launch {
@@ -4013,6 +4118,22 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     playbackDiscoveryRetried = true
                     startSourceAggregation(detail, retryFailed = true, episodeId = episodeId)
                     ready = awaitLines()
+                }
+                if (generation != autoPlayGeneration || !currentDetail(owner, detail.subject.id)) return@launch
+                if (ready != null && nextLineAvailable(ready) && preferredUntil != null) {
+                    val admitted = pendingStartupDirectory(episodeId, ready)
+                    val graceMs = preferredUntil - monotonicTimeMillis()
+                    // Only yield once to one admitted, exact work catalogue. Usable alternatives
+                    // never wait for unknown providers, every source, search/alias work, or a new deadline.
+                    if (admitted != null && graceMs > 0) {
+                        withTimeoutOrNull(graceMs) {
+                            state.first { pendingStartupDirectory(episodeId, it) !== admitted }
+                        }
+                        if (generation != autoPlayGeneration || !currentDetail(owner, detail.subject.id)) return@launch
+                        // A previously usable fallback can be withdrawn while the catalogue changes.
+                        // Then resume the existing wait; don't fail early or grant a second grace.
+                        ready = awaitLines()
+                    }
                 }
                 if (generation != autoPlayGeneration || !currentDetail(owner, detail.subject.id)) return@launch
                 if (ready != null && nextLineAvailable(ready)) {

@@ -1,0 +1,343 @@
+package dev.mangaflow.anime.ui
+
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.MutatePriority
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.DragScope
+import androidx.compose.foundation.gestures.DraggableState
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.ScrollScope
+import androidx.compose.foundation.gestures.TargetedFlingBehavior
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.snapping.SnapPosition
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.foundation.interaction.Interaction
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PageSize
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.PagerSnapDistance
+import androidx.compose.foundation.pager.PagerState
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ChevronLeft
+import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.dp
+import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+import dev.mangaflow.ui.motion.*
+import kotlin.math.abs
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.collectLatest
+
+internal data class AnimeDialMark(val caption: String, val title: String, val description: String)
+
+/** The same keyed Foundation pager and Motion spring as AnimeFeaturedCarousel, with a fixed reading line. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+internal fun AnimeBroadcastDial(label: String, previous: String, next: String, noSelection: String,
+    pageCount: Int, anchor: Int, selectionVisible: Boolean, owner: Any, active: Boolean,
+    pageKey: (Int) -> Any, mark: (Int) -> AnimeDialMark, onSelect: (Int) -> Unit) {
+    val motion = LocalMotionEnabled.current
+    val touchExploration = LocalTouchExplorationEnabled.current
+    val contrast = LocalGlassAccessibilitySettings.current.increaseContrast
+    val feedback = rememberFeelFeedback()
+    val pager = rememberPagerState(initialPage = anchor) { pageCount }
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    fun centered() = abs(pager.currentPageOffsetFraction) * pager.layoutInfo.pageSize.coerceAtLeast(1) <= 1f
+    fun aligned() = !pager.isScrollInProgress && pager.currentPage == anchor && centered()
+    val input = remember(owner, anchor, selectionVisible, active, motion, touchExploration, rtl) { DialInput(active && aligned()) }
+    val currentInput = rememberUpdatedState(input)
+    val drive = remember(pager, input) { PagerDialDrag(pager) }
+    var keyboardFocus by remember { mutableStateOf(false) }
+
+    LaunchedEffect(pager, input) {
+        if (!active) return@LaunchedEffect
+        // Ordinary selection is already centered. Only an external query/visit may realign;
+        // it cannot submit a second query or play a detent tick.
+        if (!aligned()) {
+            pager.scroll(MutatePriority.PreventUserInput) { with(pager) { updateCurrentPage(anchor) } }
+        }
+        var lastDetent = anchor
+        input.ready = true
+        snapshotFlow {
+            Triple(pager.currentPage, input.drag != null || input.request != null || input.landing != null, input.landing)
+        }.collectLatest { (detent, movingByUser, landed) ->
+            if (currentInput.value !== input) return@collectLatest
+            if (detent != lastDetent) {
+                lastDetent = detent
+                if (movingByUser && motion && !touchExploration && platformKind == PlatformKind.ANDROID) {
+                    feedback.perform(FeelEvent.Selection)
+                }
+            }
+            if (landed == null) return@collectLatest
+            // Let a new press/drag retire the previous release before committing a query.
+            withFrameNanos { }
+            if (currentInput.value === input && input.landing === landed && !pager.isScrollInProgress &&
+                centered() && pager.settledPage == landed.page) {
+                input.landing = null
+                onSelect(landed.page)
+            }
+        }
+    }
+    suspend fun moveTo(page: Int) {
+        if (motion) pager.animateScrollToPage(page,
+            animationSpec = spring(MangaMotion.GestureDamping, MangaMotion.GestureStiffness))
+        else pager.scrollToPage(page)
+    }
+    fun offerLanding(page: Int) {
+        if (currentInput.value === input && !pager.isScrollInProgress && centered() && pager.settledPage == page) {
+            input.landing = DialLanding(page)
+        }
+    }
+    val request = input.request
+    LaunchedEffect(pager, input, request) {
+        if (request == null || !input.ready || currentInput.value !== input) return@LaunchedEffect
+        try {
+            moveTo(request.page)
+            currentCoroutineContext().ensureActive()
+            if (input.request === request) offerLanding(request.page)
+        } finally {
+            if (input.request === request) input.request = null
+        }
+    }
+    val interactive = active && input.ready
+    fun pick(page: Int): Boolean {
+        if (!interactive || currentInput.value !== input || page !in 0 until pageCount || page == input.request?.page ||
+            drive.events.started != null) return false
+        if (!pager.isScrollInProgress && pager.currentPage == page && centered()) {
+            if (!selectionVisible && page == anchor && input.request == null) {
+                offerLanding(page) // explicitly chose the centered preview of the whole week / unfiltered season
+                return true
+            }
+            return false
+        }
+        input.drag = null
+        input.landing = null
+        input.request = DialRequest(page)
+        return true
+    }
+    fun step(delta: Int) = pick(pager.currentPage + delta)
+
+    val snapFling = PagerDefaults.flingBehavior(pager, pagerSnapDistance = PagerSnapDistance.atMost(if (motion) 3 else 1),
+        snapAnimationSpec = if (motion) spring(MangaMotion.GestureDamping, MangaMotion.GestureStiffness) else snap())
+    val fling = remember(snapFling, motion) {
+        if (motion) snapFling else object : TargetedFlingBehavior {
+            override suspend fun ScrollScope.performFling(initialVelocity: Float, onRemainingDistanceUpdated: (Float) -> Unit): Float =
+                with(snapFling) { performFling(0f, onRemainingDistanceUpdated) }
+        }
+    }
+    // One stock drag recognizer for touch and mouse; Pager owns position and velocity settling.
+    // The stock callback reports zero velocity for both an ordinary slow release and cancellation.
+    val drag = Modifier.draggable(drive, Orientation.Horizontal, enabled = interactive && !touchExploration,
+        interactionSource = drive.events, startDragImmediately = pager.isScrollInProgress, reverseDirection = !rtl,
+        onDragStarted = {
+            if (currentInput.value === input && interactive) {
+                input.request = null
+                input.landing = null
+                input.drag = drive.events.started
+            }
+        }, onDragStopped = stop@{ velocity ->
+            val end = drive.events.consumeEnd() ?: return@stop
+            if (currentInput.value !== input || !interactive || input.drag !== end.start) return@stop
+            try {
+                if (end.released) {
+                    pager.scroll { with(fling) { performFling(velocity, {}) } }
+                    currentCoroutineContext().ensureActive()
+                    val landed = pager.settledPage
+                    if (input.drag === end.start && landed != anchor) offerLanding(landed)
+                } else {
+                    input.drag = null
+                    moveTo(anchor) // cancel restores the selected date; this motion doesn't offer a landing
+                }
+            } finally {
+                if (input.drag === end.start) input.drag = null
+            }
+        })
+
+    val density = LocalDensity.current
+    val colors = MaterialTheme.colorScheme
+    val ink = colors.onSurface
+    val caption = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum")
+    val value = MaterialTheme.typography.titleSmall.copy(fontFeatureSettings = "tnum")
+    val height = maxOf(58.dp, with(density) { caption.lineHeight.toDp() + value.lineHeight.toDp() + 24.dp })
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Row(Modifier.widthIn(max = 458.dp).fillMaxWidth().motionInputGate(active)
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown || event.isAltPressed || event.isCtrlPressed || event.isMetaPressed) false
+                else when (event.key) {
+                    Key.DirectionLeft -> step(if (rtl) 1 else -1)
+                    Key.DirectionRight -> step(if (rtl) -1 else 1)
+                    else -> false
+                }
+            }.focusGroup(), verticalAlignment = Alignment.CenterVertically) {
+            MotionIconButton(onClick = { step(-1) }, enabled = interactive && pager.currentPage > 0,
+                modifier = Modifier.size(44.dp), tooltip = previous) {
+                Icon(if (rtl) Icons.Outlined.ChevronRight else Icons.Outlined.ChevronLeft, previous, Modifier.size(18.dp))
+            }
+            BoxWithConstraints(Modifier.weight(1f).height(height).clip(RoundedCornerShape(14.dp))
+                .background(colors.surfaceContainerHigh.copy(alpha = if (contrast) 1f else .84f))
+                .semantics {
+                    contentDescription = label
+                    stateDescription = if (selectionVisible) mark(anchor).description else noSelection
+                    if (interactive && !selectionVisible) onClick(label = "选择居中值") { pick(pager.currentPage) }
+                }
+                .onFocusChanged { keyboardFocus = it.isFocused }
+                .onPreviewKeyEvent { event ->
+                    keyboardFocus && event.type == KeyEventType.KeyDown && !event.isAltPressed && !event.isCtrlPressed &&
+                        !event.isMetaPressed && (event.key == Key.Enter || event.key == Key.Spacebar) && pick(pager.currentPage)
+                }.focusable(enabled = interactive), contentAlignment = Alignment.Center) {
+                val pageWidth = maxOf(maxWidth * .40f, 58.dp * density.fontScale).coerceIn(1.dp, maxWidth.coerceAtLeast(1.dp))
+                val inset = ((maxWidth - pageWidth) / 2).coerceAtLeast(0.dp)
+                val lens = RoundedCornerShape(11.dp)
+                Box(Modifier.width(pageWidth).fillMaxHeight().padding(vertical = 3.dp, horizontal = 2.dp)
+                    .background(ink.copy(alpha = if (contrast) .16f else .065f), lens)
+                    .then(if (keyboardFocus) Modifier.border(1.dp, ink.copy(alpha = if (contrast) 1f else .50f), lens) else Modifier))
+                HorizontalPager(state = pager, modifier = Modifier.fillMaxSize().then(drag),
+                    pageSize = PageSize.Fixed(pageWidth), contentPadding = PaddingValues(horizontal = inset),
+                    key = pageKey, snapPosition = SnapPosition.Center, overscrollEffect = null,
+                    flingBehavior = fling, userScrollEnabled = false) { page ->
+                    val info = mark(page)
+                    val interaction = remember { MutableInteractionSource() }
+                    Box(Modifier.fillMaxSize().focusProperties { canFocus = false }
+                        .semantics { contentDescription = info.description }
+                        .selectable(selectionVisible && page == anchor, interaction, indication = null,
+                            enabled = interactive, role = Role.RadioButton, onClick = { pick(page) })
+                        .motionPress(interaction, interactive), contentAlignment = Alignment.Center) {
+                        Column(Modifier.clearAndSetSemantics { }.graphicsLayer {
+                            val offset = (page - pager.currentPage - pager.currentPageOffsetFraction).coerceIn(-1f, 1f)
+                            val front = 1f - abs(offset)
+                            if (motion) {
+                                rotationY = offset * if (rtl) -18f else 18f
+                                scaleY = .86f + .14f * front
+                            }
+                            alpha = if (contrast) 1f else .62f + .38f * front
+                        }, horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(info.caption, style = caption, color = colors.onSurfaceVariant, maxLines = 1,
+                                overflow = TextOverflow.Ellipsis)
+                            Text(info.title, style = value, color = ink, fontWeight = FontWeight.SemiBold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Canvas(Modifier.width(42.dp).height(8.dp)) {
+                                for (i in -2..2) {
+                                    val x = size.width * (.5f + i * .19f)
+                                    drawLine(ink.copy(alpha = if (i == 0) .76f else .34f), Offset(x, 2.dp.toPx()),
+                                        Offset(x, (if (i == 0) 7.dp else 4.dp).toPx()), 1.dp.toPx(), StrokeCap.Round)
+                                }
+                            }
+                        }
+                    }
+                }
+                Canvas(Modifier.align(Alignment.TopCenter).width(2.dp).height(5.dp).clearAndSetSemantics { }) {
+                    // Clock-style fixed index. Marks travel under it; the index catches each detent visually.
+                    val contact = (1f - 2f * abs(pager.currentPageOffsetFraction)).coerceIn(0f, 1f)
+                    drawLine(ink.copy(alpha = if (contrast) 1f else .38f + .45f * contact), Offset(size.width / 2, 1.dp.toPx()),
+                        Offset(size.width / 2, size.height), size.width, StrokeCap.Round)
+                }
+            }
+            MotionIconButton(onClick = { step(1) }, enabled = interactive && pager.currentPage < pageCount - 1,
+                modifier = Modifier.size(44.dp), tooltip = next) {
+                Icon(if (rtl) Icons.Outlined.ChevronLeft else Icons.Outlined.ChevronRight, next, Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+private class DialInput(aligned: Boolean) {
+    var ready by mutableStateOf(aligned)
+    var request by mutableStateOf<DialRequest?>(null)
+    var drag by mutableStateOf<DragInteraction.Start?>(null)
+    var landing by mutableStateOf<DialLanding?>(null)
+}
+
+private class DialRequest(val page: Int)
+private class DialLanding(val page: Int)
+private class DialDragEnd(val start: DragInteraction.Start, val released: Boolean)
+
+/** Observe the exact Foundation interaction before its onDragStopped callback, not in an async collector. */
+private class DialDragEvents(private val delegate: MutableInteractionSource = MutableInteractionSource()) :
+    MutableInteractionSource by delegate {
+    var started: DragInteraction.Start? = null
+        private set
+    private var terminal: DialDragEnd? = null
+
+    fun consumeEnd(): DialDragEnd? = terminal.also { terminal = null }
+
+    override suspend fun emit(interaction: Interaction) {
+        record(interaction)
+        delegate.emit(interaction)
+    }
+
+    override fun tryEmit(interaction: Interaction): Boolean {
+        record(interaction)
+        return delegate.tryEmit(interaction)
+    }
+
+    private fun record(interaction: Interaction) {
+        when (interaction) {
+            is DragInteraction.Start -> { started = interaction; terminal = null }
+            is DragInteraction.Stop -> end(interaction.start, released = true)
+            is DragInteraction.Cancel -> end(interaction.start, released = false)
+        }
+    }
+
+    private fun end(start: DragInteraction.Start, released: Boolean) {
+        if (started !== start) return
+        started = null
+        terminal = DialDragEnd(start, released)
+    }
+}
+
+private class PagerDialDrag(private val pager: PagerState) : DraggableState {
+    val events = DialDragEvents()
+    override suspend fun drag(dragPriority: MutatePriority, block: suspend DragScope.() -> Unit) =
+        pager.scroll(dragPriority) {
+            val scroll = this
+            block(object : DragScope {
+                override fun dragBy(pixels: Float) { scroll.scrollBy(pixels) }
+            })
+        }
+
+    override fun dispatchRawDelta(delta: Float) { pager.dispatchRawDelta(delta) }
+}
