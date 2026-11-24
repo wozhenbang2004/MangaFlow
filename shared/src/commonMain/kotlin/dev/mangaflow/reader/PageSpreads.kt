@@ -8,6 +8,15 @@ data class PageSpread(val first: Int, val second: Int? = null) {
     fun contains(index: Int): Boolean = index == first || index == second
 }
 
+/** The pager's spreads partition the manifest in ascending original-page order, including in RTL. */
+internal fun List<PageSpread>.indexOfReaderPage(page: Int): Int = binarySearch { spread ->
+    when {
+        spread.last < page -> -1
+        spread.first > page -> 1
+        else -> 0
+    }
+}.coerceAtLeast(-1)
+
 /**
  * Treat the cover, declared full-width artwork, and user-marked correction pages as single.
  * A single inserted page flips the pairing of everything that follows without reordering images.

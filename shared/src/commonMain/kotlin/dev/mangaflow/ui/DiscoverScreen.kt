@@ -587,26 +587,25 @@ internal fun RankingControls(
     val choiceWidth = maxOf(44.dp, labelWidth + 16.dp)
     val periodWidth = choiceWidth * RankPeriod.entries.size
     BoxWithConstraints(modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
-        if (maxWidth >= periodWidth + (if (backdrop != null) 136.dp else 92.dp)) {
+        val inlineRefresh = backdrop == null || maxWidth >= periodWidth + 136.dp
+        val toolsWidth = if (backdrop != null && inlineRefresh) 132.dp else 88.dp
+        val tools: @Composable () -> Unit = {
+            RankingAudienceToggle(state.audience, onAudience, Modifier.width(44.dp))
+            if (backdrop != null) BrowseCacheStatus(state, backdrop, active,
+                onRefresh = if (inlineRefresh) null else onRefresh)
+            if (inlineRefresh) DiscoveryRefresh(state, onRefresh, active)
+        }
+        if (maxWidth >= periodWidth + toolsWidth + 4.dp) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 RankingPeriods(state.period, onPeriod, Modifier.weight(1f))
                 Spacer(Modifier.width(4.dp))
-                RankingAudienceToggle(state.audience, onAudience, Modifier.width(44.dp))
-                if (backdrop != null) BrowseCacheStatus(state, backdrop, active)
-                Box(Modifier.width(44.dp), contentAlignment = Alignment.Center) { DiscoveryRefresh(state, onRefresh, active) }
+                tools()
             }
         } else {
-            // Keep the actual period names and every choice at large font scales.
-            // Only the tools wrap; no clipped Total tab or single-letter period names.
-            val wrapLabels = maxWidth < periodWidth
             Column(Modifier.fillMaxWidth()) {
-                RankingPeriods(state.period, onPeriod, Modifier.fillMaxWidth(), wrapLabels)
+                RankingPeriods(state.period, onPeriod, Modifier.fillMaxWidth(), maxWidth < periodWidth)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically) {
-                    RankingAudienceToggle(state.audience, onAudience, Modifier.width(44.dp))
-                    if (backdrop != null) BrowseCacheStatus(state, backdrop, active)
-                    Box(Modifier.width(44.dp), contentAlignment = Alignment.Center) { DiscoveryRefresh(state, onRefresh, active) }
-                }
+                    verticalAlignment = Alignment.CenterVertically) { tools() }
             }
         }
     }
@@ -744,23 +743,23 @@ private fun DiscoveryPane(
     }
     val motion = LocalMotionEnabled.current
     val firstEntranceIndex = remember(paneKey) { retainedGrid.firstVisibleItemIndex }
-    // The Copy recommendation endpoint is an editorial list, not a daily update feed.
-    // Rotate real returned entries by local date instead of freezing the first six forever.
-    // Do not change the source list order or present this rotation as new upstream content.
-    val today = localToday()
-    val rotationDay = today.year * 366 + today.dayOfYear
-    val rankedFeatured = remember(state.items, rotationDay) {
-        val candidates = state.items.distinctBy(Manga::id)
-        if (candidates.size <= 6) candidates
-        else (0 until 6).map { candidates[(rotationDay % candidates.size + it) % candidates.size] }
+    // Compute the editorial rotation only for the pane that actually renders a carousel.
+    val featured = when {
+        !recommended -> emptyList()
+        adultProfile -> remember(displayedBooks, aggregateAdult) {
+            if (aggregateAdult) displayedBooks.asSequence().filter { it.coverUrl.isNotBlank() }
+                .distinctBy(Manga::id).take(6).toList() else emptyList()
+        }
+        else -> {
+            val today = localToday()
+            val rotationDay = today.year * 366 + today.dayOfYear
+            remember(state.items, rotationDay) {
+                val candidates = state.items.distinctBy(Manga::id)
+                if (candidates.size <= 6) candidates
+                else List(6) { candidates[(rotationDay % candidates.size + it) % candidates.size] }
+            }
+        }
     }
-    // The directory owns the gallery's geometry. Coil keeps loading/error inside
-    // those frames; a later successful thumbnail must not insert a hero above a
-    // reader's current scroll position or reorder a deliberately selected feed.
-    val featured = if (adultProfile) remember(displayedBooks, aggregateAdult) {
-        if (aggregateAdult) displayedBooks.asSequence().filter { it.coverUrl.isNotBlank() }
-            .distinctBy(Manga::id).take(6).toList() else emptyList()
-    } else rankedFeatured
     val showFeatured = recommended && (!adultProfile || aggregateAdult) &&
         (featured.isNotEmpty() || state.loading)
     val mixedSources = adultProfile && state.items.asSequence().map(Manga::sourceId).distinct().take(2).count() > 1
@@ -873,8 +872,43 @@ private fun DiscoveryPane(
                     sectionControls()
                 }
             }
+        if (state.items.isNotEmpty() && state.error != null && state.failedPage == 0) {
+            item(span = { GridItemSpan(maxLineSpan) }, key = "refresh-error") {
+                var expanded by remember(paneKey, state.error) { mutableStateOf(false) }
+                val muted = MaterialTheme.colorScheme.onSurfaceVariant
+                Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.weight(1f).heightIn(min = 48.dp)
+                            .clickable(enabled = active, role = Role.Button,
+                                onClickLabel = if (expanded) "收起原因" else "查看原因") { expanded = !expanded },
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Icon(Icons.Outlined.CloudOff, null, Modifier.size(16.dp), tint = muted)
+                            Text("更新失败，已保留当前列表", Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodySmall, color = muted)
+                            Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp).graphicsLayer {
+                                rotationZ = if (expanded) 180f else 0f
+                            }, tint = muted)
+                        }
+                        TextButton(onClick = onRetry, enabled = active) { Text("重试") }
+                    }
+                    if (expanded) Text(state.error, style = MaterialTheme.typography.bodySmall, color = muted,
+                        modifier = Modifier.padding(bottom = 8.dp))
+                }
+            }
+        }
         if (initialLoad) {
-            if (coverPlaceholders) items(visibleColumns * 2,
+            if (ranking || columns == 1) {
+                if (!showFeatured) item(span = { GridItemSpan(maxLineSpan) }, key = "list-loading-status") {
+                    Text(if (ranking) "正在加载${state.period.label}" else "正在加载漫画",
+                        Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
+                            .semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite },
+                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                items(4, key = { "loading-row:$it" }, contentType = { "list-placeholder" }) {
+                    DiscoveryListPlaceholder(ranking)
+                }
+            } else if (coverPlaceholders) items(visibleColumns * 2,
                 key = { "loading-cover:$it" }, contentType = { "cover-placeholder" }) {
                 DiscoveryCoverPlaceholder(androidManga)
             }
@@ -958,7 +992,8 @@ private fun DiscoveryPane(
                 }
             }
             item(span = { GridItemSpan(maxLineSpan) }, key = "more", contentType = "load-more") {
-                if (state.error != null) {
+                if (state.error != null && state.failedPage == 0) Spacer(Modifier.height(12.dp))
+                else if (state.error != null) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(state.error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                         TextButton(onClick = onRetry) { Text("重试") }
@@ -984,6 +1019,21 @@ private fun DiscoveryPane(
     if (desktop) DesktopVerticalScrollbar(grid,
         Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
     }
+    }
+}
+
+@Composable
+private fun DiscoveryListPlaceholder(ranked: Boolean) {
+    val ink = MaterialTheme.colorScheme.onSurface
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp).clearAndSetSemantics {},
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (ranked) Spacer(Modifier.width(22.dp))
+        Spacer(Modifier.size(width = 68.dp, height = 98.dp)
+            .background(ink.copy(alpha = .07f), RoundedCornerShape(9.dp)))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Spacer(Modifier.fillMaxWidth(.74f).height(12.dp).background(ink.copy(alpha = .09f), CircleShape))
+            Spacer(Modifier.fillMaxWidth(.46f).height(8.dp).background(ink.copy(alpha = .055f), CircleShape))
+        }
     }
 }
 

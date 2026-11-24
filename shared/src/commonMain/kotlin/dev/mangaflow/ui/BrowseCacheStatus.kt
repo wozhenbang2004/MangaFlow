@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CloudOff
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.Sync
@@ -50,7 +51,8 @@ import kotlinx.coroutines.delay
 
 /** One page-level indicator discloses actual list origin and the current reusable-data policy. */
 @Composable
-internal fun BrowseCacheStatus(state: BrowseState, backdrop: HazeState, active: Boolean) {
+internal fun BrowseCacheStatus(state: BrowseState, backdrop: HazeState, active: Boolean,
+    onRefresh: (() -> Unit)? = null) {
     val context = LocalMangaContext.current
     val store = remember(context) { ExperiencePolicyStore.get(context) }
     val overrides by store.overrides.collectAsStateWithLifecycle()
@@ -99,6 +101,7 @@ internal fun BrowseCacheStatus(state: BrowseState, backdrop: HazeState, active: 
     val age = state.updatedAt.takeIf { it > 0L && it <= now }?.let { now - it }
     val stale = state.fromCache && age != null && (fresh == 0L || age >= fresh)
     val busy = state.loading || state.refreshing || state.loadingMore
+    val actionLabel = if (onRefresh != null) "刷新与缓存" else heading
     val status = when {
         busy -> if (state.loadingMore) "正在追加结果" else "正在更新"
         state.error != null -> "更新未完整完成"
@@ -116,9 +119,9 @@ internal fun BrowseCacheStatus(state: BrowseState, backdrop: HazeState, active: 
     Box {
         MotionIconButton(onClick = { pendingSettingsKey = null; expanded = !expanded },
             enabled = interactive, modifier = Modifier.size(44.dp).semantics {
-                contentDescription = heading
+                contentDescription = actionLabel
                 stateDescription = status
-            }, tooltip = "$heading · $status") {
+            }, tooltip = "$actionLabel · $status") {
             MotionSwap(icon, Modifier.size(19.dp)) { shown ->
                 Icon(shown, null, Modifier.size(19.dp),
                     tint = if (state.error != null) colors.error else colors.onSurfaceVariant)
@@ -127,6 +130,11 @@ internal fun BrowseCacheStatus(state: BrowseState, backdrop: HazeState, active: 
         CompactGlassPopover(visible = expanded && interactive, backdrop = backdrop,
             onDismiss = { expanded = false; pendingSettingsKey = null },
             onPresenceChange = { popupPresent = it }, maximumWidth = 288.dp) {
+            if (onRefresh != null) CompactMenuAction(Icons.Outlined.Refresh, "刷新榜单",
+                enabled = interactive && !busy) {
+                expanded = false
+                onRefresh()
+            }
             Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(heading, style = MaterialTheme.typography.titleSmall)

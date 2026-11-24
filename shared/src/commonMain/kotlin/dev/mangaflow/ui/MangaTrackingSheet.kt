@@ -1,15 +1,20 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.RadioButtonChecked
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
@@ -57,9 +62,17 @@ internal fun MangaTrackingSheet(
     onContinueRead: (Manga, Chapter) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val loginVisible by rememberUpdatedState(visible)
+    if (!visible) return
     val colors = MaterialTheme.colorScheme
     val uri = LocalUriHandler.current
-    var providerIndex by remember { mutableIntStateOf(0) }
+    var providerIndex by remember(state.ready) {
+        val linked = state.bindings.firstOrNull { binding ->
+            binding.mangaId == state.manga?.id && binding.ownerId == state.accounts[binding.provider]?.ownerId
+        }?.provider
+        val initial = linked ?: MangaTrackingProvider.entries.firstOrNull { it in state.accounts }
+        mutableIntStateOf(initial?.ordinal ?: 0)
+    }
     val provider = MangaTrackingProvider.entries[providerIndex]
     val account = state.accounts[provider]
     val work = state.manga
@@ -76,7 +89,6 @@ internal fun MangaTrackingSheet(
     var showCredential by remember(provider, account?.ownerId) { mutableStateOf(false) }
     var manualCredential by remember(provider, account?.ownerId) { mutableStateOf(false) }
     var authorization by remember { mutableStateOf<MangaTrackingAuthorization?>(null) }
-    val loginVisible by rememberUpdatedState(visible)
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var showSearch by remember(provider, account?.ownerId, work?.id) { mutableStateOf(false) }
     var query by remember(provider, work?.id) { mutableStateOf(work?.title.orEmpty()) }
@@ -94,7 +106,9 @@ internal fun MangaTrackingSheet(
     val draftVolumes = volumesText.toIntOrNull()?.takeIf { it >= 0 }
     val selectedProgress = if (draftChapters != null && draftVolumes != null && chosenStatus != null)
         MangaTrackingProgress(chosenStatus, draftChapters, draftVolumes) else null
-    val continuation = controller.continuationTarget(provider)
+    val continuation = remember(controller, provider, bound, review, state.chapters) {
+        controller.continuationTarget(provider)
+    }
     val openLink: (String) -> Unit = { url ->
         externalError = runCatching { uri.openUri(url) }.exceptionOrNull()?.let { "无法打开浏览器，请检查设备的默认浏览器。" }
     }
@@ -106,13 +120,6 @@ internal fun MangaTrackingSheet(
         authorization?.let { cancelWebsite(it.id) }
         token = ""; showCredential = false; manualCredential = false
         onDismiss()
-    }
-    LaunchedEffect(visible) {
-        if (!visible) {
-            authorization?.let { controller.cancelWebsiteAuthorization(it.id) }
-            authorization = null
-            token = ""; showCredential = false; manualCredential = false; externalError = null
-        }
     }
     DisposableEffect(authorization?.id, lifecycle) {
         val owned = authorization
@@ -129,63 +136,66 @@ internal fun MangaTrackingSheet(
     }
     LaunchedEffect(bound?.subject?.id) { if (bound != null) showSearch = false }
 
-    MotionDialog(visible, onDismissRequest = dismissPanel, maximumWidth = 600.dp) {
-        LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
-            role = GlassSurfaceRole.PANEL, elevation = 0.dp) {
-            val website = authorization?.takeIf { visible }
-            Column(Modifier.fillMaxWidth().then(if (website != null)
-                Modifier.height(LocalMangaWindow.current.panelHeight.coerceAtMost(720.dp))
-                else Modifier.heightIn(max = LocalMangaWindow.current.panelHeight))) {
-                Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    if (website != null) MotionIconButton(onClick = {
-                        cancelWebsite(website.id)
-                    }, modifier = Modifier.size(44.dp), tooltip = "返回账号同步") {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
-                    }
-                    Column(Modifier.weight(1f)) {
-                        Text(website?.let { "连接 " + it.provider.label } ?: "漫画进度同步",
-                            style = MaterialTheme.typography.titleMedium)
-                        if (website != null) TrackingHint(if (website.provider == MangaTrackingProvider.BANGUMI)
-                            "Bangumi 官方页面 · next.bgm.tv" else "AniList 官方页面 · anilist.co")
-                        else work?.let { Text(it.title, style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                    }
-                    MotionIconButton(onClick = dismissPanel, modifier = Modifier.size(44.dp), tooltip = "关闭漫画进度同步") {
-                        Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
-                    }
+    MotionBottomSheet(onDismissRequest = dismissPanel, backdrop = backdrop) { dismiss ->
+        val website = authorization
+        Column(Modifier.fillMaxWidth().then(if (website != null)
+            Modifier.height(LocalMangaWindow.current.panelHeight.coerceAtMost(720.dp))
+            else Modifier.heightIn(max = LocalMangaWindow.current.panelHeight))) {
+            Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 6.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                if (website != null) MotionIconButton(onClick = {
+                    cancelWebsite(website.id)
+                }, modifier = Modifier.size(44.dp), tooltip = "返回账号同步") {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
                 }
-                if (website != null) key(website.id) {
-                    var loading by remember { mutableStateOf(true) }
-                    if (loading) Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MotionBusyIndicator(Modifier.size(18.dp))
-                        TrackingHint("正在连接官方页面…")
-                    }
-                    NativeTrackingWebsiteLogin(authorization = website,
-                        onCancel = cancelWebsite,
-                        onCredential = { id, credential ->
-                            if (loginVisible && authorization?.id == id) {
-                                controller.completeWebsiteAuthorization(id, credential)
-                                authorization = null
-                                showCredential = false; manualCredential = false; token = ""
-                            } else controller.cancelWebsiteAuthorization(id)
-                        },
-                        onLoading = { if (authorization?.id == website.id) loading = it },
-                        onError = { message ->
-                            if (loginVisible && authorization?.id == website.id) {
-                                externalError = message
-                                cancelWebsite(website.id)
-                            }
-                        }, modifier = Modifier.fillMaxWidth().weight(1f).padding(12.dp))
-                } else LazyColumn(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    item {
-                        MotionTabs(providerIndex, MangaTrackingProvider.entries.map { it.label }, onSelect = {
-                            providerIndex = it; externalError = null
-                        }, modifier = Modifier.fillMaxWidth(), controlHeight = 44.dp)
-                    }
-                    item { TrackingHint("对照收藏状态、已读话数与卷数。本机读到哪一页会继续保留。") }
+                Column(Modifier.weight(1f)) {
+                    Text(website?.let { "连接 " + it.provider.label } ?: "漫画进度同步",
+                        style = MaterialTheme.typography.titleMedium)
+                    if (website != null) TrackingHint(if (website.provider == MangaTrackingProvider.BANGUMI)
+                        "Bangumi 官方页面 · next.bgm.tv" else "AniList 官方页面 · anilist.co")
+                    else work?.let { Text(it.title, style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                }
+                MotionIconButton(onClick = {
+                    authorization?.let { cancelWebsite(it.id) }
+                    dismiss()
+                }, modifier = Modifier.size(48.dp), tooltip = "关闭漫画进度同步") {
+                    Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
+                }
+            }
+            if (website != null) key(website.id) {
+                var loading by remember { mutableStateOf(true) }
+                if (loading) Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MotionBusyIndicator(Modifier.size(18.dp))
+                    TrackingHint("正在连接官方页面…")
+                }
+                NativeTrackingWebsiteLogin(authorization = website,
+                    onCancel = cancelWebsite,
+                    onCredential = { id, credential ->
+                        if (loginVisible && authorization?.id == id) {
+                            controller.completeWebsiteAuthorization(id, credential)
+                            authorization = null
+                            showCredential = false; manualCredential = false; token = ""
+                        } else controller.cancelWebsiteAuthorization(id)
+                    },
+                    onLoading = { if (authorization?.id == website.id) loading = it },
+                    onError = { message ->
+                        if (loginVisible && authorization?.id == website.id) {
+                            externalError = message
+                            cancelWebsite(website.id)
+                        }
+                    }, modifier = Modifier.fillMaxWidth().weight(1f).padding(12.dp))
+            } else {
+                MotionTabs(providerIndex, MangaTrackingProvider.entries.map { it.label }, onSelect = {
+                    providerIndex = it; externalError = null
+                }, modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp),
+                    controlHeight = 48.dp, fullWidthIndicator = true,
+                    track = colors.onSurface.copy(alpha = .045f))
+                val list = key(provider, work?.id, account?.ownerId) { rememberLazyListState() }
+                LazyColumn(Modifier.weight(1f, fill = false), state = list,
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 6.dp, bottom = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (busy) item {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) {
@@ -214,16 +224,28 @@ internal fun MangaTrackingSheet(
                         item {
                             val websiteConfigured = provider == MangaTrackingProvider.BANGUMI || state.aniListClientId.isNotBlank()
                             if (trackingWebsiteLoginSupported() && websiteConfigured) {
-                                MotionButton(onClick = {
-                                    externalError = null; token = ""
-                                    authorization = controller.beginWebsiteAuthorization(provider)
-                                }, enabled = enabled,
-                                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                                    Text(if (account == null) "登录 " + provider.label else "重新登录 " + provider.label)
+                                TrackingHint("同步收藏、话数和卷数，本机页码会保留。")
+                                val interaction = remember { MutableInteractionSource() }
+                                LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().padding(top = 10.dp),
+                                    cornerRadius = 18.dp, role = GlassSurfaceRole.CONTROL,
+                                    interactionSource = interaction, elevation = 1.dp) {
+                                    MotionButton(onClick = {
+                                        externalError = null; token = ""
+                                        authorization = controller.beginWebsiteAuthorization(provider)
+                                    }, enabled = enabled, interactionSource = interaction,
+                                        shape = RoundedCornerShape(18.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = colors.surface.copy(alpha = .54f), contentColor = colors.onSurface),
+                                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                                        ReviewSourceMark(provider.id, size = 17.dp)
+                                        Text(if (account == null) "登录 " + provider.label else "重新登录 " + provider.label,
+                                            Modifier.weight(1f).padding(horizontal = 10.dp))
+                                        Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp))
+                                    }
                                 }
                                 TrackingHint(if (provider == MangaTrackingProvider.BANGUMI)
-                                    "在官网登录并确认创建授权，完成后自动连接，无需复制令牌。"
-                                else "在官网登录并同意授权，完成后自动连接。",
+                                    "在 Bangumi 官网确认创建授权后会自动返回。"
+                                else "在 AniList 官网授权后会自动返回。",
                                     Modifier.padding(top = 8.dp))
                             } else {
                                 TrackingHint(if (!websiteConfigured) "当前版本尚未配置 AniList 登录，可先连接 Bangumi。"
@@ -232,7 +254,9 @@ internal fun MangaTrackingSheet(
                         }
                         item {
                             MotionTextButton(onClick = { manualCredential = !manualCredential; token = "" }, enabled = enabled) {
-                                Text(if (manualCredential) "收起备用方式" else "使用已有授权 · 备用方式")
+                                Text("使用已有令牌")
+                                Icon(if (manualCredential) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                                    if (manualCredential) "收起" else "展开", Modifier.size(16.dp))
                             }
                         }
                         if (manualCredential) item {

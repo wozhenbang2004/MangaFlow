@@ -55,8 +55,6 @@ internal fun LazyListScope.animeSearchResults(
 ) {
     val loading = search.grouping || search.searchLoadingFirst || search.searchLoadingMore
     val hasFailure = search.index.error != null || search.sources.any { it.error != null }
-    val pageFailure = search.index.error != null && search.index.page > 0 ||
-        search.sources.any { it.error != null && it.page > 0 }
     val groups = search.groups
     if (groups.isEmpty()) item(key = "search-status") {
         when {
@@ -68,7 +66,7 @@ internal fun LazyListScope.animeSearchResults(
                 if (matchingReference) "已保留所选来源。试试原名或别名。" else "试试原名、别名或更短的关键词。")
         }
     }
-    items(groups, key = { it.key }) { group ->
+    items(groups, key = { it.key }, contentType = { "anime-search-result" }) { group ->
         val canonical = group.subject
         val subject = animeSearchDisplaySubject(group, controller) ?: return@items
         val manage = if (matchingReference) null else canonical?.let { { onManage(it) } }
@@ -76,9 +74,11 @@ internal fun LazyListScope.animeSearchResults(
             ({ AnimeSubjectRatings(canonical) })
         DesktopContextMenuArea(manage?.let { listOf(DesktopMenuAction("番剧操作", onClick = it)) }.orEmpty()) {
             val original = canonical?.originalTitle?.takeIf { it.isNotBlank() && !it.equals(subject.title, ignoreCase = true) }
+            val sourceCount = remember(group.sources) { group.sources.distinctBy { it.sourceId }.size }
             val metadata = listOfNotNull(subject.year?.toString(),
                 "电影".takeIf { subject.format == AnimeDiscoveryFormat.MOVIE }
-                    ?: subject.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).joinToString(" · ")
+                    ?: subject.episodeCount?.takeIf { it > 0 }?.let { "$it 集" },
+                "$sourceCount 个片源收录".takeIf { !matchingReference && sourceCount > 1 }).joinToString(" · ")
             AnimeSubjectRow(subject, metadata, onOpen = { onOpenGroup(group) },
                 onOpenLabel = if (matchingReference) "选择这部番剧" else "查看详情",
                 onLongClick = manage,
@@ -94,6 +94,16 @@ internal fun LazyListScope.animeSearchResults(
                 })
         }
     }
+    if (hasFailure && (groups.isNotEmpty() || search.canPageSearch)) item(key = "search-partial") {
+        val missing = buildList {
+            if (search.index.error != null) add(animeDiscoveryProviderLabel(search.catalogProvider))
+            search.sources.filter { it.error != null }.forEach { add(it.name) }
+        }
+        AnimeDiscoveryInlineStatus("${missing.size} 个来源暂未返回", controller::retrySearch,
+            detail = missing.joinToString("、"))
+    } else if (groups.isNotEmpty() && search.sources.any { it.loading }) item(key = "search-pending") {
+        AnimeQuietLabel("正在补充其他片源", Modifier.padding(horizontal = 10.dp, vertical = 8.dp))
+    }
     if (search.canPageSearch || search.searchLoadingMore) item(key = "search-more") {
         if (platformKind == PlatformKind.DESKTOP || matchingReference || groups.isEmpty()) {
             MotionTextButton(onClick = controller::loadMoreCatalog, enabled = search.canPageSearch,
@@ -107,10 +117,6 @@ internal fun LazyListScope.animeSearchResults(
             }
         } else Box(Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.Center) {
             BottomPullLoadIndicator(pull, Modifier.size(32.dp))
-        }
-    } else if (groups.isNotEmpty() && !loading && pageFailure) item(key = "search-retry-more") {
-        MotionTextButton(onClick = controller::retrySearch, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-            Text("重试加载更多")
         }
     }
 }

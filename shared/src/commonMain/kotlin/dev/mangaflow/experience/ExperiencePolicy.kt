@@ -49,6 +49,9 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var sampling: Job? = null
     private var memoryCache: ExperienceMemoryCache? = null
     private var diskCache: ExperienceDiskCache? = null
+    private val mutablePrefetchDiskState = MutableStateFlow(PrefetchDiskState.AVAILABLE)
+    internal val prefetchDiskState: StateFlow<PrefetchDiskState> = mutablePrefetchDiskState.asStateFlow()
+    internal fun publishPrefetchDiskState(value: PrefetchDiskState) { mutablePrefetchDiskState.value = value }
     private var memoryUsageJob: Job? = null
     private var memoryRefreshPending = false
     private var memoryExpiryWatcher: Job? = null
@@ -498,12 +501,15 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             scope.launch(start = CoroutineStart.LAZY) {
                 try {
                     val disk = synchronized(lock) { diskCache }
+                    // This existing sample also wakes readers after a transient journal error.
+                    // An unrelated storage owner's scan must not hold the image gate closed.
+                    val imageBytes = disk?.sampleSize()
                     val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
                     storage.maintenanceTick()
                     val global = storage.sample(overrides.value.runtime.cacheSampleSeconds.toLong() * 1_000L)
-                    val imageBytes = disk?.size
                     val pending = disk?.resizePending == true
-                    val error = disk?.resizeError
+                    val error = disk?.resizeError ?: mutablePrefetchDiskState.value
+                        .takeIf { it == PrefetchDiskState.UNAVAILABLE }?.waitReason
                     val cacheGroups = global.items.groupBy { item ->
                         when (item.resource.backend) {
                             dev.mangaflow.storage.CacheBackend.SCRIPT -> "SCRIPT"

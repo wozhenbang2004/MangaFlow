@@ -67,6 +67,7 @@ internal fun MotionNavigationColumn(
     selected: Int,
     itemCount: Int,
     modifier: Modifier = Modifier,
+    selectionVisible: Boolean = true,
     item: @Composable (Int, Modifier) -> Unit,
 ) {
     if (itemCount <= 0) return
@@ -99,7 +100,7 @@ internal fun MotionNavigationColumn(
         }
     }
     Column(modifier.fillMaxWidth().padding(vertical = 3.dp).drawWithCache {
-        if (heights.size != itemCount) return@drawWithCache onDrawBehind { }
+        if (!selectionVisible || heights.size != itemCount) return@drawWithCache onDrawBehind { }
         var y = 0f
         val gap = 6.dp.roundToPx().toFloat()
         val starts = FloatArray(itemCount) { i ->

@@ -11,7 +11,6 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -32,6 +31,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -44,6 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
@@ -52,6 +54,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import dev.mangaflow.ui.*
+import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.motion.*
 
 @Stable
@@ -127,7 +130,7 @@ internal fun AnimeLibrary(
             }
         }
     }
-    val filterLabels = listOf("片单", "追番", "观看历史")
+    val filterLabels = listOf("全部", "已追", "历史")
     val orderLabels = listOf("最近观看", "作品名称", "年份")
     val filter = viewState.filter.coerceIn(filterLabels.indices)
     val folder = viewState.folder
@@ -143,37 +146,48 @@ internal fun AnimeLibrary(
     LaunchedEffect(historyId, state.library) {
         if (historyId != null && state.library.none { it.subject.id == historyId }) historyId = null
     }
-    val folders = state.library.map { it.folder }.filter { it.isNotBlank() }.distinct().sorted()
-    val entries = state.library.map { entry ->
-        if (entry.subject.id in pendingHistory) entry.copy(resume = null) else entry
-    }.filter { entry ->
-        (when (filter) { 1 -> entry.followed; 2 -> entry.resume != null; else -> entry.followed || entry.resume != null }) &&
-            (folder == null || entry.folder == folder)
-    }.let { rows ->
-        when (order) {
-            1 -> rows.sortedWith(compareByDescending<AnimeLibraryEntry> { it.pinned }.thenBy { it.subject.title })
-            2 -> rows.sortedWith(compareByDescending<AnimeLibraryEntry> { it.pinned }
-                .thenByDescending { it.subject.year ?: 0 }.thenBy { it.subject.title })
-            else -> rows.sortedWith(compareByDescending<AnimeLibraryEntry> { it.pinned }
-                .thenByDescending { it.resume?.updatedAt ?: it.updatedAt })
-        }
+    val folders = remember(state.library) {
+        state.library.map { it.folder }.filter { it.isNotBlank() }.distinct().sorted()
     }
-    val continuation = if (filter == 0 && folder == null && order == 0 && !state.libraryReadUnavailable) {
-        entries.sortedByDescending { it.resume?.updatedAt ?: 0L }.firstOrNull { entry ->
-            val progress = entry.resume ?: return@firstOrNull false
-            !progress.completed ||
-                controller.continuationEpisode(entry.subject.id)?.id?.let { it != progress.episodeId } == true
+    val entries = remember(state.library, pendingHistory, filter, folder, order) {
+        val sorted = compareByDescending<AnimeLibraryEntry> { it.pinned }
+        val byPreference = when (order) {
+            1 -> sorted.thenBy { it.subject.title }
+            2 -> sorted.thenByDescending { it.subject.year ?: 0 }.thenBy { it.subject.title }
+            else -> sorted.thenByDescending { it.resume?.updatedAt ?: it.updatedAt }
         }
-    } else null
-    val works = entries.filterNot { it.subject.id == continuation?.subject?.id }
+        state.library.asSequence().filter { folder == null || it.folder == folder }
+            .map { entry -> if (entry.subject.id in pendingHistory) entry.copy(resume = null) else entry }
+            .filter { when (filter) {
+                1 -> it.followed
+                2 -> it.resume != null
+                else -> it.followed || it.resume != null
+            } }.sortedWith(byPreference).toList()
+    }
+    val showContinuation = filter == 0 && folder == null && order == 0 && !state.libraryReadUnavailable
+    val continuation = remember(entries, showContinuation, controller, state.detail) {
+        if (!showContinuation) null else entries.asSequence().filter { it.resume != null }
+            .sortedByDescending { it.resume?.updatedAt }.firstOrNull { entry ->
+                val progress = entry.resume ?: return@firstOrNull false
+                !progress.completed ||
+                    controller.continuationEpisode(entry.subject.id)?.id?.let { it != progress.episodeId } == true
+            }
+    }
+    val works = remember(entries, continuation) {
+        if (continuation == null) entries else entries.filterNot { it.subject.id == continuation.subject.id }
+    }
+    val surface = MaterialTheme.colorScheme.surface
+    val listBackground = remember(surface) {
+        Brush.verticalGradient(listOf(surface.copy(alpha = .40f), surface.copy(alpha = .65f)))
+    }
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Column(Modifier.widthIn(max = MangaLayout.ListWidth).fillMaxSize()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 MotionTabs(filter, filterLabels, onSelect = { viewState.filter = it },
                     modifier = Modifier.weight(1f).motionInputGate(contentActive),
-                    controlHeight = 44.dp, treatment = MotionTabTreatment.Soft,
-                    fullWidthIndicator = true, tooltips = listOf("我的片单", "已追番", "观看历史"))
+                    controlHeight = 44.dp, treatment = MotionTabTreatment.Underline,
+                    tooltips = listOf("全部番剧", "已追番", "观看历史"))
                 Box {
                     MotionIconButton(onClick = { optionsOpen = true }, enabled = contentActive,
                         modifier = Modifier.size(44.dp), tooltip = "文件夹与排序") {
@@ -210,21 +224,20 @@ internal fun AnimeLibrary(
                     tooltip = "重置筛选和排序") { Icon(Icons.Outlined.Close, "重置筛选和排序", Modifier.size(16.dp)) }
             }
             val positionKey = "$filter:${folder?.length ?: -1}:$folder:$order"
-            Box(Modifier.weight(1f).fillMaxWidth()) {
+            Box(Modifier.weight(1f).fillMaxWidth().mangaHazeSource(backdrop).background(listBackground)) {
                 positions.SaveableStateProvider(positionKey) {
                     val position = if (filter != 1 && folder == null && order == 0) scroll else rememberLazyListState()
                     LazyColumn(Modifier.fillMaxSize().motionInputGate(contentActive),
                         state = position, userScrollEnabled = contentActive,
-                        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 10.dp, bottom = contentBottomPadding),
-                        verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 8.dp, bottom = contentBottomPadding),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (state.libraryReadUnavailable) item(key = "library-unavailable") {
                             AnimeMessage("片单暂时无法读取",
                                 "本地记录已保留。存储恢复前，新观看进度无法保存。",
                                 action = "去发现", onAction = onDiscover)
                         }
                         if (continuation != null) {
-                            item(key = "continue-title") { AnimeLibrarySection("继续观看") }
-                            item(key = continuation.subject.id) {
+                            item(key = continuation.subject.id, contentType = "resume-feature") {
                                 val target = controller.continuationEpisode(continuation.subject.id)
                                 AnimeLibraryWorkRow(continuation, animeContinuationLabel(continuation, target),
                                     onOpen = { onResume(continuation) },
@@ -259,19 +272,37 @@ internal fun AnimeLibrary(
                             AnimeLibrarySection(when (filter) {
                                 1 -> "已追番"
                                 2 -> "最近观看"
-                                else -> "我的番剧"
+                                else -> if (continuation == null) "我的番剧" else "其他番剧"
                             }, count = works.size.takeUnless { state.libraryReadUnavailable })
                         }
-                        items(works, key = { it.subject.id }) { entry ->
-                            val target = controller.continuationEpisode(entry.subject.id)
+                        items(works, key = { it.subject.id }, contentType = { "library-work" }) { entry ->
+                            val record = entry.resume
+                            val historyRow = filter == 2 && record != null
+                            // Older backups can contain only a work-level resume checkpoint.
+                            val replayExact = if (historyRow && record?.completed == true) {
+                                state.episodeProgress[record.episodeId]?.subjectId == entry.subject.id ||
+                                    remember(entry.catalogDetail, entry.subject.id, record.episodeId) {
+                                        entry.catalogDetail?.takeIf { it.subject.id == entry.subject.id }
+                                            ?.episodes?.any { it.subjectId == entry.subject.id && it.id == record.episodeId } == true
+                                    }
+                            } else false
+                            val action = if (replayExact) "重看本集"
+                            else if (record?.completed != true) animeContinuationLabel(entry, null)
+                            else remember(controller, entry, state.detail) {
+                                animeContinuationLabel(entry, controller.continuationEpisode(entry.subject.id))
+                            }
                             SwipeToRemove(onRemove = {
                                 if (filter == 2) removeHistory(entry)
                                 else controller.setFollowed(entry.subject, false)
                             }, enabled = contentActive && !state.libraryReadUnavailable && filter != 0,
                                 label = if (filter == 2) "移除观看记录" else "取消追番", transparentBackground = true) {
-                                AnimeLibraryWorkRow(entry, animeContinuationLabel(entry, target),
-                                    onOpen = { if (entry.resume != null) onResume(entry) else onOpen(entry.subject) },
-                                    onHistory = if (filter == 2 && entry.resume != null) {
+                                AnimeLibraryWorkRow(entry, action,
+                                    onOpen = {
+                                        if (record == null) onOpen(entry.subject)
+                                        else if (replayExact) onResumeEpisode(entry, record)
+                                        else onResume(entry)
+                                    },
+                                    onHistory = if (historyRow) {
                                         { historyId = entry.subject.id }
                                     } else null,
                                     onManage = { entryPresent = true; selectedId = entry.subject.id },
@@ -332,49 +363,62 @@ internal fun AnimeLibraryWorkRow(
     val colors = MaterialTheme.colorScheme
     val resume = entry.resume
     val interaction = remember(entry.subject.id) { MutableInteractionSource() }
-    val shape = RoundedCornerShape(if (featured) 20.dp else 14.dp)
-    val extra = listOfNotNull(
-        animeStatusLabel(entry.status).takeIf { entry.followed },
-        entry.folder.takeIf { it.isNotBlank() },
-        "置顶".takeIf { entry.pinned },
-    ).joinToString(" · ")
+    val shape = RoundedCornerShape(if (featured) 22.dp else 14.dp)
+    val location = remember(entry.subject.id, entry.catalogDetail, resume) {
+        resume?.let { animeWatchLocation(entry, it) }
+    }
+    val extra = remember(entry.status, entry.followed, entry.folder, entry.pinned) {
+        listOfNotNull(
+            animeStatusLabel(entry.status).takeIf { entry.followed },
+            entry.folder.takeIf { it.isNotBlank() },
+            "置顶".takeIf { entry.pinned },
+        ).joinToString(" · ")
+    }
     Row(Modifier.fillMaxWidth().clip(shape)
-        .then(if (featured) Modifier.background(colors.surfaceContainerLow) else Modifier)
-        .padding(end = if (onManage != null) 2.dp else 0.dp),
+        .then(if (featured) Modifier.background(colors.surfaceContainerHigh.copy(alpha = .70f)) else Modifier),
         verticalAlignment = Alignment.CenterVertically) {
         Row(Modifier.weight(1f).clip(shape).motionPress(interaction, enabled = active, pressedScale = .99f)
             .combinedClickable(enabled = active, interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = actionLabel, onClick = onOpen,
                 onLongClickLabel = if (onManage != null) "管理番剧" else null, onLongClick = onManage)
-            .padding(start = 8.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            AnimePoster(entry.subject, Modifier.width(if (featured) 59.dp else 52.dp)
-                .height(if (featured) 86.dp else 76.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            .padding(start = if (featured) 10.dp else 4.dp, end = 4.dp,
+                top = if (featured) 10.dp else 6.dp, bottom = if (featured) 10.dp else 6.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (featured) {
+                // Only the lead poster supplies pixels to its own play lens.
+                val artwork = rememberHazeState()
+                Box(Modifier.width(62.dp).height(90.dp), contentAlignment = Alignment.BottomEnd) {
+                    AnimePoster(entry.subject, Modifier.fillMaxSize().mangaHazeSource(artwork))
+                    LiquidGlassSurface(artwork, Modifier.padding(4.dp).size(28.dp),
+                        cornerRadius = 14.dp, role = GlassSurfaceRole.ARTWORK,
+                        interactionSource = interaction, elevation = 0.dp, surfaceColor = Color.Black) {
+                        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .46f)),
+                            contentAlignment = Alignment.Center) {
+                            Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp), tint = Color.White)
+                        }
+                    }
+                }
+            } else AnimePoster(entry.subject, Modifier.width(46.dp).height(66.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                if (featured) Text(actionLabel, style = MaterialTheme.typography.labelMedium,
+                    color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(entry.subject.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                     style = if (featured) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                if (resume != null) {
-                    Text(if (resume.completed) actionLabel else animeWatchLocation(entry, resume),
-                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    if (resume.completed && !featured) Text(animeWatchLocation(entry, resume),
-                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (!resume.completed && resume.durationMs > 0L) {
-                        AnimeWatchProgressLine((resume.positionMs.toFloat() / resume.durationMs).coerceIn(0f, 1f),
-                            Modifier.widthIn(max = 180.dp).padding(top = 2.dp))
+                if (location != null && resume != null) {
+                    Text(location, style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
+                        color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (resume.completed && !featured && onHistory == null) {
+                        Text(actionLabel, style = MaterialTheme.typography.labelMedium,
+                            color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    } else if (!resume.completed) animeWatchFraction(resume)?.let { fraction ->
+                        AnimeWatchProgressLine(fraction, Modifier.widthIn(max = if (featured) 188.dp else 128.dp)
+                            .padding(vertical = 2.dp))
                     }
                 }
                 if (extra.isNotBlank() && !featured) Text(extra, style = MaterialTheme.typography.labelSmall,
                     color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (showRatings) AnimeSubjectRatings(entry.subject, enabled = active)
-            }
-            if (resume != null) Box(Modifier.size(36.dp).background(
-                if (featured) colors.onSurface else colors.surfaceContainerHigh, CircleShape),
-                contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.PlayArrow, null, Modifier.size(22.dp),
-                    tint = if (featured) colors.surface else colors.onSurface)
             }
         }
         if (onHistory != null) MotionIconButton(onClick = onHistory, enabled = active,

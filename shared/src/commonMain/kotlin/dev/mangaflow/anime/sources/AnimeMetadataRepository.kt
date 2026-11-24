@@ -420,15 +420,21 @@ private fun bangumiAliases(json: JSONObject): List<String> {
 /** The legacy calendar API still advertises HTTP URLs for the HTTPS-capable official CDN.
  * Normalize only that known origin; never relax the shared public-source HTTPS boundary.
  */
-private fun bangumiCover(images: JSONObject?): String =
-    listOf("large", "common", "medium", "small", "grid").firstNotNullOfOrNull { size ->
-        val raw = images?.text(size).orEmpty()
+internal fun bangumiCover(images: JSONObject?, thumbnail: Boolean = false): String {
+    val sizes = if (thumbnail) listOf("common", "medium", "large", "small", "grid")
+        else listOf("large", "common", "medium", "small", "grid")
+    if (images == null) return ""
+    return sizes.firstNotNullOfOrNull { size ->
+        if (images.isNull(size)) return@firstNotNullOfOrNull null
+        val raw = images.text(size).takeUnless { it.equals("null", ignoreCase = true) }
+            ?: return@firstNotNullOfOrNull null
         val url = raw.toHttpUrlOrNull()
         val normalized = if (url != null && url.scheme == "http" && url.host == "lain.bgm.tv" &&
             url.port == 80 && url.username.isEmpty() && url.password.isEmpty())
             url.newBuilder().scheme("https").port(443).build().toString() else raw
         sourceCover("https://bgm.tv/", normalized).takeIf { it.isNotBlank() }
     }.orEmpty()
+}
 
 internal suspend fun bangumiEpisodes(http: AnimeHttp, subjectId: Int, token: String? = null): List<JSONObject> {
     val output = mutableListOf<JSONObject>()

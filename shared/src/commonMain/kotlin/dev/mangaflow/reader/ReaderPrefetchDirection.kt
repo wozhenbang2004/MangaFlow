@@ -56,7 +56,7 @@ internal fun readerNearbyPreviewPages(
                 index += step
             }
         } else {
-            val owner = groups.indexOfFirst { it.contains(edge) }
+            val owner = groups.indexOfReaderPage(edge)
             if (owner >= 0) {
                 var index = owner + step
                 while (index in groups.indices) {

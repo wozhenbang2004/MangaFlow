@@ -369,7 +369,8 @@ internal data class ReaderPagePreflight(
 internal data class ReaderOriginalStamp(val key: String, val path: Path, val bytes: Long, val modifiedAt: Long)
 
 internal data class ReaderPreparedArtifacts(val originalPresent: Boolean?, val originalBytes: Long?,
-    val previewResident: Boolean?, val originalStamp: ReaderOriginalStamp? = null)
+    val previewResident: Boolean?, val originalStamp: ReaderOriginalStamp? = null,
+    val missingFile: Boolean = false)
 
 /** Inspect this exact artifact locally. Do not execute an image request or touch a memory LRU entry. */
 internal suspend fun inspectReaderPreparedArtifacts(
@@ -383,7 +384,8 @@ internal suspend fun inspectReaderPreparedArtifacts(
         preview = memoryCacheKey?.let { key -> loader.memoryCache?.keys?.contains(key) }
         val key = diskCacheKey ?: readerPageCacheKey(page, headers, source)
         suspend fun inspect(fileSystem: FileSystem, path: Path): ReaderPreparedArtifacts {
-            val metadata = fileSystem.metadataOrNull(path) ?: return ReaderPreparedArtifacts(false, null, preview)
+            val metadata = fileSystem.metadataOrNull(path)
+                ?: return ReaderPreparedArtifacts(false, null, preview, missingFile = true)
             val bytes = metadata.size?.takeIf { metadata.isRegularFile && it > 0L }
                 ?: return ReaderPreparedArtifacts(false, null, preview)
             val stamp = metadata.lastModifiedAtMillis?.takeIf { it > 0L }?.let { ReaderOriginalStamp(key, path, bytes, it) }
@@ -401,8 +403,14 @@ internal suspend fun inspectReaderPreparedArtifacts(
         }
         val local = readerFilePath(page.url)
         if (local != null) inspect(FileSystem.SYSTEM, StorageFile(local).nativePath)
-        else loader.diskCache?.let { cache -> cache.openSnapshot(key)?.use { inspect(cache.fileSystem, it.data) } }
-            ?: ReaderPreparedArtifacts(false, null, preview)
+        else {
+            val cache = loader.diskCache ?: return@withContext ReaderPreparedArtifacts(null, null, preview)
+            var missing = true
+            val snapshot = if (cache is ExperienceDiskCache) cache.openInspectedSnapshot(key) { missing = it }
+                else cache.openSnapshot(key)
+            snapshot?.use { inspect(cache.fileSystem, it.data) }
+                ?: ReaderPreparedArtifacts(if (missing) false else null, null, preview, missingFile = missing)
+        }
     } catch (cancelled: CancellationException) { throw cancelled }
     // Header/EXIF inspection is optional evidence, not permission to kill the
     // chapter scheduler or declare an existing original missing under pressure.
@@ -574,7 +582,8 @@ internal fun initializeExperienceImages(context: PlatformContext) {
             .weakReferencesEnabled(false).build(), automaticTotal)
         val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
         val disk = ExperienceDiskCache(StorageFile(cacheDirectory(app), "image-cache").nativePath,
-            policy.state.value.diskCacheBytes, policy::refreshCacheUsage, storage::cacheWorkFinished)
+            policy.state.value.diskCacheBytes, policy::refreshCacheUsage, storage::cacheWorkFinished,
+            policy::publishPrefetchDiskState)
         storage.attach(disk)
         ImageLoader.Builder(imageContext)
             .components {

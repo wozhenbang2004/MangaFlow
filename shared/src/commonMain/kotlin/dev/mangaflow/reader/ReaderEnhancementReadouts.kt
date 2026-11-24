@@ -90,26 +90,26 @@ internal fun readerEnhancementReadouts(
         val value = when {
             !enabled -> "原图"
             !pageMatches -> "本页增强 —"
-            visiblePages.size > 1 -> "${pageScope}已备 $readyPages/${visiblePages.size}" +
-                currentProgress?.let { " · $it" }.orEmpty()
-            state.currentEnhanced -> "本页已备"
+            task?.phase == EnhancementTaskPhase.FAILED || state.currentFailure != null -> if (visiblePages.size > 1)
+                "可见页增强 $readyPages/${visiblePages.size} · 有页增强失败" else "增强失败 · 沿用原图"
+            visiblePages.size > 1 -> "${pageScope}增强 $readyPages/${visiblePages.size}"
+            state.currentEnhanced -> "本页增强已备"
             currentProgress != null -> currentProgress
             else -> "本页未备"
         }
         add(EnhancementReadout(EnhancementMetric.QUALITY, value,
             if (enabled) listOfNotNull("${pageScope}增强文件，$value；文件就绪不代表已经呈现",
-                (currentDetail ?: task?.reason ?: task?.progress?.detail)?.takeUnless { it in value })
+                (currentDetail ?: task?.reason ?: task?.progress?.detail ?: currentProgress)?.takeUnless { it in value })
                 .joinToString("，") else "当前选择原图"))
     }
     if (EnhancementMetric.DIMENSIONS in metrics) {
-        if (!enabled || visiblePages.isEmpty()) {
-            add(EnhancementReadout(EnhancementMetric.DIMENSIONS, "增强输出 —", "当前没有可用的增强文件尺寸"))
-        } else visiblePages.forEach { index ->
+        val outputs = visiblePages.filter { enabled && it in state.assets }
+        if (outputs.isEmpty()) {
+            add(EnhancementReadout(EnhancementMetric.DIMENSIONS, "增强尺寸 —", "可见页尚无已备增强文件尺寸"))
+        } else outputs.forEach { index ->
             val resolution = readerEnhancementResolution(index, null, state.assets[index])
             val prefix = if (visiblePages.size > 1) "P${index + 1} · " else ""
-            add(EnhancementReadout(EnhancementMetric.DIMENSIONS,
-                prefix + if (resolution.enhanced) resolution.label else "增强输出 —",
-                if (resolution.enhanced) resolution.description else "第 ${index + 1} 页尚无已备增强文件尺寸"))
+            add(EnhancementReadout(EnhancementMetric.DIMENSIONS, prefix + resolution.label, resolution.description))
         }
     }
     if (EnhancementMetric.PREPARED in metrics) {
@@ -123,10 +123,9 @@ internal fun readerEnhancementReadouts(
             !pageMatches -> "前方增强 —"
             PreparationMode.SMART !in policy.preparation -> "提前增强未开启"
             state.aheadPages.isEmpty() -> "前方无待备页"
-            else -> "前方已备 $aheadReady/${state.aheadPages.size} 页"
+            else -> "前方增强 $aheadReady/${state.aheadPages.size} 页"
         }
-        val value = prepared + preparationDetail?.let { " · ${briefEnhancementDetail(it)}" }.orEmpty()
-        add(EnhancementReadout(EnhancementMetric.PREPARED, value,
+        add(EnhancementReadout(EnhancementMetric.PREPARED, prepared,
             "沿阅读方向、不包含当前可见页的增强文件，$prepared" +
                 (if (pageMatches && enabled && state.nextReady) "；下一屏全部已备" else "") +
                 preparationDetail?.let { "；$it" }.orEmpty()))

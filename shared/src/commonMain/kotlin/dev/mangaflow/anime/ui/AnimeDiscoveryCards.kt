@@ -179,16 +179,21 @@ internal fun animeDiscoveryMetric(item: AnimeDiscoveryItem, query: AnimeDiscover
 /** Artwork, title and the shared manga score band keep the same reading order in every density. */
 @Composable
 internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQuery,
-    modifier: Modifier = Modifier, list: Boolean = false, onScores: ((AnimeDiscoveryItem) -> Unit)? = null,
+    modifier: Modifier = Modifier, list: Boolean = false, showPoster: Boolean = true,
+    onScores: ((AnimeDiscoveryItem) -> Unit)? = null,
     onManage: (() -> Unit)? = null,
     onOpen: () -> Unit) {
     val provider = item.discoveryProvider ?: query.provider
-    val scores = observedAnimeRatingSnapshot(item.subject, animeDiscoverySourceScores(item, provider)).scores
+    val scores = observedAnimeRatingSnapshot(item.subject, animeDiscoverySourceScores(item, provider),
+        enabled = onScores != null).scores
     val schedule = animeDiscoveryMetric(item, query)
-    val caption = if (schedule != null && (query.calendar || query.season != null)) schedule
-    else listOfNotNull(schedule, item.year?.toString(),
-        "电影".takeIf { item.format == AnimeDiscoveryFormat.MOVIE }
-            ?: item.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).take(2).joinToString(" · ")
+    val length = "电影".takeIf { item.format == AnimeDiscoveryFormat.MOVIE }
+        ?: item.episodeCount?.takeIf { it > 0 }?.let { "${it} 集" }
+    val caption = when {
+        query.calendar -> schedule ?: length.orEmpty()
+        query.season != null && schedule != null -> schedule
+        else -> listOfNotNull(schedule, item.year?.toString(), length).take(2).joinToString(" · ")
+    }
     val rated = item.copy(sourceScores = scores)
     val showScores = onScores?.let { open -> { open(rated) } }
     val sourceBadge: (@Composable () -> Unit)? = if (provider != AnimeDiscoveryProvider.DOUBAN && scores.isEmpty() && showScores != null) {
@@ -199,13 +204,15 @@ internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQ
             AnimeSourceBadge(sources, compact = true, onClick = showScores)
         }
     } else null
-    AnimeCompactCoverCard(item.key, item.title, item.coverUrl, caption, animeDiscoverySourceId(item.coverProvider ?: provider),
+    val artworkProvider = item.coverProvider ?: provider
+    AnimeCompactCoverCard(item.key, item.title, item.coverUrl, caption, animeDiscoverySourceId(artworkProvider),
+        fallbackCover = item.subject?.coverUrl?.takeIf { artworkProvider == AnimeDiscoveryProvider.BANGUMI },
         ratings = if (scores.isEmpty()) null else ({
             AnimeRatingBadges(item.key, scores, Modifier.fillMaxWidth(), onExpand = showScores)
         }),
         captionBadge = sourceBadge,
         description = listOfNotNull(item.title, caption.takeIf(String::isNotBlank)).joinToString("，"),
-        modifier = modifier, list = list, onManage = onManage, onOpen = onOpen)
+        modifier = modifier, list = list, showPoster = showPoster, onManage = onManage, onOpen = onOpen)
 }
 
 internal fun animeDiscoverySourceScores(item: AnimeDiscoveryItem, provider: AnimeDiscoveryProvider): List<AnimeSourceScore> =
@@ -259,7 +266,8 @@ internal fun AnimeSourceGroupDiscoveryCard(group: AnimeSearchGroup, sources: Lis
 @Composable
 private fun AnimeCompactCoverCard(key: String, title: String, cover: String, caption: String, sourceId: String,
     ratings: (@Composable () -> Unit)?, description: String, modifier: Modifier,
-    list: Boolean, captionBadge: (@Composable () -> Unit)? = null, onManage: (() -> Unit)? = null, onOpen: () -> Unit) {
+    list: Boolean, captionBadge: (@Composable () -> Unit)? = null, fallbackCover: String? = null, showPoster: Boolean = true,
+    onManage: (() -> Unit)? = null, onOpen: () -> Unit) {
     val interaction = remember(key) { MutableInteractionSource() }
     val click = modifier.motionPress(interaction, pressedScale = .98f)
         .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
@@ -271,7 +279,8 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
     if (list) {
         Row(click.fillMaxWidth().padding(vertical = 4.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            AnimePoster(cover, Modifier.width(58.dp).height(84.dp).clearAndSetSemantics { }, sourceId = sourceId)
+            if (showPoster) AnimePoster(cover, Modifier.width(58.dp).height(84.dp).clearAndSetSemantics { },
+                sourceId, fallbackCover, title)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text(title, Modifier.clearAndSetSemantics { }, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                     style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 2,
@@ -284,7 +293,8 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
         }
     } else {
         Column(click) {
-            AnimePoster(cover, Modifier.fillMaxWidth().aspectRatio(2f / 3f).clearAndSetSemantics { }, sourceId = sourceId)
+            if (showPoster) AnimePoster(cover, Modifier.fillMaxWidth().aspectRatio(2f / 3f).clearAndSetSemantics { },
+                sourceId, fallbackCover, title)
             Text(title, Modifier.padding(top = 8.dp, start = 2.dp, end = 2.dp).clearAndSetSemantics { },
                 fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 20.sp),
@@ -302,11 +312,11 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
 @Composable
 private fun AnimeCompactCardCaption(caption: String, badge: (@Composable () -> Unit)?) {
     if (caption.isBlank() && badge == null) return
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        badge?.invoke()
-        if (caption.isNotBlank()) Text(caption, Modifier.weight(1f, fill = false).clearAndSetSemantics { },
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        if (caption.isNotBlank()) Text(caption, Modifier.clearAndSetSemantics { },
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2, overflow = TextOverflow.Ellipsis)
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        badge?.invoke()
     }
 }
 

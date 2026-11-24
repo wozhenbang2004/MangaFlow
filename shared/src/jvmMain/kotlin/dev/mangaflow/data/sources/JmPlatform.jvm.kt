@@ -974,7 +974,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                                 val observers = synchronized(imageActivityLock) { slot.observers.toList() }
                                 observers.forEach { it(count) }
                                 token.ifOptional {
-                                    if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded()
+                                    policy.requirePrefetchWrite()
                                     policy.acceptPrefetchChunk(count, resourceOwner)
                                     try { reserveReceipt(received) }
                                     catch (failure: Throwable) { policy.releasePrefetchBytes(count, resourceOwner); throw failure }
@@ -1087,7 +1087,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                                     if (bytes.size < 128) throw SourceException("禁漫图片还原结果为空或不完整。")
                                     if (bytes.size.toLong() > maximumBytes) throw PrefetchBudgetExceeded()
                                     token.ifOptional {
-                                        if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded()
+                                        policy.requirePrefetchWrite()
                                         receipt?.let {
                                             if (it.used < bytes.size) it.accept(bytes.size.toLong() - it.used)
                                             else it.release(it.used - bytes.size.toLong())

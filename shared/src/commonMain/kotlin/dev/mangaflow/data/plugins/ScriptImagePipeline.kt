@@ -462,7 +462,7 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
                 if (closed) throw CancellationException("图片预取已结束。")
                 received += count
                 work.ifOptional {
-                    if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded()
+                    policy.requirePrefetchWrite()
                     policy.acceptPrefetchChunk(count, resourceOwner, memoryBacked = true)
                     try { receipt.accept(count) }
                     catch (failure: Throwable) {

@@ -7,12 +7,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -34,10 +32,13 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.motionPress
 
 /** Saved native fields and exact catalogue IDs only; a display name never establishes identity. */
-internal fun animeWatchedEpisodeName(entry: AnimeLibraryEntry, progress: AnimeWatchProgress): String {
+private fun animeWatchedEpisodeName(
+    entry: AnimeLibraryEntry,
+    progress: AnimeWatchProgress,
+    catalogued: AnimeEpisode? = entry.catalogDetail?.takeIf { it.subject.id == entry.subject.id }
+        ?.episodes?.firstOrNull { it.id == progress.episodeId && it.subjectId == entry.subject.id },
+): String {
     if (progress.subjectId.isNotBlank() && progress.subjectId != entry.subject.id) return "观看记录"
-    val catalogued = entry.catalogDetail?.takeIf { it.subject.id == entry.subject.id }
-        ?.episodes?.firstOrNull { it.id == progress.episodeId && it.subjectId == entry.subject.id }
     val episode = catalogued ?: progress.episodeNumber?.takeIf { it.isFinite() }?.let { number ->
         progress.episodeKind?.let { kind ->
             AnimeEpisode(progress.episodeId, entry.subject.id, progress.episodeTitle, number, kind)
@@ -80,13 +81,20 @@ internal fun AnimeEpisodeHistorySheet(
             it.subjectId.isBlank() || it.subjectId == entry.subject.id
         })).sortedByDescending { it.updatedAt }.distinctBy { it.episodeId }
     }
+    val catalogue = remember(entry.subject.id, entry.catalogDetail) {
+        buildMap<String, AnimeEpisode> {
+            entry.catalogDetail?.takeIf { it.subject.id == entry.subject.id }?.episodes?.forEach { episode ->
+                if (episode.subjectId == entry.subject.id && episode.id !in this) put(episode.id, episode)
+            }
+        }
+    }
     val scroll = rememberLazyListState()
     MotionBottomSheet(onDismissRequest = {
         val chosen = selected
         selected = null
         onDismiss()
         chosen?.let(onContinue)
-    }, containerColor = MaterialTheme.colorScheme.background, backdrop = backdrop, desktopCloseButton = true) { dismiss ->
+    }, backdrop = backdrop) { dismiss ->
         Column(Modifier.fillMaxWidth()) {
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -105,8 +113,9 @@ internal fun AnimeEpisodeHistorySheet(
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (rows.isEmpty()) item(key = "empty") { AnimeMessage("还没有逐集观看记录") }
-                items(rows, key = { it.episodeId }) { record ->
-                    AnimeEpisodeHistoryRow(entry, record, onOpen = { selected = record; dismiss() })
+                items(rows, key = { it.episodeId }, contentType = { "episode-history" }) { record ->
+                    AnimeEpisodeHistoryRow(entry, record, catalogue[record.episodeId],
+                        onOpen = { selected = record; dismiss() })
                 }
             }
         }
@@ -118,13 +127,14 @@ internal fun AnimeEpisodeHistorySheet(
 private fun AnimeEpisodeHistoryRow(
     entry: AnimeLibraryEntry,
     record: AnimeWatchProgress,
+    catalogued: AnimeEpisode?,
     onOpen: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember(record.episodeId) { MutableInteractionSource() }
     val current = entry.resume?.episodeId == record.episodeId && !record.completed
     val label = if (record.completed) "重看这一集" else "从已保存位置继续"
-    val name = animeWatchedEpisodeName(entry, record)
+    val name = remember(entry.subject.id, record, catalogued) { animeWatchedEpisodeName(entry, record, catalogued) }
     val shape = RoundedCornerShape(14.dp)
     Row(Modifier.fillMaxWidth().clip(shape)
         .then(if (current) Modifier.background(colors.surfaceContainerLow) else Modifier)
@@ -133,22 +143,18 @@ private fun AnimeEpisodeHistoryRow(
             onClickLabel = label, onClick = onOpen)
         .heightIn(min = 56.dp).padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        if (record.completed) Icon(Icons.Outlined.Check, null, Modifier.size(17.dp),
-            tint = colors.onSurfaceVariant)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Text(name, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(listOfNotNull(
                 "上次看到".takeIf { current },
                 animeWatchPosition(record),
                 animeSourceName(record.sourceId).takeIf { it.isNotBlank() },
-            ).joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+            ).joinToString(" · "), style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
+                color = colors.onSurfaceVariant,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (!record.completed && record.durationMs > 0L) AnimeWatchProgressLine(
                 (record.positionMs.toFloat() / record.durationMs).coerceIn(0f, 1f), Modifier.widthIn(max = 192.dp))
         }
-        Box(Modifier.size(36.dp).background(if (current) colors.onSurface else colors.surfaceContainerHigh, CircleShape),
-            contentAlignment = Alignment.Center) {
-            Icon(Icons.Outlined.PlayArrow, null, Modifier.size(20.dp), tint = if (current) colors.surface else colors.onSurface)
-        }
+        if (record.completed) Icon(Icons.Outlined.Check, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
     }
 }

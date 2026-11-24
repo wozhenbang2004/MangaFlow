@@ -177,7 +177,9 @@ internal fun RankingsFromTab(
     val reportEmphasis by rememberUpdatedState(onEmphasisState)
     BoxWithConstraints(Modifier.fillMaxWidth().onGloballyPositioned { origin = it.positionInRoot() }) {
         val viewportWidth = maxWidth
-        val endLeft = 50.dp.coerceAtMost(viewportWidth)
+        // On a phone the open filter can use the area below the menu button.
+        // Its origin still follows the measured ranking tab in both directions.
+        val endLeft = if (viewportWidth < 480.dp) 0.dp else 50.dp
         val endWidth = (viewportWidth - endLeft).coerceAtLeast(1.dp)
         val relativeAnchor = if (ready) origin?.let { point ->
             Rect(anchor.left - point.x, anchor.top - point.y,

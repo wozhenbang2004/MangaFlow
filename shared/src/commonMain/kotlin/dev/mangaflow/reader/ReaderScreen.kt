@@ -297,6 +297,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import dev.mangaflow.reader.ReaderZoomableImage as ZoomableAsyncImage
@@ -2396,7 +2397,7 @@ private fun ChapterPages(
             else pages.indices.map { PageSpread(it) }
         }
         val startingGroup = remember(groups, startPage) {
-            groups.indexOfFirst { it.contains(startPage) }.coerceAtLeast(0)
+            groups.indexOfReaderPage(startPage).coerceAtLeast(0)
         }
         val pager = rememberPagerState(initialPage = startingGroup, pageCount = { groups.size })
         LaunchedEffect(keyboardRequest?.serial, active) {
@@ -2510,7 +2511,7 @@ private fun ChapterPages(
         LaunchedEffect(targetPage, groups) {
             targetPage?.let { imageIndex ->
                 readingNavigation()
-                val groupIndex = groups.indexOfFirst { it.contains(imageIndex.coerceIn(0, pages.lastIndex)) }
+                val groupIndex = groups.indexOfReaderPage(imageIndex.coerceIn(0, pages.lastIndex))
                 if (groupIndex >= 0) pager.scrollToPage(groupIndex)
                 onTargetConsumed()
             }
@@ -2524,7 +2525,7 @@ private fun ChapterPages(
         prefetchViewport = ReaderPrefetchViewport(groups = groups,
             position = { pager.currentPage + pager.currentPageOffsetFraction }, visibleRange = {
                 val shown = groups.getOrNull(pager.currentPage) ?: groups.getOrNull(pager.settledPage)
-                    ?: groups.firstOrNull { it.contains(initialPage) } ?: groups[startingGroup]
+                    ?: groups.getOrNull(groups.indexOfReaderPage(initialPage)) ?: groups[startingGroup]
                 shown.first to shown.last
             })
         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
@@ -2705,7 +2706,7 @@ private fun readerDirectionalPages(
         val available = if (step > 0) pageCount - 1 - edge else edge
         return (1..minOf(count, available)).map { edge + step * it }
     }
-    val owner = groups.indexOfFirst { it.contains(edge) }
+    val owner = groups.indexOfReaderPage(edge)
     if (owner < 0) return emptyList()
     val selected = mutableListOf<Int>()
     for (offset in 1..minOf(count, groups.size)) {
@@ -2731,7 +2732,7 @@ private data class PrefetchWindow(
     val resolveParallel: Int, val decodeParallel: Int, val decodeEnabled: Boolean, val foregroundActive: Boolean,
     val runtime: ExperienceRuntimePreferences,
     val scrollDirection: Int?, val directionAnchor: Long?, val directionBaseline: Pair<Long, Long>?,
-    val groups: List<PageSpread>?, val layoutKey: Any?, val originalCacheRevision: Long,
+    val groups: List<PageSpread>?, val layoutKey: Any?, val originalCacheRevision: Long, val diskWaitReason: String?,
     val prepareEnhancementAhead: Boolean,
 )
 
@@ -2784,6 +2785,7 @@ internal fun AdjacentPagePrefetch(
     val rangeStore = remember(context) { dev.mangaflow.storage.StorageCacheStore.get(context) }
     val budget by experience.state.collectAsStateWithLifecycle()
     val overrides by experience.overrides.collectAsStateWithLifecycle()
+    val diskState by experience.prefetchDiskState.collectAsStateWithLifecycle()
     val currentBudget by rememberUpdatedState(budget)
     val currentOverrides by rememberUpdatedState(overrides)
     val visible by rememberUpdatedState(visibleRange)
@@ -2817,7 +2819,7 @@ internal fun AdjacentPagePrefetch(
         val originalFinished = mutableSetOf<Int>()
         var originalCacheRevision by mutableLongStateOf(0L)
         val retryAttempts = mutableMapOf<Pair<Int, PrefetchStage>, Long>()
-        val retryAfter = mutableMapOf<Pair<Int, PrefetchStage>, Long>()
+        val retryAfter = mutableStateMapOf<Pair<Int, PrefetchStage>, Long>()
         val resourceDeferred = mutableSetOf<Pair<Int, PrefetchStage>>()
         // The concrete byte-window owner is the retry generation, including a promoted
         // request that finishes after a newer optional window has already been installed.
@@ -2830,6 +2832,8 @@ internal fun AdjacentPagePrefetch(
         val memoryKeys = mutableMapOf<Int, coil3.memory.MemoryCache.Key>()
         var inspectTargets = emptySet<Int>()
         var inspectVisible = emptySet<Int>()
+        var nextPreviewPages = emptySet<Int>()
+        val rewarmedNextPreviews = mutableSetOf<Int>()
         fun token(index: Int, stage: PrefetchStage): PrefetchWork {
             transientDeferred.remove(index to stage)
             capacityDeferred.remove(index to stage)
@@ -2869,7 +2873,8 @@ internal fun AdjacentPagePrefetch(
             val reason = readerPrefetchErrorLabel(failure)
             end(index, stage, if (sourceFailure) ReaderPreparationPhase.FAILED else ReaderPreparationPhase.DEFERRED, reason)
             if (sourceFailure) { resourceDeferred -= key; pageFailed(index, reason) }
-            else if (key in capacityDeferred || diskQuotaDeferred) resourceDeferred -= key
+            else if (key in capacityDeferred || key in transientDeferred ||
+                stage == PrefetchStage.DOWNLOADING && index in budgetDeferred) resourceDeferred -= key
             else resourceDeferred += key
             val attempts = (retryAttempts[key] ?: 0L) + if (sourceFailure) 1L else 0L
             if (sourceFailure) retryAttempts[key] = attempts
@@ -2893,11 +2898,30 @@ internal fun AdjacentPagePrefetch(
         val originalEpochs = mutableMapOf<Int, Int>()
         val originalStamps = mutableMapOf<Int, ReaderOriginalStamp>()
         val originalBytes = mutableMapOf<Int, Long>()
+        val verifiedOriginals = mutableSetOf<Int>()
+        // Some responses can be displayed but never retained. Repeat their local resolution
+        // only once per live window, until we actually observe a reusable original again.
+        val retriedMissingOriginals = mutableSetOf<Int>()
         val newlyAvailable = mutableSetOf<Int>()
         val inspected = mutableMapOf<Int, Int>()
         // An attempted cache-only check is not a claim that a preview remains resident.
         val previewChecks = mutableMapOf<Int, Pair<IntSize, Int>>()
-        val deferredChecks = mutableMapOf<Int, Long>()
+        val deferredChecks = mutableStateMapOf<Int, Long>()
+        // A whole window shares one retry timer, independent of the user's statistics interval.
+        val retryWake = snapshotFlow {
+            if (prefetchEnabled && readerActive) (retryAfter.values + deferredChecks.values).distinct().sorted()
+            else emptyList()
+        }.flatMapLatest { deadlines ->
+            flow {
+                var lastWake = Long.MIN_VALUE
+                for (deadline in deadlines) {
+                    if (deadline <= lastWake) continue
+                    delay((deadline - monotonicTimeMillis()).coerceAtLeast(0L))
+                    lastWake = monotonicTimeMillis()
+                    emit(Unit)
+                }
+            }
+        }.onStart { emit(Unit) }
         fun transfers(): Set<Int> = (requests.keys + scriptRequests.keys).toSet()
         fun pending(): Set<Int> = transfers() + resolutionJobs.keys
         fun originalReady(index: Int, page: Page, diskKey: String?, bytes: Long? = null) {
@@ -2907,6 +2931,7 @@ internal fun AdjacentPagePrefetch(
             originalEpochs[index] = (originalEpochs[index] ?: 0) + 1
             originalStamps.remove(index)
             originalBytes.remove(index)
+            verifiedOriginals.remove(index)
             bytes?.takeIf { it > 0L }?.let { originalBytes[index] = it }
             newlyAvailable.add(index)
             inspected.remove(index)
@@ -2947,6 +2972,10 @@ internal fun AdjacentPagePrefetch(
             var previousScanMillis = 0L
             var lastTargets = emptySet<Int>()
             while (true) {
+                if (!prefetchEnabled || !readerActive) {
+                    lastTargets = emptySet()
+                    snapshotFlow { prefetchEnabled && readerActive }.first { it }
+                }
                 listOf(PrefetchStage.RESOLVING to resolutionTokens, PrefetchStage.DOWNLOADING to workTokens,
                     PrefetchStage.CHECKING to checkTokens).forEach { (stage, tokens) ->
                     tokens.forEach { (index, work) ->
@@ -2972,19 +3001,20 @@ internal fun AdjacentPagePrefetch(
                     var scanCompleted = false
                     try {
                         for (index in scanTargets) {
+                            if (!prefetchEnabled || !readerActive) break
                             if (index !in inspectTargets || index in inspectVisible) continue
                             val retained = retainedPages[index]
                             val resolved = resolvedPages[index]
                             val epoch = originalEpochs[index]
                             val previewKey = memoryKeys[index]
-                            val native = pages.getOrNull(index)?.takeIf { page ->
+                            val resource = retained?.page ?: (resolved ?: pages.getOrNull(index))?.takeIf { page ->
                                 page.url.startsWith("file:") || (sourceId != "jmcomic" && !sourceId.startsWith("js_") &&
                                     page.sourceImageToken.isBlank() && (page.url.startsWith("https:") || page.url.startsWith("http:")))
-                            }
-                            val resource = retained?.page ?: resolved ?: native ?: continue
+                            } ?: continue
                             val started = monotonicTimeMillis()
                             val artifact = inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
                                 retained?.diskCacheKey, previewKey, previousOriginal = originalStamps[index])
+                            if (!prefetchEnabled || !readerActive) break
                             tracker?.inspectedObservation(owner, scan)
                             if (index in inspectTargets && index !in inspectVisible && originalEpochs[index] == epoch &&
                                 retainedPages[index] === retained && resolvedPages[index] == resolved) {
@@ -2993,10 +3023,11 @@ internal fun AdjacentPagePrefetch(
                                 val original = artifact.originalPresent.takeIf { it == true || retained != null ||
                                     resolved != null || resource.url.startsWith("file:") }
                                 if (original == true) {
+                                    val diskKey = retained?.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId)
                                     if (index !in transfers() && (retained == null || index !in originalFinished)) {
                                         // Register exact cache evidence before network/byte admission.
                                         // Existing files need no transfer slot, even with a full window.
-                                        originalReady(index, resource, retained?.diskCacheKey, artifact.originalBytes)
+                                        originalReady(index, resource, diskKey, artifact.originalBytes)
                                         accountCachedOriginal(index, artifact.originalBytes)
                                         originalFinished += index
                                         val key = index to PrefetchStage.DOWNLOADING
@@ -3006,21 +3037,47 @@ internal fun AdjacentPagePrefetch(
                                         originalCacheRevision++
                                     } else {
                                         if (index !in transfers()) accountCachedOriginal(index, artifact.originalBytes)
-                                        enhancement?.originalReady(index, resource, headers,
-                                            resource.sourceRouteId.ifBlank { sourceId }, retained?.diskCacheKey)
+                                        if (index !in verifiedOriginals || artifact.originalStamp != originalStamps[index])
+                                            enhancement?.originalReady(index, resource, headers,
+                                                resource.sourceRouteId.ifBlank { sourceId }, diskKey)
                                     }
+                                    verifiedOriginals += index
+                                    retriedMissingOriginals.remove(index)
+                                } else if (artifact.missingFile && retained != null && index in originalFinished &&
+                                    index !in pending() && index !in checks && !pages[index].url.startsWith("file:")) {
+                                    // A previous transfer is not proof that Coil or a materializer
+                                    // still owns the bytes. Repeat the exact download lookup first.
+                                    val retry = retriedMissingOriginals.add(index)
+                                    retainedPages.remove(index)
+                                    originalEpochs[index] = (epoch ?: 0) + 1
+                                    verifiedOriginals.remove(index)
+                                    originalBytes.remove(index)
+                                    if (retry) {
+                                        originalFinished.remove(index)
+                                        resolvedAttempts.remove(index)
+                                        resolvedPages.remove(index)
+                                    }
+                                    tracker?.missingOriginal(index, owner, retry)
+                                    originalCacheRevision++
                                 }
                                 if (artifact.originalStamp != null) originalStamps[index] = artifact.originalStamp
                                 else if (artifact.originalPresent == false) originalStamps.remove(index)
                                 artifact.originalBytes?.let { originalBytes[index] = it }
+                                val preview = artifact.previewResident.takeIf { scanLayout === currentLayout &&
+                                    memoryKeys[index] == previewKey &&
+                                    scanViewport == IntSize(currentViewportWidth(), currentHeight) }
+                                // Rewarm an evicted next page from disk once per approach. Larger
+                                // sets can exceed the LRU and continuously displace one another.
+                                if (preview == false && original == true && index in nextPreviewPages &&
+                                    index !in checks && index in previewChecks && rewarmedNextPreviews.add(index)) {
+                                    previewChecks.remove(index)
+                                    originalCacheRevision++
+                                }
                                 tracker?.artifact(index, original, artifact.originalBytes,
-                                    artifact.previewResident.takeIf { scanLayout === currentLayout &&
-                                        memoryKeys[index] == previewKey &&
-                                        scanViewport == IntSize(currentViewportWidth(), currentHeight) },
-                                    freshnessMillis = freshnessMillis, owner = owner, startedAt = started)
+                                    preview, freshnessMillis = freshnessMillis, owner = owner, startedAt = started)
                             }
                         }
-                        scanCompleted = true
+                        scanCompleted = prefetchEnabled && readerActive
                     } finally { tracker?.finishObservationScan(owner, scan, interrupted = !scanCompleted) }
                     if (fullScan) previousScanMillis = monotonicTimeMillis() - now
                 }
@@ -3040,7 +3097,7 @@ internal fun AdjacentPagePrefetch(
                     checks.keys.toSet(), resolutionJobs.keys.toSet(), resolvedPages.keys.toSet(),
                     currentBudget.resolveRequests, currentBudget.decodeRequests, experience.canDecodePrefetch(), readerActive,
                     currentBudget.runtime, currentScrollDirection?.invoke(), currentDirectionAnchor?.invoke(),
-                    currentDirectionBaseline?.invoke(), currentGroups, currentLayout, originalCacheRevision,
+                    currentDirectionBaseline?.invoke(), currentGroups, currentLayout, originalCacheRevision, diskState.waitReason,
                     currentEnhancementAhead)
             }.distinctUntilChanged().combine(snapshotFlow {
                 prefetchEnabled && (currentBudget.prefetchBytes > 0L ||
@@ -3051,7 +3108,7 @@ internal fun AdjacentPagePrefetch(
                     delay(currentBudget.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L)
                     emit(monotonicTimeMillis())
                 }
-            } }) { window, _ -> window }.collectLatest { window ->
+            } }) { window, _ -> window }.combine(retryWake) { window, _ -> window }.collectLatest { window ->
                 val now = monotonicTimeMillis()
                 if (previousLayout !== window.layoutKey || previousPreviewViewport != window.viewport) {
                     previousLayout = window.layoutKey
@@ -3065,11 +3122,10 @@ internal fun AdjacentPagePrefetch(
                     }
                     tracker?.invalidateLayoutPreviews(retiredCheckTickets)
                     memoryKeys.clear(); inspected.clear(); previewChecks.clear(); deferredChecks.clear()
+                    rewarmedNextPreviews.clear()
                     previousPosition = Float.NaN; speed = 0f
                 }
                 val groups = window.groups
-                val pairedPages = groups.orEmpty().filter { it.second != null }
-                    .flatMap { listOfNotNull(it.first, it.second) }.toSet()
                 val visiblePages = (window.first..window.last).filter { it in pages.indices }.toSet()
                 // Composition may include many future pages. Only actual visibility promotes work.
                 val foreground = if (window.foregroundActive) visiblePages else emptySet()
@@ -3084,7 +3140,7 @@ internal fun AdjacentPagePrefetch(
                 // The long preparation window follows sustained reading intent, not a
                 // one-page glance backwards. A spread is one navigation unit; panels
                 // inside the same image never count as additional reversed pages.
-                val logicalPage = window.directionAnchor ?: (groups?.indexOfFirst { it.contains(window.first) }
+                val logicalPage = window.directionAnchor ?: (groups?.indexOfReaderPage(window.first)
                     ?.takeIf { it >= 0 } ?: window.first).toLong()
                 val baseline = window.layoutKey to (window.directionBaseline?.first ?: 0L)
                 if (observedBaseline != baseline) { observedBaseline = baseline; intentEpoch++ }
@@ -3134,9 +3190,13 @@ internal fun AdjacentPagePrefetch(
                 val previewTargets = if (window.enabled) readerNearbyPreviewPages(window.first, window.last,
                     pages.size, window.decoded, direction, groups).toSet() else emptySet()
                 val memoryWindow = previewTargets.filter(::eligible).toSet()
+                nextPreviewPages = if (memoryWindow.isEmpty()) emptySet() else readerDirectionalPages(
+                    window.first, window.last, pages.size, 1, direction, groups, completeSpreads = true)
+                    .filterTo(mutableSetOf()) { it in memoryWindow }
+                rewarmedNextPreviews.retainAll(nextPreviewPages)
                 // Near previews get their resolve/check turns before distant header inspections.
                 val desired = memoryWindow + networkDesired
-                val writable = experience.canWritePrefetch()
+                val writable = window.diskWaitReason == null && window.bytes > 0L
                 val recovery = PrefetchRecoveryKey(window.bytes, window.parallel, window.resolveParallel,
                     window.decodeParallel, writable, window.foregroundActive)
                 if (recoveryKey != null && recoveryKey != recovery) resourceDeferred.forEach { key ->
@@ -3146,7 +3206,7 @@ internal fun AdjacentPagePrefetch(
                 // Admission can pause while a newly visible page is loading. That does not
                 // remove the overlapping target window or its completed cache evidence.
                 val observationWindow = (aheadTargets + behindTargets).toSet() + visiblePages
-                inspectTargets = observationWindow + previewTargets
+                inspectTargets = previewTargets + observationWindow
                 inspectVisible = visiblePages
                 // A remounted current image can temporarily be unready. Keep existing
                 // original resolution and transfers within the same observation window;
@@ -3169,6 +3229,8 @@ internal fun AdjacentPagePrefetch(
                 originalEpochs.keys.retainAll(retained)
                 originalStamps.keys.retainAll(retained)
                 originalBytes.keys.retainAll(retained)
+                verifiedOriginals.retainAll(retained)
+                retriedMissingOriginals.retainAll(retained)
                 newlyAvailable.retainAll(retained)
                 memoryKeys.keys.retainAll(retained)
                 inspected.keys.retainAll(retained)
@@ -3193,12 +3255,16 @@ internal fun AdjacentPagePrefetch(
                         accountCachedOriginal(index, originalBytes[index])
                     }
                 }
+                val waitingForOriginal = networkDesired.any {
+                    it !in originalFinished || (it to PrefetchStage.DOWNLOADING) in retryAfter
+                }
                 tracker?.window(owner, window.first, window.last, direction, aheadTargets, behindTargets,
                     networkDesired, memoryWindow, previewTargets, window.foregroundActive,
                     when { !window.enabled -> "阅读暂缓"; !window.visibleReady -> "当前页优先"
+                        window.bytes <= 0L && currentOverrides.prefetchMiB == 0 -> "原图预读额度设为 0"
                         window.bytes <= 0L -> currentBudget.reason
-                        !writable -> "等待可回收空间；当前阅读和下载受保护"
-                        byteWindow.remaining <= 0L && networkDesired.any { it !in originalFinished } ->
+                        window.diskWaitReason != null && waitingForOriginal -> window.diskWaitReason
+                        byteWindow.remaining <= 0L && waitingForOriginal ->
                             "原图预取额度已用尽；翻页或提高额度后继续"
                         else -> null })
                 // A new window can have usable bytes without changing configured limits.
@@ -3397,7 +3463,9 @@ internal fun AdjacentPagePrefetch(
                     val transfer = ReaderTransferObserver()
                     val request = imageLoader.enqueue(readerImageRequest(context, resource, headers, sourceId)
                         .readerTransferProgress(transfer)
-                        .prefetchPriority(windowBytes, sourceId.ifBlank { experienceOrigin(resource.url) }, token)
+                        .prefetchPriority(windowBytes, resource.sourceRouteId.ifBlank {
+                            sourceId.ifBlank { experienceOrigin(resource.url) }
+                        }, token)
                         .size(1).memoryCachePolicy(CachePolicy.DISABLED).diskCachePolicy(CachePolicy.ENABLED)
                         .decoderFactory(BlackholeDecoder.Factory()).build())
                     val ownedRequest = ReaderPagePrefetch(request, transfer, token)
@@ -3444,8 +3512,9 @@ internal fun AdjacentPagePrefetch(
                     val retainedPage = retainedPages[index] ?: continue
                     val resource = retainedPage.page
                     val epoch = originalEpochs[index] ?: 0
+                    val paired = groups?.let { it.getOrNull(it.indexOfReaderPage(index))?.second } != null
                     val size = readerPreviewSize(
-                        if (index in pairedPages) window.viewport.width / 2 else window.viewport.width,
+                        if (paired) window.viewport.width / 2 else window.viewport.width,
                         window.viewport.height, maxWidthPx = window.runtime.previewWidthPx,
                         maxHeightPx = window.runtime.previewHeightPx)
                     val warmMemory = window.decodeEnabled && index in memoryWindow && window.viewport.width > 0
@@ -3482,6 +3551,7 @@ internal fun AdjacentPagePrefetch(
                             when (result.status) {
                                 ReaderPagePreflightStatus.READY, ReaderPagePreflightStatus.UNVERIFIED,
                                 ReaderPagePreflightStatus.FAILED -> {
+                                    deferredChecks.remove(index)
                                     inspected[index] = epoch
                                     if (warmMemory) previewChecks[index] = size to epoch
                                     if (result.status == ReaderPagePreflightStatus.FAILED)
@@ -3781,8 +3851,12 @@ private fun ReaderPageImage(
     var resolvedPage by remember(attempt) { mutableStateOf<Page?>(null) }
     val pageTransfer by rememberReaderPageTransfer(attempt, page, observePageTransfer,
         enabled = pageVisible && loading && error == null && resolvedPage == null)
-    LaunchedEffect(attempt, pageVisible, handoffCaptured) {
+    LaunchedEffect(attempt, pageVisible, handoffCaptured, loading) {
         if (!pageVisible || !handoffCaptured) return@LaunchedEffect
+        if (!loading) {
+            preparationTracker?.handoff(page.index, false)
+            return@LaunchedEffect
+        }
         while (true) {
             val value = if (waitingForPrefetch) attemptPrefetch?.work?.snapshot() else preparationWork.snapshot()
             val ticket = preparationTicket

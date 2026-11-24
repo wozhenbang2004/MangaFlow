@@ -50,6 +50,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -91,6 +92,8 @@ import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import dev.mangaflow.data.SearchTarget
@@ -100,11 +103,8 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.NavigationDrawerItem
-import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -150,6 +150,7 @@ import dev.mangaflow.platform.storage.applicationContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -217,6 +218,33 @@ private data class SidebarDestination(
         ?: if (profile == ContentProfile.ANIME && section == Section.SETTINGS) "应用设置"
         else section.navigationTitle(profile == ContentProfile.RESTRICTED)
 }
+@Composable
+private fun DrawerDestinationLink(
+    destination: SidebarDestination, profile: ContentProfile, selected: Boolean, enabled: Boolean,
+    modifier: Modifier, compact: Boolean = false, onSelect: (SidebarDestination) -> Unit,
+) {
+    val interactions = remember(destination) { MutableInteractionSource() }
+    val colors = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(14.dp)
+    val fill = if (compact && selected) colors.onSurface.copy(alpha = .08f) else Color.Transparent
+    Row(modifier.heightIn(min = 48.dp).background(fill, shape)
+        .selectable(selected = selected, enabled = enabled, role = Role.Tab,
+            interactionSource = interactions, indication = null, onClick = { onSelect(destination) })
+        .motionPress(interactions, enabled = enabled, pressedScale = .985f)
+        .padding(horizontal = if (compact) 6.dp else 14.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = if (compact) Arrangement.Center else Arrangement.Start) {
+        Icon(destination.icon, null, Modifier.size(if (compact) 18.dp else 21.dp),
+            tint = if (selected) colors.onSurface else colors.onSurfaceVariant)
+        Spacer(Modifier.width(if (compact) 6.dp else 14.dp))
+        Text(destination.title(profile),
+            style = if (compact) MaterialTheme.typography.labelLarge else MaterialTheme.typography.bodyLarge,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (selected) colors.onSurface else colors.onSurfaceVariant,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
 /** A new reference owns the motion; cancellation cannot replay a stale destination. */
 private class DrawerAction(val target: DrawerValue, val destination: Section? = null,
     val profile: ContentProfile? = null, val animeDestination: AnimeWorkspaceDestination? = null,
@@ -310,6 +338,7 @@ private fun <T> StateFlow<T>.collectVisibleAsState(visible: Boolean): State<T> {
 fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNotifications: () -> Unit, model: MangaViewModel = rememberMangaViewModel()) {
     val windowSize = LocalMangaWindow.current
     val wallpaperContext = LocalContext.current.applicationContext
+    val appVersion = remember(wallpaperContext) { platformVersion(wallpaperContext) }
     val experience = remember(wallpaperContext) { ExperiencePolicyStore.get(wallpaperContext) }
     val highRefreshPreference = remember(experience) {
         experience.state.map { it.preferHighRefresh && it.refreshHz == null }.distinctUntilChanged()
@@ -331,7 +360,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
     val wallpaperStore = remember(wallpaperContext) { WallpaperStore.get(wallpaperContext) }
-    val wallpaper by wallpaperStore.state.collectAsStateWithLifecycle()
+    val wallpaperState = wallpaperStore.state.collectAsStateWithLifecycle()
+    val hasWallpaper by remember(wallpaperState) {
+        derivedStateOf { wallpaperState.value.let { it.mediaPath != null && it.strength > 0f } }
+    }
     val metricState = remember(model) { MangaMetricState(model.metrics, model::retainMetrics, model::releaseMetrics) }
     val detail by model.detail.collectAsStateWithLifecycle()
     val authorWorks by model.authorWorks.collectAsStateWithLifecycle()
@@ -1008,7 +1040,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     val drawerCanSelect = frame is Frame.Root && drawerExposed
     val drawerTargets = remember { mutableMapOf<SidebarDestination, Rect>() }
-    SideEffect { drawerTargets.keys.retainAll(profileSections.toSet()) }
+    DisposableEffect(drawerVisible, profileSections) {
+        onDispose { drawerTargets.clear() }
+    }
     val canSelectDrawer: () -> Boolean = {
         frame is Frame.Root && drawer.currentOffset.let { it.isFinite() && it > -drawerWidthPx + .5f }
     }
@@ -1028,13 +1062,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val routeTravel = with(density) { 24.dp.roundToPx() }
     CompositionLocalProvider(
         LocalMangaMetrics provides displayedMetrics,
-        LocalWallpaperActive provides (frame is Frame.Root && wallpaper.mediaPath != null),
+        LocalWallpaperActive provides (frame is Frame.Root && hasWallpaper && !(section == Section.ANIME && animeImmersive)),
     ) {
     DesktopNavigationWorkspace(
         visible = desktopNavigationVisible, expanded = desktopNavigationWide,
         destinations = desktopDestinations,
         selectedIndex = profileSections.indexOf(pendingSidebarDestination ?: highlightedSection).coerceAtLeast(0),
-        version = "MangaFlow " + platformVersion(LocalContext.current), backdrop = drawerBackdrop,
+        version = "MangaFlow $appVersion", backdrop = drawerBackdrop,
         onToggle = { desktopNavigationMode = if (desktopNavigationWide) 2 else 1 },
         onNavigate = { index ->
             val destination = profileSections[index]
@@ -1113,74 +1147,59 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 drawerTonalElevation = 0.dp,
                 windowInsets = WindowInsets(0, 0, 0, 0),
             ) {
-                // Preserve the measured drawer anchors for shared navigation transitions,
-                // but never draw the off-screen phone menu over persistent desktop navigation.
-                if (!desktopNavigationVisible) {
+                // The full-size shell keeps the native swipe anchors even while its contents are off-screen.
                 Box(Modifier.fillMaxSize()) {
-                if (drawerVisible && frame is Frame.Root) LiquidGlassSurface(
-                    state = drawerBackdrop,
-                    modifier = Modifier.fillMaxHeight().fillMaxWidth(),
-                    cornerRadius = 26.dp,
-                    role = GlassSurfaceRole.DRAWER,
-                    trackPointer = true, elevation = 0.dp,
-                ) {}
-                Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)
-                    .then(if (drawerCanSelect) Modifier else Modifier.clearAndSetSemantics { }
-                        .focusProperties { canFocus = false })
-                    .padding(horizontal = 14.dp, vertical = 12.dp)) {
-                    Row(Modifier.padding(12.dp, 8.dp, 12.dp, if (windowSize.shortHeight) 8.dp else 28.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(contentProfile.icon, contentDescription = null, modifier = Modifier.size(28.dp))
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(contentProfile.title, style = MaterialTheme.typography.titleLarge)
-                            Text("MANGAFLOW", fontSize = 10.sp, letterSpacing = 2.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (drawerVisible && frame is Frame.Root) {
+                        LiquidGlassSurface(drawerBackdrop, Modifier.fillMaxSize(), cornerRadius = 26.dp,
+                            role = GlassSurfaceRole.DRAWER, elevation = 0.dp) {}
+                        val selection = pendingSidebarDestination ?: highlightedSection
+                        val (destinations, tools) = remember(profileSections) {
+                            profileSections.partition { it.section != Section.SETTINGS }
+                        }
+                        Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)
+                            .semantics { paneTitle = "${contentProfile.title}导航" }
+                            .then(if (drawerCanSelect) Modifier else Modifier.clearAndSetSemantics { }
+                                .focusProperties { canFocus = false })
+                            .padding(horizontal = 12.dp, vertical = 6.dp)) {
+                            Row(Modifier.fillMaxWidth().padding(start = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Text("MangaFlow", style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.width(8.dp))
+                                Text(appVersion, Modifier.weight(1f),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                MotionIconButton(modifier = Modifier.size(48.dp), enabled = drawerCanSelect,
+                                    onClick = { drawerAction = DrawerAction(DrawerValue.Closed) }, tooltip = "关闭导航") {
+                                    Icon(Icons.Outlined.Close, "关闭导航", Modifier.size(18.dp))
+                                }
+                            }
+                            ContentProfileSwitch(contentProfile, requestProfile, manageProfileSources,
+                                modifier = Modifier.padding(bottom = 6.dp),
+                                enabled = drawerCanSelect && !rootHandoff)
+                            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(drawerScroll)) {
+                                val selectedIndex = destinations.indexOf(selection)
+                                MotionNavigationColumn(selected = selectedIndex, itemCount = destinations.size,
+                                    selectionVisible = selectedIndex >= 0) { index, itemModifier ->
+                                    val destination = destinations[index]
+                                    DrawerDestinationLink(destination, contentProfile, destination == selection,
+                                        drawerCanSelect, itemModifier.fillMaxWidth().onGloballyPositioned {
+                                            drawerTargets[destination] = it.boundsInRoot()
+                                        }, onSelect = selectDrawer)
+                                }
+                            }
+                            Row(Modifier.fillMaxWidth().padding(top = 6.dp)
+                                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .045f), RoundedCornerShape(14.dp))) {
+                                tools.forEach { destination ->
+                                    DrawerDestinationLink(destination, contentProfile, destination == selection,
+                                        drawerCanSelect, Modifier.weight(1f).onGloballyPositioned {
+                                            drawerTargets[destination] = it.boundsInRoot()
+                                        }, compact = true, onSelect = selectDrawer)
+                                }
+                            }
                         }
                     }
-                    ContentProfileSwitch(contentProfile, requestProfile, manageProfileSources,
-                        modifier = Modifier.padding(bottom = 10.dp), enabled = drawerCanSelect && !rootHandoff)
-                    Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(drawerScroll)) {
-                    CompositionLocalProvider(LocalRippleConfiguration provides null) {
-                    MotionNavigationColumn(
-                        selected = profileSections.indexOf(pendingSidebarDestination ?: highlightedSection).coerceAtLeast(0),
-                        itemCount = profileSections.size,
-                    ) { index, itemModifier ->
-                        val destination = profileSections[index]
-                        val interactions = remember(destination) { MutableInteractionSource() }
-                        val selected = (pendingSidebarDestination ?: highlightedSection) == destination
-                        NavigationDrawerItem(
-                            label = {
-                                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
-                                    .motionPress(interactions, enabled = drawerCanSelect),
-                                    verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(destination.icon, null, Modifier.size(21.dp),
-                                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (selected) 1f else .82f))
-                                    Spacer(Modifier.width(12.dp))
-                                    Text(destination.title(contentProfile), fontWeight = FontWeight.Medium)
-                                }
-                            },
-                            selected = selected,
-                            onClick = { selectDrawer(destination) },
-                            shape = RoundedCornerShape(14.dp),
-                            colors = NavigationDrawerItemDefaults.colors(
-                                selectedContainerColor = Color.Transparent,
-                                selectedTextColor = MaterialTheme.colorScheme.onSurface,
-                                selectedIconColor = MaterialTheme.colorScheme.onSurface,
-                                unselectedContainerColor = Color.Transparent,
-                                unselectedTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .88f),
-                                unselectedIconColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .82f),
-                            ),
-                            modifier = itemModifier.onGloballyPositioned {
-                                drawerTargets[destination] = it.boundsInRoot()
-                            },
-                            interactionSource = interactions,
-                        )
-                    }
-                    }
-                    }
-                    Text("MangaFlow ${platformVersion(LocalContext.current)}", modifier = Modifier.padding(12.dp),
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                }
                 }
             }
         },
@@ -1354,7 +1373,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 onConfirmSource = model::confirmRankedSource, onCancelPreview = model::cancelRankedSourcePreview,
                                 active = current.key == frame.key && !currentBack.gesturing && !currentBack.completed,
                                 wallpaper = {
-                                    if (wallpaper.mediaPath != null) AppWallpaper(wallpaperStore, Modifier.fillMaxSize(),
+                                    if (hasWallpaper) AppWallpaper(wallpaperStore, Modifier.fillMaxSize(),
                                         active = current.key == frame.key)
                                 })
                         } else {
@@ -1390,7 +1409,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             }
                             loaded.filter { (it.manga to it.source) in candidates }
                         } else emptyList()
-                        CompositionLocalProvider(LocalWallpaperActive provides (wallpaper.mediaPath != null)) {
+                        CompositionLocalProvider(LocalWallpaperActive provides hasWallpaper) {
                             DetailScreen(
                                 manga = current.state.manga, detail = current.state.detail,
                                 desktopFindRequest = desktopFindRequest.takeIf { desktopFindOwner == current.key } ?: 0,
@@ -1487,7 +1506,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 active = current.key == frame.key && authorWorks == null && !tagSearchVisible &&
                                     sourceManagement == null && sourceResumeChoice == null,
                                 wallpaper = {
-                                    if (wallpaper.mediaPath != null) AppWallpaper(wallpaperStore, Modifier.fillMaxSize(),
+                                    if (hasWallpaper) AppWallpaper(wallpaperStore, Modifier.fillMaxSize(),
                                         active = current.key == frame.key && authorWorks == null && !tagSearchVisible)
                                 },
                             )
@@ -1496,6 +1515,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     }
                     is Frame.Root -> {
                         val searchBackdrop = rememberHazeState()
+                        val playerOwnsScreen = current.section == Section.ANIME && animeImmersive
                         val rootWallpaperActive = current.key == frame.key &&
                             !drawerVisible && !recentReadingOpen && !tagSearchVisible
                         val chromeDensity = LocalDensity.current
@@ -1541,9 +1561,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         // sources and headers sample it without owning the player lifecycle.
                         Box(Modifier.fillMaxSize().mangaHazeSource(searchBackdrop, zIndex = -1f)
                             .background(MaterialTheme.colorScheme.background)) {
-                            AppWallpaper(wallpaperStore, Modifier.fillMaxSize(), active = rootWallpaperActive)
+                            if (!playerOwnsScreen && hasWallpaper) {
+                                AppWallpaper(wallpaperStore, Modifier.fillMaxSize(), active = rootWallpaperActive,
+                                    underCatalogue = current.section == Section.DISCOVER || current.section == Section.ANIME ||
+                                        current.section == Section.LIBRARY || current.section == Section.BOARDS)
+                            }
                         }
-                        val contentWidth = if (current.section == Section.ANIME && animeImmersive) {
+                        val contentWidth = if (playerOwnsScreen) {
                             windowSize.width
                         } else if (desktop && current.section != Section.DISCOVER) {
                             MangaLayout.DesktopWorkspaceWidth

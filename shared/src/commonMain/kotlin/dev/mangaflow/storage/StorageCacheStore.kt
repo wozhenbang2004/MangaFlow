@@ -4,6 +4,7 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.experience.ExperienceDiskCache
+import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.ExperienceRuntimePreferences
 import dev.mangaflow.experience.CacheEvictionOrder
 import dev.mangaflow.experience.readerPageCacheKey
@@ -579,7 +580,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
     /** Clear exactly the reviewed snapshot; new or changed entries are not silently swept in. */
     internal suspend fun clear(items: List<StoredCacheItem>, clearLegacy: Boolean = false,
         legacyRevision: Long? = null, legacyStamp: String? = null, rangeOnly: Boolean = false,
-        maintenanceFence: CacheMaintenanceFence? = null,
+        maintenanceFence: CacheMaintenanceFence? = null, bytesNeeded: Long? = null,
         removeMemory: ((Set<String>) -> Unit)? = null): CacheClearResult = withContext(Dispatchers.IO) {
         ready.await()
         mutation.withLock {
@@ -587,6 +588,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
             var ownedMutations = 0L
             val removedKeys = mutableSetOf<String>()
             for (item in items) {
+                if (bytesNeeded != null && freed >= bytesNeeded) break
                 currentCoroutineContext().ensureActive()
                 if (!synchronized(lock) { maintenanceAllowed(maintenanceFence) }) { skipped++; continue }
                 val resource = item.resource
@@ -662,7 +664,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                 }
                 else if (failed == failuresBefore) skipped++
             }
-            if (clearLegacy) {
+            if (clearLegacy && (bytesNeeded == null || freed < bytesNeeded)) {
                 val disk = synchronized(lock) { coil }
                 // Legacy entries have no reliable owner. Only a fully idle image cache can be cleared.
                 val remaining = scan()
@@ -675,7 +677,8 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                     freed += disk.clearWhenIdle { synchronized(lock) { maintenanceAllowed(maintenanceFence) && windows.isEmpty() && leases.isEmpty() && revision == version } }
                 } else skipped++
             }
-            scan()
+            val current = scan()
+            if (freed > 0L) publishImageBudget(current)
             persist()
             CacheClearResult(freed, skipped, failed, removedKeys)
         }
@@ -796,13 +799,17 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                     }
                     if (expired.isNotEmpty()) clear(expired, maintenanceFence = fence.copy(trigger = CacheMaintenanceTrigger.EXPIRY))
                     val afterExpiry = if (expired.isEmpty()) snapshot else snapshot()
-                    // At exact capacity optional writers are already closed. Trimming only an
-                    // overage can leave that state forever, with no next write to wake eviction.
-                    // Reclaim a bounded refill slice, never protected readers/offline resources.
-                    val refill = if (limit > 0L && afterExpiry.totalBytes >= limit)
-                        minOf(8L * MIB, maxOf(1L, limit / 16L)) else 0L
-                    val cleanupTarget = (limit - refill).coerceAtLeast(0L)
-                    var excess = (afterExpiry.totalBytes - cleanupTarget).coerceAtLeast(0L)
+                    // Make room before the next reader window hits the write gate. The gap
+                    // between the two thresholds avoids trimming on each completed page.
+                    val readerWindow = if (synchronized(lock) { rangeOwners.isNotEmpty() }) {
+                        val applied = ExperiencePolicyStore.get(app).state.value
+                        if (applied.prefetchRequests > 0) applied.adjacentPrefetchBytes else 0L
+                    } else 0L
+                    val refill = if (readerWindow > 0L) minOf(32L * MIB, limit / 16L, readerWindow)
+                        else minOf(8L * MIB, limit / 16L)
+                    val highWater = if (readerWindow > 0L) limit - refill / 2L else limit
+                    val cleanupTarget = if (afterExpiry.totalBytes >= highWater) limit - refill else limit
+                    val excess = (afterExpiry.totalBytes - cleanupTarget).coerceAtLeast(0L)
                     if (excess > 0L) {
                         val ageOrder = compareBy<StoredCacheItem> { it.resource.accessedAt.takeIf { at -> at > 0L } ?: it.modifiedAt }
                         val order = when (policy.evictionOrder) {
@@ -811,11 +818,15 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                             CacheEvictionOrder.LARGEST_FIRST -> compareByDescending<StoredCacheItem> { it.bytes }.then(ageOrder)
                         }
                         val ordered = afterExpiry.items.filterNot { it.protected }.sortedWith(order)
-                        val selected = ordered.takeWhile { item -> (excess > 0L).also { excess -= item.bytes } }
-                        clear(selected, clearLegacy = excess > 0L && afterExpiry.legacyReclaimable,
-                            legacyRevision = afterExpiry.legacyRevision, legacyStamp = afterExpiry.legacyStamp, maintenanceFence = fence)
+                        // A candidate can be leased, replaced or only partially reclaimed since
+                        // the scan. Advance in policy order until the owners actually free space.
+                        val legacy = afterExpiry.coilUnclassifiedBytes > 0L && afterExpiry.legacyReclaimable
+                        if (ordered.isNotEmpty() || legacy) {
+                            clear(ordered, clearLegacy = legacy, legacyRevision = afterExpiry.legacyRevision,
+                                legacyStamp = afterExpiry.legacyStamp, maintenanceFence = fence, bytesNeeded = excess)
+                        }
                     }
-                    ReaderCatalogStore(app).trimToSize(policy.catalogMiB?.toLong()?.times(MIB)
+                    catalogStore.trimToSize(policy.catalogMiB?.toLong()?.times(MIB)
                         ?: (limit / 16).coerceAtMost(32L * MIB), expire = policy.automaticCleanup) { owner ->
                             !synchronized(lock) { maintenanceAllowed(fence) } || protectedCatalog(owner)
                         }
@@ -827,15 +838,14 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                         commitResize = { publish -> synchronized(lock) {
                             if (!maintenanceAllowed(fence)) false else { publish(); true }
                         } })
-                    val current = snapshot()
+                    val current = mutation.withLock {
+                        val measured = scan()
+                        publishImageBudget(measured)
+                        persist()
+                        measured
+                    }
                     retryAfterGrace = retryAfterGrace || current.totalBytes > cleanupTarget &&
                         current.items.any { it.protected && wallTimeMillis() - it.resource.accessedAt in 0L..FILE_HANDOFF_MILLIS }
-                    val other = current.totalBytes - current.items.filter { it.resource.backend == CacheBackend.COIL }.sumOf { it.bytes } - current.coilUnclassifiedBytes
-                    val disk = synchronized(lock) { coil }
-                    // Do not stamp an old scanned budget with a newer publication version.
-                    val publication = synchronized(lock) { budget to budgetVersion }
-                    disk?.resize((publication.first - other).coerceAtLeast(0L), publication.second)
-                    mutation.withLock { persist() }
                     error = false
                 } catch (cancel: CancellationException) { throw cancel }
                 catch (_: Exception) { error = true }
@@ -848,6 +858,16 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                 }
             }
         }
+    }
+
+    /** Called under mutation so an older scan cannot publish after a newer removal. */
+    private fun publishImageBudget(snapshot: StorageCacheSnapshot) {
+        val imageBytes = snapshot.coilUnclassifiedBytes +
+            snapshot.items.sumOf { if (it.resource.backend == CacheBackend.COIL) it.bytes else 0L }
+        val other = snapshot.totalBytes - imageBytes
+        val disk = synchronized(lock) { coil } ?: return
+        val (limit, version) = synchronized(lock) { budget to budgetVersion }
+        disk.resize((limit - other).coerceAtLeast(0L), version)
     }
 
     /** Cold caches are measured but protected until their native journal owner is attached. */

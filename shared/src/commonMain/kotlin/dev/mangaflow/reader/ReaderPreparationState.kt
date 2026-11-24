@@ -54,10 +54,22 @@ internal data class ReaderPreparationState(
     val aheadReady get() = pages.count { it.role == ReaderPreparationRole.AHEAD && it.originalPresent == true }
     val behindReady get() = pages.count { it.role == ReaderPreparationRole.BEHIND && it.originalPresent == true }
     private fun count(select: (ReaderPreparationPage) -> ReaderPreparationStep): ReaderPreparationCounts {
-        val steps = pages.map(select)
-        return ReaderPreparationCounts(steps.count { it.phase == ReaderPreparationPhase.QUEUED },
-            steps.count { it.phase == ReaderPreparationPhase.ACTIVE }, steps.count { it.phase == ReaderPreparationPhase.COMPLETE },
-            steps.count { it.phase == ReaderPreparationPhase.DEFERRED }, steps.count { it.phase == ReaderPreparationPhase.FAILED })
+        var queued = 0
+        var active = 0
+        var complete = 0
+        var deferred = 0
+        var failed = 0
+        for (page in pages) {
+            when (select(page).phase) {
+                ReaderPreparationPhase.QUEUED -> queued++
+                ReaderPreparationPhase.ACTIVE -> active++
+                ReaderPreparationPhase.COMPLETE -> complete++
+                ReaderPreparationPhase.DEFERRED -> deferred++
+                ReaderPreparationPhase.FAILED -> failed++
+                ReaderPreparationPhase.SKIPPED -> Unit
+            }
+        }
+        return ReaderPreparationCounts(queued, active, complete, deferred, failed)
     }
     val resolving get() = count { it.resolve }
     val originals get() = count { it.original }
@@ -78,6 +90,8 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
     private var scanStartedAt = 0L
     private var scanning: ReaderObservationScan? = null
     private var recentScans = emptyList<ReaderObservationScan>()
+    private var sampleChanged = false
+    private var firstExpiry = Long.MAX_VALUE
     private val mutableState = MutableStateFlow(snapshot)
     val state = mutableState.asStateFlow()
 
@@ -119,6 +133,14 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
             return@synchronized
         updateStep(index, PrefetchStage.DOWNLOADING,
             ReaderPreparationStep(ReaderPreparationPhase.COMPLETE, "复用本地原图，无需网络请求"))
+        publishLocked()
+    }
+    fun missingOriginal(index: Int, owner: Any, retry: Boolean) = synchronized(lock) {
+        if (this.owner !== owner || tickets[index to PrefetchStage.DOWNLOADING]?.let { it in activeTickets } == true)
+            return@synchronized
+        updateStep(index, PrefetchStage.DOWNLOADING, if (retry)
+            ReaderPreparationStep(ReaderPreparationPhase.QUEUED, "原图已不在缓存，重新准备本页")
+        else ReaderPreparationStep(ReaderPreparationPhase.DEFERRED, "原图未能留在缓存，翻到本页时读取"))
         publishLocked()
     }
     fun close(owner: Any) = synchronized(lock) {
@@ -179,8 +201,8 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
             value.admitted -> ReaderPreparationPhase.ACTIVE
             else -> ReaderPreparationPhase.QUEUED
         }
-        updateStep(index, value.stage, ReaderPreparationStep(phase, value.wait?.reason?.let(::preparationWaitLabel)))
-        publishLocked()
+        if (updateStep(index, value.stage, ReaderPreparationStep(phase, value.wait?.reason?.let(::preparationWaitLabel))))
+            publishLocked()
     }
     fun end(index: Int, ticket: Long, stage: PrefetchStage, phase: ReaderPreparationPhase,
         reason: String? = null) = synchronized(lock) {
@@ -215,7 +237,7 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
     fun transfer(index: Int, ticket: Long, value: PrefetchWorkSnapshot) = synchronized(lock) {
         if (value.stage != PrefetchStage.DOWNLOADING || ticket !in activeTickets ||
             tickets[index to PrefetchStage.DOWNLOADING] != ticket) return@synchronized
-        rows[index]?.let { rows[index] = it.copy(receivedBytes = value.receivedBytes, expectedBytes = value.expectedBytes) }
+        recordBytes(index, value.receivedBytes, value.expectedBytes)
     }
     /** This flow is already pinned by DownloadStore to the visible page's exact transfer. */
     fun download(index: Int, ticket: Long, progress: DownloadProgress) = synchronized(lock) {
@@ -232,11 +254,14 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
             progress.waitingReason?.label ?: when (progress.phase) {
                 DownloadPhase.VERIFYING -> "原图正在验证"; DownloadPhase.COMMITTING -> "原图正在保存"; else -> null
             }))
-        rows[index]?.let { rows[index] = it.copy(receivedBytes = progress.transferredBytes,
-            expectedBytes = progress.expectedBytes.takeIf { progress.receivedBytes == progress.transferredBytes }) }
+        recordBytes(index, progress.transferredBytes, progress.expectedBytes.takeIf { progress.receivedBytes == progress.transferredBytes })
     }
     fun handoff(index: Int, joining: Boolean) = synchronized(lock) {
-        rows[index]?.let { rows[index] = it.copy(joining = joining) }; publishLocked()
+        val row = rows[index] ?: return@synchronized
+        if (row.joining != joining) {
+            rows[index] = row.copy(joining = joining)
+            publishLocked()
+        }
     }
     fun artifact(index: Int, original: Boolean?, bytes: Long?, preview: Boolean?,
         freshnessMillis: Long = 4_000L, owner: Any? = null,
@@ -250,8 +275,9 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
         val previewNew = preview != null && startedAt >= (previous.previewInspectedAt ?: Long.MIN_VALUE)
         val withOriginal = if (originalNew) previous.copy(originalPresent = original, originalBytes = bytes,
             inspectedAt = startedAt, freshUntil = now + freshnessMillis) else previous
-        rows[index] = if (previewNew) withOriginal.copy(previewResident = preview,
+        val next = if (previewNew) withOriginal.copy(previewResident = preview,
             previewInspectedAt = startedAt, previewFreshUntil = now + freshnessMillis) else withOriginal
+        if (next != previous) { rows[index] = next; sampleChanged = true }
     }
     fun beginObservationScan(owner: Any, candidates: Int): Long? = synchronized(lock) {
         if (this.owner !== owner) return@synchronized null
@@ -279,34 +305,57 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
         }
         scanning = null
     }
-    fun sample() = synchronized(lock) { publishLocked() }
-    private fun updateStep(index: Int, stage: PrefetchStage, step: ReaderPreparationStep) {
+    fun sample() = synchronized(lock) {
+        if (sampleChanged || scanning != null || monotonicTimeMillis() > firstExpiry) publishLocked()
+    }
+    private fun recordBytes(index: Int, received: Long, expected: Long?) {
         val row = rows[index] ?: return
-        rows[index] = when (stage) {
-            PrefetchStage.RESOLVING -> row.copy(resolve = step)
-            PrefetchStage.DOWNLOADING -> row.copy(original = step)
-            PrefetchStage.CHECKING -> row.copy(decode = step)
-            PrefetchStage.QUEUED -> row
+        if (row.receivedBytes != received || row.expectedBytes != expected) {
+            rows[index] = row.copy(receivedBytes = received, expectedBytes = expected)
+            sampleChanged = true
         }
+    }
+    private fun updateStep(index: Int, stage: PrefetchStage, step: ReaderPreparationStep): Boolean {
+        val row = rows[index] ?: return false
+        rows[index] = when (stage) {
+            PrefetchStage.RESOLVING -> if (row.resolve == step) return false else row.copy(resolve = step)
+            PrefetchStage.DOWNLOADING -> if (row.original == step) return false else row.copy(original = step)
+            PrefetchStage.CHECKING -> if (row.decode == step) return false else row.copy(decode = step)
+            PrefetchStage.QUEUED -> return false
+        }
+        sampleChanged = true
+        return true
     }
     private fun publishLocked() {
         val now = monotonicTimeMillis()
-        // Count original-artifact observations before expiry masks their value. Never change
-        // the value or deadline to make a readiness count look stable.
-        val candidates = rows.values.filter { it.role == ReaderPreparationRole.AHEAD || it.role == ReaderPreparationRole.BEHIND }
-        val unobserved = candidates.count { it.inspectedAt == null }
-        val expired = candidates.count { it.inspectedAt != null && (it.freshUntil ?: 0L) < now }
-        val fresh = candidates.filter { it.inspectedAt != null && (it.freshUntil ?: 0L) >= now }
-        val observations = ReaderObservationDiagnostics(unobserved, expired,
-            fresh.count { it.originalPresent == null }, fresh.count { it.originalPresent == false },
-            fresh.count { it.originalPresent == true },
+        var unobserved = 0
+        var expired = 0
+        var uncertain = 0
+        var absent = 0
+        var present = 0
+        firstExpiry = Long.MAX_VALUE
+        val pages = rows.values.sortedBy { it.pageIndex }.map { row ->
+            val freshOriginal = row.freshUntil?.takeIf { it >= now }
+            val freshPreview = row.previewFreshUntil?.takeIf { it >= now }
+            if (row.role == ReaderPreparationRole.AHEAD || row.role == ReaderPreparationRole.BEHIND) {
+                when {
+                    row.inspectedAt == null -> unobserved++
+                    freshOriginal == null -> expired++
+                    row.originalPresent == null -> uncertain++
+                    row.originalPresent == true -> present++
+                    else -> absent++
+                }
+            }
+            firstExpiry = minOf(firstExpiry, freshOriginal ?: Long.MAX_VALUE, freshPreview ?: Long.MAX_VALUE)
+            val original = if (freshOriginal != null || row.originalPresent == null && row.originalBytes == null) row
+                else row.copy(originalPresent = null, originalBytes = null)
+            if (freshPreview != null || original.previewResident == null) original else original.copy(previewResident = null)
+        }
+        val observations = ReaderObservationDiagnostics(unobserved, expired, uncertain, absent, present,
             scanning?.copy(endWindow = snapshot.windowRevision,
                 elapsedMillis = (now - scanStartedAt).coerceAtLeast(0L)), recentScans)
-        snapshot = snapshot.copy(observations = observations, pages = rows.values.sortedBy { it.pageIndex }.map { row ->
-            val original = if (row.freshUntil?.let { now <= it } == true) row
-                else row.copy(originalPresent = null, originalBytes = null)
-            if (row.previewFreshUntil?.let { now <= it } == true) original else original.copy(previewResident = null)
-        })
+        snapshot = snapshot.copy(observations = observations, pages = pages)
+        sampleChanged = false
         mutableState.value = snapshot
     }
 }

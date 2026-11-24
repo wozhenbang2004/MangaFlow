@@ -54,6 +54,7 @@ data class ReaderEnhancementState(
     val aheadPages: Set<Int> = emptySet(),
     val nextVisiblePages: Set<Int> = emptySet(),
     val preparationDetail: String? = null,
+    val currentFailure: String? = null,
 )
 
 /**
@@ -79,7 +80,7 @@ internal class ReaderEnhancementController(
     private val pending = mutableMapOf<Int, Pending>()
     private val lastAttempts = mutableMapOf<Int, Attempt>()
     private val manuallyStopped = mutableMapOf<Int, Attempt>()
-    private val failed = mutableMapOf<Int, String>()
+    private val failed = mutableMapOf<Int, PageFailure>()
     private val cacheMisses = mutableMapOf<Int, String>()
     private val waitingOriginals = mutableMapOf<Int, String>()
     private val details = mutableMapOf<Int, String>()
@@ -90,6 +91,8 @@ internal class ReaderEnhancementController(
     private val cacheWaitDetail = "前方增强等待缓存额度，翻页或增加增强缓存后继续"
     private val assets = mutableMapOf<Int, ReaderEnhancedPage>()
     private val durations = ArrayDeque<Long>()
+    private var elapsedP50Millis: Double? = null
+    private var elapsedP95Millis: Double? = null
     private var generation = 0L
     private var nextAttempt = 0L
     private var policy = EnhancementPolicy()
@@ -112,6 +115,7 @@ internal class ReaderEnhancementController(
     private data class Pending(val id: String, val original: Original, val generation: Long,
         val policy: EnhancementPolicy, val job: Job)
     private data class Attempt(val id: String, val originalIdentity: String, val generation: Long)
+    private data class PageFailure(val originalIdentity: String, val retryWhenVisible: Boolean)
     private data class Validity(val closed: Boolean = false, val generation: Long = 0L,
         val wanted: Set<Int> = emptySet(), val originalIds: Map<Int, String> = emptyMap(),
         val pendingIds: Map<Int, String> = emptyMap())
@@ -122,7 +126,10 @@ internal class ReaderEnhancementController(
 
     init {
         center.settings.registerReaderSession(sessionKey, content, workId, workSourceId)
-        scope.launch { center.scheduler.state.collect { synchronized(lock) { if (!closed) publishLocked() } } }
+        scope.launch {
+            center.scheduler.state.map { tasks -> tasks.filter { it.sessionKey == sessionKey } }
+                .distinctUntilChanged().collect { synchronized(lock) { if (!closed) publishLocked() } }
+        }
         scope.launch { center.inventory.collect {
             synchronized(lock) { if (!closed) clearFailuresLocked() }
             retryUseful()
@@ -211,7 +218,10 @@ internal class ReaderEnhancementController(
             visible = visiblePages.filterTo(linkedSetOf()) { it in 0 until totalPages }
                 .ifEmpty { setOf(page).filterTo(linkedSetOf()) { it in 0 until totalPages } }
             (visible - previousVisible).forEach { index ->
-                if (failed.remove(index) != null) details.remove(index)
+                if (failed[index]?.retryWhenVisible == true) {
+                    failed.remove(index)
+                    details.remove(index)
+                }
             }
             val leadingEdge = if (direction > 0) visible.maxOrNull() else visible.minOrNull()
             val trailingEdge = if (direction > 0) visible.minOrNull() else visible.maxOrNull()
@@ -380,7 +390,7 @@ internal class ReaderEnhancementController(
         if (closed || index !in wanted || index in pending || index in assets) return null
         val original = originals[index] ?: return null
         if (manuallyStopped[index]?.let { attemptMatchesLocked(index, it) } == true) return null
-        if (failed[index] == original.identity || cacheMisses[index] == original.identity ||
+        if (failed[index]?.originalIdentity == original.identity || cacheMisses[index] == original.identity ||
             waitingOriginals[index] == original.identity) return null
         if (index !in visible && budgetBlocked) {
             budgetDeferred += index; details[index] = cacheWaitDetail
@@ -521,7 +531,15 @@ internal class ReaderEnhancementController(
                 completedLease = null
                 assets[index] = ReaderEnhancedPage(lease.identity, lease.file.toURI(), lease.width, lease.height,
                     original.diskKey, result.elapsedMillis, cacheHit)
-                if (!cacheHit) { durations.addLast(result.elapsedMillis); while (durations.size > 128) durations.removeFirst() }
+                if (!cacheHit) {
+                    durations.addLast(result.elapsedMillis)
+                    if (durations.size > 128) durations.removeFirst()
+                    val ordered = durations.sorted()
+                    fun percentile(fraction: Double) =
+                        ordered[(kotlin.math.ceil(ordered.size * fraction).toInt() - 1).coerceIn(ordered.indices)].toDouble()
+                    elapsedP50Millis = percentile(.5)
+                    elapsedP95Millis = percentile(.95)
+                }
                 details.remove(index)
                 retainWithinBudgetLocked()
                 publishLocked()
@@ -535,7 +553,7 @@ internal class ReaderEnhancementController(
         }
         catch (failure: Exception) {
             synchronized(lock) { if (valid(index, id, epoch, original)) {
-                failed[index] = original.identity
+                failed[index] = PageFailure(original.identity, retryWhenVisible = failure !is IncompatibleReaderModel)
                 details[index] = failure.message ?: "增强失败，原画仍可阅读"; publishLocked()
             } }
         } finally {
@@ -562,9 +580,6 @@ internal class ReaderEnhancementController(
         return OriginalFile(snapshot.data.toString(), snapshot)
     }
 
-    private fun percentile(fraction: Double): Double? = durations.takeIf { it.isNotEmpty() }?.sorted()?.let {
-        it[(kotlin.math.ceil(it.size * fraction).toInt() - 1).coerceIn(it.indices)].toDouble()
-    }
     private fun publishLocked() {
         validity = Validity(closed, generation, wanted, originals.mapValues { it.value.identity }, pending.mapValues { it.value.id })
         val currentEnhanced = visible.isNotEmpty() && visible.all { it in assets }
@@ -573,8 +588,9 @@ internal class ReaderEnhancementController(
         val focus = visible.sortedWith(compareBy<Int> { if (it == current) 0 else 1 }.thenBy { abs(it - current) })
             .firstOrNull { it !in assets } ?: current
         val pendingTask = pending[focus]?.id?.let { id -> tasks.firstOrNull { it.id == id } }
+        val failedOriginal = failed[focus]?.originalIdentity
         val failure = lastAttempts[focus]?.takeIf { it.generation == generation &&
-            it.originalIdentity == originals[focus]?.identity && failed[focus] == it.originalIdentity
+            it.originalIdentity == originals[focus]?.identity && failedOriginal == it.originalIdentity
         }?.let { attempt -> tasks.firstOrNull { it.id == attempt.id && it.phase == EnhancementTaskPhase.FAILED } }
         val stopped = manuallyStopped.filter { (index, attempt) -> attemptMatchesLocked(index, attempt) }
         val stoppedTask = stopped[focus]?.let { attempt ->
@@ -586,9 +602,10 @@ internal class ReaderEnhancementController(
         mutableState.value = ReaderEnhancementState(current, currentEnhanced, nextReady,
             tasks.count { it.phase in setOf(EnhancementTaskPhase.QUEUED, EnhancementTaskPhase.WAITING, EnhancementTaskPhase.PAUSED) },
             tasks.count { it.phase == EnhancementTaskPhase.RUNNING }, detail,
-            percentile(.5), percentile(.95), cacheHits, cacheLookups, assets.toMap(), currentTask,
+            elapsedP50Millis, elapsedP95Millis, cacheHits, cacheLookups, assets.toMap(), currentTask,
             stopped.values.map { it.id }.toSet(), visible.toSet(), ahead.toSet(), nextVisible.toSet(),
-            cacheWaitDetail.takeIf { budgetBlocked && ahead.any { it !in assets } })
+            cacheWaitDetail.takeIf { budgetBlocked && ahead.any { it !in assets } },
+            detail.takeIf { failedOriginal != null && failedOriginal == originals[focus]?.identity })
         if (!closed) {
             val visible = assets[current]
             val model = visible?.identity?.modelId?.let { id ->
@@ -670,6 +687,8 @@ internal fun readerEnhancementParameters(center: EnhancementCenter, engineId: St
 internal fun selectReaderEnhancementModel(center: EnhancementCenter, selected: EnhancementPolicy,
     image: EngineContent): ReaderEnhancementModel = selectReaderEnhancementModel(center.inventory.value, selected, image)
 
+private class IncompatibleReaderModel(message: String) : IllegalArgumentException(message)
+
 internal fun selectReaderEnhancementModel(inventory: EngineInventory, selected: EnhancementPolicy,
     image: EngineContent): ReaderEnhancementModel {
     val explicit = selected.modelId?.let { id -> inventory.models.firstOrNull { it.id == id }
@@ -685,17 +704,17 @@ internal fun selectReaderEnhancementModel(inventory: EngineInventory, selected: 
             selected.scale in it.supportedScales }
     }
     if (model != null) {
-        require(image in model.contents) {
+        if (image !in model.contents) {
             val content = when (image) {
                 EngineContent.BLACK_WHITE -> "黑白漫画"
                 EngineContent.COLOR -> "彩色漫画"
                 EngineContent.WEBTOON -> "条漫"
                 EngineContent.VIDEO -> "视频"
             }
-            "${model.title} 不支持${content}，这页继续显示原图"
+            throw IncompatibleReaderModel("${model.title} 不支持${content}，这页继续显示原图")
         }
-        require(model.nativeScale == selected.scale) {
-            "${model.title} 支持 ${model.nativeScale}×，当前设为 ${selected.scale}×"
+        if (model.nativeScale != selected.scale) {
+            throw IncompatibleReaderModel("${model.title} 支持 ${model.nativeScale}×，当前设为 ${selected.scale}×")
         }
         val engine = inventory.engines.firstOrNull { it.id == model.engineId } ?: error("增强引擎尚未安装")
         check(engine.readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.READY_FOR_TRIAL) &&

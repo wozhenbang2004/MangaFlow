@@ -3,6 +3,7 @@ package dev.mangaflow.ui
 import dev.mangaflow.ui.platform.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -17,7 +18,9 @@ import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
@@ -40,7 +43,8 @@ internal val LocalWallpaperActive = compositionLocalOf { false }
 
 /** Decorative local media stays behind content; edits never own another video decoder. */
 @Composable
-internal fun AppWallpaper(store: WallpaperStore, modifier: Modifier = Modifier, active: Boolean = true) {
+internal fun AppWallpaper(store: WallpaperStore, modifier: Modifier = Modifier, active: Boolean = true,
+    underCatalogue: Boolean = false) {
     val selected by store.state.collectAsStateWithLifecycle()
     val revision = selected.revision
     val motion = LocalMotionEnabled.current
@@ -72,6 +76,15 @@ internal fun AppWallpaper(store: WallpaperStore, modifier: Modifier = Modifier, 
             }
         }
         if (selected.adjustment.shade > 0f) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = selected.adjustment.shade)))
+        if (underCatalogue) {
+            val paper = MaterialTheme.colorScheme.background
+            // Keep the artwork visible behind the controls and give the scrolling text a quieter ground.
+            Box(Modifier.matchParentSize().drawWithCache {
+                val veil = Brush.verticalGradient(0f to Color.Transparent,
+                    .22f to paper.copy(alpha = .16f), 1f to paper.copy(alpha = .58f))
+                onDrawBehind { drawRect(veil) }
+            })
+        }
     }
 }
 

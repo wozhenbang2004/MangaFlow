@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
@@ -517,7 +518,6 @@ private fun AnimeWorkspaceContent(
         directoryOpen = false
         tab = 1
         if (history) libraryViewState.filter = 2
-        else if (libraryViewState.filter == 2) libraryViewState.filter = 1
     }
     fun returnFromDirectory() {
         if (controller.sourceBrowse.state.value.selectedTitle != null) controller.sourceBrowse.closeTitle()
@@ -665,12 +665,29 @@ private fun AnimeWorkspaceContent(
                 } else {
                     val shownState = shown.detailState
                     val shownDetail = shownState?.detail
+                    var heroCollapsed by remember(shown.key) { mutableStateOf(false) }
                     Column(Modifier.fillMaxSize()) {
                         BoxWithConstraints(Modifier.fillMaxWidth()) {
                             val preferred = animePreferredColumns(maxWidth, state.discoveryColumns)
                             val actualColumns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
                             val workspaceTabs = shown.depth == 0 && !directoryOpen
-                            val stackTabs = workspaceTabs && maxWidth < 340.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
+                            val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+                            val hasLayoutControl = tab == 0 || directoryOpen
+                            val layoutInMenu = hasLayoutControl && platformKind != PlatformKind.DESKTOP &&
+                                maxWidth < 440.dp * fontScale
+                            val actionsWidth = if (hasLayoutControl && !layoutInMenu) 132.dp else 88.dp
+                            val headerRoom = maxWidth - 16.dp - actionsWidth - if (navigationVisible) 56.dp else 6.dp
+                            val tabsWidth = headerRoom.coerceIn(150.dp * fontScale, 240.dp * fontScale)
+                            val stackDesktopTabs = workspaceTabs && !navigationVisible && headerRoom < tabsWidth
+                            val controlsAlpha = {
+                                if (searchExpanded) 0f else 1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f)
+                            }
+                            val returnLabel = when {
+                                shown.depth == 0 && directoryDetailOpen -> "返回片源目录"
+                                shown.relatedDepth > 0 -> "返回上一部番剧"
+                                returnToSearch -> "返回搜索结果"
+                                else -> "返回${baseDestination.label}"
+                            }
                             val selectedTab = when (page) {
                                 AnimeWorkspacePage.SEASON, AnimeWorkspacePage.CALENDAR -> 1
                                 AnimeWorkspacePage.LIBRARY -> 2
@@ -684,11 +701,9 @@ private fun AnimeWorkspaceContent(
                                         2 -> selectLibrary()
                                         else -> Unit
                                     } },
-                                    modifier = Modifier.widthIn(max = 268.dp)
-                                        .graphicsLayer { alpha = if (searchExpanded) 0f else
-                                            1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f) }
-                                        .motionInputGate(rootActive),
-                                    treatment = MotionTabTreatment.Underline, controlHeight = 44.dp)
+                                    modifier = Modifier.motionInputGate(rootActive),
+                                    fullWidthIndicator = true, treatment = MotionTabTreatment.Capsule,
+                                    controlHeight = 44.dp)
                             }
                             Column {
                                 AnimeWorkspaceHeader(root = shown.depth == 0 && !directoryDetailOpen,
@@ -696,24 +711,24 @@ private fun AnimeWorkspaceContent(
                                         else "番剧 · ${baseDestination.label}") else
                                         shownDetail?.subject?.title ?: openingSubject?.title ?: "番剧详情",
                                     backdrop = backdrop, navigationVisible = navigationVisible,
-                                    primary = primaryTabs.takeIf { workspaceTabs && !stackTabs },
+                                    primary = primaryTabs.takeIf { workspaceTabs && !stackDesktopTabs },
+                                    showTitle = shownDetail == null || heroCollapsed,
+                                    tabsWidth = tabsWidth, actionsWidth = actionsWidth, controlsAlpha = controlsAlpha,
                                     navigation = {
                                         if (shown.depth == 0 && !directoryDetailOpen) navigation()
                                         else MotionIconButton(onClick = {
                                             if (shown.depth == 0) returnFromDirectory()
                                             else returnFromDetail()
                                         },
-                                            modifier = Modifier.size(44.dp), tooltip = "返回") {
-                                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
+                                            modifier = Modifier.size(44.dp), tooltip = returnLabel) {
+                                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, returnLabel, Modifier.size(20.dp))
                                         }
                                     },
                                     actions = if (shown.depth != 0 || directoryDetailOpen) null else ({
                                         Row(Modifier.heightIn(min = 44.dp)
-                                            .graphicsLayer { alpha = if (searchExpanded) 0f else
-                                                1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f) }
                                             .motionInputGate(active && route.depth == 0 && !searchPresent && !overlayVisible),
                                             verticalAlignment = Alignment.CenterVertically) {
-                                            if (tab == 0 || directoryOpen) DiscoveryLayoutControl(preferred, actualColumns, backdrop,
+                                            if (hasLayoutControl && !layoutInMenu) DiscoveryLayoutControl(preferred, actualColumns, backdrop,
                                                 active && route.depth == 0 && !searchPresent && !toolsPresent && !overlayVisible,
                                                 onChange = controller::setDiscoveryColumns,
                                                 onPresenceChange = { layoutPresent = it })
@@ -726,6 +741,22 @@ private fun AnimeWorkspaceContent(
                                                 CompactGlassPopover(toolsVisible, backdrop,
                                                     onDismiss = { toolsVisible = false; pendingTool = null },
                                                     onPresenceChange = ::finishToolMenu) {
+                                                    if (layoutInMenu) {
+                                                        val layoutLabel = when {
+                                                            actualColumns == preferred -> "封面布局"
+                                                            actualColumns == 1 -> "封面布局 · 当前显示列表"
+                                                            else -> "封面布局 · 当前显示 ${actualColumns} 列"
+                                                        }
+                                                        AnimeQuietLabel(layoutLabel,
+                                                            Modifier.padding(start = 12.dp, top = 6.dp))
+                                                        MotionTabs(preferred.coerceIn(1, 4) - 1,
+                                                            listOf("列表", "2 列", "3 列", "4 列"),
+                                                            onSelect = {
+                                                                controller.setDiscoveryColumns(it + 1)
+                                                                toolsVisible = false
+                                                            }, controlHeight = 44.dp, fullWidthIndicator = true,
+                                                            selectionVisible = preferred in 1..4)
+                                                    }
                                                     if (!directoryOpen) {
                                                         CompactMenuAction(Icons.Outlined.NewReleases, "新番季度",
                                                             onClick = { toolsVisible = false; selectDiscovery(AnimeDiscoveryTab.SEASON) })
@@ -757,12 +788,15 @@ private fun AnimeWorkspaceContent(
                                             Spacer(Modifier.size(44.dp))
                                         }
                                     }))
-                                if (stackTabs) Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                                    contentAlignment = Alignment.CenterStart) { primaryTabs() }
+                                if (stackDesktopTabs) LiquidGlassSurface(backdrop,
+                                    Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                                        .graphicsLayer { alpha = controlsAlpha() },
+                                    cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION,
+                                    trackPointer = true, elevation = 1.dp) { primaryTabs() }
                             }
                         }
                         if (shown.depth == 0) {
-                            MotionTabContent(pane, Modifier.weight(1f).mangaHazeSource(backdrop).motionInputGate(rootActive),
+                            MotionTabContent(pane, Modifier.weight(1f).motionInputGate(rootActive),
                                 contentKey = { it }, order = { it.ordinal }) { shownPane ->
                                 val paneActive = rootActive && shownPane == pane
                                 when (shownPane) {
@@ -770,9 +804,11 @@ private fun AnimeWorkspaceContent(
                                         onOpenItem = ::openDiscoveryItem,
                                         onManage = ::showWorkActions, active = paneActive,
                                         onResume = ::resume, onWatchHistory = { selectLibrary(history = true) })
-                                    AnimeWorkspacePane.DIRECTORY -> AnimeSourceBrowsePane(controller, backdrop, discoveryScrolls,
-                                        columns = state.discoveryColumns, active = paneActive,
-                                        onChooseTitle = ::chooseReference, contentBottomPadding = 24.dp)
+                                    AnimeWorkspacePane.DIRECTORY -> Box(Modifier.fillMaxSize().mangaHazeSource(backdrop)) {
+                                        AnimeSourceBrowsePane(controller, backdrop, discoveryScrolls,
+                                            columns = state.discoveryColumns, active = paneActive,
+                                            onChooseTitle = ::chooseReference, contentBottomPadding = 24.dp)
+                                    }
                                     AnimeWorkspacePane.LIBRARY -> AnimeLibrary(state,
                                         if (libraryViewState.filter == 2) historyScroll else libraryScroll, controller, backdrop,
                                         onOpen = ::open, onResume = ::resume,
@@ -783,7 +819,7 @@ private fun AnimeWorkspaceContent(
                                 }
                             }
                         } else if (shownState != null && shownDetail != null) {
-                            Box(Modifier.weight(1f).mangaHazeSource(backdrop)) {
+                            Box(Modifier.weight(1f)) {
                                 detailState.SaveableStateProvider(shown.key) {
                                     AnimeDetailPane(shownDetail, shownState, controller, backdrop,
                                         remember(shownDetail.subject.id) {
@@ -791,6 +827,7 @@ private fun AnimeWorkspaceContent(
                                         },
                                         onPlay = { requestPlayback(it, null) }, onOpenRelated = ::openRelated, onSources = ::showSources,
                                         onTracking = { trackingVisible = true }, modifier = Modifier.fillMaxSize(),
+                                        onHeroCollapsed = { heroCollapsed = it },
                                         active = active && shown.key == route.key && !overlayVisible && !searchPresent)
                                 }
                             }
@@ -822,7 +859,7 @@ private fun AnimeWorkspaceContent(
                 showEmptyResults = state.searchHistory.isNotEmpty(), focusInputOnExpand = focusSearchInput,
                 modifier = Modifier.fillMaxSize()
                     .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
-                    .padding(horizontal = 8.dp, vertical = 2.dp)) { height, inputActive ->
+                    .padding(vertical = 2.dp)) { height, inputActive ->
                 val matchingReference = browseCandidate != null
                 val catalogProvider = if (matchingReference) AnimeDiscoveryProvider.BANGUMI else AnimeDiscoveryProvider.DOUBAN
                 LaunchedEffect(searchExpanded, matchingReference, catalogProvider, search.query, search.indexOnly, search.catalogProvider) {
@@ -997,24 +1034,40 @@ private fun AnimeWorkspaceContent(
 @Composable
 private fun AnimeWorkspaceHeader(root: Boolean, title: String, backdrop: HazeState,
     navigationVisible: Boolean, navigation: @Composable () -> Unit,
-    primary: (@Composable () -> Unit)?,
+    primary: (@Composable () -> Unit)?, showTitle: Boolean,
+    tabsWidth: Dp, actionsWidth: Dp, controlsAlpha: () -> Float,
     actions: (@Composable () -> Unit)?) {
     val headerModifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
         .padding(horizontal = 8.dp, vertical = 2.dp)
-    val heading: @Composable () -> Unit = primary ?: {
-        Text(title, style = if (root) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
+    if (root && primary != null && actions != null) {
+        if (navigationVisible) {
+            SegmentedGlassHeader(backdrop, navigation, headerModifier.semantics { paneTitle = title },
+                controlsWidth = tabsWidth, actionsWidth = actionsWidth, controlsAlpha = controlsAlpha,
+                quietShadow = true, actions = actions) { primary() }
+        } else Box(headerModifier.semantics { paneTitle = title }) {
+            GlassControlGroup(backdrop, tabsWidth, actionsWidth, controlsAlpha, actions,
+                content = { primary() }, quietShadow = true)
+        }
+        return
+    }
+    val heading: @Composable () -> Unit = {
+        if (showTitle) Text(title,
+            style = if (root) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+    val fadingActions: @Composable () -> Unit = {
+        Box(Modifier.graphicsLayer { alpha = controlsAlpha() }) { actions?.invoke() }
     }
     if (root && !navigationVisible) {
         Row(headerModifier.fillMaxWidth().heightIn(min = 44.dp).semantics { paneTitle = title }, verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Box(Modifier.weight(1f).padding(start = 8.dp)) { heading() }
             if (actions != null) LiquidGlassSurface(backdrop, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION) {
-                actions()
+                fadingActions()
             }
         }
     } else PageTitleHeader(title, backdrop, navigation, modifier = headerModifier,
-        summary = heading, actions = actions)
+        summary = heading, actions = if (actions == null) null else fadingActions)
 }
 
 internal fun animeSubjectSummary(subject: AnimeSubject): String =

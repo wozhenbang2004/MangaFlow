@@ -64,14 +64,17 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 internal fun animeEpisodeNumber(value: Double): String =
     if (value % 1.0 == 0.0) value.toLong().toString() else value.toString()
 
-/** Keep a real episode title, but do not repeat a native/number-only primary label. */
+private val episodeOrdinalTitle = Regex("""(?:第|EP(?:ISODE)?\.?)?([0-9]+(?:\.[0-9]+)?)(?:集|话|話)?""",
+    RegexOption.IGNORE_CASE)
+
+/** Discard an ordinal alias only when it describes this exact numbered episode. */
 internal fun animeEpisodeSubtitle(episode: AnimeEpisode): String? {
-    fun normalized(value: String): String {
-        val compact = value.filterNot(Char::isWhitespace)
-        val numberOnly = Regex("^第0*([0-9]+)[集话話]$").matchEntire(compact)
-        return numberOnly?.groupValues?.get(1)?.toLongOrNull()?.let { "episode:$it" } ?: compact
-    }
-    return episode.title.trim().takeIf { it.isNotEmpty() && normalized(it) != normalized(animeEpisodeLabel(episode)) }
+    val title = episode.title.trim().ifEmpty { return null }
+    val compact = title.filterNot(Char::isWhitespace)
+    if (compact == animeEpisodeLabel(episode).filterNot(Char::isWhitespace)) return null
+    if (episode.kind == AnimeEpisodeKind.MAIN &&
+        episodeOrdinalTitle.matchEntire(compact)?.groupValues?.get(1)?.toDoubleOrNull() == episode.number) return null
+    return title
 }
 
 internal fun animeEpisodeLabel(episode: AnimeEpisode): String =
@@ -152,17 +155,34 @@ internal fun AnimePoster(subject: AnimeSubject, modifier: Modifier = Modifier) =
     AnimePoster(subject.coverUrl, modifier, animePosterSourceId(subject))
 
 @Composable
-internal fun AnimePoster(url: String, modifier: Modifier = Modifier, sourceId: String? = null) {
+internal fun AnimePoster(
+    url: String, modifier: Modifier = Modifier, sourceId: String? = null,
+    fallbackUrl: String? = null, title: String? = null,
+) {
+    val alternate = fallbackUrl?.takeIf { it.isNotBlank() && it != url }
+    var imageUrl by remember(url, alternate, sourceId) { mutableStateOf(url.ifBlank { alternate.orEmpty() }) }
+    var unavailable by remember(imageUrl, sourceId) { mutableStateOf(imageUrl.isBlank()) }
     Box(modifier.mangaCoverCard(10.dp).background(MaterialTheme.colorScheme.surfaceContainerLow),
         contentAlignment = Alignment.Center) {
-        Icon(Icons.Outlined.Tv, null, Modifier.size(24.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .3f))
-        if (url.isNotBlank()) {
+        if (unavailable && !title.isNullOrBlank()) {
+            Text(title, Modifier.padding(8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        } else {
+            Icon(Icons.Outlined.Tv, null, Modifier.size(24.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .3f))
+        }
+        if (imageUrl.isNotBlank()) key(sourceId, imageUrl) {
             val context = LocalMangaContext.current
-            val request = remember(context, url, sourceId) {
-                ImageRequest.Builder(imagePlatformContext(context)).animeArtwork(url, sourceId).build()
+            val request = remember(context, imageUrl, sourceId) {
+                ImageRequest.Builder(imagePlatformContext(context)).animeArtwork(imageUrl, sourceId).build()
             }
             AsyncImage(model = request, contentDescription = null,
+                onError = {
+                    if (alternate != null && imageUrl != alternate) imageUrl = alternate
+                    else unavailable = true
+                },
+                onSuccess = { unavailable = false },
                 contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         }
     }

@@ -323,7 +323,8 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
     private fun bangumiItem(row: JSONObject, weekday: Int? = null): AnimeDiscoveryItem {
         val subject = bangumiSubject(row)?.let { if (weekday == null) it else it.copy(airWeekday = weekday) }
             ?: throw AnimeSourceException(BANGUMI_PROVIDER, AnimeSourceStage.METADATA, "Bangumi 返回了缺少动画身份的条目。")
-        return AnimeDiscoveryItem(key = subject.id, title = subject.title, coverUrl = subject.coverUrl,
+        val thumbnail = bangumiCover(row.optJSONObject("images"), thumbnail = true)
+        return AnimeDiscoveryItem(key = subject.id, title = subject.title, coverUrl = thumbnail,
             year = subject.year, episodeCount = subject.episodeCount, rating = subject.rating, ratingScale = 10,
             rank = subject.rank, popularity = bangumiPopularity(row), airWeekday = subject.airWeekday, subject = subject,
             format = when (row.text("platform")) {

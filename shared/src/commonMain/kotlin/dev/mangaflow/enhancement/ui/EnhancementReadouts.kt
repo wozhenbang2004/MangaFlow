@@ -1,6 +1,8 @@
 package dev.mangaflow.enhancement.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
@@ -12,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.enhancement.EnhancementMetric
@@ -41,9 +44,11 @@ internal fun enhancementMetricIcon(metric: EnhancementMetric): ImageVector = whe
 /** Readings have no click action. Configuration and diagnostic navigation have their own controls. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun EnhancementReadouts(readouts: List<EnhancementReadout>, quiet: Boolean, modifier: Modifier = Modifier) {
+internal fun EnhancementReadouts(readouts: List<EnhancementReadout>, quiet: Boolean, modifier: Modifier = Modifier,
+    singleLine: Boolean = false) {
     val ink = MaterialTheme.colorScheme.onSurface.copy(alpha = if (quiet) .7f else .88f)
-    FlowRow(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp),
+    FlowRow(if (singleLine) modifier.horizontalScroll(rememberScrollState()) else modifier,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp)) {
         readouts.forEach { reading ->
             Row(Modifier.widthIn(max = 280.dp).padding(vertical = 2.dp)
@@ -52,6 +57,7 @@ internal fun EnhancementReadouts(readouts: List<EnhancementReadout>, quiet: Bool
                 horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 Icon(enhancementMetricIcon(reading.metric), null, Modifier.size(13.dp), tint = ink)
                 Text(reading.value, Modifier.weight(1f, fill = false),
+                    maxLines = if (singleLine) 1 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"), color = ink)
             }
         }

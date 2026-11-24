@@ -1,10 +1,14 @@
 package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -18,6 +22,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -29,9 +35,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.AnimeEpisode
 import dev.mangaflow.anime.AnimeEpisodeAvailability
 import dev.mangaflow.anime.AnimeWatchProgress
+import dev.mangaflow.ui.GlassSurfaceRole
+import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionSwap
@@ -82,6 +91,7 @@ internal fun AnimeDetailPlayAction(
     previous: AnimeWatchProgress?,
     loading: Boolean,
     active: Boolean,
+    backdrop: HazeState,
     modifier: Modifier = Modifier,
     onContinue: () -> Unit,
     onSources: () -> Unit,
@@ -104,28 +114,34 @@ internal fun AnimeDetailPlayAction(
         ?: "上次观看集".takeIf { progress != null }
     val time = progress?.takeUnless { it.completed }?.positionMs?.takeIf { it > 0L }?.let(::animeTime)
     val caption = listOfNotNull(episodeLabel, time?.let { "看至 $it" }).joinToString(" · ")
-    val ink = if (upcoming || pending) colors.onSurfaceVariant else colors.surface
-    MotionButton(
-        onClick = if (upcoming) onSources else onContinue,
-        modifier = modifier.heightIn(min = 56.dp),
-        enabled = active && !pending,
-        shape = RoundedCornerShape(16.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (upcoming) colors.surfaceContainerHigh else colors.onSurface,
-            contentColor = ink,
-            disabledContainerColor = colors.surfaceContainerHigh,
-            disabledContentColor = colors.onSurfaceVariant,
-        ),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp),
-    ) {
-        if (pending) MotionBusyIndicator(Modifier.size(18.dp), color = ink, strokeWidth = 1.5.dp)
-        else Icon(if (upcoming) Icons.Outlined.Schedule else Icons.Filled.PlayArrow, null, Modifier.size(21.dp))
-        Spacer(Modifier.width(8.dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(action, style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (caption.isNotEmpty()) Text(caption, style = MaterialTheme.typography.labelSmall,
-                color = ink.copy(alpha = .78f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+    val interaction = remember { MutableInteractionSource() }
+    LiquidGlassSurface(backdrop, modifier, cornerRadius = 26.dp, role = GlassSurfaceRole.READING_DOCK,
+        interactionSource = interaction, elevation = 2.dp, softCard = true) {
+        MotionButton(
+            onClick = if (upcoming) onSources else onContinue,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+            enabled = active && !pending,
+            shape = RoundedCornerShape(26.dp),
+            interactionSource = interaction,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = colors.surface.copy(alpha = .26f), contentColor = colors.onSurface,
+                disabledContainerColor = colors.surface.copy(alpha = .45f), disabledContentColor = colors.onSurfaceVariant,
+            ),
+            contentPadding = PaddingValues(start = 9.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
+        ) {
+            Box(Modifier.size(32.dp).background(colors.onSurface, RoundedCornerShape(50)),
+                contentAlignment = Alignment.Center) {
+                if (pending) MotionBusyIndicator(Modifier.size(16.dp), color = colors.surface, strokeWidth = 1.5.dp)
+                else Icon(if (upcoming) Icons.Outlined.Schedule else Icons.Filled.PlayArrow, null,
+                    Modifier.size(19.dp), tint = colors.surface)
+            }
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Text(action, style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (caption.isNotEmpty()) Text(caption, style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
         }
     }
 }
