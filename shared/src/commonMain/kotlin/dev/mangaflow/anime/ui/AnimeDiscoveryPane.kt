@@ -1,7 +1,11 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -30,11 +34,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -49,6 +55,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
@@ -66,6 +73,7 @@ import dev.mangaflow.ui.platform.plusDays
 import kotlinx.coroutines.delay
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.isoDayNumber
+import kotlin.math.roundToInt
 
 private const val FEATURED_PREVIEW = 6
 private const val WATCH_HISTORY_PREVIEW = 8
@@ -97,9 +105,24 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                 val key = animeDiscoveryFeedKey(tab)
                 val feed = state.discoveryFeeds[key]
                 val tabActive = browseActive && state.discoveryTab == tab
+                val ranking = tab == AnimeDiscoveryTab.RANKING
                 var showFilters by remember(tab) { mutableStateOf(false) }
                 LaunchedEffect(tabActive) { if (!tabActive) showFilters = false }
                 val contentActive = tabActive && !showFilters
+                // The slot already fences replies by query. Also reject input from an
+                // outgoing ranking grid or button before its recomposition catches up.
+                fun ownsCurrentFeed(): Boolean {
+                    if (!ranking) return true
+                    val current = controller.state.value
+                    return tabActive && feed != null && current.discoveryTab == tab &&
+                        current.discoveryFeeds[key]?.query == feed.query
+                }
+                fun configure(next: AnimeDiscoveryQuery) {
+                    if (ownsCurrentFeed()) controller.configureDiscovery(tab, next)
+                }
+                fun refresh() {
+                    if (ownsCurrentFeed()) controller.refreshDiscovery()
+                }
                 val broadcast = tab.broadcastDestination() == AnimeDiscoveryTab.CALENDAR
                 val today = if (broadcast) animeCalendarToday(tabActive) else null
                 val calendarDate = today?.takeIf { tab == AnimeDiscoveryTab.CALENDAR }
@@ -116,47 +139,69 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                         val gridActions: @Composable () -> Unit = {
                             AnimeCatalogueGridActions(gridWidth, state.discoveryColumns, backdrop, contentActive,
                                 controller::setDiscoveryColumns,
-                                onRefresh = controller::refreshDiscovery,
+                                onRefresh = ::refresh,
                                 loading = feed?.loading == true || feed?.loadingMore == true)
                         }
                         if (today != null) AnimeBroadcastControls(
                             activeTab = tab, today = today,
                             seasonQuery = state.discoveryFeeds[animeDiscoveryFeedKey(AnimeDiscoveryTab.SEASON)]?.query,
                             calendarQuery = state.discoveryFeeds[animeDiscoveryFeedKey(AnimeDiscoveryTab.CALENDAR)]?.query,
-                            active = tabActive, filtersOpen = showFilters, backdrop = backdrop,
+                            active = tabActive, filtersOpen = showFilters,
                             onOpenFilters = { showFilters = true },
-                            onConfigure = controller::configureDiscovery, gridActions = gridActions)
+                            onConfigure = { nextTab, query ->
+                                val live = controller.state.value
+                                // A settling gesture cannot act on a different open feed.
+                                if (!showFilters && live.discoveryTab == tab &&
+                                    live.discoveryFeeds[key]?.query == feed?.query) {
+                                    controller.configureDiscovery(nextTab, query)
+                                }
+                            }, gridActions = gridActions)
                         else if (feed != null) AnimeDiscoveryControls(tab, feed.query, tabActive, showFilters,
-                            onOpenFilters = { showFilters = true },
-                            onConfigure = { controller.configureDiscovery(tab, it) }, gridActions = gridActions)
+                            onOpenFilters = { if (ownsCurrentFeed()) showFilters = true },
+                            onConfigure = ::configure, gridActions = gridActions)
                     }
                 } else null
-                AnimeDiscoveryFeedGrid(key, visibleFeed, state.discoveryColumns, scrolls, contentBottomPadding,
-                    modifier = Modifier.fillMaxSize().mangaHazeSource(backdrop).motionInputGate(contentActive), active = contentActive,
-                    onOpen = onOpenItem, onScores = ::openScores,
-                    onManage = onManage, onRefresh = controller::refreshDiscovery,
-                    onRetry = {
-                        if (!staleWeek) controller.retryDiscovery(key)
-                        else {
-                            val current = controller.state.value
-                            val currentFeed = current.discoveryFeeds[key]
-                            if (current.discoveryTab == tab && currentFeed != null && !currentFeed.loading &&
-                                currentFeed.query == feed?.query && currentFeed.fetchedAt == feed?.fetchedAt) {
-                                controller.refreshDiscovery()
+                val grid: @Composable (Modifier, Dp) -> Unit = { modifier, topInset ->
+                    AnimeDiscoveryFeedGrid(key, visibleFeed, state.discoveryColumns, scrolls, contentBottomPadding,
+                        modifier = modifier.mangaHazeSource(backdrop).motionInputGate(contentActive), active = contentActive,
+                        onOpen = { if (ownsCurrentFeed()) onOpenItem(it) },
+                        onScores = { if (ownsCurrentFeed()) openScores(it) },
+                        onManage = { if (ownsCurrentFeed()) onManage(it) }, onRefresh = ::refresh,
+                        onRetry = {
+                            if (ownsCurrentFeed()) {
+                                if (!staleWeek) controller.retryDiscovery(key)
+                                else {
+                                    val current = controller.state.value
+                                    val currentFeed = current.discoveryFeeds[key]
+                                    if (current.discoveryTab == tab && currentFeed != null && !currentFeed.loading &&
+                                        currentFeed.query == feed?.query && currentFeed.fetchedAt == feed?.fetchedAt) {
+                                        controller.refreshDiscovery()
+                                    }
+                                }
                             }
+                        },
+                        onMore = { if (ownsCurrentFeed()) controller.loadMoreDiscovery(key) },
+                        onClearTag = { feed?.let { configure(it.query.copy(tag = "")) } },
+                        onShowFullWeek = { feed?.let { configure(it.query.copy(weekday = null)) } },
+                        catalogueHeader = catalogueHeader, contentTopPadding = topInset, calendarDate = calendarDate)
+                }
+                if (ranking && feed != null) {
+                    Column(Modifier.fillMaxSize()) {
+                        // Keep the source switch visible when the site's existing query returns
+                        // to a scrolled position. Sorting/filters still travel with the list.
+                        AnimeRankingProviderBar(feed.query.provider, state.discoveryColumns, contentActive, contentTopPadding) { provider ->
+                            if (provider != feed.query.provider && ownsCurrentFeed()) controller.selectRankingProvider(provider)
                         }
-                    },
-                    onMore = { controller.loadMoreDiscovery(key) },
-                    onClearTag = { feed?.let { controller.configureDiscovery(tab, it.query.copy(tag = "")) } },
-                    onShowFullWeek = { feed?.let { controller.configureDiscovery(tab, it.query.copy(weekday = null)) } },
-                    catalogueHeader = catalogueHeader, contentTopPadding = contentTopPadding,
-                    calendarDate = calendarDate)
+                        grid(Modifier.fillMaxWidth().weight(1f), 0.dp)
+                    }
+                } else grid(Modifier.fillMaxSize(), contentTopPadding)
                 // A restored query can scroll off the lazy header as soon as Apply
                 // runs. The editor must stay mounted long enough to actually close.
-                if (tabActive && showFilters && feed != null) AnimeDiscoveryFilterPanel(tab, feed.query, backdrop,
-                    rememberedOptions = { controller.rememberedDiscoveryOptions(tab, it) },
-                    onDismiss = { showFilters = false },
-                    onConfigure = { controller.configureDiscovery(tab, it) })
+                if (tabActive && showFilters && feed != null) androidx.compose.runtime.key(feed.query.provider.takeIf { ranking }) {
+                    AnimeDiscoveryFilterPanel(tab, feed.query, backdrop,
+                        rememberedOptions = { controller.rememberedDiscoveryOptions(tab, it) },
+                        onDismiss = { showFilters = false }, onConfigure = ::configure)
+                }
             }
         }
     }
@@ -799,8 +844,9 @@ private fun animeDiscoverySeasonTitle(query: AnimeDiscoveryQuery): String =
     listOfNotNull(query.year?.toString(), query.season?.let(::animeSeasonLabel))
         .joinToString(" ").ifBlank { "全部季度" }
 
-private fun animeDiscoveryConditions(query: AnimeDiscoveryQuery, includeTime: Boolean = false): String =
-    listOfNotNull(animeDiscoveryCaption(query),
+private fun animeDiscoveryConditions(query: AnimeDiscoveryQuery, includeTime: Boolean = false,
+    caption: String = animeDiscoveryCaption(query)): String =
+    listOfNotNull(caption,
         animeDiscoverySeasonTitle(query).takeIf { includeTime && query.year != null },
         query.tag.takeIf(String::isNotBlank)?.let { animeDiscoveryGenreLabels[it] ?: it },
         query.region.takeIf(String::isNotBlank), query.format?.let(::animeDiscoveryFormatLabel)).joinToString(" · ")
@@ -816,20 +862,17 @@ private fun AnimeDiscoveryQuery.animeQuarterIndex(): Int? =
 private fun AnimeDiscoveryQuery.withAnimeQuarter(index: Int): AnimeDiscoveryQuery =
     copy(year = index / 4, season = AnimeSeason.entries[index % 4])
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AnimeBroadcastControls(activeTab: AnimeDiscoveryTab, today: LocalDate,
     seasonQuery: AnimeDiscoveryQuery?, calendarQuery: AnimeDiscoveryQuery?, active: Boolean,
-    filtersOpen: Boolean, backdrop: HazeState, onOpenFilters: () -> Unit,
+    filtersOpen: Boolean, onOpenFilters: () -> Unit,
     onConfigure: (AnimeDiscoveryTab, AnimeDiscoveryQuery) -> Unit, gridActions: @Composable () -> Unit) {
-    val colors = MaterialTheme.colorScheme
     val current = today.animeQuarterIndex()
     val season = seasonQuery ?: AnimeDiscoveryQuery().withAnimeQuarter(current)
     val calendar = calendarQuery ?: AnimeDiscoveryQuery(calendar = true)
     val inWeek = activeTab == AnimeDiscoveryTab.CALENDAR
     val selected = if (inWeek) current else season.animeQuarterIndex()
-    val triggerQuarter = if (inWeek) season.withAnimeQuarter(current) else season
-    var choosingPeriod by remember { mutableStateOf(false) }
-    LaunchedEffect(active, activeTab) { if (!active) choosingPeriod = false }
     val enabled = active && !filtersOpen
     val filterFocus = remember { FocusRequester() }
     var filterFocused by remember { mutableStateOf(false) }
@@ -847,48 +890,32 @@ private fun AnimeBroadcastControls(activeTab: AnimeDiscoveryTab, today: LocalDat
             onConfigure(AnimeDiscoveryTab.CALENDAR, calendar.copy(weekday = day))
         }
     }
-    fun openSeason() {
-        if (enabled && inWeek) onConfigure(AnimeDiscoveryTab.SEASON, season.withAnimeQuarter(current))
+    fun openQuarter(quarter: Int) {
+        if (enabled) onConfigure(AnimeDiscoveryTab.SEASON, season.withAnimeQuarter(quarter))
     }
 
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        val center = selected ?: season.year?.let { it * 4 + current % 4 } ?: current
+        val quarters = remember(center) { (center - 1..center + 1).filter { it / 4 in 1..9998 } }
+        val quarterLabels = remember(quarters) { quarters.map { animeDiscoverySeasonTitle(season.withAnimeQuarter(it)) } }
+        BoxWithConstraints(Modifier.fillMaxWidth().semantics { contentDescription = "季度" }) {
+            AnimeBroadcastRail(quarterLabels, quarters.indexOf(center), selected != null, maxWidth,
+                owner = Triple(activeTab, if (inWeek) calendar else season, current), enabled = enabled,
+                onSelect = { index -> openQuarter(quarters[index]) })
+        }
+
+        // Only the live weekly feed owns dated controls. A seasonal list never presents
+        // a weekday selector that cannot change the works beneath it.
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.weight(1f)) {
-                Row(Modifier.clip(RoundedCornerShape(10.dp))
-                    .clickable(enabled = enabled, role = Role.Button, onClickLabel = "选择季度") { choosingPeriod = true }
-                    .semantics(mergeDescendants = true) { heading() }.heightIn(min = 44.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(animeDiscoverySeasonTitle(triggerQuarter), Modifier.weight(1f, fill = false),
-                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
-                }
-                CompactGlassPopover(choosingPeriod && enabled, backdrop, onDismiss = { choosingPeriod = false },
-                    alignToStart = true, maximumWidth = 248.dp) {
-                    val anchor = selected ?: current
-                    val options = listOf(anchor - 1, anchor, anchor + 1, current)
-                        .filter { it / 4 in 1..9998 }.distinct().sorted()
-                    Column(Modifier.selectableGroup()) {
-                        options.forEach { index ->
-                            val isSelected = index == selected
-                            val label = animeDiscoverySeasonTitle(season.withAnimeQuarter(index)) +
-                                if (index == current) " · 本季" else ""
-                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-                                .selectable(selected = isSelected, role = Role.RadioButton, onClick = {
-                                    choosingPeriod = false
-                                    if (!isSelected) {
-                                        if (index == current) openWeek(calendar.weekday)
-                                        else onConfigure(AnimeDiscoveryTab.SEASON, season.withAnimeQuarter(index))
-                                    }
-                                }).heightIn(min = 44.dp).padding(horizontal = 12.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically) {
-                                Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal)
-                                if (isSelected) Icon(Icons.Outlined.Check, null, Modifier.size(16.dp), tint = colors.onSurface)
-                            }
-                        }
-                    }
-                }
+            Column(Modifier.weight(1f)) {
+                val weekStart = today.animeWeekStart()
+                val end = weekStart.plusDays(6)
+                Text(if (inWeek) "本周番表" else "季度番单", Modifier.semantics { heading() },
+                    style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                AnimeQuietLabel(if (inWeek)
+                    "${weekStart.monthNumber}/${weekStart.dayOfMonth}–${end.monthNumber}/${end.dayOfMonth} · Bangumi"
+                else listOfNotNull(animeDiscoverySeasonTitle(season).takeIf { selected == null },
+                    animeDiscoveryConditions(season)).joinToString(" · "))
             }
             gridActions()
             if (!inWeek) MotionIconButton(onClick = {
@@ -899,24 +926,86 @@ private fun AnimeBroadcastControls(activeTab: AnimeDiscoveryTab, today: LocalDat
                 Icon(Icons.Outlined.Tune, "筛选季度番单", Modifier.size(19.dp))
             }
         }
-        if (selected == current) {
-            val weekStart = today.animeWeekStart()
-            val end = weekStart.plusDays(6)
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Column(Modifier.weight(1f)) {
-                    Text("本周放送", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-                    AnimeQuietLabel("${weekStart.monthNumber}/${weekStart.dayOfMonth}–${end.monthNumber}/${end.dayOfMonth}")
-                }
-                AnimeDiscoveryChoice("全周", inWeek && calendar.weekday == null, enabled) { openWeek(null) }
-                AnimeDiscoveryChoice("本季番单", !inWeek, enabled, ::openSeason)
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (inWeek) {
+                if (calendar.weekday != null) AnimeBroadcastAction("查看全周", enabled) { openWeek(null) }
+                AnimeBroadcastAction("看本季番单", enabled) { openQuarter(current) }
+            } else if (selected == current) {
+                AnimeBroadcastAction("查看本周番表", enabled) { openWeek(calendar.weekday) }
+            } else {
+                AnimeBroadcastAction("回到本季", enabled) { openQuarter(current) }
             }
-            AnimeWeeklyDays(today, calendar.weekday.takeIf { inWeek }, enabled, ::openWeek)
         }
-        AnimeQuietLabel(if (inWeek) "Bangumi · 仅提供放送日，不含播出时刻"
-            else if (selected == current) "季度番单 · ${animeDiscoveryConditions(season)}"
-            else "季度番单 · ${animeDiscoveryConditions(season)} · 仅本季提供本周番表")
+        if (inWeek) AnimeWeeklyDays(today, calendar.weekday, enabled, ::openWeek)
     }
+}
+
+@Composable
+private fun AnimeBroadcastAction(label: String, enabled: Boolean, onClick: () -> Unit) {
+    MotionTextButton(onClick = onClick, enabled = enabled, modifier = Modifier.heightIn(min = 44.dp),
+        contentPadding = PaddingValues(horizontal = 8.dp)) { Text(label) }
+}
+
+private class BroadcastRailRelease(val position: Float, val anchor: Int, val select: Boolean,
+    val fromDrag: Boolean = false)
+
+/** Adopted fluid tabs: a single horizontal recognizer and an indicator that follows the finger. */
+@Composable
+private fun AnimeBroadcastRail(labels: List<String>, selected: Int, selectionVisible: Boolean,
+    width: Dp, owner: Any, enabled: Boolean, onSelect: (Int) -> Unit,
+    height: Dp = 48.dp, itemContent: (@Composable (Int, Boolean, Color) -> Unit)? = null) {
+    val direction = LocalLayoutDirection.current
+    val motion = LocalMotionEnabled.current
+    val feedback = rememberFeelFeedback()
+    val latest by rememberUpdatedState(onSelect)
+    val position = remember(owner, selected, width, enabled, direction, motion) { mutableStateOf<Float?>(null) }
+    var release by remember(owner, selected, width, enabled, direction, motion) { mutableStateOf<BroadcastRailRelease?>(null) }
+    LaunchedEffect(owner, selected, width, enabled, direction, motion, release) {
+        val settling = release ?: return@LaunchedEffect
+        val spec = if (motion) spring<Float>(dampingRatio = MangaMotion.TabLeadingDamping,
+            stiffness = MangaMotion.TabLeadingStiffness) else snap<Float>()
+        Animatable(settling.position).animateTo(settling.anchor.toFloat(), animationSpec = spec) {
+            if (release === settling) position.value = value
+        }
+        if (release !== settling || !enabled) return@LaunchedEffect
+        if (settling.select && (!selectionVisible || settling.anchor != selected)) {
+            if (settling.fromDrag) feedback.perform(FeelEvent.Selection)
+            latest(settling.anchor)
+            // Keep the thumb on its anchor until the native query replaces this owner.
+        } else position.value = null
+        release = null
+    }
+    val gesture = if (enabled) Modifier.pointerInput(owner, selected, width, direction, motion, labels.size) {
+        fun anchorAt(x: Float): Float {
+            val fraction = x / size.width.coerceAtLeast(1)
+            val logical = if (direction == LayoutDirection.Rtl) 1f - fraction else fraction
+            return (logical * labels.size - .5f).coerceIn(0f, labels.lastIndex.toFloat())
+        }
+        try {
+            detectHorizontalDragGestures(
+                onDragStart = { release = null; position.value = anchorAt(it.x) },
+                onHorizontalDrag = { change, _ -> position.value = anchorAt(change.position.x) },
+                onDragCancel = { position.value?.let { release = BroadcastRailRelease(it, selected, false) } },
+                onDragEnd = { position.value?.let {
+                    release = BroadcastRailRelease(it, it.roundToInt().coerceIn(labels.indices), true, fromDrag = true)
+                } },
+            )
+        } finally {
+            release = null
+            position.value = null
+        }
+    } else Modifier
+    MotionTabs(selected, labels, onSelect = { index ->
+        if (enabled && (!selectionVisible || index != selected)) {
+            release = BroadcastRailRelease(position.value ?: selected.toFloat(), index, true)
+        } else {
+            release = null
+            position.value = null
+        }
+    }, modifier = Modifier.width(width).motionInputGate(enabled).then(gesture),
+        treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = height,
+        track = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = .9f),
+        selectionVisible = selectionVisible, scrubPosition = position, itemContent = itemContent)
 }
 
 @Composable
@@ -928,46 +1017,63 @@ private fun AnimeWeeklyDays(today: LocalDate, selectedDay: Int?, active: Boolean
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val density = LocalDensity.current
         val minimum = maxOf(44.dp, 38.dp * density.fontScale) * days.size
-        val width = maxOf(maxWidth, minimum)
         val selectedIndex = selectedDay?.minus(1) ?: todayIndex
-        val initialScroll = with(density) {
-            (width / days.size * (selectedIndex + .5f) - maxWidth / 2f)
-                .coerceIn(0.dp, width - maxWidth).roundToPx()
+        val height = maxOf(58.dp, 38.dp * density.fontScale + 12.dp)
+        val labels = remember(days) { days.map { it.dayOfMonth.toString() } }
+        val selectDay: (Int) -> Unit = { if (active && selectedDay != it + 1) onSelect(it + 1) }
+        val dayCell: @Composable (Int, Boolean, Color) -> Unit = { index, isSelected, color ->
+            val date = days[index]
+            val isToday = index == todayIndex
+            Column(Modifier.clearAndSetSemantics {
+                contentDescription = "${date.monthNumber}月${date.dayOfMonth}日 ${animeWeekdays[index]}" +
+                    if (isToday) "，今天" else ""
+            }, horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(animeWeekdays[index], style = MaterialTheme.typography.labelSmall, color = color, maxLines = 1)
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(labels[index], style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
+                        color = if (isToday) colors.onSurface else color, maxLines = 1,
+                        fontWeight = if (isSelected || isToday) FontWeight.SemiBold else FontWeight.Normal)
+                    if (isToday) Text("今", color = colors.onSurface,
+                        style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                }
+            }
         }
-        Box(Modifier.horizontalScroll(rememberScrollState(initialScroll), enabled = active)) {
-            val labels = days.map { it.dayOfMonth.toString() }
-            MotionTabs(selectedIndex, labels, onSelect = { index ->
-                val weekday = index + 1
-                if (active && selectedDay != weekday) onSelect(weekday)
-            }, modifier = Modifier.width(width).motionInputGate(active),
-                controlHeight = maxOf(58.dp, 38.dp * density.fontScale + 12.dp),
-                treatment = MotionTabTreatment.Soft, fullWidthIndicator = true,
-                track = colors.surfaceContainerHigh.copy(alpha = .9f),
-                selectionVisible = selectedDay != null,
-                itemContent = { index, selected, color ->
-                    val date = days[index]
-                    val isToday = index == todayIndex
-                    Column(Modifier.clearAndSetSemantics {
-                        contentDescription = "${date.monthNumber}月${date.dayOfMonth}日 ${animeWeekdays[index]}" +
-                            if (isToday) "，今天" else ""
-                    }, horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(animeWeekdays[index], style = MaterialTheme.typography.labelSmall, color = color, maxLines = 1)
-                        Row(verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(labels[index], style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
-                                color = if (isToday) colors.onSurface else color, maxLines = 1,
-                                fontWeight = if (selected || isToday) FontWeight.SemiBold else FontWeight.Normal)
-                            if (isToday) Text("今", color = colors.onSurface,
-                                style = MaterialTheme.typography.labelSmall, maxLines = 1)
-                        }
-                    }
-                })
+        if (minimum <= maxWidth) {
+            AnimeBroadcastRail(labels, selectedIndex, selectedDay != null, maxWidth, weekStart to selectedDay,
+                enabled = active, onSelect = selectDay, height = height, itemContent = dayCell)
+        } else {
+            // If all seven minimum hit targets can't fit, let users reveal any day without
+            // selecting intermediate days. Only this overflow branch owns horizontal panning.
+            val centered = with(density) {
+                (minimum / days.size * (selectedIndex + .5f) - maxWidth / 2f)
+                    .coerceIn(0.dp, minimum - maxWidth).roundToPx()
+            }
+            Box(Modifier.horizontalScroll(rememberScrollState(centered), enabled = active)) {
+                MotionTabs(selectedIndex, labels, selectDay, modifier = Modifier.width(minimum).motionInputGate(active),
+                    controlHeight = height, treatment = MotionTabTreatment.Soft, fullWidthIndicator = true,
+                    track = colors.surfaceContainerHigh.copy(alpha = .9f),
+                    selectionVisible = selectedDay != null, itemContent = dayCell)
+            }
         }
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+private val rankingProviders = listOf(
+    AnimeDiscoveryProvider.DOUBAN, AnimeDiscoveryProvider.BANGUMI, AnimeDiscoveryProvider.ANILIST)
+
+@Composable
+private fun AnimeRankingProviderBar(provider: AnimeDiscoveryProvider, columnPreference: Int?, active: Boolean,
+    topInset: Dp, onSelect: (AnimeDiscoveryProvider) -> Unit) {
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(top = topInset + 4.dp).motionInputGate(active)) {
+        val inset = animeDiscoveryInset(maxWidth, columnPreference, animeDiscoveryColumns(maxWidth, columnPreference))
+        Box(Modifier.fillMaxWidth().padding(horizontal = inset).semantics { paneTitle = "分站榜单" }) {
+            AnimeFilterChoices(rankingProviders, provider, ::animeDiscoveryProviderLabel, enabled = active, onSelect = onSelect)
+        }
+    }
+}
+
 @Composable
 private fun AnimeDiscoveryControls(tab: AnimeDiscoveryTab, query: AnimeDiscoveryQuery, active: Boolean,
     filtersOpen: Boolean, onOpenFilters: () -> Unit, onConfigure: (AnimeDiscoveryQuery) -> Unit,
@@ -977,7 +1083,9 @@ private fun AnimeDiscoveryControls(tab: AnimeDiscoveryTab, query: AnimeDiscovery
     var returnFocus by remember { mutableStateOf(false) }
     val controlsActive = active && !filtersOpen
     val colors = MaterialTheme.colorScheme
-    val summary = animeDiscoveryConditions(query, includeTime = true)
+    val ranking = tab == AnimeDiscoveryTab.RANKING
+    val summary = animeDiscoveryConditions(query, includeTime = true, caption = if (ranking)
+        animeRankingOrderLabel(query.provider, query.order) else animeDiscoveryCaption(query))
     fun openFilters() {
         returnFocus = triggerFocused
         onOpenFilters()
@@ -1014,27 +1122,20 @@ private fun AnimeDiscoveryControls(tab: AnimeDiscoveryTab, query: AnimeDiscovery
                 Text("筛选")
             }
         }
-        if (tab == AnimeDiscoveryTab.RANKING) {
-            val rankingOrders = animeDiscoveryOrders(query.provider.takeUnless { query.combined })
-            AnimeFilterChoices(rankingOrders, query.order, ::animeDiscoveryOrderLabel, enabled = controlsActive) { nextOrder ->
-                if (nextOrder != query.order) {
-                    val aniList = (!query.combined && query.provider == AnimeDiscoveryProvider.ANILIST) ||
-                        (query.combined && nextOrder == AnimeDiscoveryOrder.TRENDING)
-                    val nextTag = if (aniList) query.tag.takeIf(animeDiscoveryGenreLabels::containsKey)
-                        ?: animeDiscoveryGenreLabels.entries.firstOrNull { it.value == query.tag }?.key.orEmpty()
-                    else animeDiscoveryGenreLabels[query.tag] ?: query.tag
-                    onConfigure(query.copy(order = nextOrder, tag = nextTag))
-                }
+        if (ranking) {
+            AnimeFilterChoices(animeDiscoveryOrders(query.provider), query.order,
+                { animeRankingOrderLabel(query.provider, it) }, enabled = controlsActive) { nextOrder ->
+                if (nextOrder != query.order) onConfigure(query.copy(order = nextOrder))
             }
         }
     }
 }
 
-private fun animeDiscoveryOrders(provider: AnimeDiscoveryProvider?): List<AnimeDiscoveryOrder> = when (provider) {
-    AnimeDiscoveryProvider.DOUBAN -> listOf(AnimeDiscoveryOrder.POPULARITY, AnimeDiscoveryOrder.SCORE, AnimeDiscoveryOrder.NEWEST)
-    AnimeDiscoveryProvider.BANGUMI -> listOf(AnimeDiscoveryOrder.RANK, AnimeDiscoveryOrder.POPULARITY, AnimeDiscoveryOrder.SCORE)
-    AnimeDiscoveryProvider.ANILIST -> listOf(AnimeDiscoveryOrder.TRENDING, AnimeDiscoveryOrder.POPULARITY, AnimeDiscoveryOrder.SCORE)
-    null -> listOf(AnimeDiscoveryOrder.POPULARITY, AnimeDiscoveryOrder.SCORE, AnimeDiscoveryOrder.RANK, AnimeDiscoveryOrder.TRENDING)
+private fun animeRankingOrderLabel(provider: AnimeDiscoveryProvider, order: AnimeDiscoveryOrder): String = when {
+    order == AnimeDiscoveryOrder.RANK -> "站内排名"
+    order == AnimeDiscoveryOrder.TRENDING -> "近期趋势"
+    provider == AnimeDiscoveryProvider.BANGUMI && order == AnimeDiscoveryOrder.POPULARITY -> "热度"
+    else -> animeDiscoveryOrderLabel(order)
 }
 
 private fun animeDiscoveryFilterOrderLabel(order: AnimeDiscoveryOrder): String = when (order) {
@@ -1126,6 +1227,7 @@ private fun AnimeDiscoveryFilterPanel(tab: AnimeDiscoveryTab, query: AnimeDiscov
     backdrop: HazeState, rememberedOptions: (AnimeDiscoveryProvider) -> AnimeDiscoveryQuery?,
     onDismiss: () -> Unit, onConfigure: (AnimeDiscoveryQuery) -> Unit) {
     val seasonal = tab == AnimeDiscoveryTab.SEASON
+    val ranking = tab == AnimeDiscoveryTab.RANKING
     var provider by remember { mutableStateOf(query.provider) }
     var sourceOptionsVisible by remember { mutableStateOf(false) }
     var year by remember { mutableStateOf(query.year?.toString().orEmpty()) }
@@ -1138,6 +1240,7 @@ private fun AnimeDiscoveryFilterPanel(tab: AnimeDiscoveryTab, query: AnimeDiscov
     val draftOptions = remember { mutableMapOf<AnimeDiscoveryProvider, AnimeDiscoveryQuery>() }
     val colors = MaterialTheme.colorScheme
     val orders = animeDiscoveryOrders(provider)
+    val defaultOrder = if (ranking) defaultAnimeRankingQuery(provider).order else AnimeDiscoveryOrder.POPULARITY
     val currentYear = localToday().year
     val quickYears = listOf("", currentYear.toString(), (currentYear - 1).toString())
     var otherYearVisible by remember { mutableStateOf(false) }
@@ -1163,7 +1266,7 @@ private fun AnimeDiscoveryFilterPanel(tab: AnimeDiscoveryTab, query: AnimeDiscov
     val scope = listOfNotNull(animeDiscoveryProviderLabel(provider), year.takeIf(String::isNotBlank)?.let { "${it} 年" },
         season?.takeUnless { provider == AnimeDiscoveryProvider.DOUBAN }?.let(::animeSeasonLabel)).joinToString(" · ")
     val clearAvailable = year.isNotEmpty() || season != null || tag.isNotBlank() || region.isNotEmpty() || format != null ||
-        (tab != AnimeDiscoveryTab.HOME && order != AnimeDiscoveryOrder.POPULARITY)
+        (tab != AnimeDiscoveryTab.HOME && order != defaultOrder)
 
     MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop, containerColor = colors.surface) { dismiss ->
         Column(Modifier.fillMaxWidth().heightIn(max = 580.dp).imePadding().padding(horizontal = 18.dp)
@@ -1177,7 +1280,9 @@ private fun AnimeDiscoveryFilterPanel(tab: AnimeDiscoveryTab, query: AnimeDiscov
             Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState())
                 .padding(top = 6.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (tab != AnimeDiscoveryTab.HOME) AnimeFilterGroup("排序") {
-                    AnimeFilterChoices(orders, order, ::animeDiscoveryFilterOrderLabel) { order = it }
+                    AnimeFilterChoices(orders, order, {
+                        if (ranking) animeRankingOrderLabel(provider, it) else animeDiscoveryFilterOrderLabel(it)
+                    }) { order = it }
                 }
                 if (provider == AnimeDiscoveryProvider.DOUBAN) {
                     AnimeFilterGroup("地区") {
@@ -1236,7 +1341,7 @@ private fun AnimeDiscoveryFilterPanel(tab: AnimeDiscoveryTab, query: AnimeDiscov
                     if (customTagEditing)
                         AnimeTextField(tag, { tag = it }, "输入站内标签", emptyHint = "例如 音乐")
                 }
-                if (!seasonal && tab != AnimeDiscoveryTab.HOME) AnimeFilterGroup("资料目录") {
+                if (!seasonal && !ranking && tab != AnimeDiscoveryTab.HOME) AnimeFilterGroup("资料目录") {
                     AnimeFilterDisclosure(animeDiscoveryProviderLabel(provider), sourceOptionsVisible) {
                         sourceOptionsVisible = !sourceOptionsVisible
                     }
@@ -1250,7 +1355,7 @@ private fun AnimeDiscoveryFilterPanel(tab: AnimeDiscoveryTab, query: AnimeDiscov
             val clearFilters: @Composable () -> Unit = {
                 MotionTextButton(enabled = clearAvailable, onClick = {
                     year = ""; season = null; tag = ""; region = ""; format = null
-                    if (tab != AnimeDiscoveryTab.HOME) order = AnimeDiscoveryOrder.POPULARITY
+                    if (tab != AnimeDiscoveryTab.HOME) order = defaultOrder
                     otherYearVisible = false
                     error = null
                 }, modifier = Modifier.heightIn(min = 48.dp),

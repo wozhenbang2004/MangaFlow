@@ -28,6 +28,7 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -168,6 +169,7 @@ internal fun MotionTabs(
     selectionVisible: Boolean = true,
     tooltips: List<String>? = null,
     selectionBackdrop: HazeState? = null,
+    scrubPosition: State<Float?>? = null,
     itemContent: (@Composable (index: Int, selected: Boolean, color: Color) -> Unit)? = null,
 ) {
     if (labels.isEmpty()) return
@@ -183,7 +185,7 @@ internal fun MotionTabs(
     val liquid = treatment == MotionTabTreatment.Capsule
     val light = MaterialTheme.colorScheme.surface.luminance() > .5f
     val accessibility = if (selectionBackdrop != null) LocalGlassAccessibilitySettings.current else null
-    val useLens = selectionBackdrop != null && !compact && treatment != MotionTabTreatment.Underline &&
+    val useLens = scrubPosition == null && selectionBackdrop != null && !compact && treatment != MotionTabTreatment.Underline &&
         !MangaHazeRuntime.isLowRamDevice && accessibility?.reduceTransparency != true && accessibility?.increaseContrast != true
     val selectionInteractions = remember(labels.size) { List(labels.size) { MutableInteractionSource() } }
     val lensPresses = if (useLens) selectionInteractions.map { it.collectIsPressedAsState() } else emptyList()
@@ -206,7 +208,8 @@ internal fun MotionTabs(
             }
         }
     }
-    LaunchedEffect(motion, labels.size) {
+    // A scrub rail owns its one settling animation; the default tabs keep the two-edge motion.
+    if (scrubPosition == null) LaunchedEffect(motion, labels.size) {
         snapshotFlow { latest.value }.collect { target ->
             val toRight = target > left.value
             // Capture velocity before animateTo cancels its predecessor. A reverse tap continues here.
@@ -258,10 +261,16 @@ internal fun MotionTabs(
                 foreground.copy(alpha = .025f))
             val rimStroke = Stroke(.6.dp.toPx())
             onDrawBehind {
-                val start = if (fillSegment) left.value.coerceIn(0f, labels.size.toFloat()) * slot + inset
-                    else interpolate(left.value, centers) - interpolate(left.value, widths) / 2f
-                val end = if (fillSegment) right.value.coerceIn(0f, labels.size.toFloat()) * slot - inset
-                    else interpolate(right.value - 1f, centers) + interpolate(right.value - 1f, widths) / 2f
+                // Only the indicator follows the live drag. Labels and semantics own the settled tab.
+                val scrub = scrubPosition?.value
+                val leading = scrub ?: if (scrubPosition != null) index.toFloat() else left.value
+                val trailing = scrub?.plus(1f) ?: if (scrubPosition != null) index + 1f else right.value
+                val alpha = if (scrubPosition == null) selectionAlpha
+                    else if (scrub != null || selectionVisible) 1f else 0f
+                val start = if (fillSegment) leading.coerceIn(0f, labels.size.toFloat()) * slot + inset
+                    else interpolate(leading, centers) - interpolate(leading, widths) / 2f
+                val end = if (fillSegment) trailing.coerceIn(0f, labels.size.toFloat()) * slot - inset
+                    else interpolate(trailing - 1f, centers) + interpolate(trailing - 1f, widths) / 2f
                 val width = (end - start).coerceAtLeast(2.dp.toPx())
                 val restingWidth = if (fillSegment) slot - inset * 2f else widths[index]
                 val stretch = (width / restingWidth.coerceAtLeast(1f) - 1f).coerceAtLeast(0f)
@@ -281,16 +290,16 @@ internal fun MotionTabs(
                     MotionTabTreatment.Capsule -> if (underline || compact) foreground.copy(alpha = .065f) else indicator
                 }
                 drawRoundRect(tint,
-                    topLeft = topLeft, size = pillSize, cornerRadius = radius, alpha = selectionAlpha)
+                    topLeft = topLeft, size = pillSize, cornerRadius = radius, alpha = alpha)
                 // Content-level capsules keep a light drawn edge and need no backdrop capture.
                 if (liquid && selectionBackdrop == null) {
                     drawRoundRect(Brush.linearGradient(
                         rimColors,
                         start = topLeft, end = topLeft + Offset(width * .35f, h)),
-                        topLeft = topLeft, size = pillSize, cornerRadius = radius, alpha = selectionAlpha)
+                        topLeft = topLeft, size = pillSize, cornerRadius = radius, alpha = alpha)
                 }
                 if (treatment == MotionTabTreatment.Capsule) drawRoundRect(foreground.copy(alpha = if (liquid) .07f else .04f),
-                    topLeft = topLeft, size = pillSize, cornerRadius = radius, style = rimStroke, alpha = selectionAlpha)
+                    topLeft = topLeft, size = pillSize, cornerRadius = radius, style = rimStroke, alpha = alpha)
             }
         }
     val tabRow: @Composable (Modifier) -> Unit = { row ->

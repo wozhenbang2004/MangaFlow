@@ -1026,12 +1026,7 @@ private fun AnimeWorkspaceContent(
             if (active) {
                 directoryOpen = false
                 tab = 0
-                controller.configureDiscovery(AnimeDiscoveryTab.RANKING,
-                    AnimeDiscoveryQuery(provider = provider, order = when (provider) {
-                        AnimeDiscoveryProvider.BANGUMI -> AnimeDiscoveryOrder.RANK
-                        AnimeDiscoveryProvider.ANILIST -> AnimeDiscoveryOrder.TRENDING
-                        AnimeDiscoveryProvider.DOUBAN -> AnimeDiscoveryOrder.POPULARITY
-                    }))
+                controller.selectRankingProvider(provider)
             }
         })
     AnimeSourcesPanel(sourcesVisible, state, controller, backdrop, sourceEpisode,

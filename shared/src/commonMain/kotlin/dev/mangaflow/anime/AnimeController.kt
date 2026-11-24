@@ -627,7 +627,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val calendar = AnimeDiscoveryQuery(calendar = true, weekday = today.dayOfWeek.isoDayNumber)
         val mainCatalog = AnimeDiscoveryQuery(provider = AnimeDiscoveryProvider.DOUBAN)
         val defaults = mapOf(AnimeDiscoveryTab.HOME to mainCatalog,
-            AnimeDiscoveryTab.RANKING to mainCatalog, AnimeDiscoveryTab.SEASON to seasonal,
+            AnimeDiscoveryTab.RANKING to defaultAnimeRankingQuery(AnimeDiscoveryProvider.DOUBAN), AnimeDiscoveryTab.SEASON to seasonal,
             AnimeDiscoveryTab.CALENDAR to calendar)
         if (discoveryDate != today.toString() || defaults.keys.any { animeDiscoveryFeedKey(it) !in mutableState.value.discoveryFeeds }) {
             discoveryDate = today.toString()
@@ -686,6 +686,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     internal fun rememberedDiscoveryOptions(tab: AnimeDiscoveryTab, provider: AnimeDiscoveryProvider): AnimeDiscoveryQuery? =
         discoveryOptions[tab to provider]
 
+    internal fun selectRankingProvider(provider: AnimeDiscoveryProvider) {
+        val tab = AnimeDiscoveryTab.RANKING
+        val current = mutableState.value.discoveryFeeds[animeDiscoveryFeedKey(tab)]?.query
+        val query = current?.takeIf { it.provider == provider } ?: rememberedDiscoveryOptions(tab, provider)
+            ?: defaultAnimeRankingQuery(provider)
+        configureDiscovery(tab, query)
+    }
+
     fun configureDiscovery(tab: AnimeDiscoveryTab, query: AnimeDiscoveryQuery) =
         configureDiscovery(tab, query, selectTab = true)
 
@@ -704,6 +712,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     AnimeDiscoveryOrder.NEWEST, AnimeDiscoveryOrder.SCORE) } ?: AnimeDiscoveryOrder.POPULARITY,
                 // Douban's default and SERIES both use tv; keep one identity for range/scroll restoration.
                 format = query.format?.takeIf { it == AnimeDiscoveryFormat.MOVIE })
+            tab == AnimeDiscoveryTab.RANKING -> query.copy(tag = tag, combined = false, calendar = false, weekday = null,
+                order = query.order.takeIf { it in animeDiscoveryOrders(query.provider) }
+                    ?: defaultAnimeRankingQuery(query.provider).order)
             query.provider == AnimeDiscoveryProvider.DOUBAN -> query.copy(tag = tag, combined = false)
             !query.combined -> query.copy(tag = tag)
             query.order == AnimeDiscoveryOrder.TRENDING -> query.copy(provider = AnimeDiscoveryProvider.ANILIST,

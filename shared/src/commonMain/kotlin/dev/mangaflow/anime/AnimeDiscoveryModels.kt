@@ -6,6 +6,12 @@ enum class AnimeDiscoveryOrder { RANK, POPULARITY, SCORE, TRENDING, NEWEST }
 enum class AnimeDiscoveryFormat { SERIES, MOVIE, SPECIAL, SHORT }
 enum class AnimeSeason(val startMonth: Int) { WINTER(1), SPRING(4), SUMMER(7), FALL(10) }
 
+internal fun animeDiscoveryOrders(provider: AnimeDiscoveryProvider): List<AnimeDiscoveryOrder> = when (provider) {
+    AnimeDiscoveryProvider.DOUBAN -> listOf(AnimeDiscoveryOrder.POPULARITY, AnimeDiscoveryOrder.SCORE, AnimeDiscoveryOrder.NEWEST)
+    AnimeDiscoveryProvider.BANGUMI -> listOf(AnimeDiscoveryOrder.RANK, AnimeDiscoveryOrder.POPULARITY, AnimeDiscoveryOrder.SCORE)
+    AnimeDiscoveryProvider.ANILIST -> listOf(AnimeDiscoveryOrder.TRENDING, AnimeDiscoveryOrder.POPULARITY, AnimeDiscoveryOrder.SCORE)
+}
+
 /** The same request describes both the visible controls and the actual remote query. */
 data class AnimeDiscoveryQuery(
     val provider: AnimeDiscoveryProvider = AnimeDiscoveryProvider.BANGUMI,
@@ -19,6 +25,9 @@ data class AnimeDiscoveryQuery(
     val region: String = "",
     val format: AnimeDiscoveryFormat? = null,
 )
+
+internal fun defaultAnimeRankingQuery(provider: AnimeDiscoveryProvider): AnimeDiscoveryQuery =
+    AnimeDiscoveryQuery(provider = provider, order = animeDiscoveryOrders(provider).first())
 
 data class AnimeSourceScore(val provider: AnimeDiscoveryProvider, val rating: Double, val scale: Int,
     val ratingCount: Int? = null)
