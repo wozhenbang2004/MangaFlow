@@ -38,6 +38,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -283,6 +284,9 @@ private fun DesktopActionPopup(
     }
 }
 
+/** Only a host with dark media chrome opts into this variant. */
+internal val LocalDesktopTooltipOverMedia = staticCompositionLocalOf { false }
+
 /** A non-focusable label lives inside its actual icon's Box, preserving the caller's layout slot. */
 @Composable
 internal fun DesktopIconTooltip(label: String?, interaction: MutableInteractionSource, enabled: Boolean) {
@@ -321,11 +325,13 @@ internal fun DesktopIconTooltip(label: String?, interaction: MutableInteractionS
             }
         }
     }
+    val overMedia = LocalDesktopTooltipOverMedia.current
+    val colors = if (overMedia) MangaDarkColorScheme else MaterialTheme.colorScheme
     Popup(popupPositionProvider = position, properties = PopupProperties(focusable = false)) {
-        Surface(shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceContainerLow,
-            tonalElevation = 0.dp, shadowElevation = 4.dp) {
+        Surface(shape = RoundedCornerShape(10.dp), color = colors.surfaceContainerLow,
+            tonalElevation = 0.dp, shadowElevation = if (overMedia) 1.dp else 4.dp) {
             Text(label, Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, lineHeight = 16.sp,
+                color = if (overMedia) colors.onSurfaceVariant else colors.onSurface, fontSize = 12.sp, lineHeight = 16.sp,
                 maxLines = 2)
         }
     }

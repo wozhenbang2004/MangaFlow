@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.openani.mediamp.MediaStatus
 import org.openani.mediamp.MediampPlayer
 import org.openani.mediamp.PlaybackException
@@ -64,6 +65,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
     private var observers: CoroutineScope? = null
     private var bufferSeekCompletion: Job? = null
     private var loadingNative: Any? = null
+    private var startupWait: Job? = null
     private var recovery: Job? = null
     private var recoveryNotice: String? = null
     private var audioTracks = emptyList<AudioTrack>()
@@ -73,6 +75,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
     protected open val supportsVideoEnhancement: Boolean = false
     protected open val supportsModelEnhancement: Boolean = false
     protected open val supportsDecoderStartup: Boolean = false
+    protected open val onlineStartupWaitMillis: Long? = null
     protected open val streamCache: AnimeStreamCache? = null
     protected abstract suspend fun createBackend(): MediampPlayer
     protected open suspend fun createDecoderStartup(byteLimit: Long): MediampPlayer? = null
@@ -476,10 +479,41 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
             Subtitle(transport.subtitleUrl(it), it.mimeType, it.language, it.label)
         } else emptyList()
 
+    private fun watchOnlineStartup(native: MediampPlayer, transport: AnimeStreamBridge,
+        request: AnimePlayerRequest, generation: Long) {
+        val timeout = onlineStartupWaitMillis ?: return
+        val onExpired = request.onStartupWaitExpired ?: return
+        val opening = state.value
+        fun stillOpening(snapshot: AnimePlayerState) = isCurrent(generation) && engine.value === native &&
+            snapshot.sessionGeneration == opening.sessionGeneration && snapshot.timelineGeneration == opening.timelineGeneration &&
+            snapshot.assetKey == request.asset.id && snapshot.episodeId == request.asset.episodeId &&
+            foreground && snapshot.playWhenReady && !snapshot.inPictureInPicture && !snapshot.playbackSuppressed &&
+            snapshot.phase == AnimePlayerPhase.OPENING && snapshot.recoveryAttempt == 0 &&
+            snapshot.firstFrameRendered != true && snapshot.hasVideoTracks != false
+        if (!stillOpening(opening)) return
+        cancelStartupWait()
+        transport.observeStartupOrigin(until = monotonicTimeMillis() + timeout)
+        startupWait = observers?.launch(Dispatchers.Main.immediate) {
+            // The native backend does not expose a presented-frame receipt. Bound only
+            // its initial OPENING phase, never a READY playback rebuffer.
+            val interrupted = withTimeoutOrNull(timeout) { state.first { !stillOpening(it) } }
+            if (interrupted == null && stillOpening(state.value) &&
+                native.state.value.mediaStatus == MediaStatus.Opening) {
+                onExpired(opening.timelineGeneration, transport.observedRecentStartupOrigin())
+            }
+        }
+    }
+
+    override fun cancelStartupWait() {
+        startupWait?.cancel()
+        startupWait = null
+    }
+
     private suspend fun loadMedia(
         native: MediampPlayer, transport: AnimeStreamBridge?, request: AnimePlayerRequest,
         generation: Long, initialFailure: PlaybackException? = null,
     ) {
+        if (initialFailure != null) cancelStartupWait()
         val extras = subtitleFiles(request.asset, transport)
         var failure = initialFailure
         val operation = Any()
@@ -515,20 +549,26 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
                 try {
                     transport?.beginAttempt()
                     val mediaUrl = transport?.mediaUrl ?: checkNotNull(localBridge).mediaUrl
+                    if (transport != null && failure == null) watchOnlineStartup(native, transport, request, generation)
                     native.setMediaData(UriMediaData(mediaUrl, extraFiles = MediaExtraFiles(extras)),
                         playWhenReady = state.value.playWhenReady, startPositionMillis = state.value.positionMs)
                     if (isCurrent(generation)) onMediaReadyNative()
                     return
                 } catch (cancel: CancellationException) { throw cancel }
-                catch (error: PlaybackException) { failure = error }
+                catch (error: PlaybackException) {
+                    cancelStartupWait()
+                    failure = error
+                }
             }
         } finally { if (loadingNative === operation) loadingNative = null }
     }
 
     override fun setPlayingNative(playing: Boolean) {
+        if (!playing) cancelStartupWait()
         engine.value?.let { if (playing) it.play() else it.pause() }
     }
     override fun seekNative(positionMs: Long) {
+        cancelStartupWait()
         val native = engine.value ?: return
         bufferSeekCompletion?.cancel()
         // Opening only updates the requested start position and need not emit SeekCompleted.
@@ -590,6 +630,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
     protected open fun onPlaybackStateNative() {}
 
     override fun releaseNative() {
+        cancelStartupWait()
         recovery?.cancel()
         recovery = null
         recoveryNotice = null

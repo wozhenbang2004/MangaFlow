@@ -208,7 +208,10 @@ internal fun AnimeDetailPane(
     }
     val savedProgress = entry?.resume
     val savedEpisode = detail.episodes.firstOrNull { it.id == savedProgress?.episodeId && it.subjectId == subject.id }
-    val first = detailPlayEpisode(controller, state, detail, savedProgress)
+    val stockFirst = detailPlayEpisode(controller, state, detail, savedProgress)
+    val savedLineEpisode = savedProgress?.let { controller.savedResumeEpisode(detail, it) }
+    val first = stockFirst ?: savedLineEpisode
+    val offeredSavedLine = savedLineEpisode != null && savedLineEpisode.id == first?.id
     val firstAvailability = first?.let { controller.episodeAvailability(it.id, state) }
     val bindings = remember(state.sourceBindings, subject.id) { state.sourceBindings.filter { it.subjectId == subject.id } }
     val firstLines = first?.let { controller.confirmedPlaybackLines(it.id, state) }.orEmpty()
@@ -219,7 +222,7 @@ internal fun AnimeDetailPane(
     }?.let { it.sourceId to it.sourceName }
     val hasSourceIssues = state.sourceError != null || state.sourceCatalogErrors.isNotEmpty()
     val sourceSearchInProgress = state.sourceAggregationRunning || state.episodeOptionsLoading
-    val resumeCheckpoint = savedProgress?.let { detailResumeCheckpoint(state, subject.id, it) }
+    val resumeCheckpoint = savedProgress?.let { detailResumeCheckpoint(state, subject.id, it) ?: it.takeIf { offeredSavedLine } }
     val offlineProgress = detailOfflineProgress(state, subject.id, first, savedProgress)
     val offline = if (offlineProgress != null) {
         val downloads = controller.downloads.state
@@ -232,7 +235,7 @@ internal fun AnimeDetailPane(
         (first == null || first.id == savedProgress.episodeId) }
     val checkingSavedEpisode = savedProgress != null && state.pendingHistoryEpisodeId == savedProgress.episodeId
     val playControl = animeDetailPlayControl(first, savedProgress, firstAvailability,
-        checkingSavedEpisode, firstCanRetry, offline, resumeCheckpoint)
+        checkingSavedEpisode, firstCanRetry, offline, resumeCheckpoint, offeredSavedLine)
     val pendingNativeCatalog = state.sourceCatalogs.firstOrNull {
         it.title.sourceId == nativeSource && !it.notice.isNullOrBlank() && detail.episodes.isEmpty()
     }
@@ -312,7 +315,7 @@ internal fun AnimeDetailPane(
                     onEpisodes = {
                         if (dockActive && controller.state.value.detail?.subject?.id == subject.id) locateSavedEpisode()
                     },
-                    onLines = first?.takeUnless { state.resolving || state.playbackTarget != null }?.let { target ->
+                    onLines = stockFirst?.takeUnless { state.resolving || state.playbackTarget != null }?.let { target ->
                         {
                             val latest = controller.state.value
                             val current = latest.detail?.takeIf { it.subject.id == subject.id }
@@ -328,6 +331,12 @@ internal fun AnimeDetailPane(
                         val liveDetail = latest.detail?.takeIf { it.subject.id == subject.id } ?: return@play
                         if (!active || latest.resolving || latest.playbackTarget != null) return@play
                         val liveProgress = latest.library.firstOrNull { it.subject.id == subject.id }?.resume
+                        if (offeredSavedLine && control.mode == AnimeDetailPlayMode.PLAY) {
+                            if (liveProgress != null && savedProgress != null && liveProgress.episodeId == savedProgress.episodeId &&
+                                liveProgress.assetId == savedProgress.assetId && !liveProgress.completed)
+                                controller.resumeSavedEpisode(subject.id, liveProgress)
+                            return@play
+                        }
                         val liveEpisode = detailPlayEpisode(controller, latest, liveDetail, liveProgress)
                         // No old visible title may start another episode (e.g. history was just edited).
                         if (liveEpisode?.id != first?.id || liveProgress?.episodeId != savedProgress?.episodeId ||

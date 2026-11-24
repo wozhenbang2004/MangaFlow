@@ -49,7 +49,8 @@ internal data class AnimeLineHealth(
 internal class AnimeLineHealthStore(context: PlatformContext, scope: CoroutineScope) {
     private enum class Window { ADDRESS, STARTUP, EARLY_PLAYBACK }
     private enum class Kind(val window: Window) {
-        ADDRESS(Window.ADDRESS), FIRST_FRAME(Window.STARTUP), STARTUP_FAILURE(Window.STARTUP), EARLY_REBUFFER(Window.EARLY_PLAYBACK)
+        ADDRESS(Window.ADDRESS), FIRST_FRAME(Window.STARTUP), PLAYABLE_OUTPUT(Window.STARTUP),
+        STARTUP_FAILURE(Window.STARTUP), EARLY_REBUFFER(Window.EARLY_PLAYBACK)
     }
 
     private data class Observation(val kind: Kind, val time: Long, val elapsedMs: Long)
@@ -96,6 +97,7 @@ internal class AnimeLineHealthStore(context: PlatformContext, scope: CoroutineSc
 
     fun recordAddress(key: AnimeLineHealthKey, elapsedMs: Long) = record(key, Kind.ADDRESS, elapsedMs)
     fun recordFirstFrame(key: AnimeLineHealthKey, elapsedMs: Long) = record(key, Kind.FIRST_FRAME, elapsedMs)
+    fun recordPlayableOutput(key: AnimeLineHealthKey) = record(key, Kind.PLAYABLE_OUTPUT, 0L)
     fun recordStartupFailure(key: AnimeLineHealthKey) = record(key, Kind.STARTUP_FAILURE, 0L)
     fun recordEarlyPlayback(key: AnimeLineHealthKey, rebufferMs: Long) = record(key, Kind.EARLY_REBUFFER, rebufferMs)
 
@@ -105,7 +107,8 @@ internal class AnimeLineHealthStore(context: PlatformContext, scope: CoroutineSc
         if (rows.isEmpty()) return null
         val starts = rows.filter { it.kind == Kind.FIRST_FRAME }.map { it.elapsedMs }
         val rebuffer = rows.filter { it.kind == Kind.EARLY_REBUFFER }.map { it.elapsedMs }
-        return AnimeLineHealth(starts.size, rows.count { it.kind == Kind.STARTUP_FAILURE }, median(starts),
+        return AnimeLineHealth(starts.size + rows.count { it.kind == Kind.PLAYABLE_OUTPUT },
+            rows.count { it.kind == Kind.STARTUP_FAILURE }, median(starts),
             median(rows.filter { it.kind == Kind.ADDRESS }.map { it.elapsedMs }),
             rebuffer.size, rebuffer.count { it > 0L }, median(rebuffer))
     }

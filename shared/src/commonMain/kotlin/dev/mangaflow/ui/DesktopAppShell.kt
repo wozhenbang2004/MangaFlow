@@ -3,9 +3,14 @@ package dev.mangaflow.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -38,6 +43,9 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -57,10 +65,12 @@ import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.LocalPlatformAccessibilityPreferences
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionNavigationColumn
 import dev.mangaflow.ui.motion.motionPress
+import kotlinx.coroutines.delay
 
 internal data class DesktopDestination(val title: String, val icon: ImageVector, val groupHeading: String? = null)
 
@@ -186,7 +196,15 @@ internal fun DesktopNavigationWorkspace(
                 if (visible) LiquidGlassSurface(workspaceBackdrop, Modifier.width(sidebarWidth)
                     .fillMaxHeight().padding(start = 8.dp, top = 8.dp, bottom = 8.dp),
                     cornerRadius = 20.dp, role = GlassSurfaceRole.DRAWER, elevation = 0.dp) {
-                    Column(Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 8.dp)) {
+                    val railHover = remember { MutableInteractionSource() }
+                    val keyboardPulse = remember { mutableIntStateOf(0) }
+                    Column(Modifier.fillMaxSize().hoverable(railHover)
+                        .onPreviewKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown) keyboardPulse.intValue++
+                            false
+                        }
+                        .onFocusChanged { if (it.hasFocus) keyboardPulse.intValue++ }.focusGroup()
+                        .padding(horizontal = 6.dp, vertical = 8.dp)) {
                         DesktopNavigationAction("搜索", Icons.Outlined.Search, expanded, labels, onSearch,
                             modifier = Modifier.height(40.dp), shortcut = "Ctrl+K")
                         val scroll = rememberScrollState()
@@ -209,7 +227,7 @@ internal fun DesktopNavigationWorkspace(
                                     }
                                 }
                             }
-                            DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(5.dp))
+                            DesktopNavigationRailThumb(scroll, railHover, keyboardPulse)
                         }
                         // Keep the search anchor at the top in every docked width. The
                         // display preference belongs in the footer, not in the task list.
@@ -229,6 +247,31 @@ internal fun DesktopNavigationWorkspace(
                 }
             }
         }
+    }
+}
+
+/** Keep one real scrollbar mounted so thumb dragging is never lost during a fade. */
+@Composable
+private fun BoxScope.DesktopNavigationRailThumb(scroll: ScrollState, hover: MutableInteractionSource,
+    keyboardPulse: State<Int>) {
+    val hovered by hover.collectIsHoveredAsState()
+    val active = hovered || scroll.isScrollInProgress
+    val motion = LocalMotionEnabled.current
+    val strongContrast = LocalPlatformAccessibilityPreferences.current.increaseContrast
+    var shown by remember { mutableStateOf(false) }
+    LaunchedEffect(active, keyboardPulse.value) {
+        if (active || keyboardPulse.value != 0) shown = true
+        if (!active && shown) {
+            delay(650)
+            shown = false
+        }
+    }
+    val opacity = animateFloatAsState(if (shown || active || strongContrast) 1f else 0f,
+        animationSpec = if (motion && !strongContrast) tween(MangaMotion.Quick) else snap(),
+        label = "navigation-scrollbar-visibility")
+    CompositionLocalProvider(LocalDesktopNavigationScrollbar provides true) {
+        DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(5.dp)
+            .graphicsLayer { alpha = opacity.value })
     }
 }
 

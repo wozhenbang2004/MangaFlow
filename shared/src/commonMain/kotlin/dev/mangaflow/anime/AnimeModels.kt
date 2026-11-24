@@ -145,6 +145,8 @@ data class AnimeWatchProgress(
     val episodeTitle: String = "",
     val episodeNumber: Double? = null,
     val episodeKind: AnimeEpisodeKind? = null,
+    /** Hashes of the exact binding and source episode actually played. No address or session data. */
+    val resumeLineKey: String? = null,
 )
 
 data class AnimeLibraryEntry(
@@ -242,6 +244,8 @@ data class AnimePlaybackTarget(
     val sourceName: String? = null,
     val error: String? = null,
     val failure: AnimePlaybackFailure? = null,
+    val savedResume: Boolean = false,
+    val exactSavedPosition: Boolean = false,
 )
 
 data class AnimePlaybackFailure(

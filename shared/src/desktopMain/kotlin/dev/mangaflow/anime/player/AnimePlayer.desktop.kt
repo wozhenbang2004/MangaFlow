@@ -38,8 +38,10 @@ private class DesktopAnimePlayer(
 ) : RoutedNativeAnimePlayer(scope) {
     override val supportsBufferControl = true
     override val supportsVideoEnhancement = true
-    override val supportsModelEnhancement = System.getProperty("os.name", "").startsWith("Windows", ignoreCase = true)
-    override val supportsDecoderStartup = System.getProperty("os.name", "").startsWith("Windows", ignoreCase = true)
+    private val windows = System.getProperty("os.name", "").startsWith("Windows", ignoreCase = true)
+    override val supportsModelEnhancement = windows
+    override val supportsDecoderStartup = windows
+    override val onlineStartupWaitMillis = 12_000L.takeIf { windows }
     override val streamCache by lazy { DesktopAnimeStreamCache.get(context) }
     private var warming = true
     private var videoBeforeBackground: String? = null
@@ -57,6 +59,7 @@ private class DesktopAnimePlayer(
         scope = playerScope,
         renderingActive = videoRenderingActive,
         refreshHz = { context.playbackDisplayRefreshHz?.invoke() },
+        observationEpoch = { state.value.timelineGeneration to statisticsRevision },
     ) { generation, quality, motion ->
         publish(generation) { it.copy(videoEnhancement = quality ?: it.videoEnhancement, realtimeMotion = motion) }
     }
@@ -85,7 +88,11 @@ private class DesktopAnimePlayer(
                     request?.asset == window.asset
             },
             suspendRealtime = { suspended ->
-                if (windowOwnsVideo != suspended) { windowOwnsVideo = suspended; applyVideoEnhancement() }
+                if (windowOwnsVideo != suspended) {
+                    windowOwnsVideo = suspended
+                    invalidateSpatialReadout()
+                    applyVideoEnhancement()
+                }
             },
             update = { window, issue -> mutableState.value = state.value.copy(preparedVideoWindow = window, preparedVideoIssue = issue) },
             updateRetainedBytes = { bytes -> mutableState.value = state.value.copy(preparedVideoRetainedBytes = bytes) },
@@ -117,7 +124,7 @@ private class DesktopAnimePlayer(
 
     override fun setPlayingNative(playing: Boolean) {
         if (!playing) {
-            statisticsRevision++
+            invalidateSpatialReadout()
             frameWindow.reset()
             videoRenderingActive.value = false
         }
@@ -204,9 +211,10 @@ private class DesktopAnimePlayer(
 
     override fun onMediaOpeningNative() {
         onlinePreparation.clear()
+        statisticsRevision++
         warming = true
         enhancementMediaReady = false
-        publish(nativeGeneration) { it.copy(playbackViewportSize = viewportSize) }
+        publish(nativeGeneration) { it.copy(playbackViewportSize = viewportSize, nativeVideoStatistics = null) }
         applyVideoEnhancement()
         applyBufferPolicy()
         setForegroundNative(foreground || state.value.inPictureInPicture, options.backgroundAudio)
@@ -214,7 +222,17 @@ private class DesktopAnimePlayer(
 
     fun updateViewport(size: IntSize?) = command(fatal = false) {
         viewportSize = size?.takeIf { it.width > 0 && it.height > 0 }
+        if (viewportSize == null) invalidateSpatialReadout()
         publish(nativeGeneration) { it.copy(playbackViewportSize = viewportSize) }
+    }
+
+    private fun invalidateSpatialReadout() {
+        statisticsRevision++
+        publish(nativeGeneration) { current ->
+            val sample = current.nativeVideoStatistics
+            if (sample?.confirmedSpatialOutputSize == null) current
+            else current.copy(nativeVideoStatistics = sample.copy(confirmedSpatialOutputSize = null))
+        }
     }
 
     override fun onMediaReadyNative() {
@@ -284,6 +302,8 @@ private class DesktopAnimePlayer(
                             estimatedFilterFps = handle.getPropertyDoubleOrNull("estimated-vf-fps")?.takeIf { it.isFinite() && it > 0 },
                             estimatedDelayedFrames = counter("vo-delayed-frame-count"),
                             filterOutputSize = size("video-out-params"),
+                            // Unlike video-params, video-dec-params does not fall back to container dimensions.
+                            decoderInputSize = size("video-dec-params"),
                         )
                         if (alternateRuntime && handle.getPropertyBooleanOrNull("video-frame-info/interlaced") != null)
                             animeJaNai.confirmFirstFrame()
@@ -320,8 +340,11 @@ private class DesktopAnimePlayer(
                             drops.decoderDroppedFrames + drops.outputDroppedFrames else null,
                         decoderDroppedFrames = drops.decoderDroppedFrames, outputDroppedFrames = drops.outputDroppedFrames,
                     )
-                    publish(generation) { it.copy(sourceFps = sample.first, droppedFrames = sample.second.outputDroppedFrames,
-                        nativeVideoStatistics = sample.second, displayRefreshHz = refreshHz, bufferMetrics = sample.third,
+                    val resolution = if (videoRenderingActive.value && !windowOwnsVideo) nativeEnhancement.confirmedSpatialOutput(
+                        handle, generation, drops.decoderInputSize, drops.filterOutputSize) else null
+                    publish(generation) { it.copy(sourceFps = sample.first, droppedFrames = drops.outputDroppedFrames,
+                        nativeVideoStatistics = drops.copy(confirmedSpatialOutputSize = resolution),
+                        displayRefreshHz = refreshHz, bufferMetrics = sample.third,
                         frameMetrics = frames) }
                 } else {
                     frameWindow.reset()
@@ -377,7 +400,7 @@ private class DesktopAnimePlayer(
     }
 
     override fun setForegroundNative(foreground: Boolean, backgroundAudio: Boolean) {
-        if (!foreground) { discardStartup(); onlinePreparation.clear() }
+        if (!foreground) { invalidateSpatialReadout(); discardStartup(); onlinePreparation.clear() }
         val handle = engine.value?.impl as? MPVHandle ?: return
         if (!foreground && backgroundAudio && videoBeforeBackground == null) {
             val selection = handle.getPropertyString("vid") ?: "auto"

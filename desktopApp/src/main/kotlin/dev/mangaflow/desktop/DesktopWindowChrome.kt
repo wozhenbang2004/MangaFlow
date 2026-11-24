@@ -3,8 +3,11 @@ package dev.mangaflow.desktop
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
@@ -12,9 +15,11 @@ import com.sun.jna.Memory
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.win32.StdCallLibrary
+import java.awt.Toolkit
 import java.awt.Window
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
+import java.beans.PropertyChangeListener
 
 internal interface DwmCaption : StdCallLibrary {
     fun DwmSetWindowAttribute(window: Pointer, attribute: Int, value: Pointer, size: Int): Int
@@ -24,7 +29,12 @@ private val captionApi by lazy {
     runCatching { Native.load("dwmapi", DwmCaption::class.java) }.getOrNull()
 }
 
-private data class CaptionColors(val dark: Boolean, val background: Int, val foreground: Int, val fullscreen: Boolean)
+private const val HIGH_CONTRAST = "win.highContrast.on"
+private const val DEFAULT_COLOR = -1 // DWMWA_COLOR_DEFAULT
+private const val HIDDEN_BORDER = -2 // DWMWA_COLOR_NONE
+
+private data class CaptionColors(val dark: Boolean, val background: Int, val foreground: Int,
+    val border: Int, val fullscreen: Boolean)
 
 private fun Color.colorRef(): Int {
     val argb = toArgb()
@@ -33,8 +43,17 @@ private fun Color.colorRef(): Int {
 
 /** Uses the native frame so Windows drag, Snap, resize and caption buttons remain native. */
 @Composable
-internal fun DesktopWindowChrome(window: Window, background: Color, foreground: Color, fullscreen: Boolean) {
-    val colors = CaptionColors(background.luminance() < .5f, background.colorRef(), foreground.colorRef(), fullscreen)
+internal fun DesktopWindowChrome(window: Window, background: Color, foreground: Color,
+    fullscreen: Boolean, animePlaybackVisible: Boolean) {
+    val toolkit = remember { Toolkit.getDefaultToolkit() }
+    var systemPalette by remember(toolkit) { mutableStateOf(toolkit.getDesktopProperty(HIGH_CONTRAST) != false) }
+    val caption = if (animePlaybackVisible) Color(0xFF101014) else background
+    val text = if (animePlaybackVisible) Color(0xFFFAF8FF) else foreground
+    // Rejoin the OS palette when high contrast is on (or unknown), even when it
+    // changes after the app has already assigned its own colours to this HWND.
+    val colors = if (systemPalette) CaptionColors(true, DEFAULT_COLOR, DEFAULT_COLOR, DEFAULT_COLOR, fullscreen)
+    else CaptionColors(caption.luminance() < .5f, caption.colorRef(), text.colorRef(),
+        if (fullscreen || animePlaybackVisible) HIDDEN_BORDER else background.colorRef(), fullscreen)
     val latestColors = rememberUpdatedState(colors)
     val controller = remember(window) { NativeCaptionController(window) }
     SideEffect { controller.apply(colors) }
@@ -43,8 +62,14 @@ internal fun DesktopWindowChrome(window: Window, background: Color, foreground: 
             override fun windowOpened(event: WindowEvent) { controller.apply(latestColors.value, force = true) }
             override fun windowActivated(event: WindowEvent) { controller.apply(latestColors.value, force = true) }
         }
+        val contrastListener = PropertyChangeListener { systemPalette = it.newValue != false }
+        toolkit.addPropertyChangeListener(HIGH_CONTRAST, contrastListener)
+        systemPalette = toolkit.getDesktopProperty(HIGH_CONTRAST) != false
         window.addWindowListener(listener)
-        onDispose { window.removeWindowListener(listener) }
+        onDispose {
+            toolkit.removePropertyChangeListener(HIGH_CONTRAST, contrastListener)
+            window.removeWindowListener(listener)
+        }
     }
 }
 
@@ -70,7 +95,7 @@ private class NativeCaptionController(private val window: Window) {
                 set(35, colors.background) // DWMWA_CAPTION_COLOR
                 set(36, colors.foreground) // DWMWA_TEXT_COLOR
                 set(33, if (colors.fullscreen) 1 else 0) // DWMWA_WINDOW_CORNER_PREFERENCE
-                set(34, if (colors.fullscreen) -2 else colors.background) // DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE = -2
+                set(34, colors.border) // DWMWA_BORDER_COLOR
             }
             lastHandle = address
             lastColors = colors

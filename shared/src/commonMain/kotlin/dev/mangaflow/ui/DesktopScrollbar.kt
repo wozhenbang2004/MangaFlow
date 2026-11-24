@@ -4,7 +4,11 @@ import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+
+/** Scoped to the docked app rail; reader, discovery and other desktop scrollbars use their usual style. */
+internal val LocalDesktopNavigationScrollbar = staticCompositionLocalOf { false }
 
 /** Desktop shares the actual content state; mobile keeps its existing gesture and layout tree. */
 @Composable

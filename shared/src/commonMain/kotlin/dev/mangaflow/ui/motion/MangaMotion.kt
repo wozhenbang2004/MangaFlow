@@ -77,11 +77,19 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -137,12 +145,42 @@ internal fun Modifier.motionPress(
     interaction: MutableInteractionSource,
     enabled: Boolean = true,
     pressedScale: Float = MangaMotion.SurfacePressScale,
+): Modifier = motionPressFeedback(interaction, enabled, pressedScale, desktopIcon = null)
+
+/** Mouse-origin focus affects drawing only. Real focus and the click action stay with Foundation. */
+private class DesktopIconFocus {
+    private var focused = false
+    private var mouseDown = false
+    var pointerFocus by mutableStateOf(false)
+        private set
+
+    fun mousePressed(value: Boolean) {
+        mouseDown = value
+        if (value && focused) pointerFocus = true
+    }
+
+    fun focusChanged(value: Boolean) {
+        if (focused == value) return
+        focused = value
+        pointerFocus = value && mouseDown
+    }
+
+    fun keyboardPressed() { pointerFocus = false }
+}
+
+@Composable
+private fun Modifier.motionPressFeedback(
+    interaction: MutableInteractionSource,
+    enabled: Boolean,
+    pressedScale: Float,
+    desktopIcon: DesktopIconFocus?,
 ): Modifier {
     val interactionPressed by interaction.collectIsPressedAsState()
     val desktop = platformKind == PlatformKind.DESKTOP
     val hovered = if (desktop) interaction.collectIsHoveredAsState().value else false
     val focused = if (desktop) interaction.collectIsFocusedAsState().value && LocalWindowInfo.current.isWindowFocused else false
     val feedbackColor = MaterialTheme.colorScheme.onSurface
+    val iconAccessibility = if (desktopIcon != null) LocalPlatformAccessibilityPreferences.current else null
     var down by remember(interaction) { mutableStateOf(false) }
     var directPress by remember(interaction) { mutableStateOf(false) }
     var release by remember(interaction) { mutableStateOf<Job?>(null) }
@@ -165,9 +203,13 @@ internal fun Modifier.motionPress(
     )
     // clickable intentionally delays its Press inside scrolling parents. Observe down without
     // consuming it; Foundation still owns click/long-click/scroll, keyboard and TalkBack.
-    val input = if (enabled) Modifier.pointerInput(interaction) {
+    val input = if (enabled) Modifier.pointerInput(interaction, desktopIcon) {
         awaitEachGesture {
             val first = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            val mousePress = desktopIcon != null && first.type == PointerType.Mouse && !first.isConsumed &&
+                currentEvent.buttons.isPrimaryPressed
+            // The Initial pass precedes Foundation's focus request on the Main pass.
+            if (mousePress) desktopIcon?.mousePressed(true)
             release?.cancel()
             release = null
             val startedAt = monotonicTimeMillis()
@@ -189,6 +231,7 @@ internal fun Modifier.motionPress(
                     }
                 } while (true)
             } finally {
+                if (mousePress) desktopIcon?.mousePressed(false)
                 down = false
                 // A quick valid UP can precede the next draw. Keep only its visual attack
                 // alive briefly; clickable still commits immediately and owns semantics.
@@ -206,11 +249,29 @@ internal fun Modifier.motionPress(
     } else Modifier
     // Foundation owns hover/focus dispatch; draw those existing states only on desktop.
     val desktopFeedback = if (desktop) Modifier.drawBehind {
-        val radius = CornerRadius(minOf(12.dp.toPx(), size.minDimension / 2f))
-        if (enabled && (hovered || focused)) drawRoundRect(
-            feedbackColor.copy(alpha = if (focused) .075f else .045f), cornerRadius = radius)
-        if (enabled && focused) drawRoundRect(feedbackColor.copy(alpha = .36f),
-            cornerRadius = radius, style = Stroke(1.25.dp.toPx()))
+        if (!enabled) return@drawBehind
+        if (desktopIcon != null) {
+            val contrast = iconAccessibility?.increaseContrast == true
+            val focusVisible = focused && (contrast || iconAccessibility?.touchExploration == true || !desktopIcon.pointerFocus)
+            val hoverRadius = minOf(14.dp.toPx(), size.minDimension / 2f)
+            if (hovered && hoverRadius > 0f) {
+                drawCircle(feedbackColor.copy(alpha = if (contrast) .14f else .055f), radius = hoverRadius)
+            }
+            if (focusVisible) {
+                val inset = (if (contrast) 2.dp else 1.dp).toPx()
+                val extent = minOf(size.minDimension - 2f * inset, if (contrast) size.minDimension else 34.dp.toPx())
+                if (extent > 0f) drawRoundRect(feedbackColor.copy(alpha = if (contrast) 1f else .80f),
+                    topLeft = Offset((size.width - extent) / 2f, (size.height - extent) / 2f),
+                    size = Size(extent, extent), cornerRadius = CornerRadius(minOf(8.dp.toPx(), extent / 2f)),
+                    style = Stroke(inset))
+            }
+        } else {
+            val radius = CornerRadius(minOf(12.dp.toPx(), size.minDimension / 2f))
+            if (hovered || focused) drawRoundRect(
+                feedbackColor.copy(alpha = if (focused) .075f else .045f), cornerRadius = radius)
+            if (focused) drawRoundRect(feedbackColor.copy(alpha = .36f),
+                cornerRadius = radius, style = Stroke(1.25.dp.toPx()))
+        }
     } else Modifier
     return then(input).then(desktopFeedback).graphicsLayer {
         scaleX = scale.value
@@ -236,10 +297,18 @@ internal fun MotionIconButton(
     content: @Composable () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    Box(modifier.size(48.dp)
+    val desktopIcon = if (platformKind == PlatformKind.DESKTOP) remember { DesktopIconFocus() } else null
+    val focusOrigin = if (desktopIcon == null) Modifier else Modifier
+        .onFocusChanged { desktopIcon.focusChanged(it.isFocused) }
+        .onPreviewKeyEvent { event ->
+            // Tab/arrow can leave focus on the same control. A real key still restores its cue.
+            if (event.type == KeyEventType.KeyDown) desktopIcon.keyboardPressed()
+            false
+        }
+    Box(modifier.size(48.dp).then(focusOrigin)
         .clickable(enabled = enabled, interactionSource = interaction, indication = null,
             role = Role.Button, onClick = onClick)
-        .motionPress(interaction, enabled, MangaMotion.IconPressScale), contentAlignment = Alignment.Center) {
+        .motionPressFeedback(interaction, enabled, MangaMotion.IconPressScale, desktopIcon), contentAlignment = Alignment.Center) {
         Box(Modifier.graphicsLayer { alpha = if (enabled) 1f else .38f },
             contentAlignment = Alignment.Center) { content() }
         DesktopIconTooltip(tooltip, interaction, enabled)

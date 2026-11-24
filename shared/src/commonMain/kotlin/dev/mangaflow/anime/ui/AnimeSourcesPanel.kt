@@ -156,6 +156,21 @@ internal fun AnimeSourcesPanel(
     val activeLine = state.selectedPlaybackOption.takeIf { state.selectedEpisodeId == focusEpisode?.id }?.let { current ->
         episodeLines.singleOrNull { controller.samePlaybackLine(it, current) }
     }
+    val focusId = focusEpisode?.id
+    val detailVisit = controller.lineLookupDetailVisit
+    val lookupVisit = remember(controller, visible, subjectId, focusId, detailVisit) {
+        if (visible && subjectId != null && focusId != null && focusEpisode?.subjectId == subjectId)
+            controller.lineLookupVisit(subjectId, focusId) else null
+    }
+    var lookupAttached by remember(lookupVisit) { mutableStateOf(false) }
+    DisposableEffect(controller, lookupVisit) {
+        lookupAttached = lookupVisit?.let(controller::attachLineLookup) == true
+        onDispose { lookupVisit?.let(controller::releaseLineLookup) }
+    }
+    fun closeChooser() {
+        lookupVisit?.let(controller::releaseLineLookup)
+        onDismiss()
+    }
     val manualTarget = state.playbackTarget?.takeIf { it.episode.id == focusEpisode?.id }
     val manualLine = manualTarget?.manualOption?.let { requested ->
         episodeLines.singleOrNull { controller.samePlaybackLine(it, requested) }
@@ -219,7 +234,7 @@ internal fun AnimeSourcesPanel(
                 it.catalog.referenceKey() == draft.catalogKey && it.episode == draft.episode && it.confirmed
             }) mapping = null
     }
-    AnimeLinePanel(visible, overVideo, backdrop, onDismiss = { if (previewing) closePreview() else onDismiss() },
+    AnimeLinePanel(visible, overVideo, backdrop, onDismiss = { if (previewing) closePreview() else closeChooser() },
         onClosed = {
             val requested = pendingSourceWork
             val owner = presentedOwner
@@ -283,7 +298,7 @@ internal fun AnimeSourcesPanel(
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭线路面板") {
+                    MotionIconButton(onClick = ::closeChooser, modifier = Modifier.size(44.dp), tooltip = "关闭线路面板") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
                 }
@@ -372,7 +387,7 @@ internal fun AnimeSourcesPanel(
                     if (preview != null && openAsNative && onOpenSourceWork != null) {
                         MotionButton(onClick = {
                             pendingSourceWork = preview.title
-                            onDismiss()
+                            closeChooser()
                         }, enabled = visible && !state.previewLoading,
                             modifier = Modifier.fillMaxWidth().padding(16.dp).heightIn(min = 48.dp)) { Text("打开此来源的目录") }
                     } else if (preview != null && !openAsNative && !previewLinked) {
@@ -422,6 +437,34 @@ internal fun AnimeSourcesPanel(
                                     enabled = !attemptingAutomaticPlayback && availability != AnimeEpisodeAvailability.UPCOMING,
                                     onClick = { onAutomaticPlay(focusEpisode) },
                                 )
+                            }
+                            val confirmedSources = episodeLines.mapTo(mutableSetOf()) { it.sourceId }
+                            val otherCoverage = state.sourceAggregation.filter { (id, progress) ->
+                                id !in confirmedSources && (progress.episodeId == null || progress.episodeId == focusId)
+                            }.values
+                            val checkingSources = otherCoverage.count { it.phase.checking }
+                            val pausedSources = otherCoverage.count { it.phase == AnimeAssociationPhase.PAUSED }
+                            val failedSources = otherCoverage.count { it.phase == AnimeAssociationPhase.UNAVAILABLE }
+                            val canContinue = lookupAttached && lookupVisit?.let(controller::canContinueLineLookup) == true
+                            val checkingEpisode = state.episodeOptionsLoading && !state.detailLoading
+                            if (episodeLines.isNotEmpty() || checkingSources > 0 || pausedSources > 0 ||
+                                failedSources > 0 || canContinue || checkingEpisode) item(key = "episode-source-coverage") {
+                                Column(Modifier.padding(start = 8.dp, end = 8.dp)) {
+                                    val coverage = buildList {
+                                        add("已确认 ${episodeLines.size} 条")
+                                        if (checkingSources > 0) add("$checkingSources 个来源在排队或核对")
+                                        else if (checkingEpisode) add("正在核对本集")
+                                        if (pausedSources > 0) add("$pausedSources 个来源已暂停")
+                                        if (failedSources > 0) add("$failedSources 个来源未查完")
+                                    }
+                                    AnimeQuietLabel(coverage.joinToString(" · "),
+                                        Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                                    if (canContinue && lookupVisit != null) MotionTextButton(onClick = {
+                                        controller.continueLineLookup(lookupVisit)
+                                    }, enabled = visible, modifier = Modifier.heightIn(min = 44.dp)) {
+                                        Text("继续找本集线路")
+                                    }
+                                }
                             }
                             if (episodeLines.isNotEmpty()) {
                                 item(key = "episode-lines-heading") {
@@ -604,6 +647,7 @@ internal fun AnimeSourcesPanel(
                                 error != null -> if (catalog == null) "目录读取失败" else "目录更新失败"
                                 reading -> "读取目录中"
                                 association?.phase == AnimeAssociationPhase.QUEUED && catalog == null -> "等待目录"
+                                association?.phase == AnimeAssociationPhase.PAUSED && catalog == null -> "目录核对已暂停"
                                 catalog == null -> "目录尚未读取"
                                 focusEpisode != null && lines.isEmpty() -> "本集未对应"
                                 (matchesBySource[sourceId] ?: 0) > 0 ->
@@ -928,7 +972,7 @@ internal fun AnimeSourcesPanel(
                             if (state.sourceAggregationTotal > 0 && !state.sourceAggregationRunning) item(key = "aggregation-summary") {
                                 val unfinished = state.sourceAggregation.values.count { it.phase in setOf(
                                     AnimeAssociationPhase.UNAVAILABLE,
-                                    AnimeAssociationPhase.QUEUED, AnimeAssociationPhase.SEARCHING) }
+                                    AnimeAssociationPhase.PAUSED) || it.phase.checking }
                                 AnimeQuietLabel(if (unfinished > 0) "本轮已结束 · $unfinished 个未完成" else "本轮核对已结束",
                                     Modifier.padding(start = 8.dp))
                             }
@@ -1222,6 +1266,7 @@ private fun AnimeSourceDisclosure(expanded: Boolean, label: String, onClick: () 
 private fun animeAssociationPhaseLabel(phase: AnimeAssociationPhase): String = when (phase) {
     AnimeAssociationPhase.QUEUED -> "等待核对"
     AnimeAssociationPhase.SEARCHING -> "正在搜索并核对"
+    AnimeAssociationPhase.PAUSED -> "核对已暂停"
     AnimeAssociationPhase.LINKED -> "作品已关联"
     AnimeAssociationPhase.NO_MATCH -> "未找到可靠候选"
     AnimeAssociationPhase.NEEDS_SELECTION -> "待确认作品或版本"

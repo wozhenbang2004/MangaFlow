@@ -1,7 +1,9 @@
 package dev.mangaflow.anime.player
 
+import androidx.compose.ui.unit.IntSize
 import dev.mangaflow.enhancement.engine.DesktopAnimeJaNai
 import dev.mangaflow.enhancement.engine.EngineModel
+import dev.mangaflow.platform.monotonicTimeMillis
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -23,6 +25,7 @@ internal class DesktopAnimeJaNaiEnhancement(
     private val scope: CoroutineScope,
     private val renderingActive: StateFlow<Boolean>,
     private val refreshHz: () -> Double?,
+    private val observationEpoch: () -> Pair<Long, Long>,
     private val update: (Long, AnimeVideoEnhancementState?, AnimeRealtimeMotionState?) -> Unit,
 ) {
     private data class Target(
@@ -36,6 +39,20 @@ internal class DesktopAnimeJaNaiEnhancement(
     private var target: Target? = null
     private var job: Job? = null
     private var filter: DesktopAnimeJaNai.FilterSession? = null
+    private data class SpatialReceipt(
+        val epoch: Pair<Long, Long>, val input: IntSize, val output: IntSize, val observedAt: Long,
+    )
+    private var spatialReceipt: SpatialReceipt? = null
+
+    fun confirmedSpatialOutput(handle: MPVHandle, generation: Long, input: IntSize?, output: IntSize?): IntSize? {
+        val owner = target ?: return null
+        val receipt = spatialReceipt ?: return null
+        return receipt.output.takeIf {
+            owner.handle === handle && owner.generation == generation && renderingActive.value &&
+                receipt.epoch == observationEpoch() && receipt.input == input && it == output &&
+                monotonicTimeMillis() - receipt.observedAt in 0L until 1_800L
+        }
+    }
 
     fun configure(handle: MPVHandle?, generation: Long, mode: AnimeVideoEnhancementMode,
         mediaReady: Boolean, model: EngineModel?, frames: AnimeRealtimeFrameRequest?) {
@@ -76,8 +93,11 @@ internal class DesktopAnimeJaNaiEnhancement(
                 var outputDeadlineNanos = Long.MAX_VALUE
                 var lastDropCount: Long? = null
                 var overloadSamples = 0
+                var precedingSpatialPosition: Pair<Pair<Long, Long>, Double>? = null
                 while (target == next) {
                     val backend = next.handle
+                    val epoch = observationEpoch()
+                    val sampledAt = monotonicTimeMillis()
                     val observation = withContext(Dispatchers.IO) { readObservation(backend) }
                     if (target != next) return@launch
                     inputWidth = observation.width
@@ -161,6 +181,19 @@ internal class DesktopAnimeJaNaiEnhancement(
                     val interpolated = !native.interpolate || (receipt?.contains("applied RIFE v422", ignoreCase = true) == true &&
                         filteredFps != null && filteredFps > sourceFps * 1.07)
                     val observed = modelApplied && interpolated && position != null && position != initialPts
+                    // A loaded model, a same-size shader pass, or a retained paused frame
+                    // is not an output observation. Require motion since this exact epoch.
+                    val spatialPosition = position?.takeIf {
+                        observed && native.weightName != null && outWidth != null && outHeight != null &&
+                            !paused && renderingActive.value && observationEpoch() == epoch
+                    }
+                    val preceding = precedingSpatialPosition
+                    if (spatialPosition == null || preceding == null || preceding.first != epoch) spatialReceipt = null
+                    else if (spatialPosition > preceding.second && outWidth != null && outHeight != null) {
+                        spatialReceipt = SpatialReceipt(epoch, IntSize(width, height),
+                            IntSize(outWidth, outHeight), sampledAt)
+                    }
+                    precedingSpatialPosition = spatialPosition?.let { epoch to it }
                     if (observed) {
                         val dropped = observation.droppedFrames
                         val previousDrops = lastDropCount
@@ -220,6 +253,7 @@ internal class DesktopAnimeJaNaiEnhancement(
     }
 
     private fun clearFilter() {
+        spatialReceipt = null
         val prepared = filter ?: return
         filter = null
         runCatching { target?.handle?.command("vf", "remove", "@mangaflow-aji") }

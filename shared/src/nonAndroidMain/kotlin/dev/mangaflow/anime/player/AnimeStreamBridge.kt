@@ -11,6 +11,7 @@ import dev.mangaflow.net.NetworkResponse
 import dev.mangaflow.net.Request
 import dev.mangaflow.platform.randomUuid
 import dev.mangaflow.platform.monotonicTimeMillis
+import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
@@ -86,6 +87,8 @@ internal class AnimeStreamBridge private constructor(
     private var failureRetryable: Boolean? = null
     val lastFailureRetryable: Boolean? get() = synchronized(lock) { failureRetryable }
     private var attempt = 0L
+    private val startupOriginUntil = atomic(0L)
+    private var lastStartupOriginAt: Long? = null
     private val releaseCache = runCatching { cache?.retain(asset) }.getOrNull()
     private val cache = cache.takeIf { releaseCache != null }
     private val bypassedCacheResources = mutableSetOf<String>()
@@ -95,7 +98,27 @@ internal class AnimeStreamBridge private constructor(
         failure = null
         failureStatus = null
         failureRetryable = null
+        startupOriginUntil.value = 0L
+        lastStartupOriginAt = null
     }
+
+    fun observeStartupOrigin(until: Long) { startupOriginUntil.value = until }
+
+    fun observedRecentStartupOrigin(): Boolean = synchronized(lock) {
+        lastStartupOriginAt?.let { monotonicTimeMillis() - it in 0L..3_000L } == true
+    }
+
+    private fun observeStartupResponse(ownedAttempt: Long) {
+        val until = startupOriginUntil.value
+        if (until == 0L) return
+        val now = monotonicTimeMillis()
+        if (now > until) {
+            startupOriginUntil.compareAndSet(until, 0L)
+            return
+        }
+        synchronized(lock) { if (ownedAttempt == attempt) lastStartupOriginAt = now }
+    }
+
     lateinit var mediaUrl: String
         private set
     private val subtitles = linkedMapOf<String, String>()
@@ -250,6 +273,12 @@ internal class AnimeStreamBridge private constructor(
                     requestBuilder.build(), Long.MAX_VALUE,
                     onResponse = { received ->
                         response = received
+                        // Only existing origin media GETs count, not address lookup, cache, HEAD,
+                        // redirects, subtitles or keys. A closed local adapter is not reachability.
+                        if (received.code !in 300..399 && request.method == "GET" &&
+                            (resource.kind == Kind.AUTO || resource.kind == Kind.MEDIA || resource.kind == Kind.MANIFEST)) {
+                            observeStartupResponse(ownedAttempt)
+                        }
                         when {
                             received.code in setOf(301, 302, 303, 307, 308) -> {
                                 redirect = checkedRedirect(url, received.header("Location"))

@@ -154,7 +154,7 @@ fun main() {
                 ) {
                     MangaFlowTheme {
                         DesktopWindowChrome(window, MaterialTheme.colorScheme.background,
-                            MaterialTheme.colorScheme.onBackground, fullscreen.active)
+                            MaterialTheme.colorScheme.onBackground, fullscreen.active, fullscreen.animePlaybackVisible)
                         ProvideDesktopReaderKeyboard(context) {
                             MangaFlowHost(context, onModelReady = { model = it; lastModel = it })
                         }

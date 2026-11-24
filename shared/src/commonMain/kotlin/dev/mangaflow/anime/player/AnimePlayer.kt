@@ -29,6 +29,8 @@ data class AnimePlayerRequest(
     val bypassMediaCache: Boolean = false,
     /** Rechecked when an online startup stalls or encounters a retryable transport failure. */
     val hasStartupAlternative: (() -> Boolean)? = null,
+    /** An opt-in native backend reports an unbroken opening wait, not a transport or decoder error. */
+    val onStartupWaitExpired: (suspend (Long, Boolean) -> Unit)? = null,
 )
 
 /** Native engine construction failed before the source could be evaluated. */
@@ -136,6 +138,10 @@ data class AnimeNativeVideoStatistics(
     val estimatedDelayedFrames: Long?,
     /** Frame size after the video filters, before the video renderer's scaling and shaders. */
     val filterOutputSize: IntSize? = null,
+    /** mpv's decoded input size, without the container-size fallback. */
+    val decoderInputSize: IntSize? = null,
+    /** DirectML spatial output corroborated by its live model receipt and native filter dimensions. */
+    val confirmedSpatialOutputSize: IntSize? = null,
 )
 
 /** Native compressed-buffer observations. Missing measurements are deliberately not inferred from targets. */
@@ -484,6 +490,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
 
     final override fun setForeground(foreground: Boolean) = command(fatal = false) {
         this.foreground = foreground
+        if (!foreground) cancelStartupWait()
         applyForegroundPolicy()
     }
 
@@ -578,6 +585,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         }
     }
 
+    protected open fun cancelStartupWait() {}
     protected abstract suspend fun openNative(request: AnimePlayerRequest, generation: Long)
     protected abstract fun setPlayingNative(playing: Boolean)
     protected abstract fun seekNative(positionMs: Long)

@@ -45,6 +45,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
@@ -136,6 +137,7 @@ internal fun AnimePlayerPane(
     val detail = state.detail
     val activeId = state.selectedEpisodeId ?: playback.episodeId
     val activeEpisode = remember(detail?.episodes, activeId) { detail?.episodes?.firstOrNull { it.id == activeId } }
+        ?: detail?.let { controller.currentPlaybackEpisode(it.subject.id, state.selectedEpisodeId) }
     val target = state.playbackTarget
     val episode = target?.episode ?: activeEpisode
     val resolutionError = target?.error
@@ -175,6 +177,7 @@ internal fun AnimePlayerPane(
     val settingsFocus = remember { FocusRequester() }
     val watchingFocus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
+    val windowInfo = LocalWindowInfo.current
     val touchExploration = LocalTouchExplorationEnabled.current
     var videoWorkspaceFocused by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
@@ -305,7 +308,7 @@ internal fun AnimePlayerPane(
         primary = Color(0xFFF5EEFF), onPrimary = Color(0xFF241C31), outline = Color.White.copy(alpha = .30f),
         inverseSurface = Color(0xFFF5EEFF), inverseOnSurface = Color(0xFF241C31),
     )
-    CompositionLocalProvider(LocalContentColor provides colors.onSurface) {
+    CompositionLocalProvider(LocalContentColor provides colors.onSurface, LocalDesktopTooltipOverMedia provides desktop) {
         BoxWithConstraints(modifier.fillMaxSize().background(if (headerOverVideo) videoColors.background else colors.surface)
             .focusRequester(focus)
             .onFocusChanged { videoWorkspaceFocused = it.isFocused }
@@ -359,7 +362,7 @@ internal fun AnimePlayerPane(
                 sideBySide || !inlineWatching -> room
                 else -> minOf((videoWidth * 9f / 16f).coerceAtLeast(204.dp), room - 156.dp)
             }
-            val centralTransport = (fillVideo || sideBySide) && canControl && !playback.ended &&
+            val centralTransport = !desktop && (fillVideo || sideBySide) && canControl && !playback.ended &&
                 !playback.isBuffering && !awaitingVideo && playback.hasVideoTracks != false &&
                 state.notice == null && playback.notice == null &&
                 videoHeight >= 250.dp * density.fontScale.coerceAtLeast(1f)
@@ -369,6 +372,18 @@ internal fun AnimePlayerPane(
             val latestChrome by rememberUpdatedState(playback)
             val latestRequiredControls by rememberUpdatedState(requiredControls)
             val latestChromeVisible by rememberUpdatedState(showChrome)
+            val seekBareVideo by rememberUpdatedState<(AnimePlaybackChrome, Long) -> Unit> { owner, delta ->
+                val live = controller.state.value
+                val current = player.state.value
+                if (active && !locked && !obscured && !settingsPresent && !watchPanelPresent &&
+                    windowInfo.isWindowFocused && !current.inPictureInPicture &&
+                    live.selectedEpisodeId == current.episodeId && live.playbackTarget == null &&
+                    !live.resolving && live.pendingPlayback == null && owner.owns(current) &&
+                    canControl && current.durationMs > 0L && (current.phase == AnimePlayerPhase.READY || current.ended)) {
+                    focus.requestFocus()
+                    seek(delta)
+                }
+            }
 
             // One native surface keeps its composition identity through fullscreen and size changes.
             Box(Modifier.padding(top = videoTop).width(videoWidth).height(videoHeight)
@@ -432,6 +447,12 @@ internal fun AnimePlayerPane(
                     )
                 }, contentAlignment = Alignment.Center) {
                 AnimePlayerSurface(player, Modifier.fillMaxSize())
+                if (desktop && hoverEnabled && canControl && playback.hasTimeline && !showStage &&
+                    target == null && !state.resolving && state.pendingPlayback == null) {
+                    // A backmost hit target, not a parent of the buttons, timeline or panels.
+                    // The stock touch detector still handles non-mouse pointers.
+                    Box(Modifier.matchParentSize().desktopVideoSeek(pointerMedia) { seekBareVideo(pointerMedia, it) })
+                }
                 AnimePlaybackObservation(observations) { current ->
                     AnimeDanmakuOverlay(controller, current, visible = playback.owns(current) &&
                         active && !obscured && (!panelPresent || headerOverVideo) && !blockingResolution && failure == null,
@@ -488,8 +509,9 @@ internal fun AnimePlayerPane(
                 val readingsRoom = videoHeight - statusTop - statusBottom - 16.dp
                 val readingsHeight = minOf(160.dp, if (centralTransport && chromeReveal > 0f)
                     (readingsRoom - 64.dp) * .5f else readingsRoom * .5f)
-                if (readingsVisible && !panelPresent && !playback.inPictureInPicture && showingCurrentPlayback && failure == null &&
-                    !blockingResolution && !awaitingVideo && readingsHeight >= 44.dp) {
+                val showVideoReadings = readingsVisible && !panelPresent && !playback.inPictureInPicture &&
+                    showingCurrentPlayback && failure == null && !blockingResolution && !awaitingVideo && readingsHeight >= 44.dp
+                if (showVideoReadings) {
                     AnimePlaybackObservation(observations) { current ->
                         if (!playback.owns(current) || current.inPictureInPicture) return@AnimePlaybackObservation
                         MaterialTheme(colorScheme = videoColors) {
@@ -508,7 +530,22 @@ internal fun AnimePlayerPane(
                     }
                 }
                 val quietFontScale = density.fontScale.coerceAtLeast(1f)
-                if (active && !showChrome && chromeReveal <= 0f && !locked && !obscured && !panelPresent &&
+                // Optional diagnostics retain their own left-hand panel. Reserve its height on
+                // smaller desktop players rather than letting the passive right label cover it.
+                val resolutionTop = maxOf(statusTop, topInset) + 8.dp +
+                    if (showVideoReadings && videoWidth < 630.dp * quietFontScale) readingsHeight + 4.dp else 0.dp
+                if (desktop && active && !locked && !obscured && !panelPresent && !holdingFast &&
+                    !playback.inPictureInPicture && !showStage && showingCurrentPlayback &&
+                    playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && !playback.playbackSuppressed &&
+                    playback.hasVideoTracks != false && videoWidth >= 200.dp * quietFontScale &&
+                    videoHeight - resolutionTop - statusBottom >= 32.dp * quietFontScale && subject != null) {
+                    AnimePlaybackObservation(observations) { current ->
+                        if (playback.owns(current) && controller.ownsVideoReadout(subject.id, current, includePaused = true))
+                            AnimeDesktopVideoResolution(current, Modifier.align(Alignment.TopEnd)
+                                .windowInsetsPadding(safeInsets.only(WindowInsetsSides.Horizontal))
+                                .padding(top = resolutionTop, end = 12.dp).widthIn(max = videoWidth * .82f))
+                    }
+                } else if (!desktop && active && !showChrome && chromeReveal <= 0f && !locked && !obscured && !panelPresent &&
                     !readingsVisible && !holdingFast && !playback.inPictureInPicture && !showStage &&
                     showingCurrentPlayback && playback.isPlaying && !playback.playbackSuppressed &&
                     playback.hasVideoTracks != false && videoWidth >= 220.dp * quietFontScale &&
@@ -565,7 +602,8 @@ internal fun AnimePlayerPane(
                     .windowInsetsPadding(safeInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
                     .padding(horizontal = 8.dp, vertical = 5.dp)
                 Row(headerShell, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                    AnimePlaybackSurface(headerArtwork, Modifier.weight(1f, fill = false).widthIn(max = 440.dp),
+                    AnimePlaybackSurface(headerArtwork, Modifier.weight(1f, fill = false).widthIn(max = 440.dp)
+                        .desktopChromeHitPath(desktop),
                         overVideo = headerOverVideo) {
                         Row(Modifier.heightIn(min = 46.dp).padding(start = 2.dp, end = 14.dp),
                             verticalAlignment = Alignment.CenterVertically) {
@@ -585,7 +623,7 @@ internal fun AnimePlayerPane(
                         }
                     }
                     Spacer(Modifier.width(8.dp))
-                    AnimePlaybackSurface(headerArtwork, overVideo = headerOverVideo) {
+                    AnimePlaybackSurface(headerArtwork, Modifier.desktopChromeHitPath(desktop), overVideo = headerOverVideo) {
                         Row(Modifier.padding(horizontal = 2.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
                             if (fullscreen && canControl && !touchExploration) MotionIconButton(onClick = { locked = true },
                                 modifier = Modifier.size(44.dp), tooltip = "锁定触控") {
@@ -630,13 +668,14 @@ internal fun AnimePlayerPane(
                             canControl -> 340.dp
                             else -> 18.dp + 44.dp * (1 + (if (canOpenLines) 1 else 0) + (if (canOpenWatching) 1 else 0))
                         }
-                        AnimePlaybackSurface(artwork, Modifier.widthIn(max = dockWidth).fillMaxWidth(), cornerRadius = 23.dp) {
+                        AnimePlaybackSurface(artwork, Modifier.widthIn(max = dockWidth).fillMaxWidth()
+                            .desktopChromeHitPath(desktop), cornerRadius = 23.dp) {
                             AnimePlayerControls(player, playback, observations,
                                 previous, next, onEpisode, onToggle = ::toggle,
                                 onInteraction = ::interact, onHoldControls = { controlsHeld = it },
                                 nextPreparation = state.nextEpisodePreparation,
                                 workspaceNotice = state.notice, onDismissNotice = controller::dismissNotice,
-                                centralTransport = centralTransport, canControl = canControl,
+                                centralTransport = centralTransport, canControl = canControl, desktop = desktop,
                                 sourceName = currentOption?.sourceName ?: "本地播放".takeIf { showingCurrentPlayback },
                                 onSources = if (canOpenLines) ::showSources else null,
                                 fullscreen = fullscreen, onFullscreen = ::toggleFullscreen,
@@ -716,6 +755,50 @@ private fun Modifier.revealOnMouseMove(enabled: Boolean, onMove: () -> Unit): Mo
             }
         }
     }
+
+// Match an ordinary click rather than treating a drag, wheel or mouse chord as a seek.
+// Read raw Press/Release because Foundation's tap detector is primary-button oriented.
+private fun Modifier.desktopVideoSeek(owner: AnimePlaybackChrome, onSeek: (Long) -> Unit): Modifier =
+    pointerInput(owner.sessionGeneration, owner.timelineGeneration, owner.assetKey, owner.episodeId) {
+        awaitPointerEventScope {
+            var down: PointerInputChange? = null
+            var delta = 0L
+            fun inside(change: PointerInputChange) = change.position.x >= 0f && change.position.x < size.width &&
+                change.position.y >= 0f && change.position.y < size.height
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Main)
+                val mouse = event.changes.singleOrNull()?.takeIf { it.type == PointerType.Mouse }
+                if (mouse == null) { down = null; continue }
+                val held = down
+                if (held == null) {
+                    if (event.type != PointerEventType.Press || mouse.isConsumed || !inside(mouse) ||
+                        event.buttons.indexOfFirstPressed() != event.buttons.indexOfLastPressed()) continue
+                    delta = when {
+                        event.buttons.isPrimaryPressed -> -10_000L
+                        event.buttons.isSecondaryPressed -> 10_000L
+                        else -> continue
+                    }
+                    down = mouse
+                    mouse.consume() // The ancestor's touch tap/hold must not also claim this stroke.
+                } else if (mouse.id != held.id || mouse.isConsumed || !inside(mouse) ||
+                    (mouse.position - held.position).getDistance() > viewConfiguration.touchSlop ||
+                    event.type == PointerEventType.Press || event.type == PointerEventType.Exit ||
+                    event.type == PointerEventType.Scroll) {
+                    down = null
+                } else if (event.type == PointerEventType.Release) {
+                    down = null
+                    if (!event.buttons.areAnyPressed) {
+                        mouse.consume()
+                        onSeek(delta)
+                    }
+                }
+            }
+        }
+    }
+
+// Chrome can own passive padding/labels as well as its clickable children.
+private fun Modifier.desktopChromeHitPath(desktop: Boolean): Modifier =
+    if (desktop) pointerInput(Unit) { } else this
 
 @Composable
 private fun AnimeWatchingPane(
@@ -926,7 +1009,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
     previous: AnimeEpisode?, next: AnimeEpisode?, onEpisode: (AnimeEpisode) -> Unit,
     onToggle: () -> Unit, onInteraction: () -> Unit,
     onHoldControls: (Boolean) -> Unit, workspaceNotice: String?, onDismissNotice: () -> Unit,
-    nextPreparation: AnimeNextEpisodePreparation?, centralTransport: Boolean, canControl: Boolean,
+    nextPreparation: AnimeNextEpisodePreparation?, centralTransport: Boolean, canControl: Boolean, desktop: Boolean,
     sourceName: String?, onSources: (() -> Unit)?,
     fullscreen: Boolean, onFullscreen: () -> Unit, onWatching: (() -> Unit)?, watchingFocus: FocusRequester,
     modifier: Modifier = Modifier) {
@@ -939,14 +1022,19 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
         val wide = maxWidth / fontScale >= 380.dp
         val namedLine = onSources != null && sourceName != null && maxWidth / fontScale >= 520.dp
-        val previousButton = !centralTransport && canControl && wide && previous != null
+        val previousButton = !desktop && !centralTransport && canControl && wide && previous != null
         val playButton = !centralTransport && canControl
-        val nextButton = playButton && next != null && !state.ended
+        val nextButton = !desktop && playButton && next != null && !state.ended
         val iconSlots = 1 + listOf(previousButton, playButton, nextButton, onWatching != null,
             !namedLine && onSources != null).count { it }
         val actionWidth = 44.dp * iconSlots + if (namedLine) 138.dp else 0.dp
         val timelineWidth = (if (state.hourTimeline) 216.dp else 176.dp) * fontScale
         val inlineTimeline = canSeek && maxWidth >= actionWidth + timelineWidth + 6.dp
+        val desktopEpisodeRoom = desktop && inlineTimeline && !state.ended &&
+            maxWidth >= actionWidth + timelineWidth + 50.dp
+        val desktopNext = desktopEpisodeRoom && next != null
+        val desktopPrevious = desktopEpisodeRoom && previous != null &&
+            (!desktopNext || maxWidth >= actionWidth + timelineWidth + 94.dp)
         DisposableEffect(canSeek, state.sessionGeneration, state.timelineGeneration, state.assetKey, inlineTimeline) {
             // A changed timeline or a moved slider can end a drag before onValueChangeFinished.
             scrub = null
@@ -1044,6 +1132,19 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
                     Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),
                         verticalAlignment = Alignment.CenterVertically) { transport() }
                 }
+                if (desktopPrevious && previous != null)
+                    MotionIconButton(onClick = { onInteraction(); onEpisode(previous) },
+                        modifier = Modifier.size(44.dp), tooltip = "上一集") {
+                        Icon(Icons.Outlined.SkipPrevious, "上一集", Modifier.size(19.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                if (desktopNext && next != null)
+                    MotionIconButton(onClick = { onInteraction(); onEpisode(next) },
+                        modifier = Modifier.size(44.dp), tooltip = nextPreparation?.takeIf { it.episodeId == next.id }
+                            ?.let { "下一集 · ${animePreparationLabel(it)}" } ?: "下一集") {
+                        Icon(Icons.Outlined.SkipNext, "下一集", Modifier.size(19.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 if (onSources != null) {
                     val sourceLabel = sourceName?.let { "换线路，当前 $it" } ?: "选择播放线路"
                     if (namedLine && sourceName != null) MotionTextButton(onClick = onSources,

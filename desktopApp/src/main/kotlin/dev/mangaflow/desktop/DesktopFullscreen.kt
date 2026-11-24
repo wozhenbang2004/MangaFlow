@@ -19,7 +19,8 @@ internal class DesktopFullscreen {
         private set
     private var windowed: WindowedPlacement? = null
     private var owner: Owner? = null
-    private var animePlaybackVisible = false
+    var animePlaybackVisible by mutableStateOf(false)
+        private set
 
     fun setActive(enabled: Boolean, inReader: Boolean) {
         if (restoring || active == enabled) return

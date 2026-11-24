@@ -500,7 +500,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("subject", progress.subjectId)
         .put("localDownload", progress.localDownloadId)
         .put("episodeTitle", progress.episodeTitle).put("episodeNumber", progress.episodeNumber)
-        .put("episodeKind", progress.episodeKind?.name)
+        .put("episodeKind", progress.episodeKind?.name).put("resumeLineKey", progress.resumeLineKey)
 
     private fun decodeProgress(json: JSONObject) = AnimeWatchProgress(
         json.getString("episode"), json.getString("asset"), json.getString("source"),
@@ -512,6 +512,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         episodeKind = json.optString("episodeKind").takeIf { it.isNotBlank() }?.let { name ->
             AnimeEpisodeKind.entries.firstOrNull { it.name == name }
         },
+        resumeLineKey = json.optString("resumeLineKey").takeIf { ANIME_RESUME_LINE_KEY.matches(it) },
     )
 
     private fun encodeSettings(value: AnimePlaybackSettings) = JSONObject()

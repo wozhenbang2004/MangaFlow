@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -124,11 +125,43 @@ internal fun AnimeInlineVideoQuality(playback: AnimePlayerState, modifier: Modif
         source != null -> "片源标称 ${formatDecimal(source, 1)} 帧每秒，未测得当前输出"
         else -> null
     }).joinToString("，")
+    AnimeQuietVideoText(caption, description, modifier, alpha = .56f, maximumLines = 1)
+}
+
+/** Desktop samples decoder input and positively identified DirectML filter output, not renderer/window pixels. */
+@Composable
+internal fun AnimeDesktopVideoResolution(playback: AnimePlayerState, modifier: Modifier = Modifier) {
+    val sample = playback.nativeVideoStatistics ?: return
+    val input = sample.decoderInputSize?.let { videoDimensions(it.width, it.height) } ?: return
+    val effect = playback.videoEnhancement
+    val output = sample.confirmedSpatialOutputSize?.takeIf {
+        !playback.preEnhanced && playback.isPlaying && effect.phase == AnimeVideoEnhancementPhase.ACTIVE &&
+            !effect.renderedOriginalFallback && effect.outputWidth == it.width && effect.outputHeight == it.height &&
+            monotonicTimeMillis() - sample.sampledAtMillis in 0L until 1_800L
+    }?.let { videoDimensions(it.width, it.height) }
+    val source = if (playback.preEnhanced) "增强文件" else "片源"
+    val caption = if (output == null) "$source $input" else "$source $input · 增强输出 $output"
+    val description = buildString {
+        append(if (playback.preEnhanced) "增强文件的实际解码尺寸 " else "片源的实际解码尺寸 ")
+        append(input.replace("×", " 乘 "))
+        if (output != null) {
+            append("；已核对的 DirectML 视频滤镜输出 ")
+            append(output.replace("×", " 乘 "))
+            append("，不是屏幕分辨率或呈现回执")
+        }
+    }
+    AnimeQuietVideoText(caption, description, modifier, alpha = .48f, maximumLines = 2)
+}
+
+@Composable
+private fun AnimeQuietVideoText(caption: String, description: String, modifier: Modifier,
+    alpha: Float, maximumLines: Int) {
     Text(
         text = caption,
         modifier = modifier.clearAndSetSemantics { contentDescription = description },
-        color = Color.White.copy(alpha = .56f),
-        maxLines = 1,
+        color = Color.White.copy(alpha = alpha),
+        maxLines = maximumLines,
+        textAlign = if (maximumLines > 1) TextAlign.End else null,
         overflow = TextOverflow.Ellipsis,
         style = MaterialTheme.typography.labelSmall.copy(
             fontFeatureSettings = "tnum",

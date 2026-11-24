@@ -93,7 +93,7 @@ internal data class AnimeDetailPlayControl(
 
 internal fun animeDetailPlayControl(episode: AnimeEpisode?, previous: AnimeWatchProgress?,
     availability: AnimeEpisodeAvailability?, checking: Boolean, canRetry: Boolean,
-    offline: AnimeDetailOffline?, resumeCheckpoint: AnimeWatchProgress?): AnimeDetailPlayControl? {
+    offline: AnimeDetailOffline?, resumeCheckpoint: AnimeWatchProgress?, savedLineOffered: Boolean): AnimeDetailPlayControl? {
     // The catalogue already owns the empty/loading view. A saved record, however, stays discoverable.
     if (episode == null && previous == null) return null
     val next = previous != null && episode != null && episode.id != previous.episodeId
@@ -135,6 +135,7 @@ internal fun animeDetailPlayControl(episode: AnimeEpisode?, previous: AnimeWatch
         offline == AnimeDetailOffline.READY -> control(playback, AnimeDetailPlayMode.PLAY, "离线")
         offline == AnimeDetailOffline.MISSING -> control(if (episode == null) "查看作品线路" else "查看本集线路",
             AnimeDetailPlayMode.SOURCES, "原离线记录暂不可用")
+        savedLineOffered && availability != AnimeEpisodeAvailability.UPCOMING -> control(playback, AnimeDetailPlayMode.PLAY)
         episode == null && checking -> control("正在确认上次观看集", AnimeDetailPlayMode.WAIT)
         episode == null -> control("查看作品线路", AnimeDetailPlayMode.SOURCES, "上次观看集未确认")
         availability == AnimeEpisodeAvailability.UPCOMING -> control("尚未放送", AnimeDetailPlayMode.UPCOMING)
