@@ -2,14 +2,16 @@ package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -17,8 +19,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.DoneAll
 import androidx.compose.material.icons.outlined.Schedule
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -29,6 +31,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -41,9 +44,9 @@ import dev.mangaflow.anime.AnimeEpisodeAvailability
 import dev.mangaflow.anime.AnimeWatchProgress
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
-import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionSwap
+import dev.mangaflow.ui.motion.motionPress
 
 internal fun animeWatchFraction(progress: AnimeWatchProgress?): Float? = progress?.let {
     if (it.completed) 1f else if (it.durationMs > 0)
@@ -115,21 +118,19 @@ internal fun AnimeDetailPlayAction(
     val time = progress?.takeUnless { it.completed }?.positionMs?.takeIf { it > 0L }?.let(::animeTime)
     val caption = listOfNotNull(episodeLabel, time?.let { "看至 $it" }).joinToString(" · ")
     val interaction = remember { MutableInteractionSource() }
-    LiquidGlassSurface(backdrop, modifier, cornerRadius = 26.dp, role = GlassSurfaceRole.READING_DOCK,
-        interactionSource = interaction, elevation = 2.dp, softCard = true) {
-        MotionButton(
-            onClick = if (upcoming) onSources else onContinue,
-            modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-            enabled = active && !pending,
-            shape = RoundedCornerShape(26.dp),
-            interactionSource = interaction,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = colors.surface.copy(alpha = .26f), contentColor = colors.onSurface,
-                disabledContainerColor = colors.surface.copy(alpha = .45f), disabledContentColor = colors.onSurfaceVariant,
-            ),
-            contentPadding = PaddingValues(start = 9.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
+    val enabled = active && !pending
+    LiquidGlassSurface(backdrop, modifier.motionPress(interaction, enabled = enabled, pressedScale = .985f),
+        cornerRadius = 26.dp, role = GlassSurfaceRole.READING_DOCK, preferSource = true,
+        interactionSource = interaction.takeIf { enabled }, elevation = 2.dp, softCard = true) {
+        val ink = if (enabled) LocalContentColor.current else colors.onSurfaceVariant
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 52.dp)
+                .clickable(enabled = enabled, role = Role.Button, interactionSource = interaction,
+                    indication = null, onClick = if (upcoming) onSources else onContinue)
+                .padding(start = 9.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.size(32.dp).background(colors.onSurface, RoundedCornerShape(50)),
+            Box(Modifier.size(32.dp).background(ink, RoundedCornerShape(50)),
                 contentAlignment = Alignment.Center) {
                 if (pending) MotionBusyIndicator(Modifier.size(16.dp), color = colors.surface, strokeWidth = 1.5.dp)
                 else Icon(if (upcoming) Icons.Outlined.Schedule else Icons.Filled.PlayArrow, null,
@@ -137,10 +138,10 @@ internal fun AnimeDetailPlayAction(
             }
             Spacer(Modifier.width(8.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                Text(action, style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                Text(action, color = ink, style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (caption.isNotEmpty()) Text(caption, style = MaterialTheme.typography.labelSmall,
-                    color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    color = ink, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
         }
     }

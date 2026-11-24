@@ -196,6 +196,9 @@ private enum class Section(val title: String, val icon: ImageVector) {
     DOWNLOADS("下载", Icons.Outlined.FileDownload), ACCOUNT("账号", Icons.Outlined.AccountCircle),
     SETTINGS("设置", Icons.Outlined.Settings),
 }
+private val Section.usesCatalogueVeil: Boolean
+    get() = this == Section.DISCOVER || this == Section.ANIME || this == Section.LIBRARY || this == Section.BOARDS
+
 private fun Section.availableIn(profile: ContentProfile): Boolean = when (profile) {
     ContentProfile.ANIME -> this == Section.ANIME || this == Section.SETTINGS
     ContentProfile.RESTRICTED -> this != Section.ANIME && this != Section.BOARDS
@@ -771,6 +774,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val desktop = platformKind == PlatformKind.DESKTOP
     val desktopNavigationVisible = desktop && reading == null && windowSize.width >= 760.dp &&
         !(section == Section.ANIME && animeImmersive)
+    val desktopWorkspaceBackdrop = if (desktop) rememberHazeState() else drawerBackdrop
+    val desktopRoot = desktopNavigationVisible && frame is Frame.Root
     val desktopNavigationWide = when (desktopNavigationMode) {
         1 -> true
         2 -> false
@@ -1069,6 +1074,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         destinations = desktopDestinations,
         selectedIndex = profileSections.indexOf(pendingSidebarDestination ?: highlightedSection).coerceAtLeast(0),
         version = "MangaFlow $appVersion", backdrop = drawerBackdrop,
+        workspaceBackdrop = desktopWorkspaceBackdrop,
+        wallpaper = {
+            if (desktopRoot && hasWallpaper) AppWallpaper(wallpaperStore, Modifier.fillMaxSize(),
+                active = !recentReadingOpen && !tagSearchVisible, underCatalogue = section.usesCatalogueVeil)
+        },
         onToggle = { desktopNavigationMode = if (desktopNavigationWide) 2 else 1 },
         onNavigate = { index ->
             val destination = profileSections[index]
@@ -1132,12 +1142,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         },
     ) {
     ModalNavigationDrawer(
-        modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant)
+        modifier = Modifier.fillMaxSize().then(if (desktopRoot) Modifier
+            else Modifier.background(MaterialTheme.colorScheme.surfaceVariant))
             .drawerSelectionTapInput(drawerTargets, canSelectDrawer,
                 { drawer.isAnimationRunning && !drawerScroll.isScrollInProgress }, selectDrawer),
         drawerState = drawer,
         gesturesEnabled = frame is Frame.Root && !desktopNavigationVisible && section != Section.ANIME,
-        scrimColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.14f),
+        scrimColor = MaterialTheme.colorScheme.scrim.copy(alpha = .22f),
         drawerContent = {
             ModalDrawerSheet(
                 modifier = Modifier.width(drawerWidth).onSizeChanged { measuredDrawerWidth = it.width.toFloat() }
@@ -1148,10 +1159,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 windowInsets = WindowInsets(0, 0, 0, 0),
             ) {
                 // The full-size shell keeps the native swipe anchors even while its contents are off-screen.
-                Box(Modifier.fillMaxSize()) {
-                    if (drawerVisible && frame is Frame.Root) {
-                        LiquidGlassSurface(drawerBackdrop, Modifier.fillMaxSize(), cornerRadius = 26.dp,
-                            role = GlassSurfaceRole.DRAWER, elevation = 0.dp) {}
+                if (drawerVisible && frame is Frame.Root) {
+                    LiquidGlassSurface(drawerBackdrop, Modifier.fillMaxSize(), cornerRadius = 26.dp,
+                        role = GlassSurfaceRole.DRAWER, elevation = 0.dp) {
                         val selection = pendingSidebarDestination ?: highlightedSection
                         val (destinations, tools) = remember(profileSections) {
                             profileSections.partition { it.section != Section.SETTINGS }
@@ -1200,16 +1210,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             }
                         }
                     }
-                }
+                } else Spacer(Modifier.fillMaxSize())
             }
         },
     ) {
         Scaffold(
-            modifier = Modifier
-                // Keep the source node stable. The visible-only drawer effect owns capture demand;
-                // Haze 2.1 releases the layer and draws directly when that demand disappears.
-                .mangaHazeSource(drawerBackdrop),
-            containerColor = MaterialTheme.colorScheme.background,
+            // On desktop the enclosing workspace is the source and includes the rail.
+            modifier = if (desktopNavigationVisible) Modifier else Modifier.mangaHazeSource(drawerBackdrop),
+            containerColor = if (desktopRoot) Color.Transparent else MaterialTheme.colorScheme.background,
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
         ) { innerPadding ->
@@ -1514,10 +1522,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         }
                     }
                     is Frame.Root -> {
-                        val searchBackdrop = rememberHazeState()
+                        val searchBackdrop = if (desktopRoot) desktopWorkspaceBackdrop else rememberHazeState()
                         val playerOwnsScreen = current.section == Section.ANIME && animeImmersive
-                        val rootWallpaperActive = current.key == frame.key &&
-                            !drawerVisible && !recentReadingOpen && !tagSearchVisible
+                        val rootWallpaperActive = current.key == frame.key && !recentReadingOpen && !tagSearchVisible
                         val chromeDensity = LocalDensity.current
                         val chromeTopInset = screenFitContentInsets().asPaddingValues().calculateTopPadding()
                         val discoveryBackground = browseActions.browseBackground(browse)
@@ -1559,12 +1566,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         Box(Modifier.fillMaxSize()) {
                         // The persistent lower source holds the real media; foreground page
                         // sources and headers sample it without owning the player lifecycle.
-                        Box(Modifier.fillMaxSize().mangaHazeSource(searchBackdrop, zIndex = -1f)
+                        if (!desktopRoot) Box(Modifier.fillMaxSize().mangaHazeSource(searchBackdrop, zIndex = -1f)
                             .background(MaterialTheme.colorScheme.background)) {
                             if (!playerOwnsScreen && hasWallpaper) {
                                 AppWallpaper(wallpaperStore, Modifier.fillMaxSize(), active = rootWallpaperActive,
-                                    underCatalogue = current.section == Section.DISCOVER || current.section == Section.ANIME ||
-                                        current.section == Section.LIBRARY || current.section == Section.BOARDS)
+                                    underCatalogue = current.section.usesCatalogueVeil)
                             }
                         }
                         val contentWidth = if (playerOwnsScreen) {
@@ -1934,7 +1940,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     searching = desktopSearchContent, backdrop = searchBackdrop,
                                     onLeaveSearch = closeSearch, navigation = navigation,
                                     tabs = { tabModifier ->
-                                        BrowseTabs(discoveryModes.indexOf(displayedDiscovery.mode).coerceAtLeast(0), discoveryLabels, tabModifier) { index ->
+                                        BrowseTabs(discoveryModes.indexOf(displayedDiscovery.mode).coerceAtLeast(0), discoveryLabels,
+                                            tabModifier, backdrop = searchBackdrop) { index ->
                                             closeSearch()
                                             browseActions.selectDiscovery(discoveryModes[index], clearQuery = true)
                                         }
@@ -2029,7 +2036,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 val slot = bounds.width / discoveryModes.size
                                                 val left = bounds.left + slot * discoveryModes.indexOf(DiscoveryMode.RANKING).coerceAtLeast(0)
                                                 rankingAnchor = Rect(left, bounds.top, left + slot, bounds.bottom)
-                                            }.motionInputGate(rootActive && chromeReady)) { index ->
+                                            }.motionInputGate(rootActive && chromeReady), backdrop = searchBackdrop) { index ->
                                         closeSearch()
                                         browseActions.selectDiscovery(discoveryModes[index], clearQuery = true)
                                     }

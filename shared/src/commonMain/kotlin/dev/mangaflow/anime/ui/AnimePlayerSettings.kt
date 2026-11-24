@@ -53,6 +53,7 @@ internal fun AnimePlayerSettings(
     state: AnimeScreenState,
     playback: AnimePlayerState,
     backdrop: HazeState,
+    artwork: HazeState?,
     overVideo: Boolean,
     onDismiss: () -> Unit,
     onClosed: () -> Unit,
@@ -171,7 +172,7 @@ internal fun AnimePlayerSettings(
             else -> show(AnimePlayerPanel.GENERAL)
         }
     }
-    AnimePlaybackPanel(visible, overVideo, state.detail?.subject, backdrop, onDismiss, onClosed = {
+    AnimePlaybackPanel(visible, overVideo, artwork, onDismiss, onClosed = {
         val request = pendingDownload
         val sourceEpisode = pendingSourceEpisode
         val storage = pendingStorage

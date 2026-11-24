@@ -1,11 +1,8 @@
 package dev.mangaflow.anime.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ExpandLess
@@ -24,7 +21,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
@@ -102,30 +98,30 @@ internal fun AnimePlaybackStatus(
         holdControls(interactive && (expanded || focused || summaryScroll.isScrollInProgress || detailScroll.isScrollInProgress))
         onDispose { holdControls(false) }
     }
-    val shape = RoundedCornerShape(13.dp)
-    Column(modifier.heightIn(max = maximumHeight).clip(shape)
-        .background(Color.Black.copy(alpha = if (quiet) .30f else .60f))
-        .border(1.dp, Color.White.copy(alpha = if (quiet) .09f else .15f), shape)
-        .onFocusChanged { focused = it.hasFocus }) {
-        Row(Modifier.fillMaxWidth().heightIn(min = if (quiet) 26.dp else 44.dp).padding(start = 9.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            Icon(Icons.Outlined.QueryStats, null, Modifier.size(13.dp), tint = Color.White.copy(alpha = .75f))
-            Text(readouts.joinToString("  ·  ") { it.value },
-                Modifier.weight(1f).horizontalScroll(summaryScroll, enabled = interactive)
-                    .padding(end = 8.dp, top = 3.dp, bottom = 3.dp)
-                    .semantics { contentDescription = readouts.joinToString("；") { it.description } },
-                maxLines = 1, color = Color.White.copy(alpha = if (quiet) .72f else .9f),
-                style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"))
-            if (!quiet && canExpand) MotionIconButton(onClick = { details = !details; onInteraction() },
-                modifier = Modifier.size(44.dp), enabled = interactive,
-                tooltip = if (expanded) "收起观看读数" else "展开观看读数") {
-                Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                    if (expanded) "收起观看读数" else "展开 ${readouts.size} 项观看读数", Modifier.size(17.dp), tint = Color.White)
+    AnimePlaybackSurface(null, modifier.heightIn(max = maximumHeight).onFocusChanged { focused = it.hasFocus },
+        cornerRadius = 15.dp) {
+        Column {
+            val rowWidth = if (quiet) Modifier else Modifier.fillMaxWidth()
+            Row(rowWidth.heightIn(min = if (quiet) 26.dp else 44.dp).padding(start = 9.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                Icon(Icons.Outlined.QueryStats, null, Modifier.size(13.dp), tint = Color.White.copy(alpha = .82f))
+                Text(readouts.joinToString("  ·  ") { it.value },
+                    Modifier.weight(1f, fill = !quiet).horizontalScroll(summaryScroll, enabled = interactive)
+                        .padding(end = 8.dp, top = 3.dp, bottom = 3.dp)
+                        .semantics { contentDescription = readouts.joinToString("；") { it.description } },
+                    maxLines = 1, color = Color.White.copy(alpha = .94f),
+                    style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"))
+                if (!quiet && canExpand) MotionIconButton(onClick = { details = !details; onInteraction() },
+                    modifier = Modifier.size(44.dp), enabled = interactive,
+                    tooltip = if (expanded) "收起观看读数" else "展开观看读数") {
+                    Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        if (expanded) "收起观看读数" else "展开 ${readouts.size} 项观看读数", Modifier.size(17.dp), tint = Color.White)
+                }
             }
+            if (expanded) EnhancementReadouts(readouts, quiet = false,
+                modifier = Modifier.fillMaxWidth().heightIn(max = (maximumHeight - 44.dp).coerceAtLeast(1.dp))
+                    .verticalScroll(detailScroll, enabled = interactive).padding(start = 8.dp, end = 8.dp, bottom = 6.dp))
         }
-        if (expanded) EnhancementReadouts(readouts, quiet = false,
-            modifier = Modifier.fillMaxWidth().heightIn(max = (maximumHeight - 44.dp).coerceAtLeast(1.dp))
-                .verticalScroll(detailScroll, enabled = interactive).padding(start = 8.dp, end = 8.dp, bottom = 6.dp))
     }
 }
 

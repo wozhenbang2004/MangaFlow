@@ -67,13 +67,13 @@ internal fun GlassControlGroup(
         BoxWithConstraints(Modifier.weight(1f)) {
             LiquidGlassSurface(backdrop, Modifier.width(controlsWidth.coerceAtMost(maxWidth))
                 .glassGroupPress(interaction), cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION,
-                trackPointer = true, elevation = elevation, softCard = !quietShadow) {
+                trackPointer = true, elevation = elevation, softCard = !quietShadow, preferSource = true) {
                 Column(Modifier.fillMaxWidth(), content = content)
             }
         }
         Spacer(Modifier.width(6.dp))
         LiquidGlassSurface(backdrop, Modifier.width(actionsWidth).glassGroupPress(interaction),
             cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION,
-            trackPointer = true, elevation = elevation, softCard = !quietShadow) { actions() }
+            trackPointer = true, elevation = elevation, softCard = !quietShadow, preferSource = true) { actions() }
     }
 }

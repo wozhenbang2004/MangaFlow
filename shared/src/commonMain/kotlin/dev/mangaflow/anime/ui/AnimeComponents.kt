@@ -231,11 +231,9 @@ internal fun AnimePanelSurface(
     cornerRadius: Dp = 24.dp,
     content: @Composable BoxScope.() -> Unit,
 ) {
-    val surface = MaterialTheme.colorScheme.surface
     LiquidGlassSurface(backdrop, modifier, cornerRadius = cornerRadius,
-        role = GlassSurfaceRole.PANEL, softCard = true) {
-        Box(Modifier.fillMaxWidth().background(surface.copy(alpha = .94f), RoundedCornerShape(cornerRadius)),
-            propagateMinConstraints = true, content = content)
+        role = GlassSurfaceRole.PANEL, softCard = true, preferSource = true) {
+        Box(Modifier.fillMaxWidth(), propagateMinConstraints = true, content = content)
     }
 }
 

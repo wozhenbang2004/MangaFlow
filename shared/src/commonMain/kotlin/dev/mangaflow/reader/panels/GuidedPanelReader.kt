@@ -131,6 +131,7 @@ internal fun GuidedPanelReader(
     onDisable: () -> Unit,
     active: Boolean,
     backdrop: HazeState,
+    artworkModifier: Modifier,
     bottomClearancePx: Int,
 ): ReaderPrefetchViewport {
     val context = LocalContext.current
@@ -453,46 +454,48 @@ internal fun GuidedPanelReader(
     }
 
     Box(Modifier.fillMaxSize()) {
-        resource?.takeIf { attempt.acceptsResult && error == null }?.let { loaded -> key(attempt, loaded.url) {
-            PanelCamera(
-                page = loaded, headers = currentHeaders, sourceId = currentSource, box = boxes[selected], overview = overview,
-                transferObserver = transferObserver,
-                bypassFailedCache = replacement == null && prefetchFailures[pageIndex] != null && imageRetry == 0,
-                onViewportChanged = { viewport = it },
-                active = active,
-                onTap = { x ->
-                    val forwardZone = if (preferences.panelDirection == PanelDirection.RIGHT_TO_LEFT) x < .3f else x > .7f
-                    val backwardZone = if (preferences.panelDirection == PanelDirection.RIGHT_TO_LEFT) x > .7f else x < .3f
-                    when {
-                        loading || !imageReady -> onTap()
-                        forwardZone && error == null -> move(true)
-                        backwardZone && error == null -> move(false)
-                        else -> onTap()
-                    }
-                },
-                onImageReady = { if (attempt.acceptsResult) {
-                    imageReady = it
-                    if (it) {
-                        if (replacement == null) { prefetchFailures.remove(pageIndex); repair?.controller?.succeeded(primaryPage.index) }
-                        repair?.onRescue?.invoke(primaryPage.index, false)
-                    }
-                } },
-                onError = {
-                    if (attempt.acceptsResult) {
-                        error = it; imageReady = false; loading = false; attempt.stopped = true
-                    }
-                },
-                onDetailError = {
-                    if (attempt.acceptsResult) imageNotice =
-                        if (it == null) null else "原图细节暂不可用，当前显示预览"
-                },
-                // Both horizontal reader directions retain the app's left-swipe-next convention.
-                onSwipe = { delta -> move(delta < 0) },
-                boxes = boxes, selectedIndex = selected,
-                onSelectPanel = { panelIndex = it; overview = false; navigate() },
-                modifier = Modifier.fillMaxSize(),
-            )
-        } }
+        Box(Modifier.matchParentSize().then(artworkModifier)) {
+            resource?.takeIf { attempt.acceptsResult && error == null }?.let { loaded -> key(attempt, loaded.url) {
+                PanelCamera(
+                    page = loaded, headers = currentHeaders, sourceId = currentSource, box = boxes[selected], overview = overview,
+                    transferObserver = transferObserver,
+                    bypassFailedCache = replacement == null && prefetchFailures[pageIndex] != null && imageRetry == 0,
+                    onViewportChanged = { viewport = it },
+                    active = active,
+                    onTap = { x ->
+                        val forwardZone = if (preferences.panelDirection == PanelDirection.RIGHT_TO_LEFT) x < .3f else x > .7f
+                        val backwardZone = if (preferences.panelDirection == PanelDirection.RIGHT_TO_LEFT) x > .7f else x < .3f
+                        when {
+                            loading || !imageReady -> onTap()
+                            forwardZone && error == null -> move(true)
+                            backwardZone && error == null -> move(false)
+                            else -> onTap()
+                        }
+                    },
+                    onImageReady = { if (attempt.acceptsResult) {
+                        imageReady = it
+                        if (it) {
+                            if (replacement == null) { prefetchFailures.remove(pageIndex); repair?.controller?.succeeded(primaryPage.index) }
+                            repair?.onRescue?.invoke(primaryPage.index, false)
+                        }
+                    } },
+                    onError = {
+                        if (attempt.acceptsResult) {
+                            error = it; imageReady = false; loading = false; attempt.stopped = true
+                        }
+                    },
+                    onDetailError = {
+                        if (attempt.acceptsResult) imageNotice =
+                            if (it == null) null else "原图细节暂不可用，当前显示预览"
+                    },
+                    // Both horizontal reader directions retain the app's left-swipe-next convention.
+                    onSwipe = { delta -> move(delta < 0) },
+                    boxes = boxes, selectedIndex = selected,
+                    onSelectPanel = { panelIndex = it; overview = false; navigate() },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } }
+        }
         if (replacement != null && repair != null) TextButton(
             onClick = { repair.controller.select(primaryPage.index, replacement.variant) },
             modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
@@ -543,7 +546,7 @@ internal fun GuidedPanelReader(
                         fontSize = 11.sp, lineHeight = 15.sp, textAlign = TextAlign.Center)
                 }
             }
-            LiquidGlassSurface(backdrop, role = GlassSurfaceRole.READING_DOCK,
+            LiquidGlassSurface(backdrop, role = GlassSurfaceRole.READING_DOCK, preferSource = true, cornerRadius = 26.dp,
                 trackPointer = active && !loading) {
                 Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically) {

@@ -587,51 +587,30 @@ fun DetailScreen(
         }
         // A fixed atmosphere sits behind the moving book and opaque catalogue plane.
         // Floating controls sample the final composed scene through the existing Haze source.
+        val toolbarWidth = if (desktopDetail) Modifier.width(desktopWidth)
+            else Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxWidth()
         Box(Modifier.fillMaxSize().mangaHazeSource(readingBackdrop).background(informationTone)) {
             if (desktopDetail) {
                 Row(Modifier.width(desktopWidth).fillMaxHeight().align(Alignment.TopCenter)
                     .padding(start = 20.dp, end = 20.dp, top = toolbarClearance + 8.dp, bottom = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                    Column(Modifier.width(summaryWidth).fillMaxHeight(),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Box(Modifier.width(summaryWidth).fillMaxHeight()) {
                         val summaryScroll = rememberScrollState()
-                        Box(Modifier.weight(1f).fillMaxWidth()) {
-                            Column(Modifier.fillMaxSize().verticalScroll(summaryScroll).padding(end = 12.dp)) {
-                                HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
-                                    compact = true, artworkHeadroom = 0.dp, adultProfile = adultProfile, desktopSummary = true,
-                                    onIntroduction = { fullIntroduction = true },
-                                    onRatings = if (adultProfile) null else ({ fullRatings = true }),
-                                    onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
-                                    onTag = onTag?.let { action -> { tag -> action(current, tag) } }, collapse = { 0f })
-                            }
-                            DesktopVerticalScrollbar(summaryScroll,
-                                Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
+                        Column(Modifier.fillMaxSize().verticalScroll(summaryScroll)
+                            .padding(end = 12.dp, bottom = readingInset)) {
+                            HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
+                                compact = true, artworkHeadroom = 0.dp, adultProfile = adultProfile, desktopSummary = true,
+                                onIntroduction = { fullIntroduction = true },
+                                onRatings = if (adultProfile) null else ({ fullRatings = true }),
+                                onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
+                                onTag = onTag?.let { action -> { tag -> action(current, tag) } }, collapse = { 0f })
                         }
-                        DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
-                            resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
-                            hidden = false, active = active, persistent = true,
-                            modifier = Modifier.fillMaxWidth(),
-                            onContinue = onContinue, onRead = onRead, onRestart = onRestart,
-                            onContents = openContents, preferredResumeChapter = preferredResumeChapter,
-                            onContinuePreferred = onContinuePreferred, cloudProgress = copyProgress,
-                            onAdoptCloudProgress = onAdoptCloudProgress, onRetryCloudProgress = onRetryCloudProgress)
+                        DesktopVerticalScrollbar(summaryScroll,
+                            Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp, bottom = readingInset))
                     }
                     Box(Modifier.width(1.dp).fillMaxHeight().background(DetailLine))
                     sectionPane(Modifier.weight(1f).fillMaxHeight().background(informationTone),
                         16.dp + bottomInset)
-                }
-                Box(Modifier.width(desktopWidth).align(Alignment.TopCenter)) {
-                    ArtworkToolbar(header = header, compact = true, title = current.title,
-                        backdrop = readingBackdrop, favorite = isFavorite,
-                        coverFailed = coverFailed, active = active, coverLight = lightDetail,
-                        comments = activeSection == 1, commentCount = commentCount,
-                        sceneColor = informationTone.copy(alpha = .80f),
-                        onBack = onBack, onIntroduction = { fullIntroduction = true },
-                        onOpenTracking = onOpenTracking?.takeUnless { adultProfile },
-                        onToggleFavorite = {
-                            feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm)
-                            onToggleFavorite()
-                        }, onRetryCover = { coverFailed = false; coverRetry++ })
                 }
             } else {
                 Column(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
@@ -706,35 +685,22 @@ fun DetailScreen(
                         sectionPane(Modifier.weight(1f).fillMaxWidth(), readingInset + 16.dp)
                     }
                 }
-                // Keep toolbar hit targets safe while the real clear artwork scrolls under them.
-                Box(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxWidth()
-                    .height(toolbarClearance + 24.dp).align(Alignment.TopCenter)
-                    .drawBehind {
-                        val reveal = if (collapsedHero) 1f
-                            else ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)
-                        val end = size.height.coerceAtLeast(1f)
-                        val solidEnd = (toolbarClearance.toPx() / end).coerceIn(0f, .99f)
-                        drawRect(Brush.verticalGradient(
-                            0f to informationTone.copy(alpha = reveal),
-                            solidEnd to informationTone.copy(alpha = reveal),
-                            1f to informationTone.copy(alpha = 0f),
-                        ))
-                    }) {
-                    ArtworkToolbar(
-                        header = header, compact = collapsedHero, title = current.title, backdrop = artworkBackdrop,
-                        favorite = isFavorite, coverFailed = coverFailed, active = active,
-                        coverLight = lightDetail,
-                        comments = activeSection == 1, commentCount = commentCount,
-                        sceneColor = Color.Transparent,
-                        onBack = onBack, onIntroduction = { fullIntroduction = true },
-                        onOpenTracking = onOpenTracking?.takeUnless { adultProfile },
-                        onToggleFavorite = { feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm); onToggleFavorite() }, onRetryCover = {
-                            coverFailed = false
-                            coverRetry++
-                        },
-                    )
-                }
             }
+            // Record the title's contrast veil with the scene so the controls see the same artwork.
+            Box(toolbarWidth.height(toolbarClearance + 24.dp).align(Alignment.TopCenter).drawBehind {
+                val reveal = when {
+                    desktopDetail -> .48f
+                    collapsedHero -> 1f
+                    else -> ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)
+                }
+                val end = size.height.coerceAtLeast(1f)
+                val solidEnd = (toolbarClearance.toPx() / end).coerceIn(0f, .99f)
+                drawRect(Brush.verticalGradient(
+                    0f to informationTone.copy(alpha = reveal),
+                    solidEnd to informationTone.copy(alpha = reveal),
+                    1f to informationTone.copy(alpha = 0f),
+                ))
+            })
             // Measure after the foreground, paint before it and its toolbar.
             Box(
                 Modifier.fillMaxWidth().zIndex(-1f)
@@ -773,12 +739,13 @@ fun DetailScreen(
                         else -> .52f
                     }
                     val fadeVeil = if (androidEditorial) .87f else if (lightDetail) .72f else .78f
+                    val bottomTone = if (desktopDetail) informationTone.copy(alpha = fadeVeil) else informationTone
                     drawRect(Brush.verticalGradient(
                         0f to informationTone.copy(alpha = veil),
                         fadeStart to informationTone.copy(alpha = veil),
                         (fadeStart + (fadeEnd - fadeStart) * .55f) to informationTone.copy(alpha = fadeVeil),
-                        fadeEnd to informationTone,
-                        1f to informationTone,
+                        fadeEnd to bottomTone,
+                        1f to bottomTone,
                     ))
                 })
             }
@@ -790,17 +757,31 @@ fun DetailScreen(
                     size = androidx.compose.ui.geometry.Size(size.width, size.height - chapterTop))
             })
         }
-        if (!desktopDetail) DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
-            resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
-            hidden = dockHidden, collapseProgress = { dockCollapse }, active = active,
-            modifier = Modifier.align(Alignment.BottomCenter)
-                .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Bottom))
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            onHeightChanged = { measuredDockHeight = maxOf(measuredDockHeight, it) },
-            onContinue = onContinue, onRead = onRead, onRestart = onRestart, onContents = openContents,
-            preferredResumeChapter = preferredResumeChapter, onContinuePreferred = onContinuePreferred,
-            cloudProgress = copyProgress, onAdoptCloudProgress = onAdoptCloudProgress,
-            onRetryCloudProgress = onRetryCloudProgress)
+        // Both overlays sample the artwork, poster and moving content; neither is part of its own source.
+        Box(toolbarWidth.align(Alignment.TopCenter)) {
+            ArtworkToolbar(header, compact = desktopDetail || collapsedHero, fixedArtwork = desktopDetail,
+                title = current.title, backdrop = readingBackdrop, favorite = isFavorite,
+                coverFailed = coverFailed, active = active, coverLight = lightDetail,
+                comments = activeSection == 1, commentCount = commentCount,
+                onBack = onBack, onIntroduction = { fullIntroduction = true },
+                onOpenTracking = onOpenTracking?.takeUnless { adultProfile },
+                onToggleFavorite = { feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm); onToggleFavorite() },
+                onRetryCover = { coverFailed = false; coverRetry++ })
+        }
+        val dockLane = if (desktopDetail) Modifier.width(desktopWidth).padding(start = 20.dp, bottom = 12.dp)
+            else Modifier.fillMaxWidth().windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Bottom))
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        Box(dockLane.align(Alignment.BottomCenter), contentAlignment = Alignment.BottomStart) {
+            DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
+                resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
+                hidden = !desktopDetail && dockHidden, collapseProgress = { dockCollapse }, active = active,
+                persistent = desktopDetail, modifier = if (desktopDetail) Modifier.width(summaryWidth) else Modifier,
+                onHeightChanged = { measuredDockHeight = maxOf(measuredDockHeight, it) },
+                onContinue = onContinue, onRead = onRead, onRestart = onRestart, onContents = openContents,
+                preferredResumeChapter = preferredResumeChapter, onContinuePreferred = onContinuePreferred,
+                cloudProgress = copyProgress, onAdoptCloudProgress = onAdoptCloudProgress,
+                onRetryCloudProgress = onRetryCloudProgress)
+        }
     }
     }
     if (fullIntroduction) DetailIntroduction(current, backdrop = readingBackdrop, adultProfile = adultProfile,
@@ -830,6 +811,7 @@ fun DetailScreen(
 private fun ArtworkToolbar(
     header: TopAppBarState,
     compact: Boolean,
+    fixedArtwork: Boolean,
     title: String,
     backdrop: HazeState,
     favorite: Boolean,
@@ -838,7 +820,6 @@ private fun ArtworkToolbar(
     coverLight: Boolean,
     comments: Boolean,
     commentCount: String?,
-    sceneColor: Color,
     onBack: () -> Unit,
     onIntroduction: () -> Unit,
     onToggleFavorite: () -> Unit,
@@ -847,6 +828,7 @@ private fun ArtworkToolbar(
 ) {
     val colors = MaterialTheme.colorScheme
     val progress = if (compact) 1f else ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)
+    val glassAlpha = if (fixedArtwork) 1f else 1f - progress
     val artworkTint = if (coverLight) Color(0xFF242426) else Color.White
     val tint = lerp(artworkTint, DetailForeground, progress)
     val glassTone = if (coverLight) Color(0xFFFCFCFA) else Color(0xFF202023)
@@ -857,10 +839,10 @@ private fun ArtworkToolbar(
         }
     }
     SystemBarAppearance(lightStatusBars, lightSurface, active)
-    Row(Modifier.fillMaxWidth().drawBehind { drawRect(sceneColor.copy(alpha = sceneColor.alpha * progress)) }
+    Row(Modifier.fillMaxWidth()
         .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
         .heightIn(min = 56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        ArtworkAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", backdrop, 1f - progress, tint, glassTone, onBack)
+        ArtworkAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", backdrop, glassAlpha, tint, glassTone, onBack)
         Column(Modifier.weight(1f).padding(horizontal = 8.dp).graphicsLayer { alpha = progress }
             .then(if (progress > .02f) Modifier else Modifier.clearAndSetSemantics { })
             .clickable(enabled = progress > .7f, role = Role.Button, onClickLabel = "查看作品信息", onClick = onIntroduction),
@@ -885,12 +867,12 @@ private fun ArtworkToolbar(
                 }
             }
         }
-        if (coverFailed) ArtworkAction(Icons.Outlined.Refresh, "重新加载封面", backdrop, 1f - progress, tint, glassTone, onRetryCover)
+        if (coverFailed) ArtworkAction(Icons.Outlined.Refresh, "重新加载封面", backdrop, glassAlpha, tint, glassTone, onRetryCover)
         onOpenTracking?.let { open ->
-            ArtworkAction(Icons.Outlined.CloudSync, "漫画账号进度", backdrop, 1f - progress, tint, glassTone, open)
+            ArtworkAction(Icons.Outlined.CloudSync, "漫画账号进度", backdrop, glassAlpha, tint, glassTone, open)
         }
         ArtworkAction(if (favorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-            if (favorite) "从书架移除" else "加入书架", backdrop, 1f - progress, tint, glassTone, onToggleFavorite)
+            if (favorite) "从书架移除" else "加入书架", backdrop, glassAlpha, tint, glassTone, onToggleFavorite)
     }
 }
 
@@ -902,12 +884,12 @@ private fun ArtworkAction(icon: ImageVector, description: String, backdrop: Haze
         .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
         .motionPress(interaction, pressedScale = .965f), contentAlignment = Alignment.Center) {
         Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-            LiquidGlassSurface(backdrop,
+            if (glassAlpha > 0f) LiquidGlassSurface(backdrop,
                 Modifier.matchParentSize().graphicsLayer {
                     alpha = glassAlpha
                     compositingStrategy = CompositingStrategy.ModulateAlpha
                 }, cornerRadius = 20.dp, elevation = 0.dp, role = GlassSurfaceRole.ARTWORK,
-                interactionSource = interaction, trackPointer = true, surfaceColor = glassTone,
+                interactionSource = interaction, preferSource = true, surfaceColor = glassTone, contentColor = tint,
                 softCard = false) {}
             MotionSwap(icon, Modifier.size(21.dp)) { shown ->
                 Icon(shown, description, tint = tint, modifier = Modifier.size(21.dp))

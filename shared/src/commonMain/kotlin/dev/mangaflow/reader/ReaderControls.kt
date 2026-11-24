@@ -91,8 +91,13 @@ internal fun ReaderDialogSurface(
     dialogWindow: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    if (dialogWindow) ConfigureReaderDialogWindow(.12f)
-    LiquidGlassSurface(backdrop, modifier, role = GlassSurfaceRole.PANEL, softCard = true) { content() }
+    if (dialogWindow) {
+        ConfigureReaderDialogWindow(.12f)
+        LiquidGlassSurface(backdrop, modifier, role = GlassSurfaceRole.PANEL, softCard = true) { content() }
+    } else {
+        // A docked desktop inspector sits beside the page, outside its optical sample.
+        ReaderSurface(modifier, content = content)
+    }
 }
 
 /** Icon actions can return to the page without stealing focus from a settings editor. */

@@ -62,10 +62,10 @@ internal val HeaderContentGap = 2.dp
 /** Every root menu button uses the same liquid role and fixed optical geometry. */
 @Composable
 private fun HeaderNavigationGlass(backdrop: HazeState, navigation: @Composable () -> Unit,
-    quietShadow: Boolean = false) {
+    quietShadow: Boolean = false, preferSource: Boolean = false) {
     LiquidGlassSurface(backdrop, Modifier.size(44.dp), cornerRadius = 22.dp,
         role = GlassSurfaceRole.NAVIGATION, elevation = if (quietShadow) 1.dp else null,
-        softCard = !quietShadow, trackPointer = true) { navigation() }
+        softCard = !quietShadow, trackPointer = true, preferSource = preferSource) { navigation() }
 }
 
 /** Root identity is already in the drawer; the header holds navigation and actual actions. */
@@ -118,26 +118,26 @@ internal fun SegmentedGlassHeader(
         if (stacked) {
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-                    HeaderNavigationGlass(backdrop, navigation, quietShadow)
+                    HeaderNavigationGlass(backdrop, navigation, quietShadow, preferSource = true)
                     Spacer(Modifier.weight(1f))
                     LiquidGlassSurface(backdrop, Modifier.width(actionsWidth).graphicsLayer {
                         alpha = controlsAlpha()
                         compositingStrategy = CompositingStrategy.ModulateAlpha
                     }, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true,
-                        elevation = elevation, softCard = !quietShadow) { actions() }
+                        elevation = elevation, softCard = !quietShadow, preferSource = true) { actions() }
                 }
                 LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().graphicsLayer {
                     alpha = controlsAlpha()
                     compositingStrategy = CompositingStrategy.ModulateAlpha
                 }, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true,
-                    elevation = elevation, softCard = !quietShadow) {
+                    elevation = elevation, softCard = !quietShadow, preferSource = true) {
                     Column(Modifier.fillMaxWidth(), content = content)
                 }
             }
         } else {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.Top) {
-            HeaderNavigationGlass(backdrop, navigation, quietShadow)
+            HeaderNavigationGlass(backdrop, navigation, quietShadow, preferSource = true)
             Box(Modifier.weight(1f)) {
                 GlassControlGroup(backdrop, controlsWidth, actionsWidth, controlsAlpha, actions, content,
                     quietShadow = quietShadow)
@@ -235,7 +235,8 @@ internal fun RankingsFromTab(
                     alpha = merge * merge * (3f - 2f * merge)
                 },
                     cornerRadius = startRadius + (22.dp - startRadius) * progress, role = GlassSurfaceRole.NAVIGATION,
-                    trackPointer = enabled && expanded && progress >= .85f, materialExpansion = { progress }) {
+                    trackPointer = enabled && expanded && progress >= .85f, materialExpansion = { progress },
+                    preferSource = true) {
                     Column(Modifier.wrapContentSize(Alignment.TopStart, unbounded = true).width(endWidth)
                         .onSizeChanged {
                             if (expanded && it.height > 0) {

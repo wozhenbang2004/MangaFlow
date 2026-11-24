@@ -573,7 +573,8 @@ private fun CloudAccountItem(
             Box(Modifier.align(Alignment.TopEnd)) { itemMenu(platformKind == PlatformKind.DESKTOP) }
             Box(Modifier.align(if (platformKind == PlatformKind.DESKTOP) Alignment.TopStart else Alignment.TopEnd).padding(6.dp)) {
                 CopyShelfTool(syncing || addedFeedback && platformKind != PlatformKind.DESKTOP) {
-                    LiquidGlassSurface(backdrop, Modifier, cornerRadius = 12.dp, role = GlassSurfaceRole.ARTWORK) {
+                    LiquidGlassSurface(backdrop, Modifier, cornerRadius = 12.dp, role = GlassSurfaceRole.ARTWORK,
+                        contentColor = colors.onSurface) {
                         MotionSwap(syncing, Modifier.size(24.dp)) { busy ->
                             if (busy) MotionBusyIndicator(Modifier.size(12.dp), strokeWidth = 1.4.dp)
                             else Icon(Icons.Outlined.Check, "已加入本机书架", Modifier.size(14.dp), tint = colors.onSurface)

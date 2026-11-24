@@ -213,7 +213,7 @@ internal fun AnimeSourcesPanel(
                 it.catalog.referenceKey() == draft.catalogKey && it.episode == draft.episode && it.confirmed
             }) mapping = null
     }
-    AnimeLinePanel(visible, overVideo, subject, backdrop, onDismiss = { if (previewing) closePreview() else onDismiss() },
+    AnimeLinePanel(visible, overVideo, backdrop, onDismiss = { if (previewing) closePreview() else onDismiss() },
         onClosed = {
             val requested = pendingSourceWork
             val owner = presentedOwner
@@ -987,9 +987,9 @@ internal fun AnimeSourcesPanel(
 }
 
 @Composable
-private fun AnimeLinePanel(visible: Boolean, overVideo: Boolean, subject: AnimeSubject?, backdrop: HazeState,
+private fun AnimeLinePanel(visible: Boolean, overVideo: Boolean, backdrop: HazeState,
     onDismiss: () -> Unit, onClosed: () -> Unit, content: @Composable () -> Unit) {
-    if (overVideo) AnimePlaybackPanel(visible, true, subject, backdrop, onDismiss, onClosed, content)
+    if (overVideo) AnimePlaybackPanel(visible, true, null, onDismiss, onClosed, content)
     else MotionDialog(visible, onDismiss, maximumWidth = 720.dp, onClosed = onClosed) {
         AnimePanelSurface(backdrop) { content() }
     }

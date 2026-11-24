@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
@@ -497,7 +498,7 @@ private fun AnimeWorkspaceContent(
     fun showSources(episode: AnimeEpisode? = null) {
         controller.cancelPendingResume()
         sourceEpisode = episode
-        sourcesOverVideo = playing && playerFullscreen
+        sourcesOverVideo = playing
         sourcesVisible = true
     }
     fun requestPlayback(episode: AnimeEpisode, option: AnimeEpisodeOption?) {
@@ -670,7 +671,7 @@ private fun AnimeWorkspaceContent(
                     val shownState = shown.detailState
                     val shownDetail = shownState?.detail
                     var heroCollapsed by remember(shown.key) { mutableStateOf(false) }
-                    Column(Modifier.fillMaxSize()) {
+                    AnimeHeaderViewport(floating = shown.depth == 0, header = {
                         BoxWithConstraints(Modifier.fillMaxWidth()) {
                             val preferred = animePreferredColumns(maxWidth, state.discoveryColumns)
                             val actualColumns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
@@ -707,6 +708,7 @@ private fun AnimeWorkspaceContent(
                                     } },
                                     modifier = Modifier.motionInputGate(rootActive),
                                     treatment = MotionTabTreatment.Capsule,
+                                    selectionBackdrop = backdrop,
                                     selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
                                     controlHeight = 44.dp)
                             }
@@ -796,35 +798,40 @@ private fun AnimeWorkspaceContent(
                                 if (stackDesktopTabs) LiquidGlassSurface(backdrop,
                                     Modifier.fillMaxWidth().padding(horizontal = 8.dp)
                                         .graphicsLayer { alpha = controlsAlpha() },
-                                    cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION,
+                                    cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, preferSource = true,
                                     trackPointer = true, elevation = 1.dp) { primaryTabs() }
                             }
                         }
+                    }) { headerInset ->
                         if (shown.depth == 0) {
-                            MotionTabContent(pane, Modifier.weight(1f).motionInputGate(rootActive),
+                            MotionTabContent(pane, Modifier.fillMaxSize().motionInputGate(rootActive),
                                 contentKey = { it }, order = { it.ordinal }) { shownPane ->
                                 val paneActive = rootActive && shownPane == pane
                                 when (shownPane) {
                                     AnimeWorkspacePane.DISCOVERY -> AnimeDiscovery(state, controller, backdrop, discoveryScrolls,
                                         onOpenItem = ::openDiscoveryItem,
                                         onManage = ::showWorkActions, active = paneActive,
-                                        onResume = ::resume, onWatchHistory = { selectLibrary(history = true) })
-                                    AnimeWorkspacePane.DIRECTORY -> Box(Modifier.fillMaxSize().mangaHazeSource(backdrop)) {
+                                        onResume = ::resume, onWatchHistory = { selectLibrary(history = true) },
+                                        contentTopPadding = headerInset)
+                                    AnimeWorkspacePane.DIRECTORY -> Box(Modifier.fillMaxSize()
+                                        .padding(top = headerInset).mangaHazeSource(backdrop)) {
                                         AnimeSourceBrowsePane(controller, backdrop, discoveryScrolls,
                                             columns = state.discoveryColumns, active = paneActive,
                                             onChooseTitle = ::chooseReference, contentBottomPadding = 24.dp)
                                     }
-                                    AnimeWorkspacePane.LIBRARY -> AnimeLibrary(state,
-                                        if (libraryViewState.filter == 2) historyScroll else libraryScroll, controller, backdrop,
-                                        onOpen = ::open, onResume = ::resume,
-                                        onResumeEpisode = ::resumeEpisode,
-                                        onDiscover = { tab = 0; controller.selectDiscoveryTab(AnimeDiscoveryTab.HOME) },
-                                        onReview = { reviewsVisible = true }, viewState = libraryViewState,
-                                        active = paneActive, contentBottomPadding = 24.dp)
+                                    AnimeWorkspacePane.LIBRARY -> Box(Modifier.fillMaxSize().padding(top = headerInset)) {
+                                        AnimeLibrary(state,
+                                            if (libraryViewState.filter == 2) historyScroll else libraryScroll, controller, backdrop,
+                                            onOpen = ::open, onResume = ::resume,
+                                            onResumeEpisode = ::resumeEpisode,
+                                            onDiscover = { tab = 0; controller.selectDiscoveryTab(AnimeDiscoveryTab.HOME) },
+                                            onReview = { reviewsVisible = true }, viewState = libraryViewState,
+                                            active = paneActive, contentBottomPadding = 24.dp)
+                                    }
                                 }
                             }
                         } else if (shownState != null && shownDetail != null) {
-                            Box(Modifier.weight(1f)) {
+                            Box(Modifier.fillMaxSize()) {
                                 detailState.SaveableStateProvider(shown.key) {
                                     AnimeDetailPane(shownDetail, shownState, controller, backdrop,
                                         remember(shownDetail.subject.id) {
@@ -836,7 +843,7 @@ private fun AnimeWorkspaceContent(
                                         active = active && shown.key == route.key && !overlayVisible && !searchPresent)
                                 }
                             }
-                        } else Box(Modifier.weight(1f)) {
+                        } else Box(Modifier.fillMaxSize()) {
                             AnimeMessage(if (state.detailLoading) "正在载入番剧" else "番剧详情未取得",
                                 state.detailError ?: openingSubject?.title ?: openingReference?.title,
                                 action = if (state.detailLoading) null else "重试",
@@ -1034,6 +1041,29 @@ private fun AnimeWorkspaceContent(
         })
     AnimeResumePanel(state.pendingPlayback, backdrop, onChoose = controller::confirmPlayback,
         onDismiss = controller::dismissPlaybackChoice)
+}
+
+/** Measures the header before the feed, so the first item starts clear and later items can scroll underneath. */
+@Composable
+private fun AnimeHeaderViewport(floating: Boolean, header: @Composable () -> Unit,
+    content: @Composable (Dp) -> Unit) {
+    if (!floating) {
+        Column(Modifier.fillMaxSize()) {
+            header()
+            Box(Modifier.weight(1f)) { content(0.dp) }
+        }
+        return
+    }
+    SubcomposeLayout(Modifier.fillMaxSize()) { constraints ->
+        val toolbar = subcompose("header", header).single().measure(constraints.copy(minHeight = 0))
+        val inset = toolbar.height.toDp()
+        val body = subcompose("page") { Box(Modifier.fillMaxSize()) { content(inset) } }
+            .single().measure(constraints)
+        layout(body.width, body.height) {
+            body.placeRelative(0, 0)
+            toolbar.placeRelative(0, 0, zIndex = 1f)
+        }
+    }
 }
 
 /** Desktop has a permanent navigation rail, so it must not receive an empty menu surface. */

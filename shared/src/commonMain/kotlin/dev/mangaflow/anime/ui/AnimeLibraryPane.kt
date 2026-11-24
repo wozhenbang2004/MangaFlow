@@ -391,11 +391,9 @@ internal fun AnimeLibraryWorkRow(
                     AnimePoster(entry.subject, Modifier.fillMaxSize().mangaHazeSource(artwork))
                     LiquidGlassSurface(artwork, Modifier.padding(4.dp).size(28.dp),
                         cornerRadius = 14.dp, role = GlassSurfaceRole.ARTWORK,
-                        interactionSource = interaction, elevation = 0.dp, surfaceColor = Color.Black) {
-                        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .46f)),
-                            contentAlignment = Alignment.Center) {
-                            Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp), tint = Color.White)
-                        }
+                        trackPointer = true, elevation = 0.dp, preferSource = true,
+                        surfaceColor = Color.Black, contentColor = Color.White) {
+                        Icon(Icons.Outlined.PlayArrow, null, Modifier.align(Alignment.Center).size(19.dp))
                     }
                 }
             } else AnimePoster(entry.subject, Modifier.width(46.dp).height(66.dp))

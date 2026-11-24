@@ -102,6 +102,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -173,11 +174,13 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -636,7 +639,7 @@ fun ReaderScreen(
     val background = preferences.theme.background()
     val colors = MaterialTheme.colorScheme
     val lightChrome = colors.surface.luminance() > .5f
-    val readerBackdrop = rememberHazeState()
+    val readerBackdrop = key(manga.id) { rememberHazeState() }
     val readingChapterId = chapterId
     val resolvePage: ReaderPageResolver = remember(manga.id, chapterId, chapter.sourceId,
         chapter.sourceMangaId, downloadStore, adultImageContext) {
@@ -970,7 +973,7 @@ fun ReaderScreen(
     }
     val chaptersPanel: @Composable (Boolean) -> Unit = { embedded ->
         ReaderChaptersDialog(
-            visible = showChapters, chapters = chapters, currentId = chapterId,
+            visible = showChapters, chapters = chapters, currentId = chapterId, backdrop = readerBackdrop,
             manga = manga, library = libraryStore,
             downloadStore = downloadStore, loading = chaptersLoading, error = chaptersError, onRetry = onRetryChapters,
             embedded = embedded,
@@ -1181,20 +1184,30 @@ fun ReaderScreen(
             }
         },
     ) {
-    Box(Modifier.fillMaxSize().then(keyboardModifier)) {
-        // Sample the existing artwork and dim layer; controls stay outside their own backdrop.
-        Box(Modifier.fillMaxSize().graphicsLayer {
-            // Only a real source handoff arms this finite arrival. Keep the current
-            // image readable, preserve its own zoom/cursor, and never fade to empty.
+    val cutout = WindowInsets.displayCutout
+    Box(Modifier.fillMaxSize().then(keyboardModifier).drawBehind {
+        // A full page already paints its paper. Only gutters and the brief handoff expose this backing.
+        if (sourceArrival.value < 1f || cutout.getLeft(this, layoutDirection) > 0 || cutout.getRight(this, layoutDirection) > 0) {
+            drawRect(Color.Black.copy(alpha = dimPreview.value ?: preferences.dimAmount).compositeOver(background))
+        }
+    }) {
+        // Exactly one viewport owns the page sample. Record its final pan, handoff and dim,
+        // leaving chapter-edge controls, scrollbars and the guided-mode dock outside the layer.
+        val artworkModifier = Modifier.mangaHazeSource(readerBackdrop).graphicsLayer {
             alpha = .90f + .10f * sourceArrival.value
             translationX = (1f - sourceArrival.value) * 6.dp.toPx()
-        }.mangaHazeSource(readerBackdrop).background(background)
-            .then(if (loading || error != null) Modifier.clickable(
+        }.background(background).drawWithContent {
+            drawContent()
+            val dim = dimPreview.value ?: preferences.dimAmount
+            if (dim > 0f) drawRect(Color.Black.copy(alpha = dim))
+        }
+        Box(Modifier.fillMaxSize().then(if (loading || error != null) Modifier.clickable(
                 interactionSource = remember { MutableInteractionSource() }, indication = null,
                 onClickLabel = "显示或收起阅读工具",
                 onClick = { controlsVisible = !controlsVisible },
             ) else Modifier)) {
             var preparationViewport: ReaderPrefetchViewport? = null
+            if (loading || error != null || pages.isEmpty()) Box(Modifier.matchParentSize().then(artworkModifier))
             when {
                 loading || error != null -> if (chapterWaitVisible) ReaderImageRecovery(
                     index = null, failure = error.orEmpty(), pending = loading,
@@ -1260,9 +1273,10 @@ fun ReaderScreen(
                         active = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
                             !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking &&
                             repairState.selection == null && !chapterChangeRequested,
-                        backdrop = readerBackdrop,
+                        backdrop = readerBackdrop, artworkModifier = artworkModifier,
                         bottomClearancePx = if (controlsVisible) bottomControlsHeightPx else 0,
                     ) else ChapterPages(
+                        artworkModifier = artworkModifier,
                         pages = pages, sourceId = chapter.sourceId, prefetchRequests = sharedPrefetchRequests, prefetchFailures = sharedPrefetchFailures,
                         headers = headers,
                         resolvePage = resolvePage,
@@ -1330,7 +1344,7 @@ fun ReaderScreen(
                                     else -> "已到第一话"
                                 }, colors.onSurface, openPreviousChapter,
                                 onRetryChapters.takeIf { !chaptersLoading && (chaptersError != null || chapterIndex < 0) },
-                                previous = true)
+                                backdrop = readerBackdrop, previous = true)
                         },
                         endContent = { pull ->
                             if (!controlsVisible && (!immersive || pull.progress > 0f) &&
@@ -1344,7 +1358,7 @@ fun ReaderScreen(
                                         chapterIndex < 0 -> "目录暂不可用"
                                         else -> "已到最后一话"
                                     },
-                                    foreground = colors.onSurface,
+                                    foreground = colors.onSurface, backdrop = readerBackdrop,
                                     onNext = openNextChapter,
                                     onRetry = onRetryChapters.takeIf { !chaptersLoading && (chaptersError != null || chapterIndex < 0) },
                                 )
@@ -1414,9 +1428,6 @@ fun ReaderScreen(
                         PreparationMode.SMART in enhancementPolicy.preparation,
                     failedLoads = viewport.failedLoads, download = activeDownload, visibleRange = viewport.visibleRange)
             }
-
-            // Read the live dim preview during drawing; dragging does not publish or persist preferences.
-            Box(Modifier.fillMaxSize().drawBehind { drawRect(Color.Black.copy(alpha = dimPreview.value ?: preferences.dimAmount)) })
         }
 
         AnimatedVisibility(visible = sourceLoading && sourceSwitchName.isNotBlank() || sourceError != null,
@@ -1425,25 +1436,26 @@ fun ReaderScreen(
                 .padding(top = 60.dp),
             enter = fadeIn(tween(if (motionEnabled) MangaMotion.Quick else 0)),
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Quick else 0))) {
-            Row(Modifier.padding(horizontal = 16.dp).widthIn(max = 420.dp)
-                .background(colors.surface.copy(alpha = .94f), RoundedCornerShape(14.dp))
-                .padding(start = 13.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (sourceLoading) CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp,
-                    color = colors.onSurfaceVariant)
-                Column(Modifier.weight(1f, fill = false)) {
-                    Text(if (sourceLoading) "准备来源 · $sourceSwitchName"
-                        else readerPageErrorLabel(sourceError.orEmpty()) + " · 已保留当前页",
-                        fontSize = 12.sp, color = colors.onSurface, maxLines = 2,
-                        overflow = TextOverflow.Ellipsis)
-                    if (sourceLoading) ReaderWaitCaption(sourceSwitchWait.startedAt, true, colors.onSurfaceVariant)
+            LiquidGlassSurface(readerBackdrop, Modifier.padding(horizontal = 16.dp).widthIn(max = 420.dp),
+                role = GlassSurfaceRole.POPOVER, cornerRadius = 18.dp, softCard = true) {
+                Row(Modifier.padding(start = 13.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (sourceLoading) CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp,
+                        color = colors.onSurfaceVariant)
+                    Column(Modifier.weight(1f, fill = false)) {
+                        Text(if (sourceLoading) "准备来源 · $sourceSwitchName"
+                            else readerPageErrorLabel(sourceError.orEmpty()) + " · 已保留当前页",
+                            fontSize = 12.sp, color = colors.onSurface, maxLines = 2,
+                            overflow = TextOverflow.Ellipsis)
+                        if (sourceLoading) ReaderWaitCaption(sourceSwitchWait.startedAt, true, colors.onSurfaceVariant)
+                    }
+                    if (!sourceLoading) TextButton(onClick = {
+                        sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true
+                    }) { Text("其他来源", fontSize = 11.sp, color = colors.onSurface) }
+                    ReaderIcon(Icons.Rounded.Close, if (sourceLoading) "停止换源" else "关闭换源提示",
+                        interactive = active && !leavingReader, onClick = onCancelSourceSelection)
                 }
-                if (!sourceLoading) TextButton(onClick = {
-                    sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true
-                }) { Text("其他来源", fontSize = 11.sp, color = colors.onSurface) }
-                ReaderIcon(Icons.Rounded.Close, if (sourceLoading) "停止换源" else "关闭换源提示",
-                    interactive = active && !leavingReader, onClick = onCancelSourceSelection)
             }
         }
 
@@ -1487,7 +1499,10 @@ fun ReaderScreen(
             LiquidGlassSurface(
                 state = readerBackdrop,
                 role = GlassSurfaceRole.NAVIGATION,
+                cornerRadius = 28.dp,
+                preferSource = true,
                 trackPointer = true,
+                interactionSource = topChromeInteraction,
                 softCard = true,
                 modifier = Modifier.widthIn(max = MangaLayout.ListWidth).fillMaxWidth()
                     .hoverable(topChromeInteraction, enabled = desktop)
@@ -1497,8 +1512,7 @@ fun ReaderScreen(
                     .padding(horizontal = 12.dp, vertical = 4.dp),
             ) {
                 // Retain Surface's input shield on blank chrome without consuming child gestures.
-                Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).pointerInput(Unit) {}
-                    .background(colors.surface.copy(alpha = .48f)).padding(horizontal = 4.dp),
+                Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).pointerInput(Unit) {}.padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回漫画详情", interactive = readerToolsVisible, onClick = leaveReader)
                     Column(Modifier.weight(1f).padding(start = 2.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)) {
@@ -1563,14 +1577,14 @@ fun ReaderScreen(
                 LiquidGlassSurface(
                     state = readerBackdrop,
                     role = GlassSurfaceRole.READING_DOCK,
+                    preferSource = true,
                     trackPointer = true,
+                    interactionSource = bottomChromeInteraction,
                     softCard = true,
                     modifier = Modifier.fillMaxWidth(),
-                    cornerRadius = 22.dp,
+                    cornerRadius = 28.dp,
                 ) {
-                    Column(Modifier.fillMaxWidth().pointerInput(Unit) {}
-                        .background(colors.surface.copy(alpha = .48f))
-                        .padding(horizontal = 10.dp, vertical = 4.dp)) {
+                    Column(Modifier.fillMaxWidth().pointerInput(Unit) {}.padding(horizontal = 10.dp, vertical = 4.dp)) {
                         if (pages.isNotEmpty()) key(chapterId) {
                             ReaderProgressSlider(
                                 pageIndex = pageIndex, pages = pages, pendingPage = targetPage,
@@ -1850,7 +1864,7 @@ fun ReaderScreen(
         )
 
         if (compareEnhancement && enhancementState.assets[pageIndex] != null) {
-            LiquidGlassSurface(state = readerBackdrop, role = GlassSurfaceRole.NAVIGATION, softCard = true,
+            LiquidGlassSurface(state = readerBackdrop, role = GlassSurfaceRole.READING_DOCK, preferSource = true, softCard = true,
                 modifier = Modifier.align(Alignment.BottomCenter).windowInsetsPadding(readerNavigationInsets())
                     .padding(horizontal = 20.dp, vertical = 12.dp).widthIn(max = 400.dp).fillMaxWidth()) {
                 ReaderComparisonControls(enhancementDivider) { comparisonTarget = null }
@@ -1862,7 +1876,8 @@ fun ReaderScreen(
             enter = fadeIn(tween(if (motionEnabled) MangaMotion.Content else 0)),
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)),
         ) {
-            ReaderSurface(Modifier.padding(32.dp), shape = RoundedCornerShape(16.dp)) {
+            LiquidGlassSurface(readerBackdrop, Modifier.padding(32.dp), role = GlassSurfaceRole.POPOVER,
+                cornerRadius = 16.dp, softCard = true) {
                 Text(downloadMessage ?: displayedDownloadMessage, Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
                     color = colors.onSurface, fontSize = 13.sp)
             }
@@ -2024,6 +2039,7 @@ private fun ReaderComparisonControls(divider: MutableFloatState, onClose: () -> 
 @Composable
 private fun ChapterPages(
     pages: List<Page>,
+    artworkModifier: Modifier,
     sourceId: String,
     prefetchRequests: MutableMap<Int, ReaderPagePrefetch>,
     prefetchFailures: MutableMap<Int, String>,
@@ -2317,9 +2333,10 @@ private fun ChapterPages(
         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
             .bottomPullLoad(pull).bottomPullLoad(previousPull)) {
             val desktop = platformKind == PlatformKind.DESKTOP
-            LazyColumn(state = list, modifier = Modifier.then(if (desktop) Modifier.padding(horizontal = 14.dp) else Modifier)
-                .widthIn(max = MangaLayout.ReaderPageWidth)
-                .fillMaxSize().align(Alignment.TopCenter).onSizeChanged { contentWidthPx = it.width },
+            LazyColumn(state = list, modifier = Modifier.matchParentSize().then(artworkModifier)
+                .then(if (desktop) Modifier.padding(horizontal = 14.dp) else Modifier)
+                .wrapContentWidth(Alignment.CenterHorizontally).widthIn(max = MangaLayout.ReaderPageWidth)
+                .fillMaxSize().onSizeChanged { contentWidthPx = it.width },
                 verticalArrangement = Arrangement.spacedBy(if (preferences.pageGap) 6.dp else 0.dp)) {
                 itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }, contentType = { _, _ -> "page" }) { index, page ->
                     ReaderPage(
@@ -2524,7 +2541,7 @@ private fun ChapterPages(
             CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
             HorizontalPager(
                 state = pager,
-                modifier = Modifier.fillMaxSize().onSizeChanged { contentWidthPx = it.width },
+                modifier = Modifier.fillMaxSize().then(artworkModifier).onSizeChanged { contentWidthPx = it.width },
                 reverseLayout = swipeRightNext,
                 userScrollEnabled = active && !spreadZoomed(pager.currentPage),
                 // The separate bounded warmer owns offscreen previews; the pager composes only its viewport.
@@ -4656,6 +4673,7 @@ private fun ReaderSpreadDialog(
 @Composable
 private fun ReaderChaptersDialog(
     visible: Boolean,
+    backdrop: HazeState,
     manga: Manga,
     library: LibraryStore,
     chapters: List<Chapter>,
@@ -4701,8 +4719,7 @@ private fun ReaderChaptersDialog(
         val saved = remember(downloads) { downloads.associateBy { it.chapter.id } }
         val surface = if (embedded) Modifier.fillMaxSize().motionInputGate(visible)
             else Modifier.padding(horizontal = 16.dp).widthIn(max = 600.dp).fillMaxWidth()
-        if (!embedded) ConfigureReaderDialogWindow(.12f)
-        ReaderSurface(surface) {
+        ReaderDialogSurface(surface, backdrop, dialogWindow = !embedded) {
             Column((if (embedded) Modifier.fillMaxSize() else Modifier.heightIn(max = LocalMangaWindow.current.panelHeight))
                 .padding(horizontal = if (embedded) 12.dp else 16.dp, vertical = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {

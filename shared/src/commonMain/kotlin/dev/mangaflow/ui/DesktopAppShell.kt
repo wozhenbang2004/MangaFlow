@@ -3,6 +3,7 @@ package dev.mangaflow.ui
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -52,6 +53,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.SearchTarget
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
+import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -69,6 +71,8 @@ internal fun DesktopNavigationWorkspace(
     selectedIndex: Int,
     version: String,
     backdrop: HazeState,
+    workspaceBackdrop: HazeState,
+    wallpaper: @Composable () -> Unit,
     onToggle: () -> Unit,
     onNavigate: (Int) -> Unit,
     onSearch: () -> Unit,
@@ -76,7 +80,9 @@ internal fun DesktopNavigationWorkspace(
     profileControl: @Composable (compact: Boolean) -> Unit = {},
     content: @Composable () -> Unit,
 ) {
-    Box(modifier.fillMaxSize()) {
+    // Global dialogs see the assembled window. The rail samples the painted scene
+    // beneath it, never the rail itself or a snapshot of the adjacent content pane.
+    Box(modifier.fillMaxSize().then(if (visible) Modifier.mangaHazeSource(backdrop) else Modifier)) {
         if (platformKind != PlatformKind.DESKTOP) {
             content()
         } else {
@@ -86,8 +92,12 @@ internal fun DesktopNavigationWorkspace(
                 if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
                 label = "desktop-navigation-width",
             )
+            if (visible) {
+                Box(Modifier.matchParentSize().mangaHazeSource(workspaceBackdrop, zIndex = -1f)
+                    .background(MaterialTheme.colorScheme.background)) { wallpaper() }
+            }
             Row(Modifier.fillMaxSize()) {
-                if (visible) LiquidGlassSurface(backdrop, Modifier.layout { measurable, constraints ->
+                if (visible) LiquidGlassSurface(workspaceBackdrop, Modifier.layout { measurable, constraints ->
                     // Width changes must remeasure the workspace, but they do not need
                     // to recompose the navigation, its glass styles and every action.
                     val pixels = constraints.constrainWidth(width.value.roundToPx())

@@ -1,9 +1,6 @@
 package dev.mangaflow.ui
 
-import dev.mangaflow.ui.platform.*
-
-import dev.mangaflow.platform.*
-
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
@@ -38,6 +35,7 @@ import dev.chrisbanes.haze.glass.GlassReducedMotionPolicy
 import dev.chrisbanes.haze.glass.GlassStyle
 import dev.chrisbanes.haze.glass.GlassTransformTarget
 import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
+import dev.chrisbanes.haze.glass.OpticalSizePoint
 import dev.chrisbanes.haze.glass.OpticalSizeValue
 import dev.chrisbanes.haze.glass.RefractionProfile
 import dev.chrisbanes.haze.glass.hazeGlass
@@ -46,7 +44,17 @@ import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 
-internal enum class GlassSurfaceRole { CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, READING_DOCK, POPOVER, DRAWER, GALLERY, DETAIL_HERO }
+internal enum class GlassSurfaceRole { CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, SELECTION, READING_DOCK, POPOVER, DRAWER, GALLERY, DETAIL_HERO }
+
+// The short side grows as a compact rail expands into a search field or a two-row dock.
+private val toolbarBlur = OpticalSizeValue.Responsive(
+    OpticalSizePoint(44.dp, 5.dp), OpticalSizePoint(84.dp, 11.dp), OpticalSizePoint(144.dp, 17.dp),
+)
+private val toolbarDepth = OpticalSizeValue.Responsive(
+    OpticalSizePoint(44.dp, .58f), OpticalSizePoint(84.dp, .78f), OpticalSizePoint(144.dp, .92f),
+)
+private val glassPressIn = spring<Float>(dampingRatio = 1f, stiffness = MangaMotion.PressAttackStiffness)
+private val glassPressOut = spring<Float>(dampingRatio = MangaMotion.PressDamping, stiffness = MangaMotion.PressStiffness)
 
 /** Application role/layout glue; the complete Haze 2.1 runtime owns every material stage. */
 @Composable
@@ -63,75 +71,95 @@ internal fun LiquidGlassSurface(
     materialExpansion: () -> Float = { 0f },
     groupKey: Any? = null,
     surfaceShape: RoundedCornerShape? = null,
+    preferSource: Boolean = false,
+    contentColor: Color? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val surface = surfaceColor ?: colors.surface
     val light = surface.luminance() > .5f
-    val foreground = if (surfaceColor == null) colors.onSurface
+    val foreground = contentColor ?: if (surfaceColor == null) colors.onSurface
         else if (light) Color(0xFF242426) else Color.White
     val tintColor = if (softCard && surfaceColor == null) lerp(colors.background, surface, .70f) else surface
+    val selectionTint = if (role == GlassSurfaceRole.SELECTION)
+        lerp(tintColor, foreground, if (light) .18f else .12f) else tintColor
+    val protectArtworkInk = role == GlassSurfaceRole.ARTWORK && contentColor != null
     val shape = remember(cornerRadius, surfaceShape) { surfaceShape ?: RoundedCornerShape(cornerRadius) }
     val liquid = role != GlassSurfaceRole.PANEL && role != GlassSurfaceRole.POPOVER && role != GlassSurfaceRole.DRAWER
-    val clear = role == GlassSurfaceRole.CONTROL || role == GlassSurfaceRole.ARTWORK || role == GlassSurfaceRole.THUMB
+    val clear = role == GlassSurfaceRole.CONTROL || role == GlassSurfaceRole.ARTWORK ||
+        role == GlassSurfaceRole.THUMB || role == GlassSurfaceRole.SELECTION
     val motion = LocalMotionEnabled.current
+    val accessibility = LocalGlassAccessibilitySettings.current
     // Declaring hover/press installs Haze's non-consuming, node-local pointer observer.
     // External sources add focus/keyboard/ancestor presses; raw touch needs no second detector.
     val interactive = liquid && motion && (trackPointer || interactionSource != null)
     val expansion = rememberUpdatedState(materialExpansion)
     // Popups/dialogs, artwork-specific samples and nested glass controls need the
     // explicitly selected source. A window backdrop cannot cross a window boundary.
-    val input = remember(state, role) {
-        when (role) {
-            GlassSurfaceRole.NAVIGATION, GlassSurfaceRole.READING_DOCK -> HazeInput.Backdrop(state)
-            else -> HazeInput.Sources(state, retention = if (role == GlassSurfaceRole.DRAWER)
-                HazeSourceRetention.ClearWhenUnavailable else HazeSourceRetention.KeepLastFrame)
-        }
+    val input = remember(state, role, preferSource) {
+        val sources = HazeInput.Sources(state, retention = if (preferSource || role == GlassSurfaceRole.DRAWER)
+            HazeSourceRetention.ClearWhenUnavailable else HazeSourceRetention.KeepLastFrame)
+        if (!preferSource && (role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.READING_DOCK))
+            HazeInput.Backdrop(sources)
+        else sources
     }
     val material = if (liquid) {
         val themedGlass = (if (clear) GlassStyle.clear else GlassStyle.regular).material3(tintColor)
-        val glassStyle = remember(themedGlass, shape, role, interactive, light, tintColor, surfaceColor) {
+        val glassStyle = remember(themedGlass, shape, role, interactive, light, accessibility, selectionTint, protectArtworkInk) {
             themedGlass.then {
                 shape(shape)
                 val progress = expansion.value().coerceIn(0f, 1f)
                 tint(tintColor.copy(alpha = if (role == GlassSurfaceRole.GALLERY) .05f else .025f + .025f * progress))
-                // Keep the official Clear/Regular material and its responsive diffusion.
-                // Let real content show through the body; the SDK bends and lights its
-                // perimeter, capping displacement to half the actual shortest side.
-                if (liquid && role != GlassSurfaceRole.DETAIL_HERO) {
+                if (role != GlassSurfaceRole.DETAIL_HERO) {
                     lightPosition(Alignment.TopStart)
                     edgeSoftness(1.dp)
                 }
                 when (role) {
                     GlassSurfaceRole.CONTROL, GlassSurfaceRole.THUMB -> {
                         val thumb = role == GlassSurfaceRole.THUMB
-                        optics { copy(refractionStrength = if (thumb) .52f else .68f,
+                        optics { copy(refractionStrength = if (thumb) .66f else .78f,
                             refractionHeightFraction = .28f,
-                            refractionDisplacement = if (thumb) 7.dp else 14.dp,
-                            refractionProfile = RefractionProfile.Edge(if (thumb) 4.dp else 9.dp),
+                            refractionDisplacement = if (thumb) 7.dp else 15.dp,
+                            refractionProfile = RefractionProfile.Edge(if (thumb) 4.dp else 8.dp),
                             refractionDetailIntensity = .26f) }
                         tint(tintColor.copy(alpha = if (light) .035f else .055f))
                         whitePoint(if (light) .08f else -.12f)
-                        specularIntensity(if (light) .38f else .30f)
-                        ambientResponse(.10f)
-                        edgeShadow(Color.Transparent)
+                        specularIntensity(if (light) .58f else .49f)
+                        ambientResponse(.15f)
+                        edgeShadow(Color.Black.copy(alpha = if (light) .12f else .19f))
                         chromaticAberrationStrength(0f)
                         contentNormalBlend(.08f)
                     }
+                    GlassSurfaceRole.SELECTION -> {
+                        // This lens resamples the artwork, so it owns contrast for its label.
+                        // A progress thumb has no label and can stay fully clear.
+                        optics { copy(refractionStrength = .70f + .08f * progress,
+                            refractionDisplacement = 8.dp + 2.dp * progress,
+                            refractionProfile = RefractionProfile.Edge(5.dp),
+                            refractionDetailIntensity = 0f, blurRadius = OpticalSizeValue.Fixed(4.dp)) }
+                        tint(selectionTint.copy(alpha = if (light) .61f else .65f))
+                        whitePoint(if (light) .20f else -.16f)
+                        specularIntensity(.52f + .10f * progress)
+                        edgeShadow(Color.Black.copy(alpha = if (light) .14f else .24f))
+                        ambientResponse(.14f)
+                        chromaticAberrationStrength(0f)
+                    }
                     GlassSurfaceRole.NAVIGATION, GlassSurfaceRole.READING_DOCK -> {
                         val dock = role == GlassSurfaceRole.READING_DOCK
-                        optics { copy(refractionStrength = if (dock) .50f else .56f + .04f * progress,
-                            refractionHeightFraction = .18f,
-                            refractionDisplacement = if (dock) 12.dp else 16.dp + 2.dp * progress,
-                            refractionProfile = RefractionProfile.Edge(if (dock) 7.dp else 9.dp + progress.dp)) }
-                        tint(tintColor.copy(alpha = (if (dock) .05f else .035f) + .02f * progress))
-                        // Stabilize foreground polarity even over opposite-tone comic pages;
-                        // this is tonal protection, independent of blur and rim highlights.
-                        whitePoint(if (light) if (dock) .34f else .30f else if (dock) -.38f else -.34f)
-                        specularIntensity(if (light) .30f else .24f)
-                        ambientResponse(.075f)
-                        edgeShadow(Color.Transparent)
-                        contentNormalBlend(.065f)
+                        optics { copy(refractionStrength = if (dock) .65f else .72f,
+                            refractionHeightFraction = .20f,
+                            refractionDisplacement = 15.dp + 3.dp * progress,
+                            refractionProfile = RefractionProfile.Edge(8.dp + 2.dp * progress),
+                            blurRadius = toolbarBlur, depth = toolbarDepth) }
+                        // A single tonal layer protects glyphs over opposite-tone artwork.
+                        // Tint is also honoured by Haze's software fallback, unlike whitePoint.
+                        val bodyTint = if (light) .54f else .56f
+                        tint(tintColor.copy(alpha = bodyTint + (if (dock) .04f else 0f) + .025f * progress))
+                        whitePoint(if (light) .07f else -.08f)
+                        specularIntensity(if (light) .52f else .43f)
+                        ambientResponse(.14f)
+                        edgeShadow(Color.Black.copy(alpha = if (light) .11f else .20f))
+                        contentNormalBlend(.10f)
                     }
                     GlassSurfaceRole.DETAIL_HERO -> {
                         // One large passive lens. Keep the long-text interior stable and
@@ -149,7 +177,7 @@ internal fun LiquidGlassSurface(
                     }
                     else -> Unit
                 }
-                if (liquid && role != GlassSurfaceRole.GALLERY) chromaMultiplier(1.025f)
+                if (role != GlassSurfaceRole.GALLERY) chromaMultiplier(1.05f)
                 if (role == GlassSurfaceRole.ARTWORK) {
                     // Keep the cover visible through a shallow Clear lens, rather than
                     // whitening the action into another opaque button over the artwork.
@@ -157,13 +185,16 @@ internal fun LiquidGlassSurface(
                         refractionDisplacement = 12.dp, depth = OpticalSizeValue.Fixed(.50f),
                         blurRadius = OpticalSizeValue.Fixed(2.5.dp), refractionProfile = RefractionProfile.Edge(8.dp),
                         refractionDetailIntensity = .22f) }
-                    tint(tintColor.copy(alpha = if (light) .035f else .055f))
+                    val artworkTint = if (protectArtworkInk) {
+                        if (light) .54f else .56f
+                    } else if (light) .035f else .055f
+                    tint(tintColor.copy(alpha = artworkTint))
                     whitePoint(if (light) .08f else -.10f)
                     contrast(0f)
                     chromaMultiplier(1.015f)
-                    ambientResponse(.085f)
-                    specularIntensity(if (light) .32f else .26f)
-                    edgeShadow(Color.Transparent)
+                    ambientResponse(.14f)
+                    specularIntensity(if (light) .56f else .46f)
+                    edgeShadow(Color.Black.copy(alpha = if (light) .11f else .17f))
                     chromaticAberrationStrength(0f)
                     contentNormalBlend(.06f)
                 }
@@ -178,19 +209,20 @@ internal fun LiquidGlassSurface(
                     chromaMultiplier(1.025f)
                 }
                 if (interactive) {
-                    interactionLightRadiusFraction(.60f)
+                    interactionLightRadiusFraction(if (clear) .76f else .66f)
                     hovered { animate(tween(MangaMotion.Quick), tween(MangaMotion.Quick)) { lightingIntensity(.28f) } }
                     focused { animate(tween(MangaMotion.Quick), tween(MangaMotion.Content)) { lightingIntensity(.36f) } }
                     pressed {
-                        animate(tween(MangaMotion.Quick), tween(MangaMotion.Content)) {
-                            lightingIntensity(if (role == GlassSurfaceRole.ARTWORK) .48f else if (clear) .60f else .46f)
-                            refractionMultiplier(if (clear) 1.10f else 1.065f)
-                            whitePointDelta(.025f)
-                            // Long controls already own their content press motion. Keep the
-                            // member boundary stable while Haze joins/separates the group.
-                            scale(if (clear) .985f else 1f)
+                        animate(glassPressIn, glassPressOut) {
+                            lightingIntensity(if (clear) .72f else .54f)
+                            refractionMultiplier(if (clear) 1.16f else 1.10f)
+                            whitePointDelta(if (light) .025f else .015f)
+                            scale(scaleX = if (clear) .975f else .997f, scaleY = if (clear) .95f else .982f)
                         }
                     }
+                }
+                if (accessibility.reduceTransparency || accessibility.increaseContrast) {
+                    tint(tintColor.copy(alpha = if (accessibility.reduceTransparency) 1f else .84f))
                 }
             }
         }
@@ -204,9 +236,8 @@ internal fun LiquidGlassSurface(
             groupKey = groupKey,
         )
     } else {
-        val preset = if (role == GlassSurfaceRole.DRAWER) HazeMaterials.thin(tintColor) else HazeMaterials.regular(tintColor)
+        val preset = if (role == GlassSurfaceRole.PANEL) HazeMaterials.regular(tintColor) else HazeMaterials.thin(tintColor)
         val material3Blur = HazeBlurStyle.Material3(tintColor)
-        val accessibility = LocalGlassAccessibilitySettings.current
         val blurStyle = remember(material3Blur, preset, tintColor, accessibility) {
             material3Blur.then(preset).then {
                 noiseFactor(0f)
@@ -214,7 +245,8 @@ internal fun LiquidGlassSurface(
                     colorEffects(listOf(HazeColorEffect.tint(tintColor.copy(alpha =
                         if (accessibility.reduceTransparency) 1f else .86f))))
                 }
-                fallbackColorEffect(HazeColorEffect.tint(tintColor.copy(alpha = .90f)))
+                fallbackColorEffect(HazeColorEffect.tint(tintColor.copy(alpha =
+                    if (accessibility.reduceTransparency || accessibility.increaseContrast) 1f else .90f)))
             }
         }
         Modifier.hazeBlur(input = input, style = blurStyle)

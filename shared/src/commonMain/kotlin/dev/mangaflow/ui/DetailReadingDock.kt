@@ -131,89 +131,92 @@ internal fun DetailReadingDock(
         val fullWidth = if (persistent) maxWidth else minOf(maxWidth, 280.dp + 40.dp * (fontScale - 1f).coerceIn(0f, 1f))
         val compactWidth = minOf(fullWidth, 104.dp * fontScale.coerceAtMost(1.6f))
         val width = lerp(fullWidth, compactWidth, collapse)
-        Box(Modifier.align(BiasAlignment(collapse, 1f)).width(width).heightIn(min = 48.dp)
+        val enabled = active && canRead && visibility > .9f
+        val readTarget = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+            .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
+                enabled = enabled, onLongClickLabel = "阅读选项",
+                onLongClick = if (desktop) null else ({ actions = true }),
+                onClick = {
+                    if (preferred != null) onContinuePreferred?.invoke()
+                    else if (resume != null) onContinue(resume)
+                    else firstChapter?.let(onRead)
+                })
+            .then(if (desktop || !enabled) Modifier else Modifier.pointerInput(mangaId) {
+                var travel = 0f
+                detectVerticalDragGestures(onDragStart = { travel = 0f }, onVerticalDrag = { change, dy ->
+                    travel += dy
+                    if (travel < -24.dp.toPx()) { change.consume(); actions = true }
+                })
+            })
+            .motionPress(interaction, enabled = enabled, pressedScale = .985f)
+            .semantics(mergeDescendants = true) {
+                contentDescription = listOf(actionTitle.takeIf { canRead }.orEmpty(), chapterTitle, subtitle)
+                    .filter(String::isNotBlank).joinToString("，")
+            }
+        Box(Modifier.align(BiasAlignment(collapse, 1f)).width(width)
             .onSizeChanged { onHeightChanged(it.height) }.graphicsLayer {
                 alpha = visibility
                 translationY = (1f - visibility) * 86.dp.toPx()
             }.motionInputGate(active && visibility > .9f)) {
-            LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().align(Alignment.Center),
-                cornerRadius = lerp(28.dp, 18.dp, collapse), role = GlassSurfaceRole.READING_DOCK,
-                interactionSource = interaction, trackPointer = true,
-                softCard = true) {
-                DesktopContextMenuArea(desktopActions) {
-                Row(Modifier.fillMaxWidth()
-                    .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
-                        enabled = active && canRead,
-                        onLongClickLabel = "阅读选项", onLongClick = if (desktop) null else ({ actions = true }),
-                        onClick = {
-                            if (preferred != null) onContinuePreferred?.invoke()
-                            else if (resume != null) onContinue(resume)
-                            else firstChapter?.let(onRead)
-                        })
-                    .then(if (desktop) Modifier else Modifier.pointerInput(mangaId, canRead, active) {
-                        if (canRead && active) {
-                            var travel = 0f
-                            detectVerticalDragGestures(onDragStart = { travel = 0f }, onVerticalDrag = { change, dy ->
-                                travel += dy
-                                if (travel < -24.dp.toPx()) { change.consume(); actions = true }
-                            })
-                        }
-                    }).motionPress(interaction, enabled = canRead, pressedScale = .985f)
-                    .heightIn(min = minimumHeight)
-                    .padding(horizontal = lerp(16.dp, 10.dp, collapse), vertical = 4.dp)
-                    .semantics(mergeDescendants = true) {
-                        contentDescription = listOf(actionTitle.takeIf { canRead }.orEmpty(), chapterTitle, subtitle)
-                            .filter(String::isNotBlank).joinToString("，")
-                    }, verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Start) {
-                    val progressColor = MaterialTheme.colorScheme.primary
-                    Box(Modifier.size(lerp(32.dp, 20.dp, collapse)), contentAlignment = Alignment.Center) {
-                        if (fraction != null) Canvas(Modifier.matchParentSize().padding(1.dp)) {
-                            val stroke = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round)
-                            drawArc(progressColor.copy(alpha = .14f), -90f, 360f, false, style = stroke)
-                            drawArc(progressColor.copy(alpha = .85f), -90f, 360f * displayedProgress, false, style = stroke)
-                        }
-                        Icon(Icons.Filled.PlayArrow, null, tint = progressColor,
-                            modifier = Modifier.size(lerp(22.dp, 16.dp, collapse)))
-                    }
-                    Spacer(Modifier.width(lerp(10.dp, 6.dp, collapse)))
-                    Column(Modifier.weight(1f).clearAndSetSemantics {}) {
-                        Text(when {
-                            !canRead -> subtitle
-                            collapse < .6f -> actionTitle
-                            resuming -> "继续"
-                            else -> "阅读"
-                        }, color = DetailForeground, fontSize = (15f - 3f * collapse).sp,
-                            lineHeight = (21f - 4f * collapse).sp, fontWeight = FontWeight.SemiBold,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        val chapterReveal = (1f - collapse / .6f).coerceIn(0f, 1f)
-                        if (chapterTitle.isNotBlank() && chapterReveal > 0f) {
-                            Box(Modifier.height(18.dp * fontScale * chapterReveal).clipToBounds()
-                                .graphicsLayer { alpha = chapterReveal }) {
-                                Text(chapterTitle, color = DetailSecondary, fontSize = 12.sp,
-                                    lineHeight = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            DesktopContextMenuArea(desktopActions) {
+                Box(readTarget, contentAlignment = Alignment.Center) {
+                    LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(),
+                        cornerRadius = lerp(28.dp, 18.dp, collapse), role = GlassSurfaceRole.READING_DOCK,
+                        interactionSource = interaction.takeIf { enabled }, preferSource = true,
+                        softCard = true) {
+                        Row(Modifier.fillMaxWidth().heightIn(min = minimumHeight)
+                            .padding(horizontal = lerp(16.dp, 10.dp, collapse), vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Start) {
+                            val progressColor = MaterialTheme.colorScheme.primary
+                            Box(Modifier.size(lerp(32.dp, 20.dp, collapse)), contentAlignment = Alignment.Center) {
+                                if (fraction != null) Canvas(Modifier.matchParentSize().padding(1.dp)) {
+                                    val stroke = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round)
+                                    drawArc(progressColor.copy(alpha = .14f), -90f, 360f, false, style = stroke)
+                                    drawArc(progressColor.copy(alpha = .85f), -90f, 360f * displayedProgress, false, style = stroke)
+                                }
+                                Icon(Icons.Filled.PlayArrow, null, tint = progressColor,
+                                    modifier = Modifier.size(lerp(22.dp, 16.dp, collapse)))
+                            }
+                            Spacer(Modifier.width(lerp(10.dp, 6.dp, collapse)))
+                            Column(Modifier.weight(1f).clearAndSetSemantics {}) {
+                                Text(when {
+                                    !canRead -> subtitle
+                                    collapse < .6f -> actionTitle
+                                    resuming -> "继续"
+                                    else -> "阅读"
+                                }, color = DetailForeground, fontSize = (15f - 3f * collapse).sp,
+                                    lineHeight = (21f - 4f * collapse).sp, fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                val chapterReveal = (1f - collapse / .6f).coerceIn(0f, 1f)
+                                if (chapterTitle.isNotBlank() && chapterReveal > 0f) {
+                                    Box(Modifier.height(18.dp * fontScale * chapterReveal).clipToBounds()
+                                        .graphicsLayer { alpha = chapterReveal }) {
+                                        Text(chapterTitle, color = DetailSecondary, fontSize = 12.sp,
+                                            lineHeight = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+                            if (percent != null && collapse < 1f) {
+                                Spacer(Modifier.width(12.dp * (1f - collapse)))
+                                Box(Modifier.width(42.dp * fontScale * (1f - collapse)).clipToBounds()
+                                    .graphicsLayer { alpha = (1f - collapse * 2f).coerceIn(0f, 1f) },
+                                    contentAlignment = Alignment.CenterEnd) {
+                                    Text("$percent%", Modifier.clearAndSetSemantics {}, fontFamily = mangaFontFamily(MangaFontScene.NUMBERS), color = DetailSecondary, fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
+                                }
+                            }
+                            cloudProgress?.let { hint ->
+                                CopyProgressHint(hint, active = active,
+                                    revealFraction = (1f - collapse * 2f).coerceIn(0f, 1f),
+                                    onAdopt = onAdoptCloudProgress, onRetry = onRetryCloudProgress)
+                            }
+                            if (desktop) Box(Modifier.size(32.dp)) {
+                                DesktopMoreButton(desktopActions, label = "阅读选项")
                             }
                         }
                     }
-                    if (percent != null && collapse < 1f) {
-                        Spacer(Modifier.width(12.dp * (1f - collapse)))
-                        Box(Modifier.width(42.dp * fontScale * (1f - collapse)).clipToBounds()
-                            .graphicsLayer { alpha = (1f - collapse * 2f).coerceIn(0f, 1f) },
-                            contentAlignment = Alignment.CenterEnd) {
-                            Text("$percent%", Modifier.clearAndSetSemantics {}, fontFamily = mangaFontFamily(MangaFontScene.NUMBERS), color = DetailSecondary, fontSize = 14.sp,
-                                fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
-                        }
-                    }
-                    cloudProgress?.let { hint ->
-                        CopyProgressHint(hint, active = active,
-                            revealFraction = (1f - collapse * 2f).coerceIn(0f, 1f),
-                            onAdopt = onAdoptCloudProgress, onRetry = onRetryCloudProgress)
-                    }
-                    if (desktop) Box(Modifier.size(32.dp)) {
-                        DesktopMoreButton(desktopActions, label = "阅读选项")
-                    }
                 }
-            }
             }
         }
     }

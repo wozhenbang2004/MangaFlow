@@ -4,6 +4,18 @@
 
 当前运行时：完整官方 Haze 2.1.0。液态角色走 `hazeGlass` 的 Regular/Clear 与 Material3，毛玻璃角色走 `hazeBlur` 与官方材料预设；`hazeGlassContainer` 管理关联材质融合。完整能力与平台条件以 `DESIGN.md` HAZE-21-01 为准，取代 GLASS-PIPELINE-07 的部分源码适配与 1.6 底座。固定职责不变。
 
+<a id="glass-lensing-20261124"></a>
+
+## 漫画线稿、海报和触点 · 2026-11-24
+
+用户反馈“我们的液态玻璃其实做的还是不够好吧没有苹果那种感觉”。阅读器两块玻璃里各有一层 48% 的主题底色，首页当前标签使用渐变色块。材料是否成立，要看漫画的黑线或海报的色边从控件下面经过时，以及手指按下、移动和松开时各发生什么。[Apple WWDC25 · Meet Liquid Glass](https://developer.apple.com/videos/play/wwdc2025/219/)
+
+- 小按钮和活动指示保留清晰中心，沿弯曲边缘折射。左上高光和窄暗边共用 Haze 的形状，浅色画面上也要看得出厚度。按下时光落在触点，材料轻压并回弹，文字和触控范围稳定。
+- 导航与阅读坞各只做一次材质调色。随控件短边增加，背景扩散从 5 dp 过渡到 17 dp。阅读画布、封面或页面内容已有明确归属时直接选中该来源；菜单和设置继续使用适合长文的毛玻璃。高对比度和减少透明度下优先保证文字及选中状态可读。
+- 正式软件需复看三种场景：滚动番剧封面经过顶栏并切换标签，在一张黑白页和一张彩页上呼出阅读工具，以及横屏实播时展开控件。分别看边缘是否随内容变化、正文和字幕是否清楚、按压是否跟手。保存代码和触发构建后，这三项仍需真机反馈。
+
+实现参照为 Haze 2.1.0 同一版本的 [GlassOptics](https://github.com/chrisbanes/haze/blob/ca21ff2060e52e1882afdb94f9b055f7fc834bd9/haze-glass/src/commonMain/kotlin/dev/chrisbanes/haze/glass/GlassOptics.kt)、[HazeInput](https://github.com/chrisbanes/haze/blob/ca21ff2060e52e1882afdb94f9b055f7fc834bd9/haze/src/commonMain/kotlin/dev/chrisbanes/haze/HazeInput.kt) 与[触摸响应](https://github.com/chrisbanes/haze/blob/ca21ff2060e52e1882afdb94f9b055f7fc834bd9/haze-glass/src/commonMain/kotlin/dev/chrisbanes/haze/glass/GlassInteraction.kt)。
+
 ## 固定角色表
 
 | 角色 | 固定材质 | 场景 |
@@ -12,6 +24,7 @@
 | ARTWORK | 清透液态玻璃 | 封面浮动操作，封面色彩轻微透入边缘 |
 | NAVIGATION | 常规液态玻璃 | 三组分段顶栏、展开后的搜索栏、阅读器上下工具栏 |
 | THUMB | 清透液态玻璃 | 进度条活动指示；触控目标大于视觉小圆点 |
+| SELECTION | 带文字的活动透镜 | 发现主导航的选中项，从同一份内容取色，在全白或全黑封面上也保留标签的明暗差 |
 | READING_DOCK | 常规液态玻璃 | 详情页的继续阅读悬浮条；文本区域优先扩散而非折射 |
 | GALLERY | 局部低折射氛围液态玻璃 | 首页封面画廊的图文融合区；保留最新 GALLERY 专用参数，避免大黑胶囊 |
 | DETAIL_HERO | 大面积低折射液态玻璃 | 详情顶部的大封面与作品信息；单层被动镜片、清晰图文与封面氛围，详见 DETAIL-GLASS-27 |

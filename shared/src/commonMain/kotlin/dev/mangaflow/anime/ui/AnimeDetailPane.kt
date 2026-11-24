@@ -64,6 +64,7 @@ import coil3.compose.rememberAsyncImagePainter
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
 import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.anime.AnimeDetail
 import dev.mangaflow.anime.AnimeDiscoveryFormat
@@ -633,9 +634,11 @@ private fun AnimeDetailHero(
     val motion = LocalMotionEnabled.current
     val density = LocalDensity.current
     val ratings = LocalAnimeRatings.current
+    val accessibility = LocalGlassAccessibilitySettings.current
     val openRatings = { ratings.open(AnimeRatingRequest(subject.id, subject.title, subject, scores)) }
     BoxWithConstraints(Modifier.fillMaxWidth().clip(if (wide) RoundedCornerShape(20.dp) else RoundedCornerShape(0.dp))) {
         val gutter = if (compact) 12.dp else 16.dp
+        val bottomGutter = if (compact) 6.dp else 12.dp
         val innerWidth = (maxWidth - gutter * 2).coerceAtLeast(1.dp)
         val stacked = wide && !compact
         val stackedActions = innerWidth < 270.dp * density.fontScale.coerceAtMost(1.6f)
@@ -650,16 +653,18 @@ private fun AnimeDetailHero(
                 .size(imageWidth, imageWidth * 3 / 2).crossfade(if (motion) MangaMotion.Quick else 0).build()
         }
         val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Fit)
-        if (artwork.coverUrl.isNotBlank() && !compact) {
-            Box(Modifier.matchParentSize().mangaHazeSource(backdrop)) {
+        if (artwork.coverUrl.isNotBlank() && !accessibility.reduceTransparency && !accessibility.increaseContrast) {
+            Box(Modifier.matchParentSize().mangaHazeSource(backdrop).background(surface)) {
                 Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
                     modifier = Modifier.matchParentSize())
-                Box(Modifier.matchParentSize().background(Brush.horizontalGradient(
-                    0f to surface.copy(alpha = .14f), .33f to surface.copy(alpha = .66f),
-                    .56f to surface.copy(alpha = .90f), 1f to surface.copy(alpha = .84f))))
-                Box(Modifier.matchParentSize().background(Brush.verticalGradient(
-                    0f to surface.copy(alpha = .48f), .30f to Color.Transparent,
-                    .70f to surface.copy(alpha = .30f), 1f to surface)))
+                val veil = remember(surface) {
+                    Brush.verticalGradient(0f to surface.copy(alpha = .80f),
+                        .68f to surface.copy(alpha = .86f), 1f to surface.copy(alpha = .49f))
+                }
+                Box(Modifier.matchParentSize().background(veil))
+                // Join the catalogue below the controls. The lenses still sit over actual cover colour.
+                Spacer(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(bottomGutter)
+                    .background(remember(surface) { Brush.verticalGradient(listOf(surface.copy(alpha = 0f), surface)) }))
             }
         }
         val poster: @Composable () -> Unit = {
@@ -691,7 +696,7 @@ private fun AnimeDetailHero(
             }
         }
         Column(Modifier.fillMaxWidth().padding(start = gutter, end = gutter,
-            top = if (compact) 6.dp else 18.dp, bottom = if (compact) 6.dp else 12.dp),
+            top = if (compact) 6.dp else 18.dp, bottom = bottomGutter),
             verticalArrangement = Arrangement.spacedBy(if (compact) 7.dp else 14.dp)) {
             if (stacked) {
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { poster() }
@@ -852,7 +857,9 @@ private fun AnimeDetailFollow(
     val followed = entry?.followed == true
     val status = entry?.takeIf { it.followed }?.status
     Box {
-        LiquidGlassSurface(backdrop, cornerRadius = 22.dp, role = GlassSurfaceRole.CONTROL) {
+        LiquidGlassSurface(backdrop, cornerRadius = 22.dp, role = GlassSurfaceRole.ARTWORK,
+            contentColor = MaterialTheme.colorScheme.onSurface, trackPointer = active && libraryAvailable,
+            preferSource = true) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 val followLabel = if (followed) "取消追番" else "加入追番"
                 MotionTextButton(onClick = onFollow, enabled = libraryAvailable && active,

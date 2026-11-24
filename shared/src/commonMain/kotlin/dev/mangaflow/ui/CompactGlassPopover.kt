@@ -10,7 +10,6 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.rememberTransition
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Column
@@ -31,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableStateOf
@@ -38,7 +38,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -72,7 +71,6 @@ internal fun CompactGlassPopover(
     maximumWidth: Dp = 264.dp,
     alignToStart: Boolean = false,
     maximumHeight: Dp = Dp.Infinity,
-    contentBackground: Color = Color.Transparent,
     scrollContent: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
 ) {
@@ -98,9 +96,11 @@ internal fun CompactGlassPopover(
     SideEffect { reportPresence(present) }
     DisposableEffect(Unit) { onDispose { reportPresence(false) } }
     if (!present) return
+    var anchorRoom by remember { mutableIntStateOf(Int.MAX_VALUE) }
     val position = remember(density, aboveAnchor, alignToStart) {
         val gap = with(density) { 8.dp.roundToPx() }
         val margin = with(density) { 12.dp.roundToPx() }
+        val minimumListHeight = with(density) { 96.dp.roundToPx() }
         object : PopupPositionProvider {
             override fun calculatePosition(
                 anchorBounds: IntRect,
@@ -113,7 +113,20 @@ internal fun CompactGlassPopover(
                     else anchorBounds.right - popupContentSize.width
                 val below = anchorBounds.bottom + gap
                 val above = anchorBounds.top - popupContentSize.height - gap
-                val desiredY = if (aboveAnchor || below + popupContentSize.height > windowSize.height - margin) above else below
+                val spaceAbove = (anchorBounds.top - gap - margin).coerceAtLeast(0)
+                val spaceBelow = (windowSize.height - below - margin).coerceAtLeast(0)
+                val largerSpace = maxOf(spaceAbove, spaceBelow)
+                // A roomy window can keep a scrolling menu clear of its trigger.
+                // In a short window both sides may be too small even for two actions.
+                anchorRoom = if (largerSpace >= minimumListHeight) largerSpace
+                    else (windowSize.height - 2 * margin).coerceAtLeast(1)
+                val placeAbove = when {
+                    aboveAnchor && popupContentSize.height <= spaceAbove -> true
+                    !aboveAnchor && popupContentSize.height <= spaceBelow -> false
+                    spaceAbove != spaceBelow -> spaceAbove > spaceBelow
+                    else -> aboveAnchor
+                }
+                val desiredY = if (placeAbove) above else below
                 val placedX = x.coerceIn(margin, (windowSize.width - popupContentSize.width - margin).coerceAtLeast(margin))
                 val placedY = desiredY.coerceIn(margin, (windowSize.height - popupContentSize.height - margin).coerceAtLeast(margin))
                 origin = TransformOrigin(
@@ -133,11 +146,13 @@ internal fun CompactGlassPopover(
                     scaleX = scale.value; scaleY = scale.value
                     transformOrigin = origin
                     translationY = (if (origin.pivotFractionY >= .5f) 6.dp.toPx() else -6.dp.toPx()) * (1f - alpha.value)
-                }, cornerRadius = 18.dp, role = GlassSurfaceRole.POPOVER, softCard = true,
+                }, cornerRadius = 18.dp, role = GlassSurfaceRole.POPOVER, softCard = true, preferSource = true,
             materialExpansion = { alpha.value }) {
-            val height = minOf(LocalMangaWindow.current.height - 64.dp, maximumHeight).coerceAtLeast(1.dp)
+            val windowHeight = (LocalMangaWindow.current.height - 64.dp).coerceAtLeast(1.dp)
+            val height = if (scrollContent) minOf(windowHeight, maximumHeight, with(density) { anchorRoom.toDp() })
+                else minOf(windowHeight, maximumHeight)
             val scroll = if (scrollContent) Modifier.verticalScroll(rememberScrollState()) else Modifier
-            Column(Modifier.heightIn(max = height).background(contentBackground).then(scroll).padding(6.dp),
+            Column(Modifier.heightIn(max = height.coerceAtLeast(1.dp)).then(scroll).padding(6.dp),
                 content = content)
         }
     }

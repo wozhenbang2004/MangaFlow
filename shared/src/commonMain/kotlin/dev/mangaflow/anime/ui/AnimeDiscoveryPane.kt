@@ -60,7 +60,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
     scrolls: AnimeDiscoveryScrolls, onOpenItem: (AnimeDiscoveryItem) -> Unit,
     onManage: (AnimeSubject) -> Unit, active: Boolean,
     onResume: (AnimeLibraryEntry) -> Unit, onWatchHistory: () -> Unit,
-    contentBottomPadding: Dp = 24.dp) {
+    contentBottomPadding: Dp = 24.dp, contentTopPadding: Dp = 0.dp) {
     val ratings = LocalAnimeRatings.current
     val browseActive = active
     fun openScores(item: AnimeDiscoveryItem) {
@@ -68,7 +68,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
     }
     MotionTabContent(state.discoveryTab, Modifier.fillMaxSize(), contentKey = { it }, order = { it.ordinal }) { tab ->
         when (tab) {
-            AnimeDiscoveryTab.HOME -> AnimeDiscoveryHome(state, controller, backdrop, scrolls, contentBottomPadding,
+            AnimeDiscoveryTab.HOME -> AnimeDiscoveryHome(state, controller, backdrop, scrolls, contentBottomPadding, contentTopPadding,
                 onOpen = onOpenItem, onScores = ::openScores, onManage = onManage,
                 onResume = onResume, onWatchHistory = onWatchHistory,
                 active = browseActive && state.discoveryTab == tab)
@@ -79,7 +79,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                 val tabActive = browseActive && state.discoveryTab == tab
                 var overlayPresent by remember(tab) { mutableStateOf(false) }
                 val contentActive = tabActive && !overlayPresent
-                Column(Modifier.fillMaxSize().motionInputGate(tabActive)) {
+                Column(Modifier.fillMaxSize().padding(top = contentTopPadding).motionInputGate(tabActive)) {
                     if (feed != null) {
                         AnimeDiscoveryControls(tab, feed.query, backdrop, tabActive,
                             onOverlayPresence = { overlayPresent = it },
@@ -106,7 +106,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
 
 @Composable
 private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeController, backdrop: HazeState,
-    scrolls: AnimeDiscoveryScrolls, contentBottomPadding: Dp, onOpen: (AnimeDiscoveryItem) -> Unit,
+    scrolls: AnimeDiscoveryScrolls, contentBottomPadding: Dp, contentTopPadding: Dp, onOpen: (AnimeDiscoveryItem) -> Unit,
     onScores: (AnimeDiscoveryItem) -> Unit, onManage: (AnimeSubject) -> Unit,
     onResume: (AnimeLibraryEntry) -> Unit, onWatchHistory: () -> Unit, active: Boolean) {
     val key = animeDiscoveryFeedKey(AnimeDiscoveryTab.HOME)
@@ -143,7 +143,7 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
         onRefresh = controller::refreshDiscovery, onRetry = { controller.retryDiscovery(key) },
         onMore = { controller.loadMoreDiscovery(key) },
         onClearTag = { controller.configureDiscovery(AnimeDiscoveryTab.HOME, query.copy(tag = "")) },
-        featured = featured,
+        featured = featured, contentTopPadding = contentTopPadding,
         watchShelf = recent?.let { entry -> {
             AnimeDiscoveryResumeRow(entry, contentActive, onResume, onWatchHistory)
         } },
@@ -337,7 +337,8 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
     onManage: (AnimeSubject) -> Unit, onRefresh: () -> Unit,
     onRetry: () -> Unit, onMore: () -> Unit, onClearTag: () -> Unit,
     featured: List<AnimeFeaturedEntry> = emptyList(),
-    watchShelf: (@Composable () -> Unit)? = null, catalogueHeader: (@Composable () -> Unit)? = null) {
+    watchShelf: (@Composable () -> Unit)? = null, catalogueHeader: (@Composable () -> Unit)? = null,
+    contentTopPadding: Dp = 0.dp) {
     val retainedScroll = scrolls.grid(key, feed?.query)
     // The query's completed page range is restored by AnimeDiscoveryLoads before this state is used.
     // A temporary empty/loading layout must not clamp that saved position to its single status row.
@@ -373,7 +374,7 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
     Box(modifier) {
     MotionRefreshBox(enabled = active && feed?.loading != true && feed?.loadingMore != true,
         refreshing = feed?.loading == true && feed.items.isNotEmpty(), onRefresh = onRefresh,
-        indicatorTop = 4.dp, actionLabel = "刷新番剧") {
+        indicatorTop = contentTopPadding + 4.dp, actionLabel = "刷新番剧") {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val columns = animeDiscoveryColumns(maxWidth, preference)
         val inset = animeDiscoveryInset(maxWidth, preference, columns)
@@ -391,7 +392,7 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
         LazyVerticalGrid(GridCells.Fixed(columns), state = scroll, modifier = Modifier.fillMaxSize()
             .then(if (desktop) Modifier else Modifier.bottomPullLoad(pull)),
             userScrollEnabled = active,
-            contentPadding = PaddingValues(start = inset, end = inset, top = 4.dp, bottom = contentBottomPadding),
+            contentPadding = PaddingValues(start = inset, end = inset, top = contentTopPadding + 4.dp, bottom = contentBottomPadding),
             horizontalArrangement = Arrangement.spacedBy(animeDiscoveryGap(columns)), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             if (featured.isNotEmpty()) item(key = "featured", span = { GridItemSpan(maxLineSpan) }) {
                 AnimeFeaturedCarousel(featured, active = active, visible = active && galleryInView,

@@ -272,7 +272,6 @@ internal fun ReaderExperienceStatus(
                 maximumWidth = panelWidth,
                 maximumHeight = if (window.height >= 460.dp) window.height * .68f else window.height,
                 scrollContent = false,
-                contentBackground = MaterialTheme.colorScheme.surface.copy(alpha = .30f),
                 onDismiss = { close(true) }, onPresenceChange = { popoverPresent = it }) {
                 BackHandler(panelOpen && section != ReaderStatusSection.PREPARATION) { back() }
                 val closeButton: @Composable () -> Unit = {

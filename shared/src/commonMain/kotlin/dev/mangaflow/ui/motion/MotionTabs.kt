@@ -8,12 +8,15 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
@@ -40,24 +43,35 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
+import dev.chrisbanes.haze.glass.hazeGlassContainer
 import dev.mangaflow.ui.DesktopIconTooltip
+import dev.mangaflow.ui.GlassSurfaceRole
+import dev.mangaflow.ui.LiquidGlassSurface
+import dev.mangaflow.ui.glass.MangaHazeRuntime
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 internal enum class MotionTabTreatment { Capsule, Soft, Underline }
 
@@ -153,6 +167,7 @@ internal fun MotionTabs(
     role: Role = Role.Tab,
     selectionVisible: Boolean = true,
     tooltips: List<String>? = null,
+    selectionBackdrop: HazeState? = null,
     itemContent: (@Composable (index: Int, selected: Boolean, color: Color) -> Unit)? = null,
 ) {
     if (labels.isEmpty()) return
@@ -167,6 +182,11 @@ internal fun MotionTabs(
     // Capsule treatment owns its restrained optical indicator; no user-selectable glass skin.
     val liquid = treatment == MotionTabTreatment.Capsule
     val light = MaterialTheme.colorScheme.surface.luminance() > .5f
+    val accessibility = if (selectionBackdrop != null) LocalGlassAccessibilitySettings.current else null
+    val useLens = selectionBackdrop != null && !compact && treatment != MotionTabTreatment.Underline &&
+        !MangaHazeRuntime.isLowRamDevice && accessibility?.reduceTransparency != true && accessibility?.increaseContrast != true
+    val selectionInteractions = remember(labels.size) { List(labels.size) { MutableInteractionSource() } }
+    val lensPresses = if (useLens) selectionInteractions.map { it.collectIsPressedAsState() } else emptyList()
     val tabWidths = remember(labels.size) { mutableStateMapOf<Int, Int>() }
     val textMeasurer = rememberTextMeasurer()
     val textStyle = LocalTextStyle.current.copy(fontSize = fontSize)
@@ -208,8 +228,9 @@ internal fun MotionTabs(
             }
         }
     }
-    Row(modifier.fillMaxWidth().height(height)
+    val frame = modifier.fillMaxWidth().height(height)
         .clip(if (compact) RectangleShape else RoundedCornerShape(14.dp)).background(track)
+    val selectionInk = if (useLens) Modifier else Modifier
         .drawWithCache {
             val slot = size.width / labels.size
             if (compact && tabWidths.size != labels.size) return@drawWithCache onDrawBehind { }
@@ -253,15 +274,16 @@ internal fun MotionTabs(
                 val pillSize = Size(width, h)
                 val radius = CornerRadius(indicatorCornerRadius?.toPx()
                     ?: if (treatment == MotionTabTreatment.Soft) 10.dp.toPx() else h / 2)
-                val tint = when (treatment) {
+                val tint = if (selectionBackdrop != null) foreground.copy(alpha =
+                    if (accessibility?.increaseContrast == true || accessibility?.reduceTransparency == true) .23f else .13f)
+                else when (treatment) {
                     MotionTabTreatment.Underline, MotionTabTreatment.Soft -> indicator
                     MotionTabTreatment.Capsule -> if (underline || compact) foreground.copy(alpha = .065f) else indicator
                 }
                 drawRoundRect(tint,
                     topLeft = topLeft, size = pillSize, cornerRadius = radius, alpha = selectionAlpha)
-                // A small glass rim on the flat navigation surface; text stays outside the material.
-                // Backdrop blur/refraction remains in the existing floating controls over artwork.
-                if (liquid && treatment == MotionTabTreatment.Capsule) {
+                // Content-level capsules keep a light drawn edge and need no backdrop capture.
+                if (liquid && selectionBackdrop == null) {
                     drawRoundRect(Brush.linearGradient(
                         rimColors,
                         start = topLeft, end = topLeft + Offset(width * .35f, h)),
@@ -270,40 +292,91 @@ internal fun MotionTabs(
                 if (treatment == MotionTabTreatment.Capsule) drawRoundRect(foreground.copy(alpha = if (liquid) .07f else .04f),
                     topLeft = topLeft, size = pillSize, cornerRadius = radius, style = rimStroke, alpha = selectionAlpha)
             }
-        }.padding(horizontal = if (compact) 10.dp else 0.dp).selectableGroup(),
-        horizontalArrangement = if (compact) Arrangement.spacedBy(22.dp) else Arrangement.Start,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        labels.forEachIndexed { i, label ->
-            val isSelected = selectionVisible && i == index
-            val interaction = remember { MutableInteractionSource() }
-            val pressed by interaction.collectIsPressedAsState()
-            val pressAlpha = animateFloatAsState(if (pressed) .06f else 0f,
-                if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-press")
-            val labelColor by animateColorAsState(if (isSelected) foreground else muted,
-                if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-label")
-            // Reserve both weights so selecting a compact tab cannot shift its neighbours.
-            val labelWidth = if (compact && itemContent == null) with(density) {
-                labelWidths[i].toDp()
-            } else 0.dp
-            val tab = if (compact) Modifier.onSizeChanged { tabWidths[i] = it.width }
-                else Modifier.weight(1f)
-            Box(tab.height(height).selectable(
-                selected = isSelected, role = role, interactionSource = interaction, indication = null,
-                onClick = { if (!isSelected) feedback.perform(FeelEvent.Selection); onSelect(i) },
-            ).motionPress(interaction).drawBehind {
-                drawRoundRect(foreground.copy(alpha = pressAlpha.value), cornerRadius = CornerRadius(10.dp.toPx()))
-            }.then(if (compact) Modifier.widthIn(min = labelWidth + 6.dp).padding(horizontal = 3.dp) else Modifier),
-                contentAlignment = Alignment.Center) {
-                if (itemContent != null) itemContent(i, isSelected, labelColor)
-                else Text(label, color = labelColor, fontSize = fontSize,
-                        modifier = if (controlHeight != null) Modifier.padding(
-                            horizontal = if (treatment == MotionTabTreatment.Capsule) 8.dp else 2.dp) else Modifier,
-                        textAlign = TextAlign.Center,
-                        fontWeight = if (isSelected) selectedFontWeight else unselectedFontWeight,
-                        maxLines = if (wrapLabels) 2 else 1, overflow = TextOverflow.Ellipsis)
-                DesktopIconTooltip(tooltips?.getOrNull(i), interaction, tooltips != null)
+        }
+    val tabRow: @Composable (Modifier) -> Unit = { row ->
+        Row(row.then(selectionInk).padding(horizontal = if (compact) 10.dp else 0.dp).selectableGroup(),
+            horizontalArrangement = if (compact) Arrangement.spacedBy(22.dp) else Arrangement.Start,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            labels.forEachIndexed { i, label ->
+                val isSelected = selectionVisible && i == index
+                val interaction = selectionInteractions[i]
+                val pressed = if (useLens) lensPresses[i].value else interaction.collectIsPressedAsState().value
+                val focused = selectionBackdrop != null && interaction.collectIsFocusedAsState().value
+                val hovered = useLens && interaction.collectIsHoveredAsState().value
+                val pressAlpha = animateFloatAsState(if (pressed) .06f else if (hovered) .035f else 0f,
+                    if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-press")
+                val labelColor by animateColorAsState(if (isSelected) foreground else muted,
+                    if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-label")
+                // Reserve both weights so selecting a compact tab cannot shift its neighbours.
+                val labelWidth = if (compact && itemContent == null) with(density) {
+                    labelWidths[i].toDp()
+                } else 0.dp
+                val tab = if (compact) Modifier.onSizeChanged { tabWidths[i] = it.width }
+                    else Modifier.weight(1f)
+                Box(tab.height(height).selectable(
+                    selected = isSelected, role = role, interactionSource = interaction, indication = null,
+                    onClick = { if (!isSelected) feedback.perform(FeelEvent.Selection); onSelect(i) },
+                ).then(if (useLens) Modifier else Modifier.motionPress(interaction)).drawBehind {
+                    if (!useLens || !isSelected) drawRoundRect(foreground.copy(alpha = pressAlpha.value),
+                        cornerRadius = CornerRadius(10.dp.toPx()))
+                    if (selectionBackdrop != null && focused) drawRoundRect(foreground.copy(alpha = .72f),
+                        cornerRadius = CornerRadius(size.height / 2f), style = Stroke(1.dp.toPx()))
+                }.then(if (compact) Modifier.widthIn(min = labelWidth + 6.dp).padding(horizontal = 3.dp) else Modifier),
+                    contentAlignment = Alignment.Center) {
+                    if (itemContent != null) itemContent(i, isSelected, labelColor)
+                    else Text(label, color = labelColor, fontSize = fontSize,
+                            modifier = if (controlHeight != null) Modifier.padding(
+                                horizontal = if (treatment == MotionTabTreatment.Capsule) 8.dp else 2.dp) else Modifier,
+                            textAlign = TextAlign.Center,
+                            fontWeight = if (isSelected) selectedFontWeight else unselectedFontWeight,
+                            maxLines = if (wrapLabels) 2 else 1, overflow = TextOverflow.Ellipsis)
+                    DesktopIconTooltip(tooltips?.getOrNull(i), interaction, tooltips != null)
+                }
             }
         }
+    }
+    if (useLens && selectionBackdrop != null) {
+        val pressed = lensPresses.any { it.value }
+        val pressure = animateFloatAsState(if (pressed && motion) 1f else 0f,
+            if (motion) spring(dampingRatio = MangaMotion.PressDamping, stiffness = MangaMotion.PressStiffness)
+            else snap(), label = "navigation-tab-pressure")
+        Box(frame) {
+            if (selectionVisible || selectionAlpha > 0f) NavigationTabLens(selectionBackdrop, labels.size,
+                leadingEdge = { left.value }, trailingEdge = { right.value },
+                pressure = { pressure.value }, opacity = { selectionAlpha })
+            tabRow(Modifier.fillMaxSize())
+        }
+    } else tabRow(frame)
+}
+
+/** The input cells and their text stay still; only this one sampling surface is measured while it slides. */
+@Composable
+private fun NavigationTabLens(backdrop: HazeState, count: Int,
+    leadingEdge: () -> Float, trailingEdge: () -> Float, pressure: () -> Float, opacity: () -> Float) {
+    // Give the moving lens its own container. Otherwise an overlapping glass toolbar
+    // can absorb the thumb into its cluster and draw the selection behind itself.
+    Box(Modifier.fillMaxSize().graphicsLayer { alpha = opacity() }
+        .hazeGlassContainer(mergeDistance = 0.dp, memberTransitionSpec = snap())) {
+        LiquidGlassSurface(backdrop, Modifier.fillMaxSize().layout { measurable, bounds ->
+            val slot = bounds.maxWidth.toFloat() / count
+            val inset = 3.dp.toPx().coerceAtMost(slot / 2f)
+            val rest = (slot - 2f * inset).coerceAtLeast(1f)
+            val leading = leadingEdge() * slot + inset
+            val trailing = trailingEdge() * slot - inset
+            val stretch = (trailing - leading).coerceIn(rest * .91f, rest * 1.28f)
+            val push = pressure().coerceIn(0f, 1f)
+            val width = (stretch + 3.dp.toPx() * push).roundToInt().coerceIn(0, bounds.maxWidth)
+            val baseHeight = (bounds.maxHeight - 8.dp.toPx()).coerceAtLeast(0f)
+            val squeeze = (stretch / rest - 1f).coerceAtLeast(0f)
+            val thumbHeight = (baseHeight * (1f - .24f * squeeze) - push * 1.5.dp.toPx())
+                .roundToInt().coerceIn(0, bounds.maxHeight)
+            val glass = measurable.measure(Constraints.fixed(width, thumbHeight))
+            val x = ((leading + trailing - width) / 2f).roundToInt().coerceIn(0, bounds.maxWidth - width)
+            layout(bounds.maxWidth, bounds.maxHeight) {
+                glass.placeRelative(x, (bounds.maxHeight - thumbHeight) / 2)
+            }
+        }.clearAndSetSemantics { }, cornerRadius = 32.dp, role = GlassSurfaceRole.SELECTION,
+            elevation = 0.dp, preferSource = true, materialExpansion = { pressure().coerceIn(0f, 1f) }) {}
     }
 }
