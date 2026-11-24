@@ -81,7 +81,7 @@ private enum class ExperienceWorkspace { OVERVIEW, TUNING }
 @Composable
 internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, onDismiss: () -> Unit,
     onOpenStorage: (() -> Unit)? = null, onOpenNetwork: (() -> Unit)? = null,
-    onOpenSourceChecks: (() -> Unit)? = null) {
+    onOpenSourceChecks: (() -> Unit)? = null, onClosed: (() -> Unit)? = null) {
     val context = LocalMangaContext.current
     val store = remember(context) { ExperiencePolicyStore.get(context) }
     val savedBudget by store.state.collectAsStateWithLifecycle()
@@ -225,6 +225,7 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                 "network" -> onOpenNetwork?.invoke()
                 "source-checks" -> onOpenSourceChecks?.invoke()
             }
+            onClosed?.invoke()
         }) {
         val window = LocalMangaWindow.current
         BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = if (window.width < 600.dp) 0.dp else 12.dp),
@@ -736,7 +737,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 })
             }
             SettingsToggle("浏览时提前准备", custom.browseWarmup, Icons.Outlined.AutoStories) { change(custom.copy(browseWarmup = it)) }
-            Text("阅读状态栏位置", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.labelLarge,
+            Text("预读入口位置", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             ExperienceIconChoices(listOf(Triple(ReaderStatusPlacement.TOP, "顶部", Icons.Outlined.VerticalAlignTop),
                 Triple(ReaderStatusPlacement.BOTTOM, "底部", Icons.Outlined.VerticalAlignBottom),
@@ -759,7 +760,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 ExperienceHint("临近预解码是当前画面前后两侧合计的内存预览页数：单页阅读配置 8 页通常前后各 4 页，奇数优先主方向，章首尾余量给另一侧；双页不拆组。只读取本地原图，不额外扩大联网窗口，也不保证全部常驻。")
                 ExperienceHint("预读准备是后台任务，已备是核实原图存在，预览是可显示的解码图像；缓存是这些结果的存放与回收。范围、容量与闲置过期在“缓存”中独立管理。")
                 ExperienceHint("自动图标表示跟随策略，强调色表示手动值。拖动直接保存，手动输入不设业务上限；配置数量不等于正在执行的数量。")
-                ExperienceHint("阅读状态栏贴近安全区，固定图标只展示状态。点击查看数量、原因和操作，不自动展开遮挡画面。")
+                ExperienceHint("点一下漫画可以显示工具栏。点击「预读」可查看前方原图和等待原因。")
             }
         }
 

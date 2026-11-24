@@ -69,6 +69,7 @@ data class AnimeSourceBrowseState(
     val related: List<AnimeSourceTitle> = emptyList(),
     val relatedLoading: Boolean = false,
     val relatedError: String? = null,
+    val recentSourceIds: List<String> = emptyList(),
 )
 
 data class AnimeSourceLatestState(
@@ -170,20 +171,25 @@ class AnimeSourceBrowseController(
         val selected = sourceId?.let { id -> available.firstOrNull { it.id == id } }
             ?: available.firstOrNull { it.id == mutableState.value.sourceId }
             ?: preferredSource(available)
-        val wasActive = activated
-        activated = true
-        mutableState.value = mutableState.value.copy(sources = available)
-        if (!wasActive || selected?.id != mutableState.value.sourceId ||
-            selected?.revision != mutableState.value.sourceRevision) switchSource(selected)
+        visitSource(selected, available)
     }
 
-    fun selectSource(id: String) = command {
+    fun selectSource(id: String) = selectSource(id, null)
+
+    internal fun selectSource(id: String, revision: String?) = command {
         val available = availableSources()
-        val selected = available.firstOrNull { it.id == id } ?: return@command
-        val changed = !activated || selected.id != mutableState.value.sourceId ||
-            selected.revision != mutableState.value.sourceRevision
+        val selected = available.firstOrNull { it.id == id && (revision == null || it.revision == revision) }
+            ?: return@command
+        visitSource(selected, available)
+    }
+
+    private fun visitSource(selected: AnimeBrowseSource?, available: List<AnimeBrowseSource>) {
+        val previous = mutableState.value
+        val changed = !activated || selected?.id != previous.sourceId || selected?.revision != previous.sourceRevision
+        val recent = if (selected == null || previous.recentSourceIds.firstOrNull() == selected.id)
+            previous.recentSourceIds else (listOf(selected.id) + (previous.recentSourceIds - selected.id)).take(4)
         activated = true
-        mutableState.value = mutableState.value.copy(sources = available)
+        mutableState.value = previous.copy(sources = available, recentSourceIds = recent)
         if (changed) switchSource(selected)
     }
 
@@ -320,6 +326,7 @@ class AnimeSourceBrowseController(
             sources = before.sources, sourceId = source?.id, sourceRevision = source?.revision,
             categoryKey = if (keepQuery) before.categoryKey else null,
             filters = if (keepQuery) before.filters else emptyMap(),
+            recentSourceIds = before.recentSourceIds,
         )
         if (!activated) return
         val selection = selection() ?: return

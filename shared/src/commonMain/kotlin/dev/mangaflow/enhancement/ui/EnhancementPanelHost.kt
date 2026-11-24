@@ -28,11 +28,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -41,6 +43,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
+import dev.mangaflow.reader.ConfigureReaderDialogWindow
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.LocalMangaWindow
@@ -50,7 +53,7 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionDialogWindowPolicy
 import dev.mangaflow.ui.motion.motionInputGate
 
-/** One retained surface: bottom on touch devices, compact right edge on desktop. */
+/** Retains the active page until dismissal completes, including a pending external action. */
 @Composable
 internal fun EnhancementPanelHost(
     visible: Boolean,
@@ -58,6 +61,7 @@ internal fun EnhancementPanelHost(
     onDismiss: () -> Unit,
     onClosed: (() -> Unit)? = null,
     maximumWidth: Dp = 440.dp,
+    playbackOverlay: Boolean = false,
     surface: (@Composable (Modifier, @Composable () -> Unit) -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
@@ -86,28 +90,41 @@ internal fun EnhancementPanelHost(
             properties = DialogProperties(usePlatformDefaultWidth = false),
         ) {
             MotionDialogWindowPolicy(visible)
+            if (playbackOverlay) ConfigureReaderDialogWindow(dimAmount = 0f)
             val focus = LocalFocusManager.current
             SideEffect { if (!visible) focus.clearFocus(force = true) }
             Box(Modifier.fillMaxSize()) {
-                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .14f * alpha.value))
+                val scrim = if (playbackOverlay) .08f else .14f
+                val backdropInput = if (playbackOverlay) Modifier.clearAndSetSemantics { }
+                    .focusProperties { canFocus = false } else Modifier
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = scrim * alpha.value))
+                    .then(backdropInput)
                     .clickable(enabled = visible, indication = null, interactionSource = remember { MutableInteractionSource() }) {
                         onDismiss()
                     })
                 BoxWithConstraints(
                     Modifier.fillMaxSize().safeDrawingPadding().imePadding()
                         .padding(horizontal = if (desktop) 12.dp else 8.dp, vertical = 8.dp),
-                    contentAlignment = if (desktop) Alignment.CenterEnd else Alignment.BottomCenter,
                 ) {
-                    val maximumHeight = maxHeight * if (desktop) .94f else .88f
-                    val panelWidth = minOf(maxWidth, maximumWidth)
-                    val window = MangaWindowSize(panelWidth, maximumHeight, LocalDensity.current.fontScale.coerceAtLeast(1f))
+                    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+                    val sidePanel = playbackOverlay && maxWidth >= 520.dp && maxWidth > maxHeight
+                    val maximumHeight = when {
+                        sidePanel -> maxHeight.coerceAtMost(800.dp)
+                        desktop -> maxHeight * .94f
+                        else -> maxHeight * .88f
+                    }
+                    val panelWidth = if (sidePanel) (maxWidth * .42f)
+                        .coerceAtLeast(280.dp * fontScale.coerceAtMost(1.3f))
+                        .coerceAtMost(minOf(maxWidth * .55f, maximumWidth)) else minOf(maxWidth, maximumWidth)
+                    val alignment = if (sidePanel || desktop) Alignment.CenterEnd else Alignment.BottomCenter
+                    val window = MangaWindowSize(panelWidth, maximumHeight, fontScale)
                     CompositionLocalProvider(LocalMangaWindow provides window) {
-                        val panelModifier = Modifier.widthIn(max = panelWidth).fillMaxWidth().heightIn(max = maximumHeight)
+                        val panelModifier = Modifier.align(alignment).widthIn(max = panelWidth).fillMaxWidth().heightIn(max = maximumHeight)
                             .motionInputGate(visible)
                             .pointerInput(Unit) { detectTapGestures(onTap = {}) }
                             .graphicsLayer {
                                 this.alpha = alpha.value
-                                if (desktop) translationX = 24.dp.toPx() * offset.value
+                                if (sidePanel || desktop) translationX = 24.dp.toPx() * offset.value
                                 else translationY = 24.dp.toPx() * offset.value
                             }
                         if (surface != null) surface(panelModifier, content)

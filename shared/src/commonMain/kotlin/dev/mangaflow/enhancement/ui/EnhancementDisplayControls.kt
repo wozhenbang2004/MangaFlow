@@ -57,9 +57,9 @@ internal fun EnhancementDisplayControls(content: EnhancementContent) {
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         EnhancementQuiet(if (content == EnhancementContent.ANIME)
-            "所选读数显示在播放画面，收起控制后仍可见。" else "所选读数直接显示在阅读状态栏。")
+            "所选读数显示在播放画面，收起控制后仍可见。" else "在阅读工具中打开「预读」，进入「更多阅读状态」的「画质处理」查看所选读数。")
         if (content != EnhancementContent.ANIME && readerPreferences.readerStatusPlacement == ReaderStatusPlacement.HIDDEN) {
-            EnhancementQuiet("阅读状态栏目前已隐藏，所选读数暂不显示。")
+            EnhancementQuiet("预读入口已隐藏。可在底部工具栏打开。")
             MotionTextButton(onClick = {
                 if (openingStatus) return@MotionTextButton
                 openingStatus = true
@@ -79,7 +79,7 @@ internal fun EnhancementDisplayControls(content: EnhancementContent) {
             }, enabled = !openingStatus, contentPadding = PaddingValues(horizontal = 0.dp)) {
                 Icon(Icons.Outlined.VerticalAlignBottom, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text(if (openingStatus) "正在打开…" else "在底部显示阅读状态栏")
+                Text(if (openingStatus) "正在打开…" else "在底部工具栏显示预读")
             }
         }
         statusError?.let { EnhancementQuiet(it, error = true) }

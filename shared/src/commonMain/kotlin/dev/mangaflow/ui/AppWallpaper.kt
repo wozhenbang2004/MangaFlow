@@ -78,10 +78,13 @@ internal fun AppWallpaper(store: WallpaperStore, modifier: Modifier = Modifier, 
         if (selected.adjustment.shade > 0f) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = selected.adjustment.shade)))
         if (underCatalogue) {
             val paper = MaterialTheme.colorScheme.background
-            // Keep the artwork visible behind the controls and give the scrolling text a quieter ground.
             Box(Modifier.matchParentSize().drawWithCache {
-                val veil = Brush.verticalGradient(0f to Color.Transparent,
-                    .22f to paper.copy(alpha = .16f), 1f to paper.copy(alpha = .58f))
+                val veil = Brush.verticalGradient(
+                    0f to paper.copy(alpha = .12f),
+                    .28f to paper.copy(alpha = .38f),
+                    .55f to paper.copy(alpha = .78f),
+                    1f to paper.copy(alpha = .90f),
+                )
                 onDrawBehind { drawRect(veil) }
             })
         }

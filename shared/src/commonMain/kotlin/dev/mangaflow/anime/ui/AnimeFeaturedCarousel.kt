@@ -14,7 +14,6 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PageSize
 import androidx.compose.foundation.pager.PagerDefaults
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
@@ -29,6 +28,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -47,18 +48,16 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil3.compose.rememberAsyncImagePainter
 import coil3.request.ImageRequest
 import coil3.request.crossfade
-import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.anime.AnimeDiscoveryItem
-import dev.mangaflow.ui.GlassSurfaceRole
-import dev.mangaflow.ui.LiquidGlassSurface
-import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.platform.*
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.mangaCoverCard
@@ -82,10 +81,7 @@ internal data class AnimeFeaturedEntry(
     val discoveryItem: AnimeDiscoveryItem,
 )
 
-/**
- * The MangaFlow gallery pager keeps the adjacent cover visible. Only the caption
- * samples the artwork for glass, and the image and caption belong to the same item.
- */
+/** Adjacent artwork peeks in without competing with the selected work's title. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun AnimeFeaturedCarousel(
@@ -105,17 +101,17 @@ internal fun AnimeFeaturedCarousel(
         val window = LocalMangaWindow.current
         val desktop = platformKind == PlatformKind.DESKTOP
         val fontScale = density.fontScale.coerceAtLeast(1f)
-        val preferredWidth = if (entries.size == 1) galleryWidth.coerceAtMost(680.dp)
-            else (galleryWidth * .93f).coerceAtMost(680.dp)
+        val galleryInset = ((galleryWidth - 700.dp) / 2f).coerceAtLeast(0.dp)
+        val peek = if (entries.size > 1) 22.dp else 0.dp
+        val preferredWidth = (galleryWidth - galleryInset * 2 - peek).coerceAtLeast(1.dp)
         val compactLayout = preferredWidth < 255.dp || fontScale > 1.35f
-        val footerHeight = if (desktop) 44.dp else 14.dp
+        val footerHeight = if (entries.size == 1) 0.dp else if (desktop) 44.dp else 10.dp
         val itemHeight = when {
             compactLayout -> (158.dp * fontScale).coerceIn(178.dp, 280.dp)
             window.shortHeight -> (window.height * .42f).coerceIn(136.dp, 192.dp)
-            else -> (preferredWidth * .56f).coerceIn(162.dp, 242.dp)
+            else -> (preferredWidth * .61f).coerceIn(168.dp, 260.dp)
         }
         val galleryHeight = itemHeight + footerHeight + 8.dp
-        val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
         val state = rememberPagerState(
             initialPage = entries.indexOfFirst { it.key == selectedKey }.coerceAtLeast(0),
         ) { entries.size }
@@ -168,19 +164,19 @@ internal fun AnimeFeaturedCarousel(
                 }
             }.focusGroup()) {
             HorizontalPager(state = state, pageSize = PageSize.Fixed(preferredWidth),
-                contentPadding = PaddingValues(start = edgePadding, end = edgePadding, top = 2.dp, bottom = 6.dp),
-                pageSpacing = 10.dp,
+                contentPadding = PaddingValues(start = galleryInset, end = galleryInset + peek, top = 2.dp, bottom = 6.dp),
+                pageSpacing = 6.dp,
                 beyondViewportPageCount = if (visible && currentCoverReady) 1 else 0,
                 flingBehavior = fling, userScrollEnabled = active,
                 key = { entries[it].key },
                 modifier = Modifier.fillMaxWidth().height(itemHeight + 8.dp)
                     .semantics { stateDescription = "番剧 " + (state.currentPage + 1) + " / " + entries.size }) { index ->
                 val emphasis = { (1f - abs(index - position.value)).coerceIn(0f, 1f) }
-                AnimeFeaturedCard(entries[index], compactLayout, imageWidthPx, imageHeightPx,
+                AnimeFeaturedCard(entries[index], preferredWidth < 420.dp, imageWidthPx, imageHeightPx,
                     onReady = { readyCovers[entries[index].coverUrl] = true },
                     modifier = Modifier.fillMaxWidth().height(itemHeight).graphicsLayer {
-                        val scale = if (motion) .92f + .08f * emphasis() else 1f
-                        scaleX = scale; scaleY = scale
+                        scaleX = if (motion) .985f + .015f * emphasis() else 1f
+                        scaleY = if (motion) .94f + .06f * emphasis() else 1f
                         alpha = .72f + .28f * emphasis()
                     }.mangaCoverCard(20.dp),
                     offset = { if (motion) (index - position.value).coerceIn(-1f, 1f) *
@@ -188,7 +184,8 @@ internal fun AnimeFeaturedCarousel(
                     enabled = active, scoresEnabled = active && index == state.settledPage && !state.isScrollInProgress,
                     onOpenScores = onOpenScores, onOpen = onOpen)
             }
-            Row(Modifier.fillMaxWidth().height(footerHeight), verticalAlignment = Alignment.CenterVertically) {
+            if (entries.size > 1) Row(Modifier.fillMaxWidth().padding(end = peek).height(footerHeight),
+                verticalAlignment = Alignment.CenterVertically) {
                 if (desktop) MotionIconButton(onClick = { selectPage(state.currentPage - 1) },
                     enabled = active && state.currentPage > 0, modifier = Modifier.size(44.dp),
                     tooltip = "上一部番剧") {
@@ -196,7 +193,7 @@ internal fun AnimeFeaturedCarousel(
                 }
                 Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
                     val color = MaterialTheme.colorScheme.onSurface
-                    if (entries.size > 1) Canvas(Modifier.size(width = (entries.size * 16).dp, height = 4.dp)
+                    Canvas(Modifier.size(width = (entries.size * 16).dp, height = 4.dp)
                         .clearAndSetSemantics { }) {
                         repeat(entries.size) { index ->
                             val visualIndex = if (rtl) entries.lastIndex - index else index
@@ -221,7 +218,7 @@ internal fun AnimeFeaturedCarousel(
 @Composable
 private fun AnimeFeaturedCard(
     entry: AnimeFeaturedEntry,
-    compactLayout: Boolean,
+    narrow: Boolean,
     imageWidthPx: Int,
     imageHeightPx: Int,
     onReady: () -> Unit,
@@ -234,10 +231,10 @@ private fun AnimeFeaturedCard(
 ) {
     val context = LocalMangaContext.current
     val item = entry.discoveryItem
-    val scores = observedAnimeRatingSnapshot(item.subject, item.sourceScores, enabled = scoresEnabled).scores
+    val scores = observedAnimeRatingSnapshot(item.subject, item.sourceScores, enabled = false).scores
+    val primaryScore = scores.firstOrNull { it.provider == item.discoveryProvider } ?: scores.firstOrNull()
     val motion = LocalMotionEnabled.current
     val interaction = remember(entry.key) { MutableInteractionSource() }
-    val backdrop = rememberHazeState()
     val latestOnReady by rememberUpdatedState(onReady)
     val request = remember(context, entry.coverUrl, entry.sourceId, imageWidthPx, imageHeightPx, motion) {
         ImageRequest.Builder(imagePlatformContext(context)).animeArtwork(entry.coverUrl, entry.sourceId)
@@ -246,13 +243,16 @@ private fun AnimeFeaturedCard(
     val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Crop,
         onSuccess = { latestOnReady() })
     val colors = MaterialTheme.colorScheme
-    BoxWithConstraints(modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button,
+    val titleGradient = remember {
+        Brush.verticalGradient(0f to Color.Transparent, .36f to Color.Black.copy(alpha = .57f),
+            1f to Color.Black.copy(alpha = .82f))
+    }
+    Box(modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button,
         enabled = enabled, onClickLabel = "查看详情", onClick = { onOpen(entry) })
         .semantics(mergeDescendants = true) {
             contentDescription = listOf(entry.title, entry.caption).filter(String::isNotBlank).joinToString("，")
         }.motionPress(interaction, enabled = enabled, pressedScale = .985f)) {
-        val captionWidth = if (compactLayout) maxWidth - 20.dp else (maxWidth * .69f).coerceAtMost(390.dp)
-        Box(Modifier.matchParentSize().mangaHazeSource(backdrop).background(colors.surfaceContainerHigh),
+        Box(Modifier.matchParentSize().background(colors.surfaceContainerHigh),
             contentAlignment = Alignment.Center) {
             Icon(Icons.Outlined.Tv, null, Modifier.size(24.dp), tint = colors.onSurfaceVariant)
             Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
@@ -264,22 +264,26 @@ private fun AnimeFeaturedCard(
                     }
                 })
         }
-        LiquidGlassSurface(backdrop, Modifier.align(Alignment.BottomStart).padding(10.dp)
-            .width(captionWidth.coerceAtLeast(1.dp)), cornerRadius = 17.dp, role = GlassSurfaceRole.GALLERY,
-            elevation = 0.dp) {
-            Column(Modifier.fillMaxWidth().background(colors.surface.copy(alpha = .68f), RoundedCornerShape(17.dp))
-                .padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(entry.title, Modifier.clearAndSetSemantics { }, color = colors.onSurface,
-                    fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                    style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis)
-                if (entry.caption.isNotBlank()) Text(entry.caption, Modifier.clearAndSetSemantics { },
-                    color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (scores.isNotEmpty()) AnimeRatingBadges(entry.key, scores, Modifier.fillMaxWidth(),
-                    foreground = colors.onSurface, onExpand = ({
-                        onOpenScores(entry.copy(discoveryItem = item.copy(sourceScores = scores)))
-                    }).takeIf { scoresEnabled })
+        Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().background(titleGradient)
+            .padding(start = 14.dp, top = 26.dp, end = 14.dp, bottom = 9.dp)) {
+            Text(entry.title, Modifier.fillMaxWidth().clearAndSetSemantics { }, color = Color.White,
+                fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                style = MaterialTheme.typography.titleLarge.copy(
+                    fontSize = if (narrow) 19.sp else 22.sp, lineHeight = if (narrow) 24.sp else 28.sp,
+                    lineBreak = LineBreak.Heading),
+                fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (entry.caption.isNotBlank() || primaryScore != null) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (entry.caption.isNotBlank()) Text(entry.caption,
+                        Modifier.weight(1f, fill = false).clearAndSetSemantics { },
+                        color = Color.White.copy(alpha = .87f), style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (primaryScore != null) AnimeDiscoveryPrimaryScore(primaryScore,
+                        foreground = Color.White, onScores = ({
+                            onOpenScores(entry.copy(discoveryItem = item.copy(sourceScores = scores)))
+                        }).takeIf { scoresEnabled })
+                }
             }
         }
     }

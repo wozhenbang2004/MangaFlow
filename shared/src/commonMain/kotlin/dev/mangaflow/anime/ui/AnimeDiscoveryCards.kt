@@ -1,6 +1,7 @@
 package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -13,6 +14,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -34,6 +36,7 @@ import dev.mangaflow.ui.MangaLayout
 import dev.mangaflow.ui.DesktopContextMenuArea
 import dev.mangaflow.ui.DesktopMenuAction
 import dev.mangaflow.ui.detailMetricScore
+import dev.mangaflow.ui.mangaMetricValueStyle
 import dev.mangaflow.ui.mangaFontFamily
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.typography.MangaFontScene
@@ -71,7 +74,7 @@ internal fun animeDiscoveryColumns(width: Dp, preferred: Int?): Int {
         columns == 1 -> 1
         desktop && columns == 0 -> MangaLayout.automaticDesktopColumns(width, fontScale, gap, side)
         else -> MangaLayout.columns(width, columns,
-            (if (desktop) 156.dp else if (columns >= 4) 68.dp else 88.dp) * fontScale, gap, side)
+            (if (desktop) 156.dp else if (columns >= 4) 86.dp else 90.dp) * fontScale, gap, side)
     }
 }
 
@@ -176,7 +179,7 @@ internal fun animeDiscoveryMetric(item: AnimeDiscoveryItem, query: AnimeDiscover
     else -> null
 }
 
-/** Artwork, title and the shared manga score band keep the same reading order in every density. */
+/** Cards use their catalogued value; the rating sheet resolves other providers when opened. */
 @Composable
 internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQuery,
     modifier: Modifier = Modifier, list: Boolean = false, showPoster: Boolean = true,
@@ -185,7 +188,8 @@ internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQ
     onOpen: () -> Unit) {
     val provider = item.discoveryProvider ?: query.provider
     val scores = observedAnimeRatingSnapshot(item.subject, animeDiscoverySourceScores(item, provider),
-        enabled = onScores != null).scores
+        enabled = list && onScores != null).scores
+    val primaryScore = scores.firstOrNull { it.provider == provider } ?: scores.firstOrNull()
     val schedule = animeDiscoveryMetric(item, query)
     val length = "电影".takeIf { item.format == AnimeDiscoveryFormat.MOVIE }
         ?: item.episodeCount?.takeIf { it > 0 }?.let { "${it} 集" }
@@ -205,14 +209,34 @@ internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQ
         }
     } else null
     val artworkProvider = item.coverProvider ?: provider
-    AnimeCompactCoverCard(item.key, item.title, item.coverUrl, caption, animeDiscoverySourceId(artworkProvider),
+    val gridCaption = if (!list && primaryScore != null && schedule == null &&
+        !query.calendar && query.season == null) "" else caption
+    AnimeCompactCoverCard(item.key, item.title, item.coverUrl, gridCaption, animeDiscoverySourceId(artworkProvider),
         fallbackCover = item.subject?.coverUrl?.takeIf { artworkProvider == AnimeDiscoveryProvider.BANGUMI },
-        ratings = if (scores.isEmpty()) null else ({
-            AnimeRatingBadges(item.key, scores, Modifier.fillMaxWidth(), onExpand = showScores)
-        }),
+        ratings = primaryScore?.let { score -> {
+            if (list) AnimeRatingBadges(item.key, scores, Modifier.fillMaxWidth(), onExpand = showScores)
+            else AnimeDiscoveryPrimaryScore(score, onScores = showScores)
+        } },
         captionBadge = sourceBadge,
         description = listOfNotNull(item.title, caption.takeIf(String::isNotBlank)).joinToString("，"),
         modifier = modifier, list = list, showPoster = showPoster, onManage = onManage, onOpen = onOpen)
+}
+
+@Composable
+internal fun AnimeDiscoveryPrimaryScore(score: AnimeSourceScore,
+    foreground: Color = MaterialTheme.colorScheme.onSurfaceVariant, onScores: (() -> Unit)?) {
+    val source = animeDiscoveryProviderLabel(score.provider)
+    val value = if (score.scale == 10) detailMetricScore(score.rating) else animeDiscoveryScoreText(score)
+    Row(Modifier.then(if (onScores != null) Modifier.clickable(role = Role.Button,
+        onClickLabel = "查看全部来源评分", onClick = onScores) else Modifier)
+        .heightIn(min = 24.dp).semantics(mergeDescendants = true) {
+            contentDescription = "$source 评分 " + animeDiscoveryScoreText(score)
+        }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        AnimeSourceMark(animeDiscoveryScoreSourceId(score.provider), source,
+            Modifier.clearAndSetSemantics { }, size = 13.dp, ink = foreground)
+        Text(value, Modifier.clearAndSetSemantics { }, color = foreground, style = mangaMetricValueStyle(),
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
 }
 
 internal fun animeDiscoverySourceScores(item: AnimeDiscoveryItem, provider: AnimeDiscoveryProvider): List<AnimeSourceScore> =
@@ -295,11 +319,11 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
         Column(click) {
             if (showPoster) AnimePoster(cover, Modifier.fillMaxWidth().aspectRatio(2f / 3f).clearAndSetSemantics { },
                 sourceId, fallbackCover, title)
-            Text(title, Modifier.padding(top = 8.dp, start = 2.dp, end = 2.dp).clearAndSetSemantics { },
+            Text(title, Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp).clearAndSetSemantics { },
                 fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 20.sp),
-                fontWeight = FontWeight.SemiBold, maxLines = 2, minLines = 2, overflow = TextOverflow.Ellipsis)
-            if (ratings != null) Box(Modifier.fillMaxWidth().padding(top = 4.dp, start = 2.dp, end = 2.dp)) { ratings() }
+                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 19.sp),
+                fontWeight = FontWeight.Medium, maxLines = 2, minLines = 2, overflow = TextOverflow.Ellipsis)
+            if (ratings != null) Box(Modifier.fillMaxWidth().padding(start = 2.dp, end = 2.dp)) { ratings() }
             if (caption.isNotBlank() || captionBadge != null)
                 Box(Modifier.fillMaxWidth().padding(top = 3.dp, start = 2.dp, end = 2.dp)) {
                     AnimeCompactCardCaption(caption, captionBadge)

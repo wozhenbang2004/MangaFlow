@@ -7,6 +7,8 @@ import dev.mangaflow.experience.ExperienceDiskCache
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.ExperienceRuntimePreferences
 import dev.mangaflow.experience.CacheEvictionOrder
+import dev.mangaflow.experience.coilCleanFilename
+import dev.mangaflow.experience.imageCacheFiles
 import dev.mangaflow.experience.readerPageCacheKey
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
@@ -119,6 +121,8 @@ class StorageCacheStore private constructor(context: PlatformContext) {
     private val catalogStore by lazy { ReaderCatalogStore(app) }
     private var budget = 512L * MIB
     private var budgetVersion = -1L
+    private var measuredNonImageBytes: Long? = null
+    private var imageBudgetSequence = 0L
     private var cachedBytes = 0L
     private var sampledSnapshot: StorageCacheSnapshot? = null
     private var sampledAt = 0L
@@ -172,9 +176,27 @@ class StorageCacheStore private constructor(context: PlatformContext) {
         ready.await()
         mutation.withLock {
             val cached = synchronized(lock) {
-                sampledSnapshot?.takeIf { wallTimeMillis() - sampledAt in 0L until maxAgeMillis }
+                sampledSnapshot?.takeIf { it.budgetBytes == budget && wallTimeMillis() - sampledAt in 0L until maxAgeMillis }
             }
             cached ?: scan()
+        }
+    }
+    /** A real network miss waiting for disk can bypass the normal sampling interval. If an
+     * in-flight scan has already verified the same owner, its result satisfies this request. */
+    internal fun recheckImageQuota(cache: ExperienceDiskCache, checkpoint: Long) {
+        scope.launch {
+            try {
+                ready.await()
+                mutation.withLock<Unit> {
+                    if (cache.stillNeedsCheck(checkpoint)) {
+                        scan()
+                    }
+                }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                synchronized(lock) { error = true }
+            }
         }
     }
     internal fun cacheWorkFinished() = requestMaintenance()
@@ -269,13 +291,20 @@ class StorageCacheStore private constructor(context: PlatformContext) {
         requestMaintenance()
     }
 
-    internal fun attach(cache: ExperienceDiskCache) { synchronized(lock) { coil = cache }; requestMaintenance() }
+    internal fun attach(cache: ExperienceDiskCache) {
+        synchronized(lock) { coil = cache }
+        publishImageBudget()
+        requestMaintenance()
+    }
     internal fun setBudget(bytes: Long, version: Long) {
         synchronized(lock) {
             if (version < budgetVersion) return
             budgetVersion = version
-            budget = bytes.coerceAtLeast(0L)
+            val next = bytes.coerceAtLeast(0L)
+            if (budget != next) sampledSnapshot = null
+            budget = next
         }
+        publishImageBudget()
         requestMaintenance()
     }
 
@@ -469,20 +498,20 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                 protected = video == null || video.active)
         }
         val present = mutableSetOf<String>()
-        val imageFiles = StorageFile(root, "image-cache").listFiles().orEmpty()
-        val imageNames = imageFiles.map { it.name }.toSet()
+        val imageGeneration = disk?.imageFileGeneration()
+        val imageFiles = imageCacheFiles(disk?.directory ?: StorageFile(root, "image-cache").nativePath)
+        val cleanFiles = imageFiles.filterKeys(coilCleanFilename::matches)
+        val knownCoilHashes = mutableSetOf<String>()
+        var knownImageBytes = 0L
         // Coil's hashed filenames are observed for size only. Mutations always use its public owner.
         saved.filter { it.backend == CacheBackend.COIL }.forEach { resource ->
             val hash = resource.id.substringAfter(':')
-            if ("$hash.1" !in imageNames) return@forEach
-            val dir = disk?.directory ?: StorageFile(root, "image-cache").nativePath
-            val data = StorageFile(dir / "$hash.1")
-            val meta = StorageFile(dir / "$hash.0")
-            if (data.isFile) {
-                val bytes = data.length() + meta.length()
-                present += resource.id
-                items += StoredCacheItem(resource, bytes, data.lastModified(), synchronized(lock) { protected(resource, now) })
-            }
+            val data = cleanFiles["$hash.1"] ?: return@forEach
+            val bytes = (data.size ?: 0L) + (cleanFiles["$hash.0"]?.size ?: 0L)
+            knownCoilHashes += hash
+            knownImageBytes += bytes
+            present += resource.id
+            items += StoredCacheItem(resource, bytes, data.lastModifiedAtMillis ?: 0L, synchronized(lock) { protected(resource, now) })
         }
         listOf(CacheBackend.SCRIPT, CacheBackend.JM, CacheBackend.PANEL).forEach { backend ->
             val folder = when (backend) { CacheBackend.SCRIPT -> "script-decoded"; CacheBackend.JM -> "jm-decoded"; else -> "reader-panels" }
@@ -495,16 +524,12 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                 items += StoredCacheItem(resource, file.length(), file.lastModified(), synchronized(lock) { protected(resource, now) })
             }
         }
-        val diskSize = imageFiles
-            .filter { it.name.matches(Regex("[a-f0-9]{64}\\.[01]")) }.sumOf { it.length() }
-        val knownCoilHashes = items.filter { it.resource.backend == CacheBackend.COIL }
-            .map { it.resource.id.substringAfter(':') }.toSet()
-        val unknownFiles = imageFiles.filter { it.name.matches(Regex("[a-f0-9]{64}\\.[01]")) &&
-            it.name.substringBeforeLast('.') !in knownCoilHashes }
-        val legacyStamp = hash(unknownFiles.sortedBy { it.name }.joinToString("|") {
-            "${it.name}:${it.length()}:${it.lastModified()}"
+        val diskSize = cleanFiles.values.sumOf { it.size ?: 0L }
+        val unknownFiles = cleanFiles.filterKeys { it.substringBeforeLast('.') !in knownCoilHashes }
+        val legacyStamp = hash(unknownFiles.entries.sortedBy { it.key }.joinToString("|") { (name, meta) ->
+            "$name:${meta.size}:${meta.lastModifiedAtMillis ?: 0L}"
         })
-        val unknown = (diskSize - items.filter { it.resource.backend == CacheBackend.COIL }.sumOf { it.bytes }).coerceAtLeast(0L)
+        val unknown = (diskSize - knownImageBytes).coerceAtLeast(0L)
         val catalogOwner = catalogStore.cacheOwner
         val owners = synchronized(lock) { auxiliaryOwners.values.toList() } + catalogOwner
         for (owner in owners) {
@@ -545,7 +570,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
             }
         }
         val total = StorageCacheSnapshot(items, unknown, auxiliary, catalogBytes, 0L,
-            index.baseFile.length(), imageFiles.filterNot { it.name.matches(Regex("[a-f0-9]{64}\\.[01]")) }.sumOf { it.length() } +
+            index.baseFile.length(), imageFiles.entries.sumOf { (name, meta) -> if (name !in cleanFiles) meta.size ?: 0L else 0L } +
                 listOf("script-decoded", "jm-decoded", "reader-panels").sumOf { folder ->
                     StorageFile(root, folder).listFiles().orEmpty().filter { file ->
                         !file.name.matches(Regex("[a-f0-9]{64}\\.(img|jpg|json)"))
@@ -568,6 +593,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                 .sortedBy { it.accessedAt }.take((records.size - MAX_ENTRIES).coerceAtLeast(0))
             oldest.forEach { records.remove(it.id); memoryKeys.remove(it.id) }
         }
+        publishImageBudget(disk, total.totalBytes - diskSize, diskSize, imageGeneration)
         return total
     }
 
@@ -677,8 +703,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                     freed += disk.clearWhenIdle { synchronized(lock) { maintenanceAllowed(maintenanceFence) && windows.isEmpty() && leases.isEmpty() && revision == version } }
                 } else skipped++
             }
-            val current = scan()
-            if (freed > 0L) publishImageBudget(current)
+            scan()
             persist()
             CacheClearResult(freed, skipped, failed, removedKeys)
         }
@@ -840,7 +865,6 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                         } })
                     val current = mutation.withLock {
                         val measured = scan()
-                        publishImageBudget(measured)
                         persist()
                         measured
                     }
@@ -860,14 +884,22 @@ class StorageCacheStore private constructor(context: PlatformContext) {
         }
     }
 
-    /** Called under mutation so an older scan cannot publish after a newer removal. */
-    private fun publishImageBudget(snapshot: StorageCacheSnapshot) {
-        val imageBytes = snapshot.coilUnclassifiedBytes +
-            snapshot.items.sumOf { if (it.resource.backend == CacheBackend.COIL) it.bytes else 0L }
-        val other = snapshot.totalBytes - imageBytes
-        val disk = synchronized(lock) { coil } ?: return
-        val (limit, version) = synchronized(lock) { budget to budgetVersion }
-        disk.resize((limit - other).coerceAtLeast(0L), version)
+    private data class ImageAllocation(val cache: ExperienceDiskCache, val limit: Long, val sequence: Long, val measured: Boolean)
+
+    /** A successful foreground inventory and a policy change each update the actual write gate
+     * immediately, independently of optional video/catalogue trimming. Never take the image
+     * lock while holding the storage lock (editors notify storage on completion). */
+    private fun publishImageBudget(scanned: ExperienceDiskCache? = null, other: Long? = null,
+        imageBytes: Long? = null, generation: Long? = null) {
+        val allocation = synchronized(lock) {
+            if (other != null) measuredNonImageBytes = other
+            val cache = coil ?: return
+            if (budgetVersion < 0L) return
+            val nonImage = measuredNonImageBytes
+            ImageAllocation(cache, (budget - (nonImage ?: 0L)).coerceAtLeast(0L), ++imageBudgetSequence, nonImage != null)
+        }
+        allocation.cache.resize(allocation.limit, allocation.sequence, imageBytes.takeIf { scanned === allocation.cache },
+            generation, allowIncrease = allocation.measured)
     }
 
     /** Cold caches are measured but protected until their native journal owner is attached. */

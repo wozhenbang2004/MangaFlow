@@ -57,6 +57,7 @@ internal fun AnimeSourcesPanel(
     controller: AnimeController,
     backdrop: HazeState,
     focusEpisode: AnimeEpisode?,
+    overVideo: Boolean,
     recovering: Boolean,
     onDismiss: () -> Unit,
     onPlay: (String, AnimeEpisodeOption) -> Unit,
@@ -212,7 +213,7 @@ internal fun AnimeSourcesPanel(
                 it.catalog.referenceKey() == draft.catalogKey && it.episode == draft.episode && it.confirmed
             }) mapping = null
     }
-    MotionDialog(visible, onDismissRequest = { if (previewing) closePreview() else onDismiss() }, maximumWidth = 720.dp,
+    AnimeLinePanel(visible, overVideo, subject, backdrop, onDismiss = { if (previewing) closePreview() else onDismiss() },
         onClosed = {
             val requested = pendingSourceWork
             val owner = presentedOwner
@@ -234,8 +235,9 @@ internal fun AnimeSourcesPanel(
                 }
             }
         }) {
-        AnimePanelSurface(backdrop) {
-            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
+            val window = LocalMangaWindow.current
+            Column(Modifier.fillMaxWidth().then(if (overVideo) Modifier.height(window.height)
+                else Modifier.heightIn(max = window.panelHeight))) {
                 Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     if (previewing) MotionIconButton(onClick = ::closePreview, modifier = Modifier.size(44.dp),
@@ -250,7 +252,7 @@ internal fun AnimeSourcesPanel(
                             focusEpisode != null -> "播放线路"
                             else -> "作品来源"
                         }, style = MaterialTheme.typography.titleLarge)
-                        val context = if (previewing) subject?.title else listOfNotNull(
+                        val context = if (previewing) subject?.title else if (overVideo) focusEpisode?.let(::animeEpisodeLabel) else listOfNotNull(
                             focusEpisode?.let(::animeEpisodeLabel), subject?.title).joinToString(" · ")
                         if (!context.isNullOrBlank()) Text(context, style = MaterialTheme.typography.bodySmall,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -981,7 +983,15 @@ internal fun AnimeSourcesPanel(
                     Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp),
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-        }
+    }
+}
+
+@Composable
+private fun AnimeLinePanel(visible: Boolean, overVideo: Boolean, subject: AnimeSubject?, backdrop: HazeState,
+    onDismiss: () -> Unit, onClosed: () -> Unit, content: @Composable () -> Unit) {
+    if (overVideo) AnimePlaybackPanel(visible, true, subject, backdrop, onDismiss, onClosed, content)
+    else MotionDialog(visible, onDismiss, maximumWidth = 720.dp, onClosed = onClosed) {
+        AnimePanelSurface(backdrop) { content() }
     }
 }
 

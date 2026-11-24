@@ -51,7 +51,12 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var diskCache: ExperienceDiskCache? = null
     private val mutablePrefetchDiskState = MutableStateFlow(PrefetchDiskState.AVAILABLE)
     internal val prefetchDiskState: StateFlow<PrefetchDiskState> = mutablePrefetchDiskState.asStateFlow()
-    internal fun publishPrefetchDiskState(value: PrefetchDiskState) { mutablePrefetchDiskState.value = value }
+    private val mutablePrefetchDiskQuota = MutableStateFlow(PrefetchDiskQuota(PrefetchDiskState.AVAILABLE, null, null))
+    internal val prefetchDiskQuota = mutablePrefetchDiskQuota.asStateFlow()
+    internal fun publishPrefetchDiskQuota(value: PrefetchDiskQuota) {
+        mutablePrefetchDiskQuota.value = value
+        mutablePrefetchDiskState.value = value.state
+    }
     private var memoryUsageJob: Job? = null
     private var memoryRefreshPending = false
     private var memoryExpiryWatcher: Job? = null
@@ -503,7 +508,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                     val disk = synchronized(lock) { diskCache }
                     // This existing sample also wakes readers after a transient journal error.
                     // An unrelated storage owner's scan must not hold the image gate closed.
-                    val imageBytes = disk?.sampleSize()
+                    disk?.sampleSize()
                     val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
                     storage.maintenanceTick()
                     val global = storage.sample(overrides.value.runtime.cacheSampleSeconds.toLong() * 1_000L)
@@ -545,12 +550,12 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                     synchronized(lock) {
                         sampledDiskBytes = global.totalBytes
                         mutableUsage.value = mutableUsage.value.copy(
-                            imageDiskBytes = imageBytes, diskBytes = global.totalBytes,
-                            diskLimit = state.value.diskCacheBytes, diskSampledAtMillis = storage.measuredAtMillis,
+                            imageDiskBytes = mutablePrefetchDiskQuota.value.usedBytes, diskBytes = global.totalBytes,
+                            diskLimit = global.budgetBytes, diskSampledAtMillis = storage.measuredAtMillis,
                             diskProtectedBytes = (global.totalBytes - global.reclaimableBytes).coerceAtLeast(0L),
                             diskReclaimableBytes = global.reclaimableBytes,
                             diskAreas = cacheAreas,
-                            diskResizePending = pending || global.pending || global.totalBytes > state.value.diskCacheBytes,
+                            diskResizePending = pending || global.pending || global.totalBytes > global.budgetBytes,
                             cacheError = error,
                             observedDiskPeakBytes = maxObserved(mutableUsage.value.observedDiskPeakBytes, global.totalBytes),
                         )
@@ -1103,6 +1108,12 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     }
     internal fun canWritePrefetch(): Boolean = synchronized(lock) {
         mutableState.value.prefetchBytes > 0L && diskCache?.acceptsPrefetchWrites != false
+    }
+
+    internal fun recheckPrefetchDiskQuota() {
+        val cache = synchronized(lock) { diskCache } ?: return
+        val checkpoint = cache.requestBlockedCheck() ?: return
+        dev.mangaflow.storage.StorageCacheStore.get(app).recheckImageQuota(cache, checkpoint)
     }
 
     internal fun requirePrefetchWrite() = synchronized(lock) {

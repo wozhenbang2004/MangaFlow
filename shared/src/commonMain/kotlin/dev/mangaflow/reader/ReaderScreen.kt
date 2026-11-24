@@ -203,8 +203,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -465,13 +465,17 @@ fun ReaderScreen(
     }
     val currentSourceName = chapter.variants.firstOrNull { it.storageId == chapter.id }?.sourceName
     val sourceSwitchWait = remember(sourceLoading, sourceSwitchName) { ReaderLoadAttempt() }
-    var controlsVisible by rememberSaveable { mutableStateOf(true) }
+    var controlsVisible by rememberSaveable { mutableStateOf(false) }
     val fullscreen = LocalWindowFullscreen.current
     val immersive = fullscreen?.active == true
     val hideAmbientChrome = immersive && !controlsVisible
-    var topControlsHeightPx by remember { mutableIntStateOf(0) }
     var bottomControlsHeightPx by remember { mutableIntStateOf(0) }
     var readerStatusInspecting by remember(chapterId) { mutableStateOf(false) }
+    var readerStatusOpen by remember(chapterId) { mutableStateOf(false) }
+    var restoreStatusFocus by remember(chapterId) { mutableStateOf(false) }
+    val statusControlFocus = remember { FocusRequester() }
+    val placementFlow = remember(experience) { experience.overrides.map { it.readerStatusPlacement }.distinctUntilChanged() }
+    val statusPlacement by placementFlow.collectAsStateWithLifecycle(initialValue = experience.overrides.value.readerStatusPlacement)
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showEnhancement by rememberSaveable { mutableStateOf(false) }
     var comparisonTarget by remember(chapterId) { mutableStateOf<ReaderComparisonTarget?>(null) }
@@ -528,7 +532,6 @@ fun ReaderScreen(
                 onCancelSourceSelection()
                 chapterChangeRequested = true
                 chapterId = previous.id
-                controlsVisible = true
             }
         }
     }
@@ -538,7 +541,6 @@ fun ReaderScreen(
                 onCancelSourceSelection()
                 chapterChangeRequested = true
                 chapterId = next.id
-                controlsVisible = true
             }
         }
     }
@@ -564,6 +566,8 @@ fun ReaderScreen(
     val latestComparisonOwner by rememberUpdatedState(enhancement to pageIndex)
     val compareEnhancement = comparisonTarget?.matches(enhancement, pageIndex,
         enhancementState.assets[pageIndex], enhancementPolicy) == true
+    val readerToolsVisible = controlsVisible && !readerStatusInspecting && !readerStatusOpen && !panelBlocksReading &&
+        !showPanelModels && !showEnhancement && !compareEnhancement && !showSpreadAdjustment && !showComments && !showPageNavigator
     val warmSourceStandbys by rememberUpdatedState(onWarmSourceStandbys)
     val prefetchedPageFailed by rememberUpdatedState(onPrefetchPageFailed)
     val cancelSourceStandbys by rememberUpdatedState(onCancelSourceStandbys)
@@ -591,21 +595,26 @@ fun ReaderScreen(
     val enhancementSources = remember(sourceIdentity, pages, headers) {
         mutableStateMapOf<Int, ReaderEnhancementSourceReceipt>()
     }
-    val preparation by preparationTracker.state.collectAsStateWithLifecycle()
+    val preparationWindow by key(preparationTracker) {
+        val windows = remember {
+            preparationTracker.state.map { it.readingWindow() }.distinctUntilChanged()
+        }
+        windows.collectAsStateWithLifecycle(initialValue = remember { preparationTracker.state.value.readingWindow() })
+    }
     val comparisonSnapshot = comparisonTarget
     LaunchedEffect(comparisonSnapshot, compareEnhancement) {
         if (!compareEnhancement && comparisonTarget == comparisonSnapshot) comparisonTarget = null
     }
     BackHandler(enabled = active && compareEnhancement) { comparisonTarget = null }
     LaunchedEffect(sourceIdentity, chapter, pageIndex, pages, standbyActive, loading, error,
-        sourcePickerBlocking, chapterChangeRequested, experienceBudget.standbySources, preparation.direction) {
+        sourcePickerBlocking, chapterChangeRequested, experienceBudget.standbySources, preparationWindow.direction) {
         // A stalled or failed visible image is exactly when spare sources matter. Do not
         // gate standby preparation on the visible image reaching READY.
         if (!standbyActive || pages.isEmpty() ||
             sourcePickerBlocking || chapterChangeRequested) return@LaunchedEffect
         // A finite intent delay follows the actual cursor; rapid paging replaces stale work.
         delay(350)
-        warmSourceStandbys(chapter, pageIndex.coerceIn(pages.indices), pages.size, preparation.direction)
+        warmSourceStandbys(chapter, pageIndex.coerceIn(pages.indices), pages.size, preparationWindow.direction)
     }
     val chapterDownload = remember(downloadStore, manga.id, chapterId) { downloadStore.observeChapter(manga.id, chapterId) }
     val initialDownload = remember(downloadStore, manga.id, chapterId) {
@@ -742,10 +751,10 @@ fun ReaderScreen(
     }
     val rescueStandbys by rememberUpdatedState(onRescueSourceStandbys)
     val rescuePages = remember(sourceIdentity) { mutableStateMapOf<Int, Boolean>() }
-    val visibleRepairPages = remember(pageIndex, preparation.firstVisible, preparation.lastVisible, pages.size) {
+    val visibleRepairPages = remember(pageIndex, preparationWindow.visible, pages.size) {
         if (pageIndex !in pages.indices) emptyList()
-        else if (pageIndex in preparation.firstVisible..preparation.lastVisible)
-            listOf(pageIndex) + (preparation.firstVisible..preparation.lastVisible).filter { it in pages.indices && it != pageIndex }
+        else if (pageIndex in preparationWindow.visible)
+            listOf(pageIndex) + preparationWindow.visible.filter { it in pages.indices && it != pageIndex }
         else listOf(pageIndex)
     }
     val latestVisibleRepairPages by rememberUpdatedState(visibleRepairPages)
@@ -835,17 +844,7 @@ fun ReaderScreen(
     // Old page panes may save their own cursor while a source switch disposes them.
     val chapterPageCount = pages.size
 
-    val clock = rememberReaderClock(active && !leavingReader)
-    val androidPageLabel = platformKind == PlatformKind.ANDROID
-    val cornerStatusStyle = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, fontFeatureSettings = "tnum")
-    val cornerStatusMeasurer = rememberTextMeasurer()
-    // Reserve the chapter's widest page count before layout, so every turn keeps
-    // the neighbouring status slots in place and no first-frame measurement jumps.
-    val cornerStatusWidth = with(LocalDensity.current) {
-        cornerStatusMeasurer.measure("88:88 · ${"8".repeat(pages.size.toString().length)} / ${pages.size}",
-            cornerStatusStyle, maxLines = 1, softWrap = false).size.width.toDp() +
-            if (androidPageLabel) 16.dp else 8.dp
-    }.coerceAtMost(LocalMangaWindow.current.width * .45f)
+    val clock = rememberReaderClock(readerToolsVisible && readerForeground && !leavingReader)
     val readingEligible = active && !leavingReader && !loading && error == null && imageVisible &&
         !panelBlocksReading && !showPanelModels && !showComments && !showSpreadAdjustment && !showPageNavigator &&
         !showReaderActions && !readerActionsPresent && !sourcePickerBlocking && !readerStatusInspecting &&
@@ -1118,7 +1117,7 @@ fun ReaderScreen(
             discussionState?.ensureLoaded()
         }
     }
-    LaunchedEffect(atChapterEnd, touchExploration, chromeEngaged, readerStatusInspecting) {
+    LaunchedEffect(atChapterEnd, touchExploration, chromeEngaged) {
         if (atChapterEnd && !touchExploration && !chromeEngaged && !readerStatusInspecting) controlsVisible = false
     }
 
@@ -1129,9 +1128,14 @@ fun ReaderScreen(
     var keyboardRequest by remember(chapterId) { mutableStateOf<ReaderKeyboardRequest?>(null) }
     val keyboardReady = keyboard != null && readingEligible && !showPageNavigator &&
         preferences.panelEngine == PanelEngine.OFF
-    LaunchedEffect(keyboardReady, keyboardFocusRestore) {
+    LaunchedEffect(keyboardReady, keyboardFocusRestore, readerToolsVisible, readerStatusInspecting) {
         // Let closing chrome settle first. An open inspector keeps its own focused editor.
-        if (keyboardReady && !showSettings && (!showChapters || focusReadingAfterChapter)) {
+        if (restoreStatusFocus && readerToolsVisible && readerForeground && !leavingReader &&
+            statusPlacement != ReaderStatusPlacement.HIDDEN) {
+            withFrameNanos { }
+            statusControlFocus.requestFocus()
+            restoreStatusFocus = false
+        } else if (keyboardReady && !showSettings && (!showChapters || focusReadingAfterChapter)) {
             withFrameNanos { }
             keyboardFocus.requestFocus()
             focusReadingAfterChapter = false
@@ -1367,7 +1371,7 @@ fun ReaderScreen(
             // manual singles. The saved cursor alone describes only one half of a spread.
             val enhancementViewport by rememberUpdatedState(preparationViewport)
             val enhancementCursor by rememberUpdatedState(pageIndex)
-            LaunchedEffect(enhancement, pages, preparation.direction, readerForeground,
+            LaunchedEffect(enhancement, pages, preparationWindow.direction, readerForeground,
                 leavingReader, chapterChangeRequested, enhancementPolicy,
                 experienceBudget.enhancementAhead, experienceBudget.enhancementProtected) {
                 snapshotFlow {
@@ -1378,7 +1382,7 @@ fun ReaderScreen(
                     }.orEmpty()
                     // Share prefetch's established reading intent. A brief backward glance
                     // must not turn enhancement around while original preparation stays ahead.
-                    val direction = if (preparation.direction < 0) -1 else 1
+                    val direction = if (preparationWindow.direction < 0) -1 else 1
                     val next = range?.let { (first, last) ->
                         readerDirectionalPages(first, last, pages.size, 1, direction,
                             viewport?.groups, completeSpreads = true).toSet()
@@ -1408,7 +1412,7 @@ fun ReaderScreen(
                     retainOriginalsAcrossLayouts = true,
                     prepareEnhancementAhead = enhancementPolicy.tier != QualityTier.ORIGINAL &&
                         PreparationMode.SMART in enhancementPolicy.preparation,
-                    failedLoads = viewport.failedLoads, visibleRange = viewport.visibleRange)
+                    failedLoads = viewport.failedLoads, download = activeDownload, visibleRange = viewport.visibleRange)
             }
 
             // Read the live dim preview during drawing; dragging does not publish or persist preferences.
@@ -1461,8 +1465,20 @@ fun ReaderScreen(
                 modifier = anchor.padding(bottom = bottom))
         }
 
+        val statusAvailable = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
+            !showEnhancement && !compareEnhancement && !showSpreadAdjustment && !showComments && !showPageNavigator &&
+            !sourcePickerBlocking && !chapterChangeRequested && !showReaderActions && !readerActionsPresent &&
+            repairState.selection == null
+        val statusButton: @Composable () -> Unit = {
+            ReaderPrefetchButton(preparationTracker.state, enabled = readerToolsVisible && statusAvailable,
+                modifier = Modifier.widthIn(min = 48.dp, max = (68.dp * readerFontScale).coerceAtMost(100.dp))
+                    .focusRequester(statusControlFocus)) {
+                restoreStatusFocus = false
+                readerStatusOpen = true
+            }
+        }
         AnimatedVisibility(
-            controlsVisible, Modifier.align(Alignment.TopCenter).onSizeChanged { topControlsHeightPx = it.height },
+            readerToolsVisible, Modifier.align(Alignment.TopCenter),
             enter = fadeIn(tween(if (motionEnabled) MangaMotion.Content else 0)) +
                 slideInVertically(tween(if (motionEnabled) MangaMotion.Chrome else 0, easing = MangaMotion.EnterEasing)) { -toolbarTravel },
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
@@ -1482,9 +1498,9 @@ fun ReaderScreen(
             ) {
                 // Retain Surface's input shield on blank chrome without consuming child gestures.
                 Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).pointerInput(Unit) {}
-                    .background(colors.surface.copy(alpha = .82f)).padding(horizontal = 4.dp),
+                    .background(colors.surface.copy(alpha = .48f)).padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回漫画详情", interactive = controlsVisible, onClick = leaveReader)
+                    ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回漫画详情", interactive = readerToolsVisible, onClick = leaveReader)
                     Column(Modifier.weight(1f).padding(start = 2.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)) {
                         Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1493,18 +1509,12 @@ fun ReaderScreen(
                                 "补页 · ${it.variant.sourceName} ${it.page.index + 1}"
                             },
                             currentSourceName.takeIf { chapter.variants.size > 1 },
-                            if (enhancementPolicy.tier != QualityTier.ORIGINAL) {
-                                val visible = enhancementState.visiblePages
-                                val ready = visible.count { it in enhancementState.assets }
-                                if (visible.size > 1) "增强已备 $ready/${visible.size}"
-                                else if (enhancementState.currentEnhanced) "本页增强已备" else "原图"
-                            } else null,
-                            "下一屏增强已备".takeIf { enhancementState.nextReady }).joinToString(" · "),
+                            clock.takeIf { it.isNotBlank() }).joinToString(" · "),
                             color = colors.onSurface.copy(alpha = .86f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     if (preferences.panelEngine == PanelEngine.OFF &&
                         (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT)) {
-                        TextButton(enabled = controlsVisible, onClick = {
+                        TextButton(enabled = readerToolsVisible, onClick = {
                             cursor.scrollOffset = 0
                             updatePreferences(preferences.copy(doublePage = !preferences.doublePage))
                             keyboardFocusRestore++
@@ -1512,32 +1522,33 @@ fun ReaderScreen(
                             Text(if (preferences.doublePage) "双页" else "单页", color = colors.onSurface, fontSize = 12.sp)
                         }
                     }
-                    if (repairState.replacements.containsKey(pageIndex)) {
-                        ReaderIcon(Icons.Rounded.Refresh, "恢复本页原图", interactive = controlsVisible,
+                    if (statusPlacement == ReaderStatusPlacement.HIDDEN && repairState.replacements.containsKey(pageIndex)) {
+                        ReaderIcon(Icons.Rounded.Refresh, "恢复本页原图", interactive = readerToolsVisible,
                             onClick = { repairs.undo(pageIndex) })
-                        ReaderIcon(Icons.Rounded.Tune, "调整本页备用来源与对齐", interactive = controlsVisible,
+                        ReaderIcon(Icons.Rounded.Tune, "调整本页备用来源与对齐", interactive = readerToolsVisible,
                             onClick = { openPageRepair(pageIndex) })
                     }
+                    if (statusPlacement == ReaderStatusPlacement.TOP) statusButton()
                     if (desktop) ReaderIcon(Icons.AutoMirrored.Outlined.MenuBook,
-                        if (showChapters) "收起章节目录" else "章节目录", interactive = controlsVisible,
+                        if (showChapters) "收起章节目录" else "章节目录", interactive = readerToolsVisible,
                         emphasis = if (showChapters) 1f else .82f, onClick = ::toggleReaderChapters)
-                    ReaderIcon(Icons.Rounded.AutoAwesome, "画质与性能", interactive = controlsVisible,
+                    ReaderIcon(Icons.Rounded.AutoAwesome, "画质与性能", interactive = readerToolsVisible,
                         emphasis = if (enhancementState.currentEnhanced || showEnhancement) 1f else .82f,
                         onClick = { showEnhancement = true; controlsVisible = true })
                     ReaderIcon(Icons.Rounded.Tune, if (desktop) "阅读设置与快捷键" else "阅读设置",
-                        interactive = controlsVisible, emphasis = if (showSettings) 1f else .82f,
+                        interactive = readerToolsVisible, emphasis = if (showSettings) 1f else .82f,
                         onClick = ::toggleReaderSettings)
                     if (fullscreen != null) ReaderIcon(
                         if (immersive) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen,
                         if (immersive) "退出全屏（Esc）" else "沉浸全屏（F11）",
-                        interactive = controlsVisible, onClick = { fullscreen.setActive(!immersive) },
+                        interactive = readerToolsVisible, onClick = { fullscreen.setActive(!immersive) },
                     )
                 }
             }
         }
 
         AnimatedVisibility(
-            controlsVisible, Modifier.align(Alignment.BottomCenter).onSizeChanged { bottomControlsHeightPx = it.height },
+            readerToolsVisible, Modifier.align(Alignment.BottomCenter).onSizeChanged { bottomControlsHeightPx = it.height },
             enter = fadeIn(tween(if (motionEnabled) MangaMotion.Content else 0)) +
                 slideInVertically(tween(if (motionEnabled) MangaMotion.Chrome else 0, easing = MangaMotion.EnterEasing)) { toolbarTravel },
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
@@ -1558,16 +1569,14 @@ fun ReaderScreen(
                     cornerRadius = 22.dp,
                 ) {
                     Column(Modifier.fillMaxWidth().pointerInput(Unit) {}
-                        .background(colors.surface.copy(alpha = .82f))
+                        .background(colors.surface.copy(alpha = .48f))
                         .padding(horizontal = 10.dp, vertical = 4.dp)) {
                         if (pages.isNotEmpty()) key(chapterId) {
                             ReaderProgressSlider(
                                 pageIndex = pageIndex, pages = pages, pendingPage = targetPage,
-                                headers = headers, sourceId = chapter.sourceId,
-                                enhancementEnabled = enhancementPolicy.tier != QualityTier.ORIGINAL,
-                                showSpreadDimensions = preferences.panelEngine == PanelEngine.OFF &&
+                                showSpreadRange = preferences.panelEngine == PanelEngine.OFF &&
                                     preferences.doublePage && preferences.mode != ReadingMode.VERTICAL,
-                                enabled = controlsVisible,
+                                enabled = readerToolsVisible,
                                 onSeek = { destination ->
                                     if (destination != pageIndex) {
                                         returnLocation = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
@@ -1577,6 +1586,7 @@ fun ReaderScreen(
                                 },
                                 onOpenNavigator = { showPageNavigator = true },
                                 onInteractionChanged = { progressInteracting = it; if (!it) keyboardFocusRestore++ },
+                                statusContent = if (statusPlacement == ReaderStatusPlacement.BOTTOM) statusButton else null,
                                 sourceContent = {
                                     if (canChooseSource || sourceLoading) Box(
                                         Modifier.width(44.dp).heightIn(min = 44.dp)
@@ -1590,7 +1600,7 @@ fun ReaderScreen(
                                         if (sourceLoading) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)
                                         else ReaderSourceStack(
                                             chapter = chapter,
-                                            enabled = controlsVisible && active && !leavingReader,
+                                            enabled = readerToolsVisible && active && !leavingReader,
                                             onOpen = {
                                                 sourceCloseRequested = false
                                                 sourceChapter = chapter
@@ -1599,6 +1609,9 @@ fun ReaderScreen(
                                     }
                                 },
                             )
+                        }
+                        if (pages.isEmpty() && statusPlacement == ReaderStatusPlacement.BOTTOM) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { statusButton() }
                         }
                         BoxWithConstraints(Modifier.fillMaxWidth()) {
                             val canCorrectSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage &&
@@ -1684,29 +1697,29 @@ fun ReaderScreen(
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 if (inlineChapterNavigation) ReaderIcon(
                                     Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "上一章",
-                                    enabled = chapterIndex > 0, interactive = controlsVisible,
+                                    enabled = chapterIndex > 0, interactive = readerToolsVisible,
                                     buttonSize = 44.dp, onClick = openPrevious)
                                 if (inlineCatalog) ReaderIcon(
-                                    Icons.AutoMirrored.Outlined.MenuBook, "章节目录", interactive = controlsVisible,
+                                    Icons.AutoMirrored.Outlined.MenuBook, "章节目录", interactive = readerToolsVisible,
                                     buttonSize = 44.dp, onClick = ::toggleReaderChapters)
                                 if (inlineChapterNavigation) ReaderIcon(
                                     Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
                                     enabled = openNextChapter != null && !chapterChangeRequested,
-                                    interactive = controlsVisible, buttonSize = 44.dp,
+                                    interactive = readerToolsVisible, buttonSize = 44.dp,
                                     onClick = { openNextChapter?.invoke() })
                                 Spacer(Modifier.weight(1f))
                                 if (inlinePicture) ReaderIcon(
                                     pictureIcon, pictureLabel, enabled = currentPicture != null,
-                                    interactive = controlsVisible, buttonSize = 44.dp, onClick = toggleCurrentPicture)
+                                    interactive = readerToolsVisible, buttonSize = 44.dp, onClick = toggleCurrentPicture)
                                 if (inlineComments) ReaderIcon(
                                     Icons.Outlined.Forum, commentsLabel, enabled = pages.isNotEmpty() && commentsAvailable,
-                                    interactive = controlsVisible, buttonSize = 44.dp, onClick = { showComments = true })
+                                    interactive = readerToolsVisible, buttonSize = 44.dp, onClick = { showComments = true })
                                 key(chapterId) {
                                     Box {
-                                        if (secondaryActions) ReaderIcon(Icons.Outlined.MoreHoriz, "其他阅读操作", interactive = controlsVisible,
+                                        if (secondaryActions) ReaderIcon(Icons.Outlined.MoreHoriz, "其他阅读操作", interactive = readerToolsVisible,
                                             buttonSize = 44.dp) { showReaderActions = !showReaderActions }
                                         CompactGlassPopover(
-                                            visible = secondaryActions && showReaderActions && controlsVisible && active && !leavingReader,
+                                            visible = secondaryActions && showReaderActions && readerToolsVisible && active && !leavingReader,
                                             backdrop = readerBackdrop, aboveAnchor = true,
                                             onDismiss = { showReaderActions = false },
                                             onPresenceChange = { readerActionsPresent = it },
@@ -1771,7 +1784,7 @@ fun ReaderScreen(
                                     chapterId = chapterId, entry = activeDownload, submitting = savingChapter,
                                     label = downloadLabel,
                                     enabled = pages.isNotEmpty() && !downloaded && !localImport && !savingChapter,
-                                    interactive = controlsVisible && active && !leavingReader,
+                                    interactive = readerToolsVisible && active && !leavingReader,
                                     onClick = saveChapter,
                                 )
                             }
@@ -1782,25 +1795,25 @@ fun ReaderScreen(
         }
 
         ReaderExperienceStatus(
-            visible = readerForeground && !hideAmbientChrome && !leavingReader && !panelBlocksReading && !showPanelModels &&
-                !showEnhancement && !compareEnhancement &&
-                !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking &&
-                !chapterChangeRequested && !showReaderActions && !readerActionsPresent && repairState.selection == null,
+            visible = statusAvailable,
+            open = readerStatusOpen,
+            onClose = { restoreFocus ->
+                restoreStatusFocus = restoreFocus
+                readerStatusOpen = false
+            },
             sessionKey = sourceIdentity, store = experience,
             standbys = currentSourceStandbys, alternativeCount = alternativeSources.size, backdrop = readerBackdrop,
-            preparation = preparation,
+            preparationUpdates = preparationTracker.state,
             enhancement = enhancementState, enhancementPolicy = enhancementPolicy,
             enhancementSettings = enhancementCenter.settings, enhancementContent = enhancementContent,
             currentPage = pageIndex.takeIf { pages.isNotEmpty() && !loading && error == null },
             onOpenEnhancement = { showEnhancement = true; controlsVisible = true },
             chapterLoading = loading, chapterUnavailable = error != null,
             imageVisible = imageVisible, localChapter = localImport,
-            ambient = androidPageLabel && !controlsVisible && imageVisible && !loading && error == null,
             downloadedChapter = activeDownload?.status == DownloadStatus.COMPLETED,
             repairedPages = repairState.replacements.size, repairBusy = repairState.busy, repairReason = repairState.reason,
-            onAlignPage = alternativeSources.firstOrNull()?.takeIf { pages.isNotEmpty() }?.let { variant ->
-                { repairs.select(pageIndex, repairState.replacements[pageIndex]?.variant ?: variant) }
-            },
+            onAlignPage = if (alternativeSources.isNotEmpty() && pageIndex in pages.indices)
+                ({ openPageRepair(pageIndex) }) else null,
             onUndoPage = repairState.replacements[pageIndex]?.let { { repairs.undo(pageIndex) } },
             onUndoSourceSwitch = onUndoSourceSwitch.takeIf { canUndoSourceSwitch },
             standbyAvailability = standbyAvailability.takeIf { it.workId == manga.id && it.chapterId == chapter.id }
@@ -1808,17 +1821,6 @@ fun ReaderScreen(
             nextChapterPreparation = nextChapterPreparation?.takeIf {
                 it.workId == manga.id && it.currentChapterId == chapter.id && it.chapterId == nextChapter?.id
             },
-            topClearance = with(LocalDensity.current) {
-                (if (controlsVisible) (topControlsHeightPx - readerStatusInsets().getTop(this))
-                    .coerceAtLeast(0).toDp().coerceAtLeast(60.dp) else 0.dp) +
-                    if (sourceLoading || sourceError != null) 64.dp else 0.dp
-            },
-            bottomClearance = maxOf(if (atChapterEnd) 72.dp else 24.dp, with(LocalDensity.current) {
-                if (controlsVisible) (bottomControlsHeightPx - readerNavigationInsets().getBottom(this))
-                    .coerceAtLeast(0).toDp().coerceAtLeast(112.dp) else 0.dp
-            }),
-            bottomEndClearance = if (!controlsVisible && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF)
-                cornerStatusWidth else 0.dp,
             onInspectingChange = { readerStatusInspecting = it },
             onOpenSources = if (alternativeSources.isEmpty()) null else ({
                 sourceTriggerAnchor = null
@@ -1847,25 +1849,6 @@ fun ReaderScreen(
             },
         )
 
-        if (!controlsVisible && !immersive && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF) Box(
-            modifier = Modifier.align(Alignment.BottomEnd)
-                .windowInsetsPadding(readerNavigationInsets().union(WindowInsets.displayCutout)
-                    .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
-                .padding(end = 12.dp, bottom = (if (atChapterEnd) 72.dp else 0.dp) + 2.dp),
-        ) {
-            Box(Modifier.width(cornerStatusWidth).heightIn(min = if (androidPageLabel) 48.dp else 44.dp)
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
-                    role = Role.Button, onClickLabel = "显示阅读工具") { controlsVisible = true },
-                contentAlignment = Alignment.Center) {
-                Text("$clock · ${pageIndex + 1} / ${pages.size}",
-                    modifier = if (androidPageLabel) Modifier
-                        .background(preferences.theme.background().copy(alpha = .94f), CircleShape)
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                    else Modifier.padding(horizontal = 4.dp),
-                    color = preferences.theme.foreground().copy(alpha = if (androidPageLabel) 1f else .58f),
-                    style = cornerStatusStyle, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-            }
-        }
         if (compareEnhancement && enhancementState.assets[pageIndex] != null) {
             LiquidGlassSurface(state = readerBackdrop, role = GlassSurfaceRole.NAVIGATION, softCard = true,
                 modifier = Modifier.align(Alignment.BottomCenter).windowInsetsPadding(readerNavigationInsets())
@@ -1894,6 +1877,12 @@ fun ReaderScreen(
         sourceId = chapter.sourceId,
         resolvePage = resolvePage,
         currentPage = pageIndex,
+        pageInformation = {
+            ReaderPageResolutionInfo(pages, headers, chapter.sourceId, pageIndex,
+                showSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage && preferences.mode != ReadingMode.VERTICAL,
+                enhancementEnabled = enhancementPolicy.tier != QualityTier.ORIGINAL, enhancement = enhancementState,
+                replacements = repairState.replacements, enhancementSources = enhancementSources)
+        },
         collectedPages = pageCollections.filter { it.manga.id == manga.id && it.chapter.id == chapterId && !it.spread }
             .map(PageCollection::firstPage).toSet(),
         onToggleCollection = { togglePicture(it) },
@@ -2724,6 +2713,14 @@ private data class ReaderSourceIdentity(val logicalId: String, val chapterId: St
 
 private class ReaderCursor(var scrollOffset: Int = 0, var panelIndex: Int = 0)
 
+// A byte-progress update does not change which store can supply an original.
+private data class ReadingWindow(val visible: IntRange, val direction: Int)
+
+private fun ReaderPreparationState.readingWindow() = ReadingWindow(firstVisible..lastVisible, direction)
+
+private data class ReaderDownloadAvailability(val generation: String, val status: DownloadStatus,
+    val completed: Int, val routeFallback: Boolean, val needsSourceRefresh: Boolean)
+
 private data class PrefetchWindow(
     val first: Int, val last: Int, val composed: Set<Int>, val inFlight: Set<Int>, val enabled: Boolean,
     val visibleReady: Boolean, val ahead: Int, val behind: Int,
@@ -2733,10 +2730,16 @@ private data class PrefetchWindow(
     val runtime: ExperienceRuntimePreferences,
     val scrollDirection: Int?, val directionAnchor: Long?, val directionBaseline: Pair<Long, Long>?,
     val groups: List<PageSpread>?, val layoutKey: Any?, val originalCacheRevision: Long, val diskWaitReason: String?,
-    val prepareEnhancementAhead: Boolean,
+    val prepareEnhancementAhead: Boolean, val download: ReaderDownloadAvailability?,
 )
 
 private data class PrefetchedReaderPage(val page: Page, val diskCacheKey: String?)
+
+private fun Page.hasInspectableReaderOriginal(sourceId: String): Boolean {
+    val source = sourceRouteId.ifBlank { sourceId }
+    return url.startsWith("file:") || (source != "jmcomic" && !source.startsWith("js_") &&
+        sourceImageToken.isBlank() && (url.startsWith("https:") || url.startsWith("http:")))
+}
 
 private data class PrefetchRecoveryKey(val bytes: Long, val parallel: Int, val resolve: Int,
     val decode: Int, val writable: Boolean, val foreground: Boolean)
@@ -2773,7 +2776,7 @@ internal fun AdjacentPagePrefetch(
     directionBaseline: (() -> Pair<Long, Long>)? = null,
     layoutKey: Any? = null, retainOriginalsAcrossLayouts: Boolean = false,
     prepareEnhancementAhead: Boolean = false,
-    failedLoads: Map<Int, String> = emptyMap(),
+    failedLoads: Map<Int, String> = emptyMap(), download: DownloadEntry? = null,
     visibleRange: () -> Pair<Int, Int>,
 ) {
     val context = LocalContext.current
@@ -2806,6 +2809,9 @@ internal fun AdjacentPagePrefetch(
     val currentHeight by rememberUpdatedState(viewportHeight)
     val currentLayout by rememberUpdatedState(layoutKey)
     val currentEnhancementAhead by rememberUpdatedState(prepareEnhancementAhead)
+    val currentDownload by rememberUpdatedState(download?.let {
+        ReaderDownloadAvailability(it.progress.generation, it.status, it.completedPages, it.routingError, it.needsSourceRefresh)
+    })
     LaunchedEffect(pages, headers, if (retainOriginalsAcrossLayouts) null else mode, imageLoader,
         resolvePage, scriptPrefetch, sourceId, if (retainOriginalsAcrossLayouts) null else groups,
         if (retainOriginalsAcrossLayouts) null else viewportHeight,
@@ -2816,11 +2822,15 @@ internal fun AdjacentPagePrefetch(
         val resolvedPages = mutableStateMapOf<Int, Page>()
         val resolutionJobs = mutableStateMapOf<Int, Job>()
         val resolutionTokens = mutableMapOf<Int, PrefetchWork>()
+        val waitingForDownload = mutableSetOf<Int>()
+        var previousDownload = currentDownload
+        var requestedDiskRecheck = false
         val originalFinished = mutableSetOf<Int>()
         var originalCacheRevision by mutableLongStateOf(0L)
         val retryAttempts = mutableMapOf<Pair<Int, PrefetchStage>, Long>()
         val retryAfter = mutableStateMapOf<Pair<Int, PrefetchStage>, Long>()
         val resourceDeferred = mutableSetOf<Pair<Int, PrefetchStage>>()
+        val diskDeferred = mutableSetOf<Int>()
         // The concrete byte-window owner is the retry generation, including a promoted
         // request that finishes after a newer optional window has already been installed.
         val budgetDeferred = mutableMapOf<Int, PrefetchByteBudget>()
@@ -2837,7 +2847,10 @@ internal fun AdjacentPagePrefetch(
         fun token(index: Int, stage: PrefetchStage): PrefetchWork {
             transientDeferred.remove(index to stage)
             capacityDeferred.remove(index to stage)
-            if (stage == PrefetchStage.DOWNLOADING) budgetDeferred.remove(index)
+            if (stage == PrefetchStage.DOWNLOADING) {
+                budgetDeferred.remove(index)
+                diskDeferred.remove(index)
+            }
             val ticket = tracker?.begin(index, stage, owner) ?: 0L
             allTickets[index to stage] = ticket
             return PrefetchWork(experience::wakeAdmissions, observe = {
@@ -2863,6 +2876,7 @@ internal fun AdjacentPagePrefetch(
             }
             if (stage == PrefetchStage.DOWNLOADING) {
                 budgetDeferred.remove(index)
+                if (diskQuotaDeferred) diskDeferred += index else diskDeferred.remove(index)
                 var cause: Throwable? = failure
                 repeat(8) {
                     if (cause is PrefetchBudgetExceeded && !diskQuotaDeferred &&
@@ -2923,6 +2937,7 @@ internal fun AdjacentPagePrefetch(
             }
         }.onStart { emit(Unit) }
         fun transfers(): Set<Int> = (requests.keys + scriptRequests.keys).toSet()
+        fun transferring(index: Int) = index in requests || index in scriptRequests
         fun pending(): Set<Int> = transfers() + resolutionJobs.keys
         fun originalReady(index: Int, page: Page, diskKey: String?, bytes: Long? = null) {
             enhancement?.originalReady(index, page, headers, page.sourceRouteId.ifBlank { sourceId }, diskKey)
@@ -2967,6 +2982,33 @@ internal fun AdjacentPagePrefetch(
             catch (_: PrefetchBudgetExceeded) { byteWindow.exhaust() }
             accountedOriginals += index
         }
+        fun publishOriginalObservation(index: Int, artifact: ReaderPreparedArtifacts, started: Long) {
+            // The visible renderer publishes its own exact source, including per-page repairs.
+            if (index in inspectTargets && index !in inspectVisible) {
+                tracker?.artifact(index, artifact.originalPresent, artifact.originalBytes, null,
+                    freshnessMillis = currentBudget.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 2_000L,
+                    owner = owner, startedAt = started)
+            }
+        }
+        fun acceptCachedOriginal(index: Int, page: Page, diskKey: String, artifact: ReaderPreparedArtifacts) {
+            if (transferring(index)) return
+            val retained = retainedPages[index]
+            if (retained == null || retained.page != page || retained.diskCacheKey != diskKey || index !in originalFinished) {
+                originalReady(index, page, diskKey, artifact.originalBytes)
+                originalFinished += index
+                val key = index to PrefetchStage.DOWNLOADING
+                retryAttempts.remove(key); retryAfter.remove(key); resourceDeferred.remove(key)
+                budgetDeferred.remove(index); diskDeferred.remove(index); transientDeferred.remove(key); capacityDeferred.remove(key)
+                tracker?.localOriginal(index, owner)
+                originalCacheRevision++
+            } else if (index !in verifiedOriginals || artifact.originalStamp != originalStamps[index]) {
+                enhancement?.originalReady(index, page, headers, page.sourceRouteId.ifBlank { sourceId }, diskKey)
+            }
+            accountCachedOriginal(index, artifact.originalBytes)
+            verifiedOriginals += index
+            retriedMissingOriginals.remove(index)
+            artifact.originalStamp?.let { originalStamps[index] = it }
+        }
         val progressSampler = requestScope.launch {
             var cacheAt = 0L
             var previousScanMillis = 0L
@@ -3007,10 +3049,8 @@ internal fun AdjacentPagePrefetch(
                             val resolved = resolvedPages[index]
                             val epoch = originalEpochs[index]
                             val previewKey = memoryKeys[index]
-                            val resource = retained?.page ?: (resolved ?: pages.getOrNull(index))?.takeIf { page ->
-                                page.url.startsWith("file:") || (sourceId != "jmcomic" && !sourceId.startsWith("js_") &&
-                                    page.sourceImageToken.isBlank() && (page.url.startsWith("https:") || page.url.startsWith("http:")))
-                            } ?: continue
+                            val resource = retained?.page ?: (resolved ?: pages.getOrNull(index))
+                                ?.takeIf { it.hasInspectableReaderOriginal(sourceId) } ?: continue
                             val started = monotonicTimeMillis()
                             val artifact = inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
                                 retained?.diskCacheKey, previewKey, previousOriginal = originalStamps[index])
@@ -3024,25 +3064,7 @@ internal fun AdjacentPagePrefetch(
                                     resolved != null || resource.url.startsWith("file:") }
                                 if (original == true) {
                                     val diskKey = retained?.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId)
-                                    if (index !in transfers() && (retained == null || index !in originalFinished)) {
-                                        // Register exact cache evidence before network/byte admission.
-                                        // Existing files need no transfer slot, even with a full window.
-                                        originalReady(index, resource, diskKey, artifact.originalBytes)
-                                        accountCachedOriginal(index, artifact.originalBytes)
-                                        originalFinished += index
-                                        val key = index to PrefetchStage.DOWNLOADING
-                                        retryAttempts.remove(key); retryAfter.remove(key); resourceDeferred.remove(key)
-                                        budgetDeferred.remove(index); transientDeferred.remove(key); capacityDeferred.remove(key)
-                                        tracker?.localOriginal(index, owner)
-                                        originalCacheRevision++
-                                    } else {
-                                        if (index !in transfers()) accountCachedOriginal(index, artifact.originalBytes)
-                                        if (index !in verifiedOriginals || artifact.originalStamp != originalStamps[index])
-                                            enhancement?.originalReady(index, resource, headers,
-                                                resource.sourceRouteId.ifBlank { sourceId }, diskKey)
-                                    }
-                                    verifiedOriginals += index
-                                    retriedMissingOriginals.remove(index)
+                                    acceptCachedOriginal(index, resource, diskKey, artifact)
                                 } else if (artifact.missingFile && retained != null && index in originalFinished &&
                                     index !in pending() && index !in checks && !pages[index].url.startsWith("file:")) {
                                     // A previous transfer is not proof that Coil or a materializer
@@ -3098,7 +3120,7 @@ internal fun AdjacentPagePrefetch(
                     currentBudget.resolveRequests, currentBudget.decodeRequests, experience.canDecodePrefetch(), readerActive,
                     currentBudget.runtime, currentScrollDirection?.invoke(), currentDirectionAnchor?.invoke(),
                     currentDirectionBaseline?.invoke(), currentGroups, currentLayout, originalCacheRevision, diskState.waitReason,
-                    currentEnhancementAhead)
+                    currentEnhancementAhead, currentDownload)
             }.distinctUntilChanged().combine(snapshotFlow {
                 prefetchEnabled && (currentBudget.prefetchBytes > 0L ||
                     currentBudget.decodedPrefetchPages > 0 && experience.canDecodePrefetch())
@@ -3189,13 +3211,18 @@ internal fun AdjacentPagePrefetch(
                 // encoded/network window. Extra nearby pages are cache-only candidates.
                 val previewTargets = if (window.enabled) readerNearbyPreviewPages(window.first, window.last,
                     pages.size, window.decoded, direction, groups).toSet() else emptySet()
-                val memoryWindow = previewTargets.filter(::eligible).toSet()
+                val hasSavedPages = window.enabled && (window.download?.completed ?: 0) > 0
+                val memoryWindow = if (hasSavedPages) previewTargets else previewTargets.filter(::eligible).toSet()
                 nextPreviewPages = if (memoryWindow.isEmpty()) emptySet() else readerDirectionalPages(
                     window.first, window.last, pages.size, 1, direction, groups, completeSpreads = true)
                     .filterTo(mutableSetOf()) { it in memoryWindow }
                 rewarmedNextPreviews.retainAll(nextPreviewPages)
                 // Near previews get their resolve/check turns before distant header inspections.
                 val desired = memoryWindow + networkDesired
+                // Saved pages live outside Coil. Their exact local owner can be read even
+                // when the current policy permits neither another GET nor a warmed preview.
+                val savedCandidates = if (hasSavedPages) aheadTargets + behindTargets else emptyList()
+                val resolveDesired = desired + savedCandidates
                 val writable = window.diskWaitReason == null && window.bytes > 0L
                 val recovery = PrefetchRecoveryKey(window.bytes, window.parallel, window.resolveParallel,
                     window.decodeParallel, writable, window.foregroundActive)
@@ -3203,6 +3230,23 @@ internal fun AdjacentPagePrefetch(
                     retryAfter[key] = now
                 }
                 recoveryKey = recovery
+                if (window.download != previousDownload) {
+                    val old = previousDownload
+                    val download = window.download
+                    // Completion count alone can advance in any order. Recheck only pages
+                    // already waiting on this writer. A changed owner also retires unused URLs.
+                    val ownerChanged = download == null || old == null || old.copy(completed = download.completed) != download
+                    for (index in resolveDesired) {
+                        if (transferring(index) || index in resolutionJobs) continue
+                        if (index in waitingForDownload) {
+                            retryAfter.remove(index to PrefetchStage.RESOLVING)
+                            resolvedAttempts.remove(index)
+                        } else if (ownerChanged && index !in retainedPages && resolvedPages.remove(index) != null) {
+                            resolvedAttempts.remove(index)
+                        }
+                    }
+                    previousDownload = download
+                }
                 // Admission can pause while a newly visible page is loading. That does not
                 // remove the overlapping target window or its completed cache evidence.
                 val observationWindow = (aheadTargets + behindTargets).toSet() + visiblePages
@@ -3215,7 +3259,7 @@ internal fun AdjacentPagePrefetch(
                 // whose original or preview is still inside the live window.
                 val retainedOriginals = if (retainOriginalsAcrossLayouts && window.enabled &&
                     window.foregroundActive && window.bytes > 0L) pending().intersect(observationWindow) else emptySet()
-                val running = desired + foreground + promoted + retainedOriginals
+                val running = desired + foreground + promoted + retainedOriginals + resolutionJobs.keys.intersect(resolveDesired)
                 (pending() + checks.keys).filter { it !in running }.forEach(::stop)
                 // Preview preparation can extend beyond the original-image window when
                 // its independent decoded-page setting is larger. Keep that admitted work's
@@ -3223,6 +3267,7 @@ internal fun AdjacentPagePrefetch(
                 val retained = observationWindow + previewTargets + desired + promoted
                 cacheRangeOwner?.let { rangeStore.updateReadingRange(it, retained + window.composed) }
                 resolvedAttempts.retainAll(retained)
+                waitingForDownload.retainAll(retained)
                 resolvedPages.keys.retainAll(retained)
                 originalFinished.retainAll(retained)
                 retainedPages.keys.retainAll(retained)
@@ -3239,6 +3284,7 @@ internal fun AdjacentPagePrefetch(
                 retryAttempts.keys.removeAll { it.first !in retained }
                 retryAfter.keys.removeAll { it.first !in retained }
                 resourceDeferred.removeAll { it.first !in retained }
+                diskDeferred.retainAll(retained)
                 budgetDeferred.keys.retainAll(retained)
                 transientDeferred.keys.removeAll { it.first !in retained }
                 capacityDeferred.keys.removeAll { it.first !in retained }
@@ -3258,12 +3304,24 @@ internal fun AdjacentPagePrefetch(
                 val waitingForOriginal = networkDesired.any {
                     it !in originalFinished || (it to PrefetchStage.DOWNLOADING) in retryAfter
                 }
+                val waitingForWrite = window.visibleReady && window.foregroundActive && window.parallel > 0 &&
+                    window.diskWaitReason != null && byteWindow.remaining > 0L &&
+                    networkDesired.any { index ->
+                        !transferring(index) && index !in resolutionJobs && index !in waitingForDownload &&
+                            resolvedPages[index]?.url?.startsWith("file:") == false &&
+                            (index !in originalFinished || index in diskDeferred)
+                    }
+                if (window.diskWaitReason == null) requestedDiskRecheck = false
+                else if (waitingForWrite && !requestedDiskRecheck) {
+                    requestedDiskRecheck = true
+                    experience.recheckPrefetchDiskQuota()
+                }
                 tracker?.window(owner, window.first, window.last, direction, aheadTargets, behindTargets,
                     networkDesired, memoryWindow, previewTargets, window.foregroundActive,
                     when { !window.enabled -> "阅读暂缓"; !window.visibleReady -> "当前页优先"
                         window.bytes <= 0L && currentOverrides.prefetchMiB == 0 -> "原图预读额度设为 0"
                         window.bytes <= 0L -> currentBudget.reason
-                        window.diskWaitReason != null && waitingForOriginal -> window.diskWaitReason
+                        waitingForWrite -> window.diskWaitReason
                         byteWindow.remaining <= 0L && waitingForOriginal ->
                             "原图预取额度已用尽；翻页或提高额度后继续"
                         else -> null })
@@ -3300,7 +3358,8 @@ internal fun AdjacentPagePrefetch(
                 }
                 for ((key, readyAt) in retryAfter.toMap()) {
                     val (index, stage) = key
-                    if (now < readyAt || index !in desired || !window.visibleReady ||
+                    val wanted = if (stage == PrefetchStage.RESOLVING) index in resolveDesired else index in desired
+                    if (now < readyAt || !wanted || !window.visibleReady ||
                         !window.foregroundActive || stage == PrefetchStage.DOWNLOADING && !writable || index in pending()) continue
                     if (capacityDeferred[key]?.let { !experience.canRetryPrefetchCapacity(it) } == true) continue
                     when (stage) {
@@ -3312,7 +3371,7 @@ internal fun AdjacentPagePrefetch(
                 }
                 if (!window.visibleReady) return@collectLatest
                 // Resolution owns a small independent queue and never suspends this window collector.
-                for (index in desired) {
+                for (index in resolveDesired) {
                     if (index in resolvedAttempts || index in resolutionJobs) continue
                     if (resolutionJobs.size >= window.resolveParallel) break
                     if (capacityDeferred[index to PrefetchStage.RESOLVING]?.let {
@@ -3329,26 +3388,40 @@ internal fun AdjacentPagePrefetch(
                             currentCoroutineContext().ensureActive()
                             if (resolutionJobs[index] !== owned) return@launch
                             if (resource != null) {
-                                resolvedPages[index] = resource
-                                if (resource.url.startsWith("file:")) {
+                                if (index !in verifiedOriginals && resource.hasInspectableReaderOriginal(sourceId)) {
+                                    // Look up the exact saved/Coil original before publishing a URL
+                                    // for transport. Otherwise a fast turn can join an unnecessary GET.
                                     val key = readerPageCacheKey(resource, headers, sourceId)
-                                    val bytes = inspectReaderPreparedArtifacts(context, resource, headers, sourceId, key).originalBytes
+                                    val started = monotonicTimeMillis()
+                                    val artifact = inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
+                                        key, previousOriginal = originalStamps[index])
                                     currentCoroutineContext().ensureActive()
                                     if (resolutionJobs[index] !== owned) return@launch
-                                    originalReady(index, resource, key, bytes)
-                                    accountCachedOriginal(index, bytes)
-                                    originalFinished += index
-                                    tracker?.localOriginal(index, owner)
+                                    if (artifact.originalPresent == true) {
+                                        acceptCachedOriginal(index, resource, key, artifact)
+                                    } else if (resource.url.startsWith("file:")) {
+                                        // The decode stage can still identify a format that the
+                                        // optional header reader could not verify. Never GET a file URL.
+                                        originalReady(index, resource, key)
+                                        originalFinished += index
+                                    }
+                                    publishOriginalObservation(index, artifact, started)
                                 }
+                                if (window.download != currentDownload && !resource.url.startsWith("file:") &&
+                                    index !in retainedPages) return@launch
+                                resolvedPages[index] = resource
                             }
                             end(index, PrefetchStage.RESOLVING, if (resource != null) ReaderPreparationPhase.COMPLETE
                                 else ReaderPreparationPhase.DEFERRED, if (resource == null) "已有下载负责本页" else null)
                             val key = index to PrefetchStage.RESOLVING
                             if (resource == null) {
+                                waitingForDownload += index
                                 // This is only DownloadStore's local ownership lookup. Revisit it
                                 // after the real download settles, without starting a duplicate.
-                                retryAfter[key] = monotonicTimeMillis() + currentBudget.runtime.prefetchRetryBaseSeconds.coerceAtLeast(1).toLong() * 1000L
+                                retryAfter[key] = if (window.download != currentDownload) monotonicTimeMillis() else
+                                    monotonicTimeMillis() + currentBudget.runtime.prefetchRetryBaseSeconds.coerceAtLeast(1).toLong() * 1000L
                             } else {
+                                waitingForDownload.remove(index)
                                 retryAttempts.remove(key); retryAfter.remove(key); resourceDeferred.remove(key)
                             }
                             resolvedAttempts += index
@@ -3475,16 +3548,24 @@ internal fun AdjacentPagePrefetch(
                         try {
                             val result = request.job.await()
                             currentCoroutineContext().ensureActive()
-                            if (requests[index] !== ownedRequest) return@launch
+                            if (requests[index] !== ownedRequest || index !in inspectTargets && !token.isForeground) return@launch
                             if (result is SuccessResult) {
-                                val cachedBytes = if (result.dataSource != coil3.decode.DataSource.NETWORK)
-                                    inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
-                                        result.diskCacheKey, previousOriginal = originalStamps[index]).originalBytes else null
+                                val started = monotonicTimeMillis()
+                                val diskKey = result.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId)
+                                val artifact = inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
+                                    diskKey, previousOriginal = originalStamps[index])
                                 currentCoroutineContext().ensureActive()
-                                if (requests[index] !== ownedRequest) return@launch
-                                originalReady(index, resource, result.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId),
-                                    cachedBytes ?: transfer.snapshot().receivedBytes.takeIf { it > 0L })
+                                if (requests[index] !== ownedRequest || index !in inspectTargets && !token.isForeground) return@launch
+                                originalReady(index, resource, diskKey,
+                                    artifact.originalBytes ?: transfer.snapshot().receivedBytes.takeIf { it > 0L })
+                                if (artifact.originalPresent == true) {
+                                    verifiedOriginals += index
+                                    retriedMissingOriginals.remove(index)
+                                    artifact.originalStamp?.let { originalStamps[index] = it }
+                                }
+                                publishOriginalObservation(index, artifact, started)
                                 if (result.dataSource != coil3.decode.DataSource.NETWORK) token.ifOptional {
+                                    val cachedBytes = artifact.originalBytes
                                     if (cachedBytes != null) {
                                         try { windowBytes.accept(cachedBytes) }
                                         catch (_: PrefetchBudgetExceeded) { windowBytes.exhaust() }
@@ -4314,6 +4395,7 @@ private fun ReaderPageNavigatorDialog(
     sourceId: String,
     resolvePage: ReaderPageResolver,
     currentPage: Int,
+    pageInformation: @Composable () -> Unit,
     collectedPages: Set<Int>,
     onToggleCollection: (Int) -> Unit,
     backdrop: HazeState,
@@ -4333,6 +4415,7 @@ private fun ReaderPageNavigatorDialog(
         ) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp)) {
                 ReaderPanelHeading("页导航", "关闭页导航", onDismiss)
+                pageInformation()
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(76.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
                     modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
@@ -4396,15 +4479,13 @@ private fun ReaderProgressSlider(
     pageIndex: Int,
     pages: List<Page>,
     pendingPage: Int?,
-    headers: Map<String, String>,
-    sourceId: String,
-    enhancementEnabled: Boolean,
-    showSpreadDimensions: Boolean,
+    showSpreadRange: Boolean,
     enabled: Boolean,
     onSeek: (Int) -> Unit,
     onOpenNavigator: () -> Unit,
     onInteractionChanged: (Boolean) -> Unit,
     sourceContent: (@Composable () -> Unit)? = null,
+    statusContent: (@Composable () -> Unit)? = null,
 ) {
     val interactions = remember { MutableInteractionSource() }
     val pressed by interactions.collectIsPressedAsState()
@@ -4414,43 +4495,21 @@ private fun ReaderProgressSlider(
     val pageCount = pages.size
     val lastPage = (pageCount - 1).coerceAtLeast(0)
     val shown = (preview ?: pendingPage?.toFloat() ?: pageIndex.toFloat()).coerceIn(0f, lastPage.toFloat())
-    val dimensionRevision by ReaderDimensionCache.revision.collectAsStateWithLifecycle()
     val enhancement = LocalReaderEnhancementPresentation.current
-    val replacements = LocalReaderPageRepair.current?.state?.replacements.orEmpty()
     val spread = enhancement?.state?.visiblePages?.takeIf {
-        showSpreadDimensions && it.size == 2 && pageIndex in it &&
-            enhancement.state.currentPage == pageIndex && preview == null && pendingPage == null
+        showSpreadRange && it.size == 2 && pageIndex in it && enhancement.state.currentPage == pageIndex &&
+            preview == null && pendingPage == null
     }
-    val shownIndices = spread?.sorted() ?: listOf(shown.roundToInt())
-    val enhancementSources = LocalReaderEnhancementSources.current
-    val sourceReceipts = shownIndices.associateWith { enhancementSources?.get(it) }
-    val resolutions = remember(shownIndices, pages, headers, sourceId, dimensionRevision,
-        enhancement?.state?.assets, enhancementEnabled, replacements, sourceReceipts) {
-        shownIndices.map { index ->
-            val replacement = replacements[index]
-            val page = replacement?.page ?: pages.getOrNull(index)
-            val ownedHeaders = if (page?.sourceRouteId?.isNotBlank() == true) emptyMap()
-                else replacement?.headers ?: headers
-            val ownedSource = page?.sourceRouteId?.ifBlank { replacement?.variant?.sourceId ?: sourceId } ?: sourceId
-            val originalKey = page?.let { readerPageCacheKey(it, ownedHeaders, ownedSource) }
-            val resolvedKey = sourceReceipts[index]?.takeIf { it.originalKey == originalKey }?.resolvedKey ?: originalKey
-            val originalSize = resolvedKey?.let(ReaderDimensionCache::get)
-                ?: originalKey?.let(ReaderDimensionCache::get)
-                ?: page?.takeIf { it.width > 0 && it.height > 0 }?.let { IntSize(it.width, it.height) }
-            val asset = enhancement?.state?.assets?.get(index)?.takeIf {
-                // A matching source version alone cannot prove a URL alias. Use the same
-                // resolved cache identity as the live image, including repaired pages.
-                enhancementEnabled && page != null && it.identity.pageId == index.toString() &&
-                    it.identity.sourceId == ownedSource && it.identity.sourceVersion == readerEnhancementSourceVersion(page) &&
-                    it.sourceCacheIdentity == resolvedKey
-            }
-            index to readerEnhancementResolution(index, originalSize, asset)
-        }
+    val pageLabel = if (spread != null) "${spread.min() + 1}–${spread.max() + 1}" else "${shown.roundToInt() + 1}"
+    val labelStyle = MaterialTheme.typography.labelMedium.copy(fontSize = 12.sp, fontFeatureSettings = "tnum")
+    val reserve = "8".repeat(pageCount.toString().length)
+    val reserveLabel = if (showSpreadRange) "$reserve–$reserve / $reserve" else "$reserve / $reserve"
+    val measurer = rememberTextMeasurer()
+    val labelPixels = remember(measurer, reserveLabel, labelStyle) {
+        measurer.measure(reserveLabel, labelStyle, maxLines = 1).size.width
     }
-    val resolutionDescription = resolutions.joinToString("；") { it.second.description }
-    val pageLabel = if (spread != null) "${shownIndices.first() + 1}–${shownIndices.last() + 1}"
-        else "${shown.roundToInt() + 1}"
-    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    val labelWidth = (with(LocalDensity.current) { labelPixels.toDp() } + 12.dp)
+        .coerceIn(48.dp, (LocalMangaWindow.current.width * .35f).coerceAtLeast(48.dp))
 
     LaunchedEffect(pressed, dragged, enabled) {
         interactionChanged(enabled && (pressed || dragged))
@@ -4479,31 +4538,63 @@ private fun ReaderProgressSlider(
             interactions = interactions,
             label = "阅读进度，第 ${shown.roundToInt() + 1} 页，共 $pageCount 页",
         )
-        Column(Modifier.width((if (enhancementEnabled || showSpreadDimensions) 148.dp else 112.dp) * fontScale)
+        Box(Modifier.width(labelWidth)
             .heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
             .clickable(enabled = enabled && pageCount > 0, role = Role.Button,
                 onClickLabel = "打开页面导航", onClick = onOpenNavigator)
-            .semantics { contentDescription = "第 $pageLabel 页，共 $pageCount 页，$resolutionDescription" }
+            .semantics { contentDescription = "第 $pageLabel 页，共 $pageCount 页" }
             .padding(horizontal = 4.dp, vertical = 5.dp),
-            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                Text(mangaNumberText(pageLabel), color = colors.onSurface, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
-                Text(mangaNumberText(" / $pageCount"), color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 16.sp)
+            contentAlignment = Alignment.Center) {
+            Text(mangaNumberText("$pageLabel / $pageCount"), color = colors.onSurface,
+                style = labelStyle, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+        }
+        statusContent?.invoke()
+    }
+}
+
+@Composable
+private fun ReaderPageResolutionInfo(pages: List<Page>, headers: Map<String, String>, sourceId: String,
+    pageIndex: Int, showSpread: Boolean, enhancementEnabled: Boolean, enhancement: ReaderEnhancementState,
+    replacements: Map<Int, ReaderPageReplacement>, enhancementSources: Map<Int, ReaderEnhancementSourceReceipt>) {
+    if (pageIndex !in pages.indices) return
+    val shownIndices = enhancement.visiblePages.takeIf {
+        showSpread && it.size == 2 && pageIndex in it && enhancement.currentPage == pageIndex
+    }?.sorted() ?: listOf(pageIndex)
+    val dimensionRevision by ReaderDimensionCache.revision.collectAsStateWithLifecycle()
+    val sourceReceipts = shownIndices.associateWith { enhancementSources[it] }
+    val resolutions = remember(shownIndices, pages, headers, sourceId, dimensionRevision,
+        enhancement.assets, enhancementEnabled, replacements, sourceReceipts) {
+        shownIndices.map { index ->
+            val replacement = replacements[index]
+            val page = replacement?.page ?: pages.getOrNull(index)
+            val ownedHeaders = if (page?.sourceRouteId?.isNotBlank() == true) emptyMap()
+                else replacement?.headers ?: headers
+            val ownedSource = page?.sourceRouteId?.ifBlank { replacement?.variant?.sourceId ?: sourceId } ?: sourceId
+            val originalKey = page?.let { readerPageCacheKey(it, ownedHeaders, ownedSource) }
+            val resolvedKey = sourceReceipts[index]?.takeIf { it.originalKey == originalKey }?.resolvedKey ?: originalKey
+            val originalSize = resolvedKey?.let(ReaderDimensionCache::get)
+                ?: originalKey?.let(ReaderDimensionCache::get)
+                ?: page?.takeIf { it.width > 0 && it.height > 0 }?.let { IntSize(it.width, it.height) }
+            val asset = enhancement.assets[index]?.takeIf {
+                // A matching source version alone cannot prove a URL alias. Use the same
+                // resolved cache identity as the live image, including repaired pages.
+                enhancementEnabled && page != null && it.identity.pageId == index.toString() &&
+                    it.identity.sourceId == ownedSource && it.identity.sourceVersion == readerEnhancementSourceVersion(page) &&
+                    it.sourceCacheIdentity == resolvedKey
             }
-            resolutions.forEach { (index, resolution) ->
-                Row(horizontalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterHorizontally),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    if (spread != null) Text(mangaNumberText("${index + 1}"),
-                        color = colors.onSurfaceVariant, fontSize = 10.sp, lineHeight = 16.sp)
-                    if (resolution.enhanced) Icon(Icons.Rounded.AutoAwesome, "增强文件尺寸",
-                        tint = colors.primary, modifier = Modifier.size(12.dp))
-                    Text(mangaNumberText(resolution.valueLabel),
-                        color = if (resolution.enhanced) colors.onSurface else colors.onSurfaceVariant,
-                        fontSize = 11.sp, lineHeight = 16.sp,
-                        fontWeight = if (resolution.enhanced) FontWeight.Medium else FontWeight.Normal,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
+            index to readerEnhancementResolution(index, originalSize, asset)
+        }
+    }
+    Column(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        resolutions.forEach { (index, resolution) ->
+            val value = when {
+                resolution.enhanced && resolution.originalLabel != null -> "原图 ${resolution.originalLabel} · ${resolution.label}"
+                resolution.valueLabel == "—" -> "尺寸待核实"
+                else -> resolution.label
             }
+            Text("第 ${index + 1} 页 · $value", modifier = Modifier.semantics { contentDescription = resolution.description },
+                style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

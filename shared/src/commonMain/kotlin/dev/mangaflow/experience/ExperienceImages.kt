@@ -583,7 +583,7 @@ internal fun initializeExperienceImages(context: PlatformContext) {
         val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
         val disk = ExperienceDiskCache(StorageFile(cacheDirectory(app), "image-cache").nativePath,
             policy.state.value.diskCacheBytes, policy::refreshCacheUsage, storage::cacheWorkFinished,
-            policy::publishPrefetchDiskState)
+            policy::publishPrefetchDiskQuota)
         storage.attach(disk)
         ImageLoader.Builder(imageContext)
             .components {

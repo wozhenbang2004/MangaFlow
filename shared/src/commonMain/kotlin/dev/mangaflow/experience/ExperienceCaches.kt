@@ -12,7 +12,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import okio.ByteString.Companion.encodeUtf8
+import okio.FileMetadata
+import okio.FileNotFoundException
 import okio.FileSystem
+import okio.IOException
 import okio.Path
 import okio.SYSTEM
 
@@ -215,6 +219,31 @@ internal enum class PrefetchDiskState(val waitReason: String?) {
     UNAVAILABLE("原图缓存暂不可用"),
 }
 
+internal data class PrefetchDiskQuota(val state: PrefetchDiskState, val usedBytes: Long?, val limitBytes: Long?)
+
+internal val coilCleanFilename = Regex("[a-f0-9]{64}\\.[01]")
+
+/** One physical inventory for shared-cache accounting and the image write gate. An unreadable
+ * directory is unknown, never an empty cache. A cache just removed by the OS can be empty. */
+internal fun imageCacheFiles(directory: Path, fs: FileSystem = FileSystem.SYSTEM): Map<String, FileMetadata> {
+    val paths = try {
+        fs.list(directory)
+    } catch (failure: IOException) {
+        val parent = directory.parent ?: throw failure
+        if (directory !in fs.list(parent)) return emptyMap()
+        throw failure
+    }
+    val files = mutableMapOf<String, FileMetadata>()
+    for (path in paths) {
+        val meta = try { fs.metadata(path) } catch (_: FileNotFoundException) { continue }
+        if (meta.isRegularFile) {
+            if (meta.size == null) throw IOException("Image cache file size unavailable")
+            files[path.name] = meta
+        }
+    }
+    return files
+}
+
 /**
  * One directory owner, one stable ImageLoader cache identity. Original snapshots can live for
  * an entire reading session; resizing waits for every reader/editor lease without clearing.
@@ -224,7 +253,7 @@ internal class ExperienceDiskCache(
     initialBytes: Long,
     private val changed: () -> Unit,
     private val workFinished: () -> Unit,
-    private val publishWriteState: (PrefetchDiskState) -> Unit,
+    private val publishQuota: (PrefetchDiskQuota) -> Unit,
 ) : DiskCache {
     private val lock = StorageLock()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -234,18 +263,27 @@ internal class ExperienceDiskCache(
     private var delegate: DiskCache? = build()
     private var leases = 0
     private val keyLeases = mutableMapOf<String, Int>()
+    private val removedWhileLeased = mutableSetOf<String>()
     private val reclaimWhenReleased = mutableSetOf<String>()
     private var clearWhenReleased = false
     private var revision = -1L
     private var scheduled = false
     private var closed = false
     private var error: String? = null
-    private var writeState: PrefetchDiskState? = null
+    private var quota: PrefetchDiskQuota? = null
+    private var fileGeneration = 0L
+    // Coil restores CLEAN lengths from its journal. After OS cache eviction those lengths can
+    // outlive the files. Keep a corrected measurement current through the owner's own writes.
+    private var correctedBytes: Long? = null
+    private var needsFileMeasurement = false
+    private var verification = 0L
+    private var verifiedSequence = -1L
+    private var requestedWhileBlocked = false
     override val size: Long get() = synchronized(lock) { delegate?.size ?: 0L }
     override val maxSize: Long get() = synchronized(lock) { if (delegate == null) 0L else applied }
     val resizePending: Boolean get() = synchronized(lock) { target != applied || error != null }
     val acceptsPrefetchWrites: Boolean get() = synchronized(lock) {
-        (writeState ?: updateWriteState()) == PrefetchDiskState.AVAILABLE
+        (quota ?: updateQuota()).state == PrefetchDiskState.AVAILABLE
     }
     val resizeError: String? get() = synchronized(lock) { error }
 
@@ -253,9 +291,19 @@ internal class ExperienceDiskCache(
     // snapshot and the accounting-only publication of the new maximum is still pending.
     private fun measuredSize(): Long? = try { delegate?.size } catch (_: Exception) { null }
     internal fun sampleSize(): Long? = synchronized(lock) {
-        measuredSize().also { updateWriteState(it) }
+        updateQuota().usedBytes
     }
-    private fun updateWriteState(bytes: Long? = if (!closed && target > 0L) measuredSize() else null): PrefetchDiskState {
+    internal fun imageFileGeneration(): Long = synchronized(lock) { fileGeneration }
+    internal fun requestBlockedCheck(): Long? = synchronized(lock) {
+        if (closed || requestedWhileBlocked || quota?.state == PrefetchDiskState.AVAILABLE) return@synchronized null
+        requestedWhileBlocked = true
+        verification
+    }
+    internal fun stillNeedsCheck(checkpoint: Long): Boolean = synchronized(lock) {
+        !closed && quota?.state != PrefetchDiskState.AVAILABLE && checkpoint == verification
+    }
+    private fun updateQuota(journal: Long? = if (closed) null else measuredSize()): PrefetchDiskQuota {
+        val bytes = if (needsFileMeasurement || journal == null) null else correctedBytes ?: journal
         val next = when {
             closed || delegate == null -> PrefetchDiskState.UNAVAILABLE
             target == 0L -> PrefetchDiskState.NO_ALLOCATION
@@ -263,22 +311,35 @@ internal class ExperienceDiskCache(
             bytes >= target -> PrefetchDiskState.FULL
             else -> PrefetchDiskState.AVAILABLE
         }
-        if (writeState != next) {
-            writeState = next
-            publishWriteState(next)
+        val value = PrefetchDiskQuota(next, bytes, target.takeUnless { closed })
+        if (next == PrefetchDiskState.AVAILABLE) requestedWhileBlocked = false
+        if (quota != value) {
+            quota = value
+            publishQuota(value)
         }
-        return next
+        return value
     }
     // The shared storage owner performs value-aware eviction. An independent Coil LRU
     // ceiling could otherwise delete a protected reading window behind that owner's back.
     private fun build() = DiskCache.Builder().directory(directory).fileSystem(fileSystem)
         .maxSizeBytes(Long.MAX_VALUE).build()
 
-    fun resize(bytes: Long, version: Long) = synchronized(lock) {
-        if (closed || version < revision) return@synchronized
-        revision = version
-        target = bytes.coerceAtLeast(0L)
-        updateWriteState()
+    fun resize(bytes: Long, version: Long, observedFiles: Long? = null, generation: Long? = null,
+        allowIncrease: Boolean = true) = synchronized(lock) {
+        if (closed) return@synchronized
+        val confirmsFiles = observedFiles != null && generation == fileGeneration && version >= verifiedSequence
+        if (version >= revision) {
+            revision = version
+            target = if (allowIncrease) bytes.coerceAtLeast(0L) else minOf(target, bytes.coerceAtLeast(0L))
+        } else if (!confirmsFiles) return@synchronized
+        val journal = measuredSize()
+        if (confirmsFiles) {
+            correctedBytes = observedFiles.takeUnless { it == journal }
+            needsFileMeasurement = false
+            verifiedSequence = version
+            verification++
+        }
+        updateQuota(journal)
         scheduleResize()
     }
     private fun scheduleResize() {
@@ -296,7 +357,7 @@ internal class ExperienceDiskCache(
                 } catch (_: Exception) {
                     error = "缓存容量暂未调整，请稍后重试"
                 }
-                updateWriteState()
+                updateQuota()
             }
             changed()
         }
@@ -313,7 +374,7 @@ internal class ExperienceDiskCache(
     internal fun openInspectedSnapshot(key: String, onMiss: (Boolean) -> Unit): DiskCache.Snapshot? = synchronized(lock) {
         snapshotLocked(key).also {
             if (it == null) onMiss(!closed && delegate != null && key !in keyLeases &&
-                writeState != PrefetchDiskState.UNAVAILABLE)
+                quota?.state != PrefetchDiskState.UNAVAILABLE)
         }
     }
     override fun openEditor(key: String): DiskCache.Editor? = synchronized(lock) {
@@ -322,15 +383,70 @@ internal class ExperienceDiskCache(
         if (closed || target <= 0L) return@synchronized null
         delegate?.openEditor(key)?.let { acquireLease(key); EditorLease(key, it) }
     }
-    override fun remove(key: String): Boolean = synchronized(lock) {
-        (delegate?.remove(key) == true).also { if (it) updateWriteState() }
+    /** Measure the same two files the shared inventory counts. An IO error is not zero bytes. */
+    private fun entryBytes(hash: String): Long? {
+        var total = 0L
+        for (index in 0..1) {
+            val meta = try {
+                fileSystem.metadata(directory / "$hash.$index")
+            } catch (_: FileNotFoundException) {
+                continue
+            } catch (_: IOException) {
+                return null
+            }
+            total += meta.size ?: return null
+        }
+        return total
     }
-    override fun clear() = synchronized(lock) { delegate?.clear(); updateWriteState(); Unit }
+    private inline fun <T> changeEntry(key: String, operation: () -> T): T {
+        val corrected = correctedBytes
+        val hash = corrected?.let { key.encodeUtf8().sha256().hex() }
+        val before = hash?.let(::entryBytes)
+        try {
+            return operation()
+        } finally {
+            fileGeneration++
+            if (corrected != null && hash != null) {
+                val after = entryBytes(hash)
+                correctedBytes = if (before != null && after != null) (corrected + after - before).coerceAtLeast(0L) else null
+                needsFileMeasurement = correctedBytes == null
+            }
+            updateQuota()
+        }
+    }
+    override fun remove(key: String): Boolean = synchronized(lock) {
+        changeEntry(key) {
+            (delegate?.remove(key) == true).also { if (it && key in keyLeases) removedWhileLeased += key }
+        }
+    }
+    private fun physicalSize(): Long? = try {
+        imageCacheFiles(directory, fileSystem).entries.sumOf { (name, meta) ->
+            if (coilCleanFilename.matches(name)) meta.size ?: 0L else 0L
+        }
+    } catch (_: IOException) { null }
+    private fun clearFiles(): Long {
+        val before = physicalSize()
+        try {
+            delegate?.clear()
+            removedWhileLeased += keyLeases.keys
+        } finally {
+            fileGeneration++
+            val after = physicalSize()
+            val journal = measuredSize()
+            correctedBytes = after.takeUnless { it == journal }
+            needsFileMeasurement = after == null
+            updateQuota(journal)
+            workFinished()
+        }
+        val after = quota?.usedBytes
+        return if (before != null && after != null) (before - after).coerceAtLeast(0L) else 0L
+    }
+    override fun clear() = synchronized(lock) { clearFiles(); Unit }
     override fun shutdown() = synchronized(lock) {
         closed = true
         delegate?.shutdown()
         delegate = null
-        updateWriteState()
+        updateQuota()
         Unit
     }
 
@@ -347,9 +463,7 @@ internal class ExperienceDiskCache(
             (data.size ?: 0L) + (fileSystem.metadata(snapshot.metadata).size ?: 0L) == bytes &&
                 (data.lastModifiedAtMillis ?: 0L) == modifiedAt
         } finally { snapshot.close() }
-        val removed = unchanged && delegate?.remove(key) == true
-        if (removed) updateWriteState()
-        removed
+        unchanged && changeEntry(key) { delegate?.remove(key) == true }
     }
     internal fun clearWhenIdle(allowed: () -> Boolean): Long = synchronized(lock) {
         if (closed || !allowed()) return@synchronized 0L
@@ -357,19 +471,15 @@ internal class ExperienceDiskCache(
             clearWhenReleased = true
             return@synchronized 0L
         }
-        val before = delegate?.size ?: 0L
-        delegate?.clear()
-        updateWriteState()
-        (before - (delegate?.size ?: 0L)).coerceAtLeast(0L)
+        clearFiles()
     }
 
     private fun acquireLease(key: String) { leases++; keyLeases[key] = (keyLeases[key] ?: 0) + 1 }
     private fun releaseLease(key: String, wrote: Boolean = false) {
         leases--
         val remaining = (keyLeases[key] ?: 1) - 1
-        if (remaining == 0) keyLeases.remove(key) else keyLeases[key] = remaining
+        if (remaining == 0) { keyLeases.remove(key); removedWhileLeased.remove(key) } else keyLeases[key] = remaining
         check(leases >= 0)
-        if (wrote) updateWriteState()
         scheduleResize()
         val retryKey = remaining == 0 && reclaimWhenReleased.remove(key)
         val retryClear = leases == 0 && clearWhenReleased
@@ -385,7 +495,10 @@ internal class ExperienceDiskCache(
         override fun close() = synchronized(lock) {
             if (!finished) {
                 finished = true
-                try { snapshot.close() } finally { releaseLease(key) }
+                try {
+                    if (key in removedWhileLeased && keyLeases[key] == 1) changeEntry(key) { snapshot.close() }
+                    else snapshot.close()
+                } finally { releaseLease(key) }
             }
         }
         override fun closeAndOpenEditor(): DiskCache.Editor? = synchronized(lock) {
@@ -393,7 +506,8 @@ internal class ExperienceDiskCache(
             finished = true
             var editor: DiskCache.Editor? = null
             try {
-                if (!closed && target > 0L) editor = snapshot.closeAndOpenEditor()
+                if (key in removedWhileLeased && keyLeases[key] == 1) changeEntry(key) { snapshot.close() }
+                else if (!closed && target > 0L) editor = snapshot.closeAndOpenEditor()
                 else snapshot.close()
                 editor?.let { EditorLease(key, it) }
             } finally { if (editor == null) releaseLease(key) }
@@ -406,13 +520,13 @@ internal class ExperienceDiskCache(
         override fun commit() = synchronized(lock) {
             if (!finished) {
                 finished = true
-                try { editor.commit() } finally { releaseLease(key, wrote = true) }
+                try { changeEntry(key) { editor.commit() } } finally { releaseLease(key, wrote = true) }
             }
         }
         override fun abort() = synchronized(lock) {
             if (!finished) {
                 finished = true
-                try { editor.abort() } finally { releaseLease(key, wrote = true) }
+                try { changeEntry(key) { editor.abort() } } finally { releaseLease(key, wrote = true) }
             }
         }
         override fun commitAndOpenSnapshot(): DiskCache.Snapshot? = synchronized(lock) {
@@ -420,14 +534,11 @@ internal class ExperienceDiskCache(
             finished = true
             var snapshot: DiskCache.Snapshot? = null
             try {
-                snapshot = editor.commitAndOpenSnapshot()
+                snapshot = changeEntry(key) { editor.commitAndOpenSnapshot() }
                 snapshot?.let { SnapshotLease(key, it) }
             } finally {
                 if (snapshot == null) releaseLease(key, wrote = true)
-                else {
-                    updateWriteState()
-                    workFinished()
-                }
+                else workFinished()
             }
         }
     }

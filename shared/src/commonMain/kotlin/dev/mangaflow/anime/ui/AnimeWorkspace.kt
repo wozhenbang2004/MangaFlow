@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.*
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -168,6 +169,7 @@ private fun AnimeWorkspaceContent(
     var layoutPresent by remember { mutableStateOf(false) }
     var pendingTool by remember { mutableStateOf<AnimeWorkspaceTool?>(null) }
     var sourcesVisible by remember { mutableStateOf(false) }
+    var sourcesOverVideo by remember { mutableStateOf(false) }
     var sourceManagerVisible by remember { mutableStateOf(false) }
     var downloadsVisible by remember { mutableStateOf(false) }
     var storageVisible by remember { mutableStateOf(false) }
@@ -495,6 +497,7 @@ private fun AnimeWorkspaceContent(
     fun showSources(episode: AnimeEpisode? = null) {
         controller.cancelPendingResume()
         sourceEpisode = episode
+        sourcesOverVideo = playing && playerFullscreen
         sourcesVisible = true
     }
     fun requestPlayback(episode: AnimeEpisode, option: AnimeEpisodeOption?) {
@@ -636,6 +639,7 @@ private fun AnimeWorkspaceContent(
             pendingAssociation = null
             sourceEpisode = null
             controller.previewSource(association.title)
+            sourcesOverVideo = false
             sourcesVisible = true
         }
     }
@@ -702,7 +706,8 @@ private fun AnimeWorkspaceContent(
                                         else -> Unit
                                     } },
                                     modifier = Modifier.motionInputGate(rootActive),
-                                    fullWidthIndicator = true, treatment = MotionTabTreatment.Capsule,
+                                    treatment = MotionTabTreatment.Capsule,
+                                    selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
                                     controlHeight = 44.dp)
                             }
                             Column {
@@ -1005,6 +1010,7 @@ private fun AnimeWorkspaceContent(
             }
         })
     AnimeSourcesPanel(sourcesVisible, state, controller, backdrop, sourceEpisode,
+        overVideo = sourcesOverVideo,
         recovering = playbackPhase == AnimePlayerPhase.ERROR || state.playbackTarget?.error != null,
         onDismiss = ::dismissSources, onAutomaticPlay = { episode ->
             sourcesVisible = false

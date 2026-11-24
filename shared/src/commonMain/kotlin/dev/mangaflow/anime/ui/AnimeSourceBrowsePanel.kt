@@ -10,7 +10,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.*
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -38,44 +37,21 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
     val owner = controller.sourceBrowse
     val state by owner.state.collectAsStateWithLifecycle()
     val source = state.sources.firstOrNull { it.id == state.sourceId && it.revision == state.sourceRevision }
-    var sourceMenu by remember { mutableStateOf(false) }
     var sourcePresent by remember { mutableStateOf(false) }
     var filtersPresent by remember { mutableStateOf(false) }
     var filtersVisible by remember { mutableStateOf(false) }
     val category = state.categories.firstOrNull { it.key == state.categoryKey }
     val defaultSection = if (source?.capabilities?.contains("latest") == true) "更新" else "推荐"
-    LaunchedEffect(active, state.sourceId, state.sourceRevision) {
-        if (!active) { sourceMenu = false; filtersVisible = false }
-    }
+    LaunchedEffect(active) { if (!active) filtersVisible = false }
     LaunchedEffect(state.sourceId, state.sourceRevision, state.categoryKey) { filtersVisible = false }
     val contentActive = active && !sourcePresent && !filtersPresent
     Column(Modifier.fillMaxSize().motionInputGate(active)) {
         if (state.selectedTitle == null && state.sources.isNotEmpty()) {
             Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 10.dp, top = 4.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Box(Modifier.weight(1f)) {
-                    MotionTextButton(onClick = { sourcePresent = true; sourceMenu = true }, enabled = contentActive,
-                        modifier = Modifier.widthIn(max = 300.dp).heightIn(min = 44.dp),
-                        colors = ButtonDefaults.textButtonColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                            contentColor = MaterialTheme.colorScheme.onSurface),
-                        contentPadding = PaddingValues(horizontal = 12.dp)) {
-                        if (source != null) AnimeSourceMark(source.id, source.name, size = 20.dp)
-                        else Icon(Icons.Outlined.Public, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(source?.name ?: "选择片源", Modifier.weight(1f, fill = false),
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Spacer(Modifier.width(5.dp))
-                        Icon(Icons.Outlined.ExpandMore, null, Modifier.size(17.dp))
-                    }
-                    CompactGlassPopover(sourceMenu && active, backdrop, onDismiss = { sourceMenu = false },
-                        onPresenceChange = { sourcePresent = it }, alignToStart = true) {
-                        state.sources.forEach { item ->
-                            CompactMenuAction(if (source?.id == item.id) Icons.Outlined.Check else Icons.Outlined.Public,
-                                item.name, onClick = { owner.selectSource(item.id); sourceMenu = false })
-                        }
-                    }
-                }
+                AnimeDirectoryPicker(controller, state.sources, source, state.recentSourceIds, backdrop,
+                    active = active && !filtersPresent, modifier = Modifier.weight(1f),
+                    onPresenceChange = { sourcePresent = it })
                 if (category?.filters?.isNotEmpty() == true) {
                     MotionIconButton(onClick = { filtersPresent = true; filtersVisible = true }, enabled = contentActive,
                         modifier = Modifier.size(44.dp), tooltip = "筛选片源目录") {

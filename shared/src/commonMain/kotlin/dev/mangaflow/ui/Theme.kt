@@ -38,7 +38,7 @@ private val LightColors = lightColorScheme(
     surfaceContainer = Color(0xFFF0F0EE), surfaceContainerLow = Color(0xFFF5F5F2),
     surfaceContainerHigh = Color(0xFFECECE9),
 )
-private val DarkColors = darkColorScheme(
+internal val MangaDarkColorScheme = darkColorScheme(
     primary = Color(0xFFADBFD5), onPrimary = Color(0xFF203148),
     primaryContainer = Color(0xFF2B3848), onPrimaryContainer = Color(0xFFDFE8F3),
     secondary = Color(0xFFB7B7BB), secondaryContainer = Color(0xFF303033),
@@ -104,7 +104,7 @@ fun MangaFlowTheme(content: @Composable () -> Unit) {
     MangaFontProvider {
         val family = mangaFontFamily(MangaFontScene.INTERFACE)
         val typography = remember(family) { readerTypography(family) }
-        MaterialTheme(colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors,
+        MaterialTheme(colorScheme = if (isSystemInDarkTheme()) MangaDarkColorScheme else LightColors,
             typography = typography, content = content)
     }
 }
