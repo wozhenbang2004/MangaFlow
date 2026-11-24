@@ -225,7 +225,7 @@ internal fun LazyListScope.animeSearchResults(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun AnimeSearchWorkRow(
+internal fun AnimeSearchWorkRow(
     subject: AnimeSubject, facts: String, original: String?, sources: List<Pair<String, String>>,
     active: Boolean, onOpen: () -> Unit, openLabel: String, onLongClick: (() -> Unit)? = null,
     ratings: (@Composable () -> Unit)? = null,

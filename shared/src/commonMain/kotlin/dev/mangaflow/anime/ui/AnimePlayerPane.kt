@@ -127,6 +127,11 @@ internal fun AnimePlayerPane(
     onEpisode: (AnimeEpisode) -> Unit,
     modifier: Modifier = Modifier,
     onStorage: () -> Unit = {},
+    browseVisit: AnimePlayerBrowseVisit? = null,
+    browseRequest: Int = 0,
+    onBrowseOpen: (AnimePlayerBrowseVisit) -> Unit = {},
+    onBrowseClose: (AnimePlayerBrowseVisit) -> Unit = {},
+    onBrowseRequestConsumed: (Int) -> Unit = {},
 ) {
     val player = controller.player
     val observations = player.state.collectAsStateWithLifecycle()
@@ -178,6 +183,7 @@ internal fun AnimePlayerPane(
     val chromeFocus = remember { FocusRequester() }
     val settingsFocus = remember { FocusRequester() }
     val watchingFocus = remember { FocusRequester() }
+    val browseFocus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     val windowInfo = LocalWindowInfo.current
     val touchExploration = LocalTouchExplorationEnabled.current
@@ -202,6 +208,7 @@ internal fun AnimePlayerPane(
     var settingsVisible by remember { mutableStateOf(false) }
     var settingsPresent by remember { mutableStateOf(false) }
     var interactionEpoch by remember { mutableIntStateOf(0) }
+    var hadBrowseVisit by remember { mutableStateOf(false) }
     val panelPresent = settingsPresent || watchPanelPresent
     val requiredControls = blockingResolution || failure != null || awaitingVideo ||
         playback.phase != AnimePlayerPhase.READY || !playback.playWhenReady || obscured || settingsPresent || watchPanelPresent ||
@@ -252,6 +259,12 @@ internal fun AnimePlayerPane(
         }
     } else null
     fun interact() { controlsVisible = true; interactionEpoch++ }
+    fun browseBack(): Boolean {
+        val visit = browseVisit?.takeIf { active && it.subjectId == subject?.id } ?: return false
+        if (!visit.returnToResults()) onBrowseClose(visit)
+        interact()
+        return true
+    }
     fun showSources() { interact(); onSources(episode) }
     fun showSettings() {
         interact()
@@ -351,26 +364,59 @@ internal fun AnimePlayerPane(
                     Key.DirectionLeft -> { seek(-10_000L); true }
                     Key.DirectionRight -> { seek(10_000L); true }
                     Key.F -> { toggleFullscreen(); true }
-                    Key.Escape -> if (fullscreen) { onFullscreenChange(false); true } else false
+                    Key.Escape -> if (fullscreen) { onFullscreenChange(false); true } else browseBack()
                     else -> false
                 }
             }.revealOnMouseMove(fullscreen && hoverEnabled, ::interact).focusable()) {
             val widePlayer = maxWidth >= 680.dp
-            val sideBySide = episodesVisible && widePlayer &&
-                (desktop || maxWidth >= 900.dp || maxHeight < 540.dp)
-            val railWidth = (maxWidth * .29f).coerceIn(234.dp, 340.dp)
-            val videoWidth = if (fillVideo || !sideBySide) maxWidth else maxWidth - railWidth
             val videoTop = if (headerOverVideo) 0.dp else headerHeight
             val room = (maxHeight - videoTop - bottomInset).coerceAtLeast(1.dp)
-            val inlineWatching = !fillVideo && episodesVisible && (sideBySide || room >= 380.dp)
+            val browseFits = desktop && active && !fillVideo &&
+                maxWidth >= 720.dp * density.fontScale.coerceAtLeast(1f) &&
+                room >= 360.dp * density.fontScale.coerceAtLeast(1f)
+            val browsing = browseVisit != null && browseFits
+            val browseInteractive = active && !obscured && !locked && !panelPresent
+            fun openBrowse() {
+                val subjectId = subject?.id ?: return
+                if (!browseFits || !browseInteractive) return
+                val live = player.state.value
+                if (!playback.owns(live)) return
+                if (browsing && browseVisit != null) browseVisit.focusSearch()
+                else if (controller.ownsVideoReadout(subjectId, live, includePaused = true)) {
+                    onBrowseOpen(AnimePlayerBrowseVisit(subjectId))
+                }
+                interact()
+            }
+            LaunchedEffect(browseVisit, browseFits, active) {
+                if (active && browseVisit != null && !browseFits) onBrowseClose(browseVisit)
+                if (active && hadBrowseVisit && browseVisit == null && browseInteractive && !fillVideo) {
+                    focusChromeOnReveal = browseFocus
+                    interact()
+                }
+                hadBrowseVisit = active && browseVisit != null
+            }
+            LaunchedEffect(browseRequest, active) {
+                if (!active || browseRequest == 0) return@LaunchedEffect
+                onBrowseRequestConsumed(browseRequest)
+                openBrowse()
+            }
+            val sideBySide = browsing || episodesVisible && widePlayer &&
+                (desktop || maxWidth >= 900.dp || maxHeight < 540.dp)
+            val railWidth = (maxWidth * .29f).coerceIn(if (browsing) 278.dp else 234.dp, 340.dp)
+            val videoWidth = if (fillVideo || !sideBySide) maxWidth else maxWidth - railWidth
+            val inlineWatching = !browsing && !fillVideo && episodesVisible && (sideBySide || room >= 380.dp)
             LaunchedEffect(active, showChrome, focusChromeOnReveal, chromeReveal > 0f, panelPresent, obscured,
                 playback.inPictureInPicture, inlineWatching, detail == null) {
                 val destination = focusChromeOnReveal ?: return@LaunchedEffect
                 if (!active || obscured || playback.inPictureInPicture) focusChromeOnReveal = null
                 else if (showChrome && chromeReveal > 0f && !panelPresent) {
                     withFrameNanos { }
-                    val targetFocus = if (destination == watchingFocus && (inlineWatching || detail == null))
-                        chromeFocus else destination
+                    val targetFocus = when {
+                        destination == watchingFocus && (inlineWatching || detail == null) -> chromeFocus
+                        destination == browseFocus && (!browseFits || detail == null || !browseInteractive ||
+                            !showingCurrentPlayback || !canControl || showStage) -> chromeFocus
+                        else -> destination
+                    }
                     targetFocus.requestFocus()
                     focusChromeOnReveal = null
                 }
@@ -627,10 +673,17 @@ internal fun AnimePlayerPane(
                         overVideo = headerOverVideo) {
                         Row(Modifier.heightIn(min = 46.dp).padding(start = 2.dp, end = 14.dp),
                             verticalAlignment = Alignment.CenterVertically) {
-                            MotionIconButton(onClick = { if (fullscreen) onFullscreenChange(false) else onBack() },
-                                modifier = Modifier.size(44.dp).focusRequester(chromeFocus),
-                                tooltip = if (fullscreen) "退出全屏" else "退出播放并保存位置") {
-                                Icon(Icons.AutoMirrored.Outlined.ArrowBack, if (fullscreen) "退出全屏" else "退出播放", Modifier.size(20.dp))
+                            val backLabel = when {
+                                fullscreen -> "退出全屏"
+                                browsing && browseVisit?.previewId != null -> "返回搜索结果"
+                                browsing -> "收起边看边逛"
+                                else -> "退出播放并保存位置"
+                            }
+                            MotionIconButton(onClick = {
+                                if (fullscreen) onFullscreenChange(false)
+                                else if (!browseBack()) onBack()
+                            }, modifier = Modifier.size(44.dp).focusRequester(chromeFocus), tooltip = backLabel) {
+                                Icon(Icons.AutoMirrored.Outlined.ArrowBack, backLabel, Modifier.size(20.dp))
                             }
                             Column(Modifier.weight(1f, fill = false).padding(vertical = 3.dp)) {
                                 Text(subject?.title ?: "播放", style = MaterialTheme.typography.titleMedium,
@@ -643,13 +696,32 @@ internal fun AnimePlayerPane(
                         }
                     }
                     Spacer(Modifier.width(8.dp))
-                    AnimePlaybackSurface(headerArtwork, Modifier.desktopChromeHitPath(desktop), overVideo = headerOverVideo) {
+                    AnimePlaybackTopActionSurface(headerArtwork, videoDockSource?.haze,
+                        Modifier.desktopChromeHitPath(desktop), overVideo = headerOverVideo,
+                        windowsVideo = useWindowsVideoDock && headerOverVideo) {
                         Row(Modifier.padding(horizontal = 2.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
                             if (fullscreen && canControl && !touchExploration) MotionIconButton(onClick = { locked = true },
                                 modifier = Modifier.size(44.dp), tooltip = "锁定触控") {
                                 Icon(Icons.Outlined.LockOpen, "锁定触控", Modifier.size(20.dp))
                             }
-                            if (desktop && !fillVideo && widePlayer && detail != null && (sideBySide || !episodesVisible)) {
+                            if (desktop && !fillVideo && widePlayer && detail != null) {
+                                val label = when {
+                                    browsing -> "收起边看边逛"
+                                    !browseFits -> "扩大窗口后可边看边逛"
+                                    else -> "边看边逛 · Ctrl+K"
+                                }
+                                MotionIconButton(onClick = {
+                                    if (browsing && browseVisit != null) onBrowseClose(browseVisit) else openBrowse()
+                                },
+                                    enabled = browseFits && browseInteractive &&
+                                        (browsing || showingCurrentPlayback && canControl && !showStage),
+                                    modifier = Modifier.size(44.dp).focusRequester(browseFocus), tooltip = label) {
+                                    Icon(if (browsing) Icons.Outlined.Close else Icons.Outlined.Search,
+                                        label, Modifier.size(20.dp))
+                                }
+                            }
+                            if (desktop && !browsing && !fillVideo && widePlayer && detail != null &&
+                                (sideBySide || !episodesVisible)) {
                                 val label = if (episodesVisible) "收起选集与评论" else "展开选集与评论"
                                 MotionIconButton(onClick = { episodesVisible = !episodesVisible; interact() },
                                     modifier = Modifier.size(44.dp).semantics {
@@ -715,7 +787,12 @@ internal fun AnimePlayerPane(
                     }
                 }
             }
-            if (inlineWatching && !watchPanelPresent) {
+            if (browsing && browseVisit != null) key(browseVisit) {
+                AnimePlayerBrowseRail(controller, browseVisit,
+                    active = browseInteractive, onClose = { onBrowseClose(browseVisit) },
+                    modifier = Modifier.align(Alignment.TopEnd).width(railWidth).height(room)
+                        .windowInsetsPadding(safeInsets.only(WindowInsetsSides.Top)).background(colors.surface))
+            } else if (inlineWatching && !watchPanelPresent) {
                 val episodePanel = if (sideBySide) Modifier.align(Alignment.TopEnd).offset(y = videoTop)
                     .width(railWidth).height(room).windowInsetsPadding(safeInsets.only(WindowInsetsSides.Top))
                 else Modifier.offset(y = controlsTop).fillMaxWidth()

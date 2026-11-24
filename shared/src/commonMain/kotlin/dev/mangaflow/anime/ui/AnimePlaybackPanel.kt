@@ -53,6 +53,32 @@ internal fun AnimePlaybackPanel(
         }, content = content)
 }
 
+@Composable
+internal fun AnimePlaybackTopActionSurface(
+    artwork: HazeState?,
+    liveVideo: HazeState?,
+    modifier: Modifier,
+    overVideo: Boolean,
+    windowsVideo: Boolean,
+    content: @Composable () -> Unit,
+) {
+    if (!windowsVideo) {
+        AnimePlaybackSurface(artwork, modifier, overVideo = overVideo, content = content)
+        return
+    }
+    val colors = MaterialTheme.colorScheme
+    val toolsColors = remember(colors) {
+        colors.copy(surface = WindowsVideoDockSurface, onSurface = WindowsVideoDockInk,
+            onSurfaceVariant = WindowsVideoDockInk, primary = WindowsVideoDockInk,
+            onPrimary = WindowsVideoDockSurface, outline = WindowsVideoDockInk.copy(alpha = .36f),
+            inverseSurface = WindowsVideoDockInk, inverseOnSurface = WindowsVideoDockSurface)
+    }
+    MaterialTheme(colorScheme = toolsColors) {
+        // Use the dock's already-owned video layer, or its readable pale fallback.
+        AnimePlaybackSurface(liveVideo, modifier, overVideo = overVideo, windowsVideoDock = true, content = content)
+    }
+}
+
 /** A material can only sample a separately supplied Compose source, never an assumed native backdrop. */
 @Composable
 internal fun AnimePlaybackSurface(

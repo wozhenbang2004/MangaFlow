@@ -219,6 +219,21 @@ private fun AnimeWorkspaceContent(
     var recheckRequest by remember { mutableStateOf<AnimeTrackingReview?>(null) }
     val playing = state.playbackTarget != null || state.resolving ||
         playbackPhase != AnimePlayerPhase.IDLE && playbackPhase != AnimePlayerPhase.RELEASED
+    var playbackBrowseVisit by remember(controller) { mutableStateOf<AnimePlayerBrowseVisit?>(null) }
+    var playbackBrowseRequest by remember(controller) { mutableIntStateOf(0) }
+    val browseVisit = playbackBrowseVisit?.takeIf { active && playing && it.subjectId == state.detail?.subject?.id }
+    fun closePlaybackBrowse(visit: AnimePlayerBrowseVisit) {
+        if (playbackBrowseVisit === visit) {
+            playbackBrowseVisit = null
+            playbackBrowseRequest = 0
+        }
+    }
+    LaunchedEffect(active, playing, state.detail?.subject?.id) {
+        if (!active || !playing || playbackBrowseVisit != null && browseVisit == null) {
+            playbackBrowseVisit = null
+            playbackBrowseRequest = 0
+        }
+    }
     val route = when {
         playing -> AnimeRoute("player", 2, relatedDepth = detailHistory.size)
         state.detail != null || state.detailLoading || state.detailError != null ->
@@ -304,6 +319,14 @@ private fun AnimeWorkspaceContent(
     LaunchedEffect(searchRequest, active) {
         if (active && searchRequest != consumedSearchRequest) {
             consumedSearchRequest = searchRequest
+            val live = controller.state.value
+            val livePhase = controller.playbackPhase.value
+            if (platformKind == PlatformKind.DESKTOP && (playing || live.resolving || live.playbackTarget != null ||
+                    livePhase != AnimePlayerPhase.IDLE && livePhase != AnimePlayerPhase.RELEASED)) {
+                // Desktop search can browse beside the same video; it must not close it.
+                playbackBrowseRequest = searchRequest
+                return@LaunchedEffect
+            }
             layoutFullscreen = false
             controller.closePlayback()
             controller.closeDetail()
@@ -329,6 +352,8 @@ private fun AnimeWorkspaceContent(
 
     fun closePlayback() {
         layoutFullscreen = false
+        playbackBrowseVisit = null
+        playbackBrowseRequest = 0
         controller.closePlayback()
     }
     fun submitSearch(term: String) {
@@ -576,6 +601,9 @@ private fun AnimeWorkspaceContent(
         else directoryOpen = false
     }
     fun back() {
+        val liveBrowse = playbackBrowseVisit?.takeIf {
+            active && it.subjectId == controller.state.value.detail?.subject?.id
+        }
         when {
             sourceManagerVisible -> sourceManagerVisible = false
             downloadsVisible -> downloadsVisible = false
@@ -588,6 +616,7 @@ private fun AnimeWorkspaceContent(
             searchProgressVisible -> searchProgressVisible = false
             searchExpanded -> { searchExpanded = false; browseCandidate = null }
             playing && playerFullscreen -> setPlayerFullscreen(false)
+            liveBrowse != null -> if (!liveBrowse.returnToResults()) closePlaybackBrowse(liveBrowse)
             playing -> closePlayback()
             route.depth == 1 -> returnFromDetail()
             directoryOpen -> returnFromDirectory()
@@ -684,7 +713,16 @@ private fun AnimeWorkspaceContent(
                         onPlayDownload = ::playDownload,
                         onSources = ::showSources,
                         onEpisode = { requestPlayback(it, null) }, modifier = Modifier.fillMaxSize(),
-                        onStorage = { storagePresent = true; storageVisible = true })
+                        onStorage = { storagePresent = true; storageVisible = true },
+                        browseVisit = browseVisit, browseRequest = playbackBrowseRequest,
+                        onBrowseOpen = { visit ->
+                            if (active && shown.key == route.key && playbackBrowseVisit == null &&
+                                controller.state.value.detail?.subject?.id == visit.subjectId) playbackBrowseVisit = visit
+                        },
+                        onBrowseClose = ::closePlaybackBrowse,
+                        onBrowseRequestConsumed = { request ->
+                            if (playbackBrowseRequest == request) playbackBrowseRequest = 0
+                        })
                 } else {
                     val shownState = shown.detailState
                     val shownDetail = shownState?.detail

@@ -355,6 +355,7 @@ internal fun AnimeTextField(
     enabled: Boolean = true,
     onSubmit: (() -> Unit)? = null,
     emptyHint: String? = null,
+    inputModifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -367,7 +368,7 @@ internal fun AnimeTextField(
         cursorBrush = androidx.compose.ui.graphics.SolidColor(colors.onSurface),
         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(12.dp))
             .background(colors.onSurface.copy(alpha = .045f)).padding(horizontal = 14.dp, vertical = 13.dp)
-            .semantics { contentDescription = placeholder },
+            .semantics { contentDescription = placeholder }.then(inputModifier),
         decorationBox = { field ->
             Box {
                 if (value.isEmpty() && emptyHint != null) Text(emptyHint,

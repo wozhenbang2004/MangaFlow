@@ -19,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -56,6 +57,36 @@ internal data class AnimeUnifiedSearchState(
     val groups: List<AnimeSearchGroup> = emptyList(),
     val grouping: Boolean = false,
 )
+
+/**
+ * The player's browse rail can read the main catalogue, not run playback-source searches
+ * or adopt a result as the current detail. Its scope and query are separate from main search.
+ */
+internal class AnimePlaybackCatalogueSearch(
+    private val engine: AnimeUnifiedSearch,
+    private val routing: DownloadRoutingStore,
+) {
+    val state = engine.state
+
+    fun submit(query: String) {
+        val keyword = query.trim()
+        if (keyword.isNotEmpty()) engine.search(keyword, indexOnly = true)
+    }
+
+    fun retry() {
+        engine.reconcile()
+        if (state.value.index.error != null) engine.retryIndex()
+    }
+
+    fun loadMore() {
+        engine.reconcile()
+        engine.loadMore()
+    }
+
+    suspend fun observeRoutes() {
+        routing.state.collect { engine.reconcile() }
+    }
+}
 
 /** Application-main-scope owner. A query has one independent cursor and request per provider. */
 internal class AnimeUnifiedSearch(

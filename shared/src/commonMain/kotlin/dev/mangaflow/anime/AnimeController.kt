@@ -655,6 +655,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     internal fun retrySearchProvider(sourceId: String) = unifiedSearch.retrySource(sourceId)
     internal fun retrySearch() = unifiedSearch.retryFailed()
 
+    internal fun newPlaybackCatalogueSearch(panelScope: CoroutineScope): AnimePlaybackCatalogueSearch =
+        AnimePlaybackCatalogueSearch(
+            AnimeUnifiedSearch(panelScope, metadata, sources, douban, ::searchSourceOrder),
+            routing,
+        )
+
     /** Each destination keeps its query and completed range, including the single home catalogue. */
     fun ensureDiscovery(loadHome: Boolean = true) {
         val today = Instant.fromEpochMilliseconds(wallTimeMillis()).toLocalDateTime(TimeZone.currentSystemDefault()).date
