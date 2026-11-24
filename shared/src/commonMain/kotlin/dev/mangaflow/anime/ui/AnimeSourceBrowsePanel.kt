@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -41,6 +42,9 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
     var filtersPresent by remember { mutableStateOf(false) }
     var filtersVisible by remember { mutableStateOf(false) }
     val category = state.categories.firstOrNull { it.key == state.categoryKey }
+    val appliedFilters = category?.filters.orEmpty().count { filter ->
+        filter.options.any { it.value == state.filters[filter.key] }
+    }
     val defaultSection = if (source?.capabilities?.contains("latest") == true) "更新" else "推荐"
     LaunchedEffect(active) { if (!active) filtersVisible = false }
     LaunchedEffect(state.sourceId, state.sourceRevision, state.categoryKey) { filtersVisible = false }
@@ -53,10 +57,15 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
                     active = active && !filtersPresent, modifier = Modifier.weight(1f),
                     onPresenceChange = { sourcePresent = it })
                 if (category?.filters?.isNotEmpty() == true) {
+                    val filterLabel = if (appliedFilters > 0) "目录筛选，已选 $appliedFilters 项" else "目录筛选"
                     MotionIconButton(onClick = { filtersPresent = true; filtersVisible = true }, enabled = contentActive,
-                        modifier = Modifier.size(44.dp), tooltip = "筛选片源目录") {
-                        Icon(Icons.Outlined.FilterList, "筛选片源目录", Modifier.size(20.dp),
-                            tint = if (state.filters.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                        modifier = Modifier.size(44.dp), tooltip = filterLabel) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(1.dp)) {
+                            val ink = if (appliedFilters > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            Icon(Icons.Outlined.FilterList, filterLabel, Modifier.size(18.dp), tint = ink)
+                            if (appliedFilters > 0) Text(appliedFilters.toString(), Modifier.clearAndSetSemantics { },
+                                style = MaterialTheme.typography.labelSmall, color = ink)
+                        }
                     }
                 }
                 if (source != null) MotionIconButton(onClick = owner::refresh,
@@ -118,9 +127,10 @@ private fun AnimeSourceCatalogue(state: AnimeSourceBrowseState, preferred: Int?,
                     AnimeDiscoveryInlineStatus(if (state.items.isEmpty()) "暂时无法读取片源目录" else "更新失败，保留上次结果",
                         onRetry, detail = state.error)
                 }
-                if (state.items.isEmpty() && state.error == null) item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
+                if (state.items.isEmpty() && state.error == null && state.categoryError == null) item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
                     if (state.loading) AnimeDiscoveryLoading("正在载入番剧")
-                    else AnimeMessage("没有符合当前条件的番剧")
+                    else AnimeMessage("没有符合当前条件的番剧",
+                        if (state.filters.isEmpty()) null else "可调整当前分类的筛选条件。")
                 }
                 else items(state.items, key = { it.sourceId + ":" + it.id }) { title ->
                     AnimeSourceDiscoveryCard(title, list = columns == 1, onOpen = { onOpen(title) })
@@ -230,7 +240,7 @@ private fun AnimeSourceFilters(visible: Boolean, category: LanercCategory?, sele
                     AnimeBrowseFilter(filter, selected[filter.key],
                         onSelect = { onSelect(filter.key, it) })
                 }
-                MotionButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("完成") }
+                MotionButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("返回目录") }
             }
         }
     }

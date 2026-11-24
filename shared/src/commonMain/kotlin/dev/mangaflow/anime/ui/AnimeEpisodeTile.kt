@@ -59,21 +59,22 @@ internal fun AnimeEpisodeTile(
     val subtitle = animeEpisodeSubtitle(episode)
     val sourceState = when (availability) {
         AnimeEpisodeAvailability.UPCOMING -> "尚未放送"
-        AnimeEpisodeAvailability.RECENTLY_FAILED -> "可重试"
+        AnimeEpisodeAvailability.RECENTLY_FAILED -> "线路未就绪"
         AnimeEpisodeAvailability.CHECKING -> "正在找线路"
         AnimeEpisodeAvailability.UNMATCHED -> "暂无匹配线路"
         AnimeEpisodeAvailability.MATCHED -> null
     }
     val caption = when (availability) {
         AnimeEpisodeAvailability.UPCOMING, AnimeEpisodeAvailability.RECENTLY_FAILED -> sourceState
-        else -> subtitle ?: selectionLabel
+        else -> subtitle ?: selectionLabel ?: sourceState.takeIf { listRow }
     }
     val menuLabel = if (onMore != null) "本集操作" else "选择本集线路"
     val menu = onMore ?: onSources
     val actionLabel = when (availability) {
-        AnimeEpisodeAvailability.UPCOMING -> "查看 $label 的来源"
-        AnimeEpisodeAvailability.RECENTLY_FAILED -> "重试播放 $label"
-        else -> "播放 $label"
+        AnimeEpisodeAvailability.UPCOMING -> "查看 $label 的放送与线路"
+        AnimeEpisodeAvailability.CHECKING, AnimeEpisodeAvailability.UNMATCHED -> "查找 $label 的片源并播放"
+        AnimeEpisodeAvailability.RECENTLY_FAILED -> "尝试播放 $label"
+        AnimeEpisodeAvailability.MATCHED -> "播放 $label"
     }
     val ink = if (watched && !selectedEpisode) colors.onSurfaceVariant else colors.onSurface
     val shape = RoundedCornerShape(14.dp)

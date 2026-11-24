@@ -55,6 +55,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import dev.chrisbanes.haze.HazeState
@@ -74,11 +75,41 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
+/** Playback facts that can change controls/placement but do not tick with the media clock. */
+@Immutable
+private data class AnimePlaybackChrome(
+    val sessionGeneration: Long, val timelineGeneration: Long, val assetKey: String?, val episodeId: String?,
+    val phase: AnimePlayerPhase, val playWhenReady: Boolean, val isBuffering: Boolean,
+    val playbackSuppressed: Boolean, val firstFrameRendered: Boolean?, val hasVideoTracks: Boolean?,
+    val inPictureInPicture: Boolean, val error: String?, val notice: String?, val recoveryAttempt: Int,
+    val hasTimeline: Boolean, val hourTimeline: Boolean,
+) {
+    constructor(playback: AnimePlayerState) : this(
+        playback.sessionGeneration, playback.timelineGeneration, playback.assetKey, playback.episodeId,
+        playback.phase, playback.playWhenReady, playback.isBuffering, playback.playbackSuppressed,
+        playback.firstFrameRendered, playback.hasVideoTracks, playback.inPictureInPicture, playback.error,
+        playback.notice, playback.recoveryAttempt, playback.durationMs > 0L, playback.durationMs >= 3_600_000L,
+    )
+
+    val ended: Boolean get() = phase == AnimePlayerPhase.ENDED
+    val isPlaying: Boolean get() = phase == AnimePlayerPhase.READY && playWhenReady && !isBuffering
+
+    fun sameMedia(playback: AnimePlayerState): Boolean = sessionGeneration == playback.sessionGeneration &&
+        assetKey == playback.assetKey && episodeId == playback.episodeId
+
+    fun owns(playback: AnimePlayerState): Boolean = sameMedia(playback) && timelineGeneration == playback.timelineGeneration
+}
+
+/** A non-inline restart scope keeps the subscription's fast reads out of the player layout. */
+@Composable
+private fun AnimePlaybackObservation(observations: State<AnimePlayerState>, content: @Composable (AnimePlayerState) -> Unit) {
+    content(observations.value)
+}
+
 @Composable
 internal fun AnimePlayerPane(
     controller: AnimeController,
     state: AnimeScreenState,
-    playback: AnimePlayerState,
     backdrop: HazeState,
     active: Boolean,
     fullscreen: Boolean,
@@ -94,6 +125,11 @@ internal fun AnimePlayerPane(
     modifier: Modifier = Modifier,
     onStorage: () -> Unit = {},
 ) {
+    val player = controller.player
+    val observations = player.state.collectAsStateWithLifecycle()
+    val playback = remember(observations) {
+        derivedStateOf(structuralEqualityPolicy()) { AnimePlaybackChrome(observations.value) }
+    }.value
     val fillVideo = fullscreen || playback.inPictureInPicture
     val desktop = platformKind == PlatformKind.DESKTOP
     val headerOverVideo = fillVideo || desktop
@@ -211,17 +247,20 @@ internal fun AnimePlayerPane(
         interact()
     }
     fun seek(delta: Long) {
-        if (playback.durationMs <= 0L || !canControl) return
+        val current = player.state.value
+        if (!canControl || !playback.owns(current) || current.durationMs <= 0L ||
+            current.phase != AnimePlayerPhase.READY && !current.ended) return
         interact()
-        controller.player.seekTo((playback.positionMs + delta).coerceIn(0L, playback.durationMs))
+        player.seekTo((current.positionMs + delta).coerceIn(0L, current.durationMs))
     }
     fun toggle() {
-        if (!canControl) return
+        val current = player.state.value
+        if (!canControl || !playback.owns(current) || current.phase != AnimePlayerPhase.READY && !current.ended) return
         interact()
         when {
-            playback.ended -> { controller.player.seekTo(0L); controller.player.play() }
-            playback.playWhenReady -> controller.player.pause()
-            else -> controller.player.play()
+            current.ended -> { player.seekTo(0L); player.play() }
+            current.playWhenReady -> player.pause()
+            else -> player.play()
         }
     }
     LaunchedEffect(Unit) { focus.requestFocus() }
@@ -321,14 +360,15 @@ internal fun AnimePlayerPane(
                 videoHeight >= 250.dp * density.fontScale.coerceAtLeast(1f)
             val controlsTop = videoTop + videoHeight
             val compactStage = videoHeight - (if (headerOverVideo) headerHeight else 0.dp) - footerHeight < 108.dp
-            val latestPlayback by rememberUpdatedState(playback)
+            val pointerMedia = playback
+            val latestChrome by rememberUpdatedState(playback)
             val latestRequiredControls by rememberUpdatedState(requiredControls)
             val latestChromeVisible by rememberUpdatedState(showChrome)
 
             // One native surface keeps its composition identity through fullscreen and size changes.
             Box(Modifier.padding(top = videoTop).width(videoWidth).height(videoHeight)
                 .background(Color.Black).clipToBounds().revealOnMouseMove(desktop && !fillVideo && hoverEnabled, ::interact)
-                .pointerInput(playback.sessionGeneration, active, locked, fullscreen, canControl,
+                .pointerInput(pointerMedia.sessionGeneration, pointerMedia.assetKey, active, locked, fullscreen, canControl,
                     state.settings.longPressSpeed, obscured, settingsPresent, watchPanelPresent, playback.inPictureInPicture) {
                     if (!active || locked || obscured || settingsPresent || watchPanelPresent || playback.inPictureInPicture) return@pointerInput
                     var accelerated = false
@@ -348,43 +388,48 @@ internal fun AnimePlayerPane(
                             }
                         },
                         onDoubleTap = { point ->
-                            if (canControl) {
+                            val current = player.state.value
+                            if (canControl && pointerMedia.sameMedia(current) && latestChrome.owns(current) &&
+                                (current.phase == AnimePlayerPhase.READY || current.ended)) {
                                 val delta = if (point.x < size.width / 2f) -10_000L else 10_000L
-                                val target = (latestPlayback.positionMs + delta).coerceAtLeast(0L)
-                                controller.player.seekTo(if (latestPlayback.durationMs > 0L)
-                                    target.coerceAtMost(latestPlayback.durationMs) else target)
+                                val position = (current.positionMs + delta).coerceAtLeast(0L)
+                                player.seekTo(if (current.durationMs > 0L) position.coerceAtMost(current.durationMs) else position)
                                 interact()
                             }
                         },
                         onPress = press@{
                             accelerated = false
-                            if (!canControl || !latestPlayback.isPlaying) return@press
-                            val generation = latestPlayback.sessionGeneration
-                            val originalSpeed = latestPlayback.speed
+                            val current = player.state.value
+                            val expected = latestChrome
+                            if (!canControl || !pointerMedia.sameMedia(current) || !expected.owns(current) ||
+                                !current.isPlaying || current.playbackSuppressed) return@press
+                            val originalSpeed = current.speed
                             coroutineScope {
                                 val fast = launch {
                                     delay(viewConfiguration.longPressTimeoutMillis)
-                                    if (controller.player.state.value.sessionGeneration == generation) {
+                                    val live = player.state.value
+                                    if (expected.owns(live) && live.isPlaying && !live.playbackSuppressed) {
                                         accelerated = true
                                         holdingFast = true
-                                        controller.player.setSpeed(state.settings.longPressSpeed)
+                                        player.setSpeed(state.settings.longPressSpeed)
                                     }
                                 }
                                 try { tryAwaitRelease() }
                                 finally {
                                     fast.cancel()
-                                    if (holdingFast && controller.player.state.value.sessionGeneration == generation)
-                                        controller.player.setSpeed(originalSpeed)
+                                    if (accelerated && expected.sameMedia(player.state.value)) player.setSpeed(originalSpeed)
                                     holdingFast = false
                                 }
                             }
                         },
                     )
                 }, contentAlignment = Alignment.Center) {
-                AnimePlayerSurface(controller.player, Modifier.fillMaxSize())
-                AnimeDanmakuOverlay(controller, playback,
-                    visible = active && !obscured && (!panelPresent || headerOverVideo) && !blockingResolution && failure == null,
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 12.dp))
+                AnimePlayerSurface(player, Modifier.fillMaxSize())
+                AnimePlaybackObservation(observations) { current ->
+                    AnimeDanmakuOverlay(controller, current, visible = playback.owns(current) &&
+                        active && !obscured && (!panelPresent || headerOverVideo) && !blockingResolution && failure == null,
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 12.dp))
+                }
                 if (posterLayer != null && subject != null) key(posterLayer) {
                     val context = LocalMangaContext.current
                     val request = remember(context, subject.coverUrl, posterSource) {
@@ -426,27 +471,33 @@ internal fun AnimePlayerPane(
                     }
                 }
                 if (holdingFast && !playback.inPictureInPicture)
-                    AnimePlaybackSurface(artwork, Modifier.align(Alignment.TopCenter).padding(top = statusTop + 6.dp)) {
-                        Text(animeSpeedLabel(playback.speed), Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
-                            style = MaterialTheme.typography.labelLarge)
+                    AnimePlaybackObservation(observations) { current ->
+                        if (playback.owns(current) && !current.inPictureInPicture)
+                            AnimePlaybackSurface(artwork, Modifier.align(Alignment.TopCenter).padding(top = statusTop + 6.dp)) {
+                                Text(animeSpeedLabel(current.speed), Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                                    style = MaterialTheme.typography.labelLarge)
+                            }
                     }
                 val readingsRoom = videoHeight - statusTop - statusBottom - 16.dp
                 val readingsHeight = minOf(160.dp, if (centralTransport && chromeReveal > 0f)
                     (readingsRoom - 64.dp) * .5f else readingsRoom * .5f)
                 if (readingsVisible && !panelPresent && !playback.inPictureInPicture && showingCurrentPlayback && failure == null &&
                     !blockingResolution && !awaitingVideo && readingsHeight >= 44.dp) {
-                    MaterialTheme(colorScheme = videoColors) {
-                        AnimePlaybackStatus(playback, quiet = !showChrome,
-                            observing = active && !obscured && !settingsPresent && !watchPanelPresent,
-                            interactive = active && showChrome && !locked && !obscured && !settingsPresent && !watchPanelPresent,
-                            maximumHeight = readingsHeight,
-                            onInteraction = ::interact,
-                            onHoldControls = { readingsHeld = it },
-                            modifier = Modifier.align(Alignment.TopStart)
-                                .padding(start = 14.dp, end = 14.dp, top = statusTop + 8.dp)
-                                .widthIn(max = 320.dp),
-                            nextPreparation = state.nextEpisodePreparation,
-                            nextPreparationEnabled = state.settings.prepareNextEpisode)
+                    AnimePlaybackObservation(observations) { current ->
+                        if (!playback.owns(current) || current.inPictureInPicture) return@AnimePlaybackObservation
+                        MaterialTheme(colorScheme = videoColors) {
+                            AnimePlaybackStatus(current, quiet = !showChrome,
+                                observing = active && !obscured && !settingsPresent && !watchPanelPresent,
+                                interactive = active && showChrome && !locked && !obscured && !settingsPresent && !watchPanelPresent,
+                                maximumHeight = readingsHeight,
+                                onInteraction = ::interact,
+                                onHoldControls = { readingsHeld = it },
+                                modifier = Modifier.align(Alignment.TopStart)
+                                    .padding(start = 14.dp, end = 14.dp, top = statusTop + 8.dp)
+                                    .widthIn(max = 320.dp),
+                                nextPreparation = state.nextEpisodePreparation,
+                                nextPreparationEnabled = state.settings.prepareNextEpisode)
+                        }
                     }
                 }
                 val quietFontScale = density.fontScale.coerceAtLeast(1f)
@@ -454,13 +505,15 @@ internal fun AnimePlayerPane(
                     !readingsVisible && !holdingFast && !playback.inPictureInPicture && !showStage &&
                     showingCurrentPlayback && playback.isPlaying && !playback.playbackSuppressed &&
                     playback.hasVideoTracks != false && videoWidth >= 220.dp * quietFontScale &&
-                    videoHeight - (if (headerOverVideo) topInset else 0.dp) >= 90.dp * quietFontScale &&
-                    subject != null && controller.ownsVideoReadout(subject.id, playback)) {
+                    videoHeight - (if (headerOverVideo) topInset else 0.dp) >= 90.dp * quietFontScale && subject != null) {
                     val insetSides = if (headerOverVideo) WindowInsetsSides.Top + WindowInsetsSides.Horizontal
                         else WindowInsetsSides.Horizontal
-                    AnimeInlineVideoQuality(playback, Modifier.align(Alignment.TopEnd)
-                        .windowInsetsPadding(safeInsets.only(insetSides)).padding(top = 8.dp, end = 10.dp)
-                        .widthIn(max = videoWidth * .75f))
+                    AnimePlaybackObservation(observations) { current ->
+                        if (playback.owns(current) && controller.ownsVideoReadout(subject.id, current))
+                            AnimeInlineVideoQuality(current, Modifier.align(Alignment.TopEnd)
+                                .windowInsetsPadding(safeInsets.only(insetSides)).padding(top = 8.dp, end = 10.dp)
+                                .widthIn(max = videoWidth * .75f))
+                    }
                 }
                 if (centralTransport && canControl && !playback.inPictureInPicture && chromeReveal > 0f) {
                     Box(Modifier.fillMaxSize().padding(top = statusTop, bottom = statusBottom), contentAlignment = Alignment.Center) {
@@ -561,7 +614,7 @@ internal fun AnimePlayerPane(
                         safeInsets.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)) else Modifier)
                     .padding(horizontal = 8.dp, vertical = 4.dp), contentAlignment = Alignment.BottomCenter) {
                     MaterialTheme(colorScheme = videoColors) {
-                        val hasTimeline = canControl && playback.durationMs > 0L
+                        val hasTimeline = canControl && playback.hasTimeline
                         val hasNotice = state.notice != null || playback.notice != null
                         val canOpenLines = episode != null && !inlineWatching && (!showStage || compactStage)
                         val canOpenWatching = !inlineWatching && detail != null
@@ -571,7 +624,7 @@ internal fun AnimePlayerPane(
                             else -> 18.dp + 44.dp * (1 + (if (canOpenLines) 1 else 0) + (if (canOpenWatching) 1 else 0))
                         }
                         AnimePlaybackSurface(artwork, Modifier.widthIn(max = dockWidth).fillMaxWidth(), cornerRadius = 23.dp) {
-                            AnimePlayerControls(controller.player, playback,
+                            AnimePlayerControls(player, playback, observations,
                                 previous, next, onEpisode, onToggle = ::toggle,
                                 onInteraction = ::interact, onHoldControls = { controlsHeld = it },
                                 nextPreparation = state.nextEpisodePreparation,
@@ -603,11 +656,14 @@ internal fun AnimePlayerPane(
                 }
             }
         }
-        if (settingsPresent && !playback.inPictureInPicture) AnimePlayerSettings(settingsVisible, AnimePlayerPanel.GENERAL,
-            controller, state, playback, backdrop, artwork = artwork.takeIf { fillVideo }, overVideo = headerOverVideo,
-            onDismiss = { settingsVisible = false; interact() }, onClosed = { settingsPresent = false },
-            onPlayDownload = onPlayDownload, onSources = onSources,
-            onStorage = onStorage, readingsVisible = readingsVisible, onReadingsVisible = { readingsVisible = it })
+        if (settingsPresent && !playback.inPictureInPicture) AnimePlaybackObservation(observations) { current ->
+            AnimePlayerSettings(settingsVisible, AnimePlayerPanel.GENERAL, controller, state, current, backdrop,
+                artwork = artwork.takeIf { fillVideo }, overVideo = headerOverVideo,
+                pictureInPictureFullscreen = fullscreen.takeIf { active && !obscured },
+                onDismiss = { settingsVisible = false; interact() }, onClosed = { settingsPresent = false },
+                onPlayDownload = onPlayDownload, onSources = onSources,
+                onStorage = onStorage, readingsVisible = readingsVisible, onReadingsVisible = { readingsVisible = it })
+        }
         if (watchPanelPresent && !playback.inPictureInPicture) AnimePlaybackPanel(watchPanelOpen, headerOverVideo,
             artwork.takeIf { fillVideo }, onDismiss = { watchPanelOpen = false; interact() }, onClosed = {
                 val wasPresent = watchPanelPresent
@@ -731,7 +787,7 @@ private fun AnimeWatchingPane(
 @Composable
 private fun AnimeVideoStatus(
     resolving: Boolean, autoMatching: Boolean, sourceName: String?, failure: String?, incident: AnimePlaybackFailure?,
-    playback: AnimePlayerState, hasAudioAlternative: Boolean, canChooseSource: Boolean, canRetry: Boolean,
+    playback: AnimePlaybackChrome, hasAudioAlternative: Boolean, canChooseSource: Boolean, canRetry: Boolean,
     compact: Boolean, next: AnimeEpisode?, nextUpcoming: Boolean,
     onRetry: () -> Unit, onSources: () -> Unit, onEpisode: (AnimeEpisode) -> Unit,
     onKeepPlayback: () -> Unit, canKeepPlayback: Boolean, onRestorePlayback: () -> Unit, canRestorePlayback: Boolean,
@@ -857,7 +913,7 @@ private fun PlayerStageMessage(title: String, detail: String?, maxLines: Int = 2
 }
 
 @Composable
-private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
+private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome, observations: State<AnimePlayerState>,
     previous: AnimeEpisode?, next: AnimeEpisode?, onEpisode: (AnimeEpisode) -> Unit,
     onToggle: () -> Unit, onInteraction: () -> Unit,
     onHoldControls: (Boolean) -> Unit, workspaceNotice: String?, onDismissNotice: () -> Unit,
@@ -865,13 +921,10 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
     sourceName: String?, onSources: (() -> Unit)?,
     fullscreen: Boolean, onFullscreen: () -> Unit, onWatching: (() -> Unit)?, watchingFocus: FocusRequester,
     modifier: Modifier = Modifier) {
-    var scrub by remember(state.sessionGeneration, state.timelineGeneration) { mutableStateOf<Long?>(null) }
-    val duration = state.durationMs
-    val canSeek = canControl && duration > 0L
-    val bufferedRange = state.bufferedMs.takeIf {
-        state.phase == AnimePlayerPhase.READY && state.assetKey != null &&
-            state.positionMs in 0L until duration && it > state.positionMs
-    }?.let { state.positionMs.toFloat()..it.coerceAtMost(duration).toFloat() }
+    var scrub by remember(state.sessionGeneration, state.timelineGeneration, state.assetKey, state.episodeId) {
+        mutableStateOf<Long?>(null)
+    }
+    val canSeek = canControl && state.hasTimeline
     val releaseControls by rememberUpdatedState(onHoldControls)
     BoxWithConstraints(modifier) {
         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
@@ -883,9 +936,9 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
         val iconSlots = 1 + listOf(previousButton, playButton, nextButton, onWatching != null,
             !namedLine && onSources != null).count { it }
         val actionWidth = 44.dp * iconSlots + if (namedLine) 138.dp else 0.dp
-        val timelineWidth = (if (duration >= 3_600_000L) 216.dp else 176.dp) * fontScale
+        val timelineWidth = (if (state.hourTimeline) 216.dp else 176.dp) * fontScale
         val inlineTimeline = canSeek && maxWidth >= actionWidth + timelineWidth + 6.dp
-        DisposableEffect(canSeek, state.sessionGeneration, state.timelineGeneration, inlineTimeline) {
+        DisposableEffect(canSeek, state.sessionGeneration, state.timelineGeneration, state.assetKey, inlineTimeline) {
             // A changed timeline or a moved slider can end a drag before onValueChangeFinished.
             scrub = null
             releaseControls(false)
@@ -895,21 +948,54 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlayerState,
             }
         }
         val timeline: @Composable (Modifier) -> Unit = { placement ->
-            Row(placement, verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                val timeStyle = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum")
-                Text(animeTime(scrub ?: state.positionMs), style = timeStyle, maxLines = 1,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                MaterialTheme(colorScheme = MaterialTheme.colorScheme.copy(surface = MaterialTheme.colorScheme.onSurface)) {
-                    MotionSlider(value = (scrub ?: state.positionMs).toFloat(),
-                        onValueChange = { onHoldControls(true); scrub = it.toLong() },
-                        valueRange = 0f..duration.toFloat(),
-                        bufferedRange = bufferedRange,
-                        onValueChangeFinished = { scrub?.let(player::seekTo); scrub = null; onHoldControls(false); onInteraction() },
-                        formatValue = { animeTime(it.toLong()) },
-                        modifier = Modifier.weight(1f).semantics { contentDescription = "播放进度" })
+            val timelineFocus = remember(state.sessionGeneration, state.assetKey, state.episodeId) { FocusRequester() }
+            var timelineFocused by remember(state.sessionGeneration, state.assetKey, state.episodeId) { mutableStateOf(false) }
+            AnimePlaybackObservation(observations) { current ->
+                if (!state.owns(current) || current.durationMs <= 0L) return@AnimePlaybackObservation
+                val duration = current.durationMs
+                val bufferedRange = current.bufferedMs.takeIf {
+                    current.phase == AnimePlayerPhase.READY && current.assetKey != null &&
+                        current.positionMs in 0L until duration && it > current.positionMs
+                }?.let { current.positionMs.toFloat()..it.coerceAtMost(duration).toFloat() }
+                Row(placement, verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    val timeStyle = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum")
+                    Text(animeTime(scrub ?: current.positionMs), style = timeStyle, maxLines = 1,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    MaterialTheme(colorScheme = MaterialTheme.colorScheme.copy(surface = MaterialTheme.colorScheme.onSurface)) {
+                        val restoreFocus = timelineFocused
+                        // Material's drag otherwise follows replaced callbacks into a new timeline.
+                        key(state.sessionGeneration, state.timelineGeneration, state.assetKey, state.episodeId) {
+                            LaunchedEffect(timelineFocus) {
+                                if (restoreFocus) {
+                                    withFrameNanos { }
+                                    timelineFocus.requestFocus()
+                                }
+                            }
+                            MotionSlider(value = (scrub ?: current.positionMs).toFloat(),
+                                onValueChange = {
+                                    if (state.owns(player.state.value)) { onHoldControls(true); scrub = it.toLong() }
+                                },
+                                valueRange = 0f..duration.toFloat(),
+                                bufferedRange = bufferedRange,
+                                onValueChangeFinished = {
+                                    val requested = scrub
+                                    val live = player.state.value
+                                    if (requested != null && state.owns(live) && live.durationMs > 0L &&
+                                        (live.phase == AnimePlayerPhase.READY || live.ended))
+                                        player.seekTo(requested.coerceIn(0L, live.durationMs))
+                                    scrub = null
+                                    onHoldControls(false)
+                                    onInteraction()
+                                },
+                                formatValue = { animeTime(it.toLong()) },
+                                modifier = Modifier.weight(1f).focusRequester(timelineFocus)
+                                    .onFocusChanged { timelineFocused = it.hasFocus }.focusGroup()
+                                    .semantics { contentDescription = "播放进度" })
+                        }
+                    }
+                    Text(animeTime(duration), style = timeStyle, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                Text(animeTime(duration), style = timeStyle, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         val transport: @Composable () -> Unit = {

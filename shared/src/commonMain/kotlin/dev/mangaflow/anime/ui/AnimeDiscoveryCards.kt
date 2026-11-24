@@ -219,7 +219,9 @@ internal fun AnimeDiscoveryCard(item: AnimeDiscoveryItem, query: AnimeDiscoveryQ
         } },
         captionBadge = sourceBadge,
         description = listOfNotNull(item.title, caption.takeIf(String::isNotBlank)).joinToString("，"),
-        modifier = modifier, list = list, showPoster = showPoster, onManage = onManage, onOpen = onOpen)
+        modifier = modifier, list = list, showPoster = showPoster,
+        captionLines = if (schedule != null && (query.calendar || query.season != null)) 2 else 1,
+        onManage = onManage, onOpen = onOpen)
 }
 
 @Composable
@@ -291,7 +293,7 @@ internal fun AnimeSourceGroupDiscoveryCard(group: AnimeSearchGroup, sources: Lis
 private fun AnimeCompactCoverCard(key: String, title: String, cover: String, caption: String, sourceId: String,
     ratings: (@Composable () -> Unit)?, description: String, modifier: Modifier,
     list: Boolean, captionBadge: (@Composable () -> Unit)? = null, fallbackCover: String? = null, showPoster: Boolean = true,
-    onManage: (() -> Unit)? = null, onOpen: () -> Unit) {
+    captionLines: Int = 1, onManage: (() -> Unit)? = null, onOpen: () -> Unit) {
     val interaction = remember(key) { MutableInteractionSource() }
     val click = modifier.motionPress(interaction, pressedScale = .98f)
         .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
@@ -301,7 +303,8 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
     DesktopContextMenuArea(if (onManage != null) listOf(
         DesktopMenuAction("查看详情", onClick = onOpen), DesktopMenuAction("番剧操作", onClick = onManage)) else emptyList()) {
     if (list) {
-        Row(click.fillMaxWidth().padding(vertical = 4.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically,
+        Row(click.fillMaxWidth().heightIn(min = 48.dp).padding(vertical = 4.dp, horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             if (showPoster) AnimePoster(cover, Modifier.width(58.dp).height(84.dp).clearAndSetSemantics { },
                 sourceId, fallbackCover, title)
@@ -310,7 +313,7 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
                     style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 2,
                     overflow = TextOverflow.Ellipsis)
                 ratings?.invoke()
-                AnimeCompactCardCaption(caption, captionBadge)
+                AnimeCompactCardCaption(caption, captionBadge, captionLines)
             }
             Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -326,7 +329,7 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
             if (ratings != null) Box(Modifier.fillMaxWidth().padding(start = 2.dp, end = 2.dp)) { ratings() }
             if (caption.isNotBlank() || captionBadge != null)
                 Box(Modifier.fillMaxWidth().padding(top = 3.dp, start = 2.dp, end = 2.dp)) {
-                    AnimeCompactCardCaption(caption, captionBadge)
+                    AnimeCompactCardCaption(caption, captionBadge, captionLines)
                 }
         }
         }
@@ -334,12 +337,12 @@ private fun AnimeCompactCoverCard(key: String, title: String, cover: String, cap
 }
 
 @Composable
-private fun AnimeCompactCardCaption(caption: String, badge: (@Composable () -> Unit)?) {
+private fun AnimeCompactCardCaption(caption: String, badge: (@Composable () -> Unit)?, lines: Int) {
     if (caption.isBlank() && badge == null) return
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         if (caption.isNotBlank()) Text(caption, Modifier.clearAndSetSemantics { },
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1, overflow = TextOverflow.Ellipsis)
+            maxLines = lines, overflow = TextOverflow.Ellipsis)
         badge?.invoke()
     }
 }

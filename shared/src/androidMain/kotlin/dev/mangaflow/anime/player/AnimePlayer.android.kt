@@ -512,11 +512,14 @@ internal class AndroidAnimePlayer(
     private fun isSameStartupAsset(left: AnimePlaybackAsset, right: AnimePlaybackAsset): Boolean =
         left.copy(title = "", resolutions = emptyList()) == right.copy(title = "", resolutions = emptyList())
 
+    // The parked decoder uses no interpolation effect. Its eventual active session
+    // gets a new intent token even when the actual viewing options are unchanged.
     private fun sameStartupConfiguration(left: AnimePlayerOptions, right: AnimePlayerOptions): Boolean =
         left.copy(bufferMinMs = right.bufferMinMs, bufferMaxMs = right.bufferMaxMs,
             bufferStartMs = right.bufferStartMs, bufferRebufferMs = right.bufferRebufferMs,
             bufferForwardBytes = right.bufferForwardBytes, bufferBackBytes = right.bufferBackBytes,
-            bufferRefillNearTarget = right.bufferRefillNearTarget) == right
+            bufferRefillNearTarget = right.bufferRefillNearTarget,
+            realtimeMotionIntent = right.realtimeMotionIntent) == right
 
     private fun takeStartup(request: AnimePlayerRequest): Startup? {
         val owner = startup

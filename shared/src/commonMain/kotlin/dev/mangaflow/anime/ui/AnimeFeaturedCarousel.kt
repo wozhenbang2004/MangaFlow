@@ -173,6 +173,8 @@ internal fun AnimeFeaturedCarousel(
                 modifier = Modifier.fillMaxWidth().height(itemHeight + 8.dp)
                     .semantics { stateDescription = "番剧 " + (state.currentPage + 1) + " / " + entries.size }) { index ->
                 val emphasis = { (1f - abs(index - position.value)).coerceIn(0f, 1f) }
+                val settled = state.settledPage == index
+                val acceptTap = active && !state.isScrollInProgress
                 AnimeFeaturedCard(entries[index], preferredWidth < 420.dp, imageWidthPx, imageHeightPx,
                     onReady = { readyCovers[entries[index].coverUrl] = true },
                     modifier = Modifier.fillMaxWidth().height(itemHeight).graphicsLayer {
@@ -182,8 +184,13 @@ internal fun AnimeFeaturedCarousel(
                     }.mangaCoverCard(20.dp),
                     offset = { if (motion) (index - position.value).coerceIn(-1f, 1f) *
                         (if (rtl) -1f else 1f) else 0f },
-                    enabled = active, scoresEnabled = active && index == state.settledPage && !state.isScrollInProgress,
-                    onOpenScores = onOpenScores, onOpen = onOpen)
+                    enabled = acceptTap, scoresEnabled = acceptTap && settled,
+                    actionLabel = if (settled) "查看详情" else "选中这部推荐番剧",
+                    onOpenScores = onOpenScores, onOpen = { entry ->
+                        if (active && !state.isScrollInProgress) {
+                            if (state.settledPage == index) onOpen(entry) else selectPage(index)
+                        }
+                    })
             }
             if (entries.size > 1) Row(Modifier.fillMaxWidth().padding(end = peek).height(footerHeight),
                 verticalAlignment = Alignment.CenterVertically) {
@@ -227,6 +234,7 @@ private fun AnimeFeaturedCard(
     offset: () -> Float,
     enabled: Boolean,
     scoresEnabled: Boolean,
+    actionLabel: String,
     onOpenScores: (AnimeFeaturedEntry) -> Unit,
     onOpen: (AnimeFeaturedEntry) -> Unit,
 ) {
@@ -249,7 +257,7 @@ private fun AnimeFeaturedCard(
             1f to Color.Black.copy(alpha = .82f))
     }
     Box(modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button,
-        enabled = enabled, onClickLabel = "查看详情", onClick = { onOpen(entry) })
+        enabled = enabled, onClickLabel = actionLabel, onClick = { onOpen(entry) })
         .semantics(mergeDescendants = true) {
             contentDescription = listOf(entry.title, entry.caption).filter(String::isNotBlank).joinToString("，")
         }.motionPress(interaction, enabled = enabled, pressedScale = .985f)) {

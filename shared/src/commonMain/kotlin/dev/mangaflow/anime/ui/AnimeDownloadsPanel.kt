@@ -156,6 +156,18 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                     LazyColumn(Modifier.fillMaxWidth().motionInputGate(!actionsPresent), state = scroll,
                         userScrollEnabled = !actionsPresent, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        downloads.readIssue?.let { issue ->
+                            item(key = "download-read-issue") {
+                                when (issue) {
+                                    is AnimeDownloadReadIssue.Unavailable -> AnimeDiscoveryInlineStatus(
+                                        "无法读取已有离线记录", showIssue = true,
+                                        detail = issue.detail + "\n现有列表可能不完整。")
+                                    AnimeDownloadReadIssue.Partial -> AnimeDiscoveryInlineStatus(
+                                        if (rows.isEmpty()) "无法确认此分类是否为空" else "部分下载记录暂不可读",
+                                        showIssue = true, detail = "未能读取的记录暂不显示，原有离线文件未因读取失败而删除。")
+                                }
+                            }
+                        }
                         downloads.notice?.let { notice ->
                             item(key = "download-notice") { AnimeDiscoveryInlineStatus(notice) }
                         }
@@ -166,7 +178,7 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                             downloads.loading && rows.isEmpty() -> item(key = "loading") {
                                 AnimeMessage("正在读取下载任务", icon = Icons.Outlined.Download)
                             }
-                            rows.isEmpty() -> item(key = "empty") {
+                            rows.isEmpty() && downloads.readIssue == null -> item(key = "empty") {
                                 val (title, detail) = when (filter) {
                                     1 -> "没有待完成的下载" to null
                                     2 -> "还没有可离线观看的剧集" to "下载完成的剧集会出现在这里。"

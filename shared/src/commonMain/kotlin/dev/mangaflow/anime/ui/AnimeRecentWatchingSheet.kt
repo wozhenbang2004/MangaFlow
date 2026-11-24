@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material3.Icon
@@ -29,6 +30,7 @@ import dev.mangaflow.ui.CompactMenuAction
 import dev.mangaflow.ui.mangaFontFamily
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionTextButton
 
 /** RecentReadingSheet's compact, task-first list; navigation waits for the shared sheet's exit. */
 @Composable
@@ -38,10 +40,13 @@ internal fun AnimeRecentWatchingSheet(
     backdrop: HazeState,
     onDismiss: () -> Unit,
     onChoose: (AnimeLibraryEntry) -> Unit,
+    onOpenHistory: () -> Unit,
     continuationLabel: (AnimeLibraryEntry) -> String,
 ) {
     val scroll = rememberLazyListState()
-    val recent = remember(entries) { entries.filter { it.resume != null }.sortedByDescending { it.resume?.updatedAt } }
+    val recent = remember(entries, unavailable) {
+        if (unavailable) emptyList() else entries.filter { it.resume != null }.sortedByDescending { it.resume?.updatedAt }
+    }
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.background,
         backdrop = backdrop) { dismiss ->
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, bottom = 4.dp),
@@ -53,7 +58,7 @@ internal fun AnimeRecentWatchingSheet(
                 Icon(Icons.Outlined.Close, "关闭最近观看", Modifier.size(18.dp))
             }
         }
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(), state = scroll,
+        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).weight(1f, fill = false), state = scroll,
             contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)) {
             if (unavailable) item(key = "unavailable") {
@@ -64,6 +69,14 @@ internal fun AnimeRecentWatchingSheet(
             items(recent, key = { it.subject.id }) { entry ->
                 AnimeLibraryWorkRow(entry, continuationLabel(entry),
                     onOpen = { onChoose(entry); dismiss() })
+            }
+        }
+        Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 4.dp),
+            horizontalArrangement = Arrangement.End) {
+            MotionTextButton(onClick = { onOpenHistory(); dismiss() }, modifier = Modifier.heightIn(min = 44.dp)) {
+                Icon(Icons.Outlined.History, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("全部观看历史")
             }
         }
     }

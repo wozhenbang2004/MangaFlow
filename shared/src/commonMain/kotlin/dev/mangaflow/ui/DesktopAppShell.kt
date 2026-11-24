@@ -41,6 +41,7 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -60,7 +61,33 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionNavigationColumn
 import dev.mangaflow.ui.motion.motionPress
 
-internal data class DesktopDestination(val title: String, val icon: ImageVector)
+internal data class DesktopDestination(val title: String, val icon: ImageVector, val groupHeading: String? = null)
+
+/** Headers occupy space in the one motion column, but never own a route or a tap target. */
+internal sealed interface SidebarNavigationRow {
+    data class Heading(val title: String) : SidebarNavigationRow
+    data class Destination(val index: Int) : SidebarNavigationRow
+}
+
+internal fun sidebarNavigationRows(headingsByDestination: List<String?>): List<SidebarNavigationRow> = buildList {
+    headingsByDestination.forEachIndexed { index, heading ->
+        if (heading != null) add(SidebarNavigationRow.Heading(heading))
+        add(SidebarNavigationRow.Destination(index))
+    }
+}
+
+@Composable
+internal fun SidebarGroupLabel(title: String, modifier: Modifier = Modifier, compact: Boolean = false) {
+    val ink = MaterialTheme.colorScheme.onSurfaceVariant
+    if (compact) Box(modifier.fillMaxWidth().height(10.dp).semantics {
+        heading()
+        contentDescription = title
+    }, contentAlignment = Alignment.Center) {
+        Spacer(Modifier.width(18.dp).height(1.dp).background(ink.copy(alpha = .28f)))
+    } else Text(title, modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 7.dp, bottom = 1.dp)
+        .semantics { heading() }, style = MaterialTheme.typography.labelMedium,
+        color = ink, fontWeight = FontWeight.Medium)
+}
 
 /** Recompose the current glass drawer as persistent navigation; content owns the remaining window. */
 @Composable
@@ -128,28 +155,36 @@ internal fun DesktopNavigationWorkspace(
                         profileControl(!expanded)
                         Spacer(Modifier.height(12.dp))
                         val scroll = rememberScrollState()
+                        val rows = remember(destinations) { sidebarNavigationRows(destinations.map(DesktopDestination::groupHeading)) }
+                        val selectedRow = rows.indexOf(SidebarNavigationRow.Destination(selectedIndex))
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 3.dp)) {
-                                MotionNavigationColumn(selected = selectedIndex, itemCount = destinations.size) { index, itemModifier ->
-                                    val destination = destinations[index]
-                                    val interaction = remember(index) { MutableInteractionSource() }
-                                    val current = selectedIndex == index
-                                    if (expanded) Row(itemModifier.fillMaxWidth().height(46.dp).clip(RoundedCornerShape(14.dp))
-                                        .clickable(role = Role.Button, interactionSource = interaction, indication = null,
-                                            onClick = { onNavigate(index) })
-                                        .motionPress(interaction).semantics { selected = current }
-                                        .padding(horizontal = 10.dp),
-                                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                        Icon(destination.icon, null, Modifier.size(20.dp),
-                                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (current) 1f else .76f))
-                                        Text(destination.title, style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
-                                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    } else MotionIconButton(onClick = { onNavigate(index) },
-                                        modifier = itemModifier.fillMaxWidth().height(46.dp).semantics { selected = current },
-                                        tooltip = destination.title) {
-                                        Icon(destination.icon, destination.title, Modifier.size(20.dp),
-                                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (current) 1f else .76f))
+                                MotionNavigationColumn(selected = selectedRow, itemCount = rows.size,
+                                    selectionVisible = selectedRow >= 0) { index, itemModifier ->
+                                    when (val row = rows[index]) {
+                                        is SidebarNavigationRow.Heading -> SidebarGroupLabel(row.title, itemModifier, compact = !expanded)
+                                        is SidebarNavigationRow.Destination -> {
+                                            val destination = destinations[row.index]
+                                            val interaction = remember(row.index) { MutableInteractionSource() }
+                                            val current = selectedIndex == row.index
+                                            if (expanded) Row(itemModifier.fillMaxWidth().height(46.dp).clip(RoundedCornerShape(14.dp))
+                                                .clickable(role = Role.Button, interactionSource = interaction, indication = null,
+                                                    onClick = { onNavigate(row.index) })
+                                                .motionPress(interaction).semantics { selected = current }
+                                                .padding(horizontal = 10.dp),
+                                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                                Icon(destination.icon, null, Modifier.size(20.dp),
+                                                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (current) 1f else .76f))
+                                                Text(destination.title, style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
+                                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            } else MotionIconButton(onClick = { onNavigate(row.index) },
+                                                modifier = itemModifier.fillMaxWidth().height(46.dp).semantics { selected = current },
+                                                tooltip = destination.title) {
+                                                Icon(destination.icon, destination.title, Modifier.size(20.dp),
+                                                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (current) 1f else .76f))
+                                            }
+                                        }
                                     }
                                 }
                             }

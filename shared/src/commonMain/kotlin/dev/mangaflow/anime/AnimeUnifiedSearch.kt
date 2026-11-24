@@ -11,6 +11,7 @@ import dev.mangaflow.data.bodySourceSearchTerms
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.platform.monotonicTimeMillis
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -308,18 +309,35 @@ internal class AnimeUnifiedSearch(
             }
             try {
                 key.route.requireAvailable()
-                suspend fun find() = permits.withPermit {
-                    if (!current()) return@withPermit null
-                    publishSource(waiting.copy(queued = false))
-                    withTimeoutOrNull(SEARCH_TIMEOUT_MILLIS) {
-                        searchPage(provider, term, page, newTerms, expected, attempted, forceRefresh)
+                var remainingMillis = SEARCH_TIMEOUT_MILLIS
+                var reading = false
+                suspend fun read(candidate: String, limit: Long): List<AnimeSourceTitle>? {
+                    val budget = minOf(remainingMillis, limit)
+                    if (budget <= 0L) return null
+                    suspend fun admitted(): List<AnimeSourceTitle> = permits.withPermit {
+                        if (!current()) throw CancellationException("来源搜索已变化。")
+                        if (!reading) {
+                            reading = true
+                            publishSource(waiting.copy(queued = false))
+                        }
+                        val started = monotonicTimeMillis()
+                        try {
+                            withTimeoutOrNull(budget) {
+                                attempted += candidate
+                                repository.search(provider, candidate, page, forceRefresh)
+                            } ?: error(if (limit == SEARCH_ALIAS_TIMEOUT_MILLIS) "来源别名搜索超时，请重试。"
+                                else "搜索超时，请重试。")
+                        } finally {
+                            val elapsed = (monotonicTimeMillis() - started).coerceAtLeast(0L)
+                            remainingMillis = (remainingMillis - elapsed).coerceAtLeast(0L)
+                        }
                     }
-                        ?: error("搜索超时，请重试。")
+                    // Queue only actual reads, so aliases cannot hold slots ahead of waiting literal queries.
+                    return if (provider is LanercProvider) scriptPermits.withPermit { admitted() } else admitted()
                 }
-                val (matchedTerm, found) =
-                    (if (provider is LanercProvider) scriptPermits.withPermit { find() } else find())
-                    ?: return@launch
+                val (matchedTerm, found) = searchPage(term, page, newTerms, expected, attempted, ::read)
                 if (!current()) return@launch
+                check(remainingMillis > 0L || found.isNotEmpty()) { "搜索超时，请重试。" }
                 check(found.all { it.sourceId == provider.id && (it.sourceRevision == null || it.sourceRevision == key.revision) }) {
                     "来源返回的条目身份已变化，请重试。"
                 }
@@ -372,13 +390,12 @@ internal class AnimeUnifiedSearch(
     }
 
     private suspend fun searchPage(
-        provider: AnimeProvider, term: String, page: Int, newTerms: List<String>, expected: AnimeSubject?,
-        attempted: MutableSet<String>, forceRefresh: Boolean,
+        term: String, page: Int, newTerms: List<String>, expected: AnimeSubject?,
+        attempted: Set<String>, read: suspend (String, Long) -> List<AnimeSourceTitle>?,
     ): SearchPageResult {
         val firstRequest = newTerms.isEmpty()
         if (firstRequest) {
-            attempted += term
-            val found = repository.search(provider, term, page, forceRefresh)
+            val found = read(term, SEARCH_TIMEOUT_MILLIS) ?: error("搜索超时，请重试。")
             if (page > 1 || found.isNotEmpty()) return SearchPageResult(term, found)
         }
         val alternatives = if (firstRequest) {
@@ -388,10 +405,9 @@ internal class AnimeUnifiedSearch(
         var answered = firstRequest
         var failure: Exception? = null
         for (candidate in alternatives) {
-            if (!attempted.add(candidate)) continue
+            if (candidate in attempted) continue
             val found = try {
-                withTimeoutOrNull(SEARCH_ALIAS_TIMEOUT_MILLIS) { repository.search(provider, candidate, page, forceRefresh) }
-                    ?: error("来源别名搜索超时，请重试。")
+                read(candidate, SEARCH_ALIAS_TIMEOUT_MILLIS) ?: break
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (error: Exception) {

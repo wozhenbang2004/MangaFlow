@@ -257,7 +257,8 @@ internal fun AnimeSourcesPanel(
                         if (!context.isNullOrBlank()) Text(context, style = MaterialTheme.typography.bodySmall,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    if (!previewing && subjectId != null && (focusEpisode == null || aggregationExpanded)) {
+                    if (!previewing && subjectId != null && (focusEpisode == null || episodeLines.isNotEmpty() || aggregationExpanded)) {
+                        val probeLabel = if (focusEpisode != null) "探测本集线路，不开始播放" else "探测各来源的一集，不开始播放"
                         if (measuring && measurementBatch?.manual == true) Box(Modifier.size(44.dp).semantics { contentDescription = "正在探测来源画质与媒体网络" },
                             contentAlignment = Alignment.Center) { MotionBusyIndicator(Modifier.size(17.dp), strokeWidth = 1.5.dp) }
                         else MotionIconButton(onClick = {
@@ -270,8 +271,8 @@ internal fun AnimeSourcesPanel(
                             else controller.measureWorkSources(force = true)
                         },
                             enabled = visible,
-                            modifier = Modifier.size(44.dp), tooltip = if (focusEpisode != null) "探测本集全部已对应线路" else "重新探测画质与网络") {
-                            Icon(Icons.Outlined.Speed, if (focusEpisode != null) "探测本集全部已对应线路" else "重新探测画质与网络", Modifier.size(20.dp),
+                            modifier = Modifier.size(44.dp), tooltip = probeLabel) {
+                            Icon(Icons.Outlined.Speed, probeLabel, Modifier.size(20.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
@@ -398,9 +399,10 @@ internal fun AnimeSourcesPanel(
                                     attemptingAutomaticPlayback -> "找到本集线路后自动播放"
                                     recoveringThisEpisode && canAutoPlay -> "有其他本集线路可尝试"
                                     recoveringThisEpisode -> "上一条线路未能播放"
-                                    activeLine != null -> "当前使用 ${activeLine.sourceName}"
-                                    canAutoPlay -> "已找到本集线路 · 自动选择"
-                                    availability == AnimeEpisodeAvailability.CHECKING -> "正在核对本集，找到后可立即播放"
+                                    activeLine != null -> "当前线路 · ${activeLine.sourceName}"
+                                    recommendedLine != null -> "优先尝试 ${recommendedLine.sourceName}"
+                                    canAutoPlay -> "已对应本集 · 自动选线"
+                                    availability == AnimeEpisodeAvailability.CHECKING -> "正在核对本集线路"
                                     episodeLines.isNotEmpty() -> "仍可尝试重试本集线路"
                                     else -> "暂未找到本集线路"
                                 }
@@ -418,18 +420,24 @@ internal fun AnimeSourcesPanel(
                                 item(key = "episode-lines-heading") {
                                     AnimeSectionTitle("手动选线", modifier = Modifier.padding(top = 10.dp, start = 4.dp))
                                 }
-                                val visibleLines = if (allEpisodeLines) episodeLines else episodeLines.take(8)
+                                // Keep the active and explicitly requested lines visible without sorting by every new sample.
+                                val featured = (listOfNotNull(activeLine, manualLine) + episodeLines).distinct().take(8).toSet()
+                                val visibleLines = if (allEpisodeLines) episodeLines else episodeLines.filter { it in featured }
                                 items(visibleLines, key = { "line:" + controller.optionKey(it) }) { option ->
                                     val failure = controller.recentPlaybackLineFailure(focusEpisode.id, option, state)
                                     val enabled = controller.canAttemptPlaybackLine(focusEpisode.id, option, state)
                                     val current = option == activeLine && !recovering
+                                    val openingLine = option == manualLine && state.resolving && !recovering && manualTarget?.error == null
                                     val status = when {
+                                        openingLine -> "正在打开"
                                         current -> "当前线路"
                                         !enabled -> "暂不可用"
                                         failure != null -> "最近播放失败，可重试"
                                         option == recommendedLine -> "自动首选"
                                         else -> "已对应本集"
                                     }
+                                    val metrics = controller.playbackMeasurements(focusEpisode.id, option)
+                                    val probe = currentLineMeasurements[option]
                                     val group = option.episode.group.takeIf(String::isNotBlank)?.let(::animeSourceGroupLabel)
                                     AnimeLineChoice(
                                         title = option.sourceName,
@@ -442,8 +450,12 @@ internal fun AnimeSourcesPanel(
                                             else -> Icons.Outlined.PlayArrow
                                         },
                                         active = current,
-                                        enabled = enabled && !current,
+                                        busy = openingLine,
+                                        enabled = enabled && !current && !openingLine,
                                         actionLabel = if (failure != null) "重试 ${option.sourceName}" else "用 ${option.sourceName} 播放本集",
+                                        supporting = if (metrics != null || probe != null) ({
+                                            AnimeSourceMetricsStrip(metrics, progress = probe)
+                                        }) else null,
                                         onClick = { onPlay(focusEpisode.id, option) },
                                     )
                                 }
@@ -498,7 +510,7 @@ internal fun AnimeSourcesPanel(
                             AnimeQuietLabel(summary + status,
                                 Modifier.padding(start = 8.dp, bottom = 2.dp))
                             val outcomes = listOf(
-                                AnimeSourceMeasurementPhase.COMPLETE to "媒体可读",
+                                AnimeSourceMeasurementPhase.COMPLETE to if (measurementBatch.manual) "样本可读" else "已有媒体证据",
                                 AnimeSourceMeasurementPhase.MANIFEST_ONLY to "仅清单",
                                 AnimeSourceMeasurementPhase.ADDRESS_ONLY to "仅取址",
                                 AnimeSourceMeasurementPhase.FAILED to "失败",
@@ -507,9 +519,10 @@ internal fun AnimeSourcesPanel(
                                 AnimeSourceMeasurementPhase.UNAVAILABLE to "待重试",
                                 AnimeSourceMeasurementPhase.CANCELLED to "已停止",
                             ).mapNotNull { (phase, label) ->
-                                val count = if (!hasLineBatch || phase == AnimeSourceMeasurementPhase.WAITING_CATALOG ||
-                                    phase == AnimeSourceMeasurementPhase.NO_EPISODE) counts[phase] else lineCounts[phase]
-                                count?.let { "$label $it" }
+                                val perSource = !hasLineBatch || phase == AnimeSourceMeasurementPhase.WAITING_CATALOG ||
+                                    phase == AnimeSourceMeasurementPhase.NO_EPISODE
+                                val count = if (perSource) counts[phase] else lineCounts[phase]
+                                count?.let { "$label $it" + if (perSource) " 源" else " 条" }
                             }
                             if (outcomes.isNotEmpty()) AnimeQuietLabel(outcomes.joinToString(" · "),
                                 Modifier.padding(start = 8.dp, bottom = 2.dp))
@@ -1006,6 +1019,7 @@ private fun AnimeLineChoice(
     sourceId: String? = null,
     busy: Boolean = false,
     actionLabel: String? = null,
+    supporting: (@Composable () -> Unit)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
@@ -1030,6 +1044,7 @@ private fun AnimeLineChoice(
             Text(detail, modifier = if (sourceId == null) Modifier.semantics { liveRegion = LiveRegionMode.Polite }
                 else Modifier, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
+            supporting?.invoke()
         }
         if (busy) MotionBusyIndicator(Modifier.size(18.dp), strokeWidth = 1.5.dp)
         else Icon(icon, null, Modifier.size(22.dp), tint = ink)

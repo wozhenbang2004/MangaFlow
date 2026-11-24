@@ -44,6 +44,25 @@ internal enum class AnimePlayerPanel {
     DANMAKU, DANMAKU_SEARCH, DANMAKU_DISPLAY, DANMAKU_ACCESS,
 }
 
+private data class AnimePictureInPictureTarget(
+    val subjectId: String, val episodeId: String, val assetKey: String,
+    val session: Long, val timeline: Long, val fullscreen: Boolean,
+)
+
+private fun AnimePlayerState.pictureInPictureTarget(
+    screen: AnimeScreenState, visibleFullscreen: Boolean?,
+): AnimePictureInPictureTarget? {
+    val fullscreen = visibleFullscreen ?: return null
+    val subjectId = screen.detail?.subject?.id ?: return null
+    val episode = episodeId ?: return null
+    val asset = assetKey ?: return null
+    if (AnimePlayerCapability.PICTURE_IN_PICTURE !in capabilities || inPictureInPicture ||
+        phase != AnimePlayerPhase.READY || error != null || firstFrameRendered != true || hasVideoTracks == false ||
+        screen.selectedEpisodeId != episode || screen.resolving || screen.playbackTarget != null ||
+        screen.pendingPlayback != null) return null
+    return AnimePictureInPictureTarget(subjectId, episode, asset, sessionGeneration, timelineGeneration, fullscreen)
+}
+
 /** One retained panel owns all playback disclosures; no dialog-on-dialog navigation. */
 @Composable
 internal fun AnimePlayerSettings(
@@ -55,6 +74,7 @@ internal fun AnimePlayerSettings(
     backdrop: HazeState,
     artwork: HazeState?,
     overVideo: Boolean,
+    pictureInPictureFullscreen: Boolean?,
     onDismiss: () -> Unit,
     onClosed: () -> Unit,
     onPlayDownload: (AnimeDownloadSelection) -> Unit,
@@ -89,12 +109,14 @@ internal fun AnimePlayerSettings(
     var pendingDownload by remember { mutableStateOf<AnimeDownloadSelection?>(null) }
     var pendingSourceEpisode by remember { mutableStateOf<AnimeEpisode?>(null) }
     var pendingStorage by remember { mutableStateOf(false) }
+    var pendingPictureInPicture by remember { mutableStateOf<AnimePictureInPictureTarget?>(null) }
     var videoReturnSection by remember { mutableStateOf(AnimePlayerPanel.GENERAL) }
     var sourceReturnSection by remember { mutableStateOf(AnimePlayerPanel.GENERAL) }
     LaunchedEffect(visible, initialSection, initialEnhancementPage) {
         if (visible) {
             section = initialSection; error = null; pendingDownload = null; pendingSourceEpisode = null
             pendingStorage = false; videoReturnSection = AnimePlayerPanel.GENERAL
+            pendingPictureInPicture = null
             sourceReturnSection = AnimePlayerPanel.GENERAL
             enhancementNavigation.reset(initialEnhancementPage)
             speedDraft = playback.speed.toString(); holdDraft = state.settings.longPressSpeed.toString()
@@ -176,13 +198,21 @@ internal fun AnimePlayerSettings(
         val request = pendingDownload
         val sourceEpisode = pendingSourceEpisode
         val storage = pendingStorage
+        val pictureInPicture = pendingPictureInPicture
         pendingDownload = null
         pendingSourceEpisode = null
         pendingStorage = false
+        pendingPictureInPicture = null
         onClosed()
         if (request != null) onPlayDownload(request)
         else if (sourceEpisode != null) onSources(sourceEpisode)
         else if (storage) onStorage()
+        else if (pictureInPicture != null) {
+            val player = controller.player
+            // The retained dialog is gone. A different episode, seek or Back must not take over this handoff.
+            if (player.state.value.pictureInPictureTarget(controller.state.value, pictureInPictureFullscreen) == pictureInPicture)
+                player.enterPictureInPicture()
+        }
     }) {
             MotionBackHandler(visible && section != AnimePlayerPanel.GENERAL, state = null, onBack = ::back)
             Column(Modifier.fillMaxWidth().height(LocalMangaWindow.current.height)) {
@@ -297,9 +327,21 @@ internal fun AnimePlayerSettings(
                                     onCheckedChange = { enabled -> controller.updatePlaybackSettings { it.copy(backgroundAudio = enabled) } })
                             }
                             if (AnimePlayerCapability.PICTURE_IN_PICTURE in capabilities) item {
-                                CompactMenuAction(Icons.Outlined.PictureInPictureAlt, "进入画中画", onClick = {
-                                    controller.player.enterPictureInPicture(); onDismiss()
-                                })
+                                val eligible = playback.pictureInPictureTarget(state, pictureInPictureFullscreen)
+                                val label = when {
+                                    eligible != null -> "进入画中画"
+                                    playback.hasVideoTracks == false -> "画中画 · 当前线路只有音频"
+                                    else -> "画中画 · 出画后可用"
+                                }
+                                CompactMenuAction(Icons.Outlined.PictureInPictureAlt, label, enabled = eligible != null,
+                                    onClick = {
+                                        val current = controller.player.state.value.pictureInPictureTarget(
+                                            controller.state.value, pictureInPictureFullscreen)
+                                        if (current != null && current == eligible) {
+                                            pendingPictureInPicture = current
+                                            onDismiss()
+                                        }
+                                    })
                             }
                             item { AnimePlayerSettingsSection("画质与读数") }
                             item { AnimePlayerSettingLink(Icons.Outlined.AutoAwesome, "画质增强与补帧", "") {

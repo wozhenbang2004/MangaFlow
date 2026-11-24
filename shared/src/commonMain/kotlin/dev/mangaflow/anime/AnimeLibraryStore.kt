@@ -51,7 +51,24 @@ internal data class AnimeLibraryState(
     val restoreEpoch: Long = 0L,
     /** No persisted records are known; entries/bindings are session-only playback associations. */
     val readUnavailable: Boolean = false,
-)
+) {
+    // Derived from this immutable snapshot only; never serialize it as an episode checkpoint.
+    val legacyResumeOffsets: Map<String, AnimeWatchProgress> by lazy {
+        if (readUnavailable) return@lazy emptyMap()
+        val claims = mutableMapOf<String, AnimeWatchProgress?>()
+        for ((subjectId, entry) in entries) {
+            val resume = entry.resume ?: continue
+            val episodeId = resume.episodeId
+            if (episodeId.isBlank() || episodeId in progress) continue
+            // Do not elect one owner when more than one work claims the same missing slot.
+            claims[episodeId] = if (episodeId in claims) null else resume.takeIf {
+                subjectId.isNotBlank() && entry.subject.id == subjectId && it.subjectId == subjectId &&
+                    !it.completed && it.positionMs > 0L && it.updatedAt > (clearedHistoryAt[subjectId] ?: -1L)
+            }
+        }
+        claims.mapNotNull { (episodeId, resume) -> resume?.let { episodeId to it } }.toMap()
+    }
+}
 
 /** One atomic document owns watch state and reviewed associations, including their undo receipt. */
 internal class AnimeLibraryStore private constructor(context: PlatformContext, scope: CoroutineScope) {
@@ -210,8 +227,11 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
 
     fun progressFor(subjectId: String, episodeId: String): AnimeWatchProgress? {
         val before = mutableState.value
-        return before.progress[episodeId]?.takeIf { (it.subjectId.isEmpty() || it.subjectId == subjectId) &&
+        val explicit = before.progress[episodeId]
+        if (explicit != null) return explicit.takeIf { (it.subjectId.isEmpty() || it.subjectId == subjectId) &&
             it.updatedAt > (before.clearedHistoryAt[subjectId] ?: -1L) }
+        if (before.entries[subjectId]?.resume?.episodeId != episodeId) return null
+        return before.legacyResumeOffsets[episodeId]?.takeIf { it.subjectId == subjectId }
     }
 
     suspend fun updateSettings(change: (AnimePlaybackSettings) -> AnimePlaybackSettings) =

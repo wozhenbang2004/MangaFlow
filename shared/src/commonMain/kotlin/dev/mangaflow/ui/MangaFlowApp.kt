@@ -222,6 +222,22 @@ private data class SidebarDestination(
         ?: if (profile == ContentProfile.ANIME && section == Section.SETTINGS) "应用设置"
         else section.navigationTitle(profile == ContentProfile.RESTRICTED)
 }
+
+private data class AnimeSidebarGroup(val title: String, val destinations: List<SidebarDestination>)
+
+private fun animeSidebarGroup(title: String, vararg destinations: AnimeWorkspaceDestination) =
+    AnimeSidebarGroup(title, destinations.map { SidebarDestination(Section.ANIME, it) })
+
+private val animeSidebarGroups = listOf(
+    animeSidebarGroup("浏览", AnimeWorkspaceDestination.HOME, AnimeWorkspaceDestination.CALENDAR,
+        AnimeWorkspaceDestination.SEASON, AnimeWorkspaceDestination.RANKING,
+        AnimeWorkspaceDestination.GENRES, AnimeWorkspaceDestination.DIRECTORY),
+    animeSidebarGroup("我的番剧", AnimeWorkspaceDestination.LIBRARY, AnimeWorkspaceDestination.HISTORY,
+        AnimeWorkspaceDestination.DOWNLOADS),
+    animeSidebarGroup("管理", AnimeWorkspaceDestination.TRACKING),
+)
+private val animeSidebarHeadings = animeSidebarGroups.associate { it.destinations.first() to it.title }
+
 @Composable
 private fun DrawerDestinationLink(
     destination: SidebarDestination, profile: ContentProfile, selected: Boolean, enabled: Boolean,
@@ -799,12 +815,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     val profileSections = remember(contentProfile) {
         if (contentProfile == ContentProfile.ANIME) {
-            listOf(AnimeWorkspaceDestination.HOME, AnimeWorkspaceDestination.LIBRARY,
-                AnimeWorkspaceDestination.HISTORY, AnimeWorkspaceDestination.SEASON,
-                AnimeWorkspaceDestination.CALENDAR, AnimeWorkspaceDestination.RANKING,
-                AnimeWorkspaceDestination.GENRES, AnimeWorkspaceDestination.DIRECTORY,
-                AnimeWorkspaceDestination.DOWNLOADS, AnimeWorkspaceDestination.TRACKING)
-                .map { SidebarDestination(Section.ANIME, it) } +
+            animeSidebarGroups.flatMap(AnimeSidebarGroup::destinations) +
                 listOf(SidebarDestination(Section.SETTINGS, experience = true), SidebarDestination(Section.SETTINGS))
         } else {
             Section.entries.filter { it.availableIn(contentProfile) && (restrictedMode || it != Section.ACCOUNT) }
@@ -825,8 +836,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 ?: animeDestination
             else null)
     }
+    val sidebarHeadings = if (animeMode) animeSidebarHeadings else emptyMap()
     val desktopDestinations = remember(profileSections, contentProfile) {
-        profileSections.map { DesktopDestination(it.title(contentProfile), it.icon) }
+        profileSections.map { DesktopDestination(it.title(contentProfile), it.icon, sidebarHeadings[it]) }
     }
     CopyShelfSyncOverlay(
         model = model, snapshot = copyShelfSyncSnapshot,
@@ -1089,7 +1101,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     DesktopNavigationWorkspace(
         visible = desktopNavigationVisible, expanded = desktopNavigationWide,
         destinations = desktopDestinations,
-        selectedIndex = profileSections.indexOf(pendingSidebarDestination ?: highlightedSection).coerceAtLeast(0),
+        selectedIndex = profileSections.indexOf(pendingSidebarDestination ?: highlightedSection)
+            .let { if (animeMode) it else it.coerceAtLeast(0) },
         version = "MangaFlow $appVersion", backdrop = drawerBackdrop,
         workspaceBackdrop = desktopWorkspaceBackdrop,
         wallpaper = {
@@ -1198,6 +1211,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         val (destinations, tools) = remember(profileSections) {
                             profileSections.partition { it.section != Section.SETTINGS }
                         }
+                        val rows = remember(destinations, sidebarHeadings) {
+                            sidebarNavigationRows(destinations.map { sidebarHeadings[it] })
+                        }
                         Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)
                             .semantics { paneTitle = "${contentProfile.title}导航" }
                             .then(if (drawerCanSelect) Modifier else Modifier.clearAndSetSemantics { }
@@ -1221,14 +1237,19 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 modifier = Modifier.padding(bottom = 6.dp),
                                 enabled = drawerCanSelect && !rootHandoff)
                             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(drawerScroll)) {
-                                val selectedIndex = destinations.indexOf(selection)
-                                MotionNavigationColumn(selected = selectedIndex, itemCount = destinations.size,
-                                    selectionVisible = selectedIndex >= 0) { index, itemModifier ->
-                                    val destination = destinations[index]
-                                    DrawerDestinationLink(destination, contentProfile, destination == selection,
-                                        drawerCanSelect, itemModifier.fillMaxWidth().onGloballyPositioned {
-                                            drawerTargets[destination] = it.boundsInRoot()
-                                        }, onSelect = selectDrawer)
+                                val selectedRow = rows.indexOf(SidebarNavigationRow.Destination(destinations.indexOf(selection)))
+                                MotionNavigationColumn(selected = selectedRow, itemCount = rows.size,
+                                    selectionVisible = selectedRow >= 0) { index, itemModifier ->
+                                    when (val row = rows[index]) {
+                                        is SidebarNavigationRow.Heading -> SidebarGroupLabel(row.title, itemModifier)
+                                        is SidebarNavigationRow.Destination -> {
+                                            val destination = destinations[row.index]
+                                            DrawerDestinationLink(destination, contentProfile, destination == selection,
+                                                drawerCanSelect, itemModifier.fillMaxWidth().onGloballyPositioned {
+                                                    drawerTargets[destination] = it.boundsInRoot()
+                                                }, onSelect = selectDrawer)
+                                        }
+                                    }
                                 }
                             }
                             Row(Modifier.fillMaxWidth().padding(top = 6.dp)

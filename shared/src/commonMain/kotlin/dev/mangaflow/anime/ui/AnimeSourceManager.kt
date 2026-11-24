@@ -139,7 +139,7 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                             }
                         }
                         if (paused.isNotEmpty()) {
-                            item(key = "paused-header") { AnimeSectionTitle("已停用") }
+                            item(key = "paused-header") { AnimeSectionTitle("当前不参与找源") }
                             sourceManagerRows(paused, state, ::openSource, fixedBuiltIns.keys)
                         }
                         if (available.isNotEmpty()) {
@@ -169,11 +169,11 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                             LazyColumn(Modifier.weight(1f, fill = false), state = videoScroll, contentPadding = PaddingValues(16.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 item(key = "active-video-header") {
-                                AnimeSectionTitle("已启用 · ${active.size}", subtitle = "用于搜索和剧集匹配") {
-                                    if (remaining > 0 || references.isNotEmpty()) {
-                                        MotionTextButton(onClick = { moreVideoSources = true }) { Text("管理其他来源") }
+                                    AnimeSectionTitle("参与找源 · ${active.size}", subtitle = "启用不代表线路可播放") {
+                                        if (remaining > 0 || references.isNotEmpty()) {
+                                            MotionTextButton(onClick = { moreVideoSources = true }) { Text("管理其他来源") }
+                                        }
                                     }
-                                }
                                 }
                                 sourceManagerRows(active, state, ::openSource, fixedBuiltIns.keys)
                                 if (active.isEmpty()) item { AnimeMessage("暂无已启用的视频来源") }
@@ -183,7 +183,9 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                             val browse = extensions.filter { it.kind == LanercSourceKind.BROWSE }
                             LazyColumn(Modifier.weight(1f, fill = false), state = browseScroll, contentPadding = PaddingValues(16.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                item(key = "builtin-browse-heading") { AnimeSectionTitle("作品与播出资料") }
+                                item(key = "builtin-browse-heading") {
+                                    AnimeSectionTitle("作品与播出资料", subtitle = "只提供资料，不提供播放线路")
+                                }
                                 items(AnimeDiscoveryProvider.entries, key = { "builtin-browse:" + it.name }) { provider ->
                                     AnimeSelection(animeDiscoveryProviderLabel(provider),
                                         when (provider) {
@@ -247,16 +249,18 @@ private val LanercSourceListing.displayName: String get() = name.removeSuffix(" 
 private val SourcePreparationState.retryableFailure: Boolean get() = phase == SourcePreparationPhase.FAILED && canRetry
 
 private fun LazyListScope.sourceManagerRows(sources: List<LanercSourceListing>, state: AnimeScreenState,
-    onSelect: (LanercSourceListing) -> Unit, fixedBuiltInIds: Set<String> = emptySet()) {
+    onSelect: (LanercSourceListing) -> Unit, fixedBuiltInIds: Set<String> = emptySet(),
+    rowTitle: (LanercSourceListing) -> String = { it.displayName }) {
     items(sources, key = { it.id }) { source ->
         val native = source.id in BUNDLED_ANIME_SOURCE_IDS || source.id in fixedBuiltInIds
+        val title = rowTitle(source)
         val colors = MaterialTheme.colorScheme
         val interaction = remember { MutableInteractionSource() }
         Row(
             Modifier.fillMaxWidth().heightIn(min = 57.dp)
                 .clip(RoundedCornerShape(12.dp)).background(colors.onSurface.copy(alpha = .045f))
                 .clickable(interactionSource = interaction, indication = null, role = Role.Button,
-                    onClickLabel = "管理 ${source.displayName}", onClick = { onSelect(source) })
+                    onClickLabel = "管理 $title", onClick = { onSelect(source) })
                 .motionPress(interaction, pressedScale = .99f)
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -266,7 +270,7 @@ private fun LazyListScope.sourceManagerRows(sources: List<LanercSourceListing>, 
                 AnimeSourceMark(source.id, source.displayName, size = 18.dp)
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(source.displayName, style = MaterialTheme.typography.titleSmall,
+                Text(title, style = MaterialTheme.typography.titleSmall,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 AnimeQuietLabel(animeSourceManagerLabel(source, state, native))
             }
@@ -381,16 +385,16 @@ private fun AnimeSourceManagerDetail(
             else -> Unit
         }
         if (alternatives.isNotEmpty()) {
-            item(key = "alternatives-heading") { AnimeSectionTitle("同一来源的其他实现") }
-            items(alternatives, key = { "alternative:" + it.id }) { alternative ->
-                val altNative = alternative.id in BUNDLED_ANIME_SOURCE_IDS
-                val label = when {
-                    altNative -> "内置实现"
+            item(key = "alternatives-heading") {
+                AnimeSectionTitle("同一来源的其他实现", subtitle = "打开后可分别管理")
+            }
+            val builtInIds = controller.builtInVideoSources.keys
+            sourceManagerRows(alternatives, state, onSelectAlternative, builtInIds) { alternative ->
+                when {
+                    alternative.id in BUNDLED_ANIME_SOURCE_IDS || alternative.id in builtInIds -> "内置实现"
                     "homeSections" in alternative.capabilities && "searchFiltered" in alternative.capabilities -> "脚本版 · 推荐与分类"
                     else -> "脚本版"
                 }
-                AnimeSelection(label, animeSourceManagerLabel(alternative, state, altNative), selected = alternative.active,
-                    onClick = { onSelectAlternative(alternative) })
             }
         }
         val declared = source.capabilities.mapNotNull { animeExtensionCapability(it, source.kind) }.distinct()

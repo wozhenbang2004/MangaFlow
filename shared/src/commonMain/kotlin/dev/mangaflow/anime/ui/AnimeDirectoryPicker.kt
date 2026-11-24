@@ -119,11 +119,11 @@ internal fun AnimeDirectoryPicker(controller: AnimeController, sources: List<Ani
                 AnimeSourceMark(source.id, source.name, size = 18.dp)
                 Spacer(Modifier.width(7.dp))
             }
-            Text(source?.name ?: "选择目录", Modifier.weight(1f, fill = false),
-                style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (current?.variant != null) {
-                Text(current.group.variant, Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelSmall,
+            Column(Modifier.weight(1f, fill = false)) {
+                Text(source?.name ?: "选择目录", style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val scope = current?.variant ?: current?.group?.title
+                if (scope != null) Text(scope, style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Icon(Icons.Outlined.ExpandMore, "切换目录", Modifier.padding(start = 4.dp).size(16.dp),

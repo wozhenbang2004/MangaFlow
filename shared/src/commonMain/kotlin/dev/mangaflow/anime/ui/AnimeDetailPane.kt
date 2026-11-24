@@ -51,6 +51,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.platform.LocalDensity
@@ -97,6 +98,8 @@ import dev.mangaflow.ui.mangaFontFamily
 import dev.mangaflow.ui.motion.*
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -173,8 +176,7 @@ internal fun AnimeDetailPane(
     }
     val savedProgress = entry?.resume
     val savedEpisode = detail.episodes.firstOrNull { it.id == savedProgress?.episodeId && it.subjectId == subject.id }
-    val first = controller.continuationEpisode(subject.id) ?: if (savedProgress == null)
-        main.firstOrNull { it.id !in completed } ?: main.firstOrNull() ?: extra.firstOrNull() else null
+    val first = detailPlayEpisode(controller, state, detail, savedProgress)
     val firstAvailability = first?.let { controller.episodeAvailability(it.id, state) }
     val bindings = remember(state.sourceBindings, subject.id) { state.sourceBindings.filter { it.subjectId == subject.id } }
     val firstLines = first?.let { controller.confirmedPlaybackLines(it.id, state) }.orEmpty()
@@ -185,6 +187,19 @@ internal fun AnimeDetailPane(
     }?.let { it.sourceId to it.sourceName }
     val hasSourceIssues = state.sourceError != null || state.sourceCatalogErrors.isNotEmpty()
     val sourceSearchInProgress = state.sourceAggregationRunning || state.episodeOptionsLoading
+    val resumeCheckpoint = savedProgress?.let { detailResumeCheckpoint(state, subject.id, it) }
+    val offlineProgress = detailOfflineProgress(state, subject.id, first, savedProgress)
+    val offline = if (offlineProgress != null) {
+        val downloads = controller.downloads.state
+        val projection = remember(downloads, subject.id, offlineProgress.localDownloadId,
+            offlineProgress.episodeId, offlineProgress.assetId, offlineProgress.sourceId) {
+            downloads.map { animeDetailOffline(it, subject.id, offlineProgress) }.distinctUntilChanged()
+        }
+        projection.collectAsStateWithLifecycle(initialValue = animeDetailOffline(downloads.value, subject.id, offlineProgress)).value
+    } else AnimeDetailOffline.MISSING.takeIf { savedProgress?.localDownloadId != null && !savedProgress.completed &&
+        (first == null || first.id == savedProgress.episodeId) }
+    val playControl = animeDetailPlayControl(first, savedProgress, firstAvailability,
+        state.detailLoading || sourceSearchInProgress, firstCanRetry, offline, resumeCheckpoint != null)
     val pendingNativeCatalog = state.sourceCatalogs.firstOrNull {
         it.title.sourceId == nativeSource && !it.notice.isNullOrBlank() && detail.episodes.isEmpty()
     }
@@ -217,8 +232,54 @@ internal fun AnimeDetailPane(
         val wide = maxWidth >= (if (compactHero) 650.dp else 840.dp) * fontScale.coerceAtMost(1.5f)
         val width = minOf(maxWidth, if (wide) 1400.dp else 1080.dp)
         val horizontal = if (wide) 24.dp else 16.dp
-        val bottomInset = screenFitContentInsets().asPaddingValues().calculateBottomPadding()
-        val listEnd = 18.dp + bottomInset
+        val contentInsets = screenFitContentInsets()
+        val bottomInset = contentInsets.asPaddingValues().calculateBottomPadding()
+        val showDock = playControl != null && WindowInsets.ime.getBottom(density) == 0
+        var measuredDock by remember(subject.id, width, density, compactHero) { mutableIntStateOf(0) }
+        // Lists draw edge-to-edge, but their last row must scroll completely clear of the dock.
+        val dockClearance = if (showDock && !wide) maxOf(if (compactHero) 48.dp else 56.dp,
+            with(density) { measuredDock.toDp() }) + 8.dp else 0.dp
+        val listEnd = 18.dp + bottomInset + dockClearance
+        val playDock: @Composable (Modifier) -> Unit = { dockModifier ->
+            playControl?.let { control ->
+                AnimeDetailPlayAction(control, compact = compactHero, backdrop = backdrop,
+                    active = active && !statusPresent && !discussionChecksPresent && !discussionFilter && episodeMenuOwner == null,
+                    modifier = dockModifier.onSizeChanged { measuredDock = maxOf(measuredDock, it.height) },
+                    onActivate = play@{
+                        val latest = controller.state.value
+                        val liveDetail = latest.detail?.takeIf { it.subject.id == subject.id } ?: return@play
+                        if (!active || latest.resolving || latest.playbackTarget != null) return@play
+                        val liveProgress = latest.library.firstOrNull { it.subject.id == subject.id }?.resume
+                        val liveEpisode = detailPlayEpisode(controller, latest, liveDetail, liveProgress)
+                        // No old visible title may start another episode (e.g. history was just edited).
+                        if (liveEpisode?.id != first?.id || liveProgress?.episodeId != savedProgress?.episodeId ||
+                            liveProgress?.completed != savedProgress?.completed || liveProgress?.assetId != savedProgress?.assetId ||
+                            liveProgress?.localDownloadId != savedProgress?.localDownloadId) return@play
+                        when (control.mode) {
+                            AnimeDetailPlayMode.WAIT -> Unit
+                            AnimeDetailPlayMode.SOURCES, AnimeDetailPlayMode.UPCOMING -> onSources(liveEpisode)
+                            AnimeDetailPlayMode.PLAY, AnimeDetailPlayMode.FIND -> {
+                                val liveOffline = detailOfflineProgress(latest, subject.id, liveEpisode, liveProgress)
+                                if (liveOffline != null) {
+                                    if (offline != AnimeDetailOffline.READY ||
+                                        liveOffline.localDownloadId != offlineProgress?.localDownloadId ||
+                                        liveOffline.assetId != offlineProgress?.assetId ||
+                                        animeDetailOffline(controller.downloads.state.value, subject.id, liveOffline) != AnimeDetailOffline.READY)
+                                        return@play
+                                } else if (offline != null || liveEpisode == null ||
+                                    controller.episodeAvailability(liveEpisode.id, latest) == AnimeEpisodeAvailability.UPCOMING) return@play
+                                if (liveProgress != null) {
+                                    val liveCheckpoint = detailResumeCheckpoint(latest, subject.id, liveProgress)
+                                    if ((resumeCheckpoint != null) != (liveCheckpoint != null)) return@play
+                                    val exactEpisode = liveEpisode?.id ?: liveOffline?.episodeId ?: return@play
+                                    controller.dismissNotice()
+                                    controller.resumeEpisode(subject.id, exactEpisode)
+                                } else liveEpisode?.let(onPlay)
+                            }
+                        }
+                    })
+            }
+        }
         LaunchedEffect(subject.id, header, wide) {
             snapshotFlow { !wide && header.heightOffsetLimit < 0f && header.heightOffset <= header.heightOffsetLimit + 1f }
                 .collect { reportHeroCollapsed(it) }
@@ -266,20 +327,6 @@ internal fun AnimeDetailPane(
         }
         val hero: @Composable () -> Unit = {
             AnimeDetailHero(subject, canonicalInfo, liveScores, wide, compactHero, active, backdrop,
-                artworkAction = { actionModifier ->
-                    AnimeDetailPlayAction(first, firstAvailability, savedProgress,
-                        loading = first == null && state.detailLoading,
-                        active = active && !statusPresent && !discussionChecksPresent && episodeMenuOwner == null,
-                        backdrop = backdrop,
-                        modifier = actionModifier,
-                        onContinue = {
-                            if (savedProgress != null) {
-                                controller.dismissNotice()
-                                controller.resume(subject.id)
-                            } else first?.let(onPlay)
-                        },
-                        onSources = { onSources(first) })
-                },
                 followAction = {
                     AnimeDetailFollow(entry, backdrop, !state.libraryReadUnavailable, active, native,
                         onFollow = { controller.setFollowed(subject, entry?.followed != true) },
@@ -493,9 +540,11 @@ internal fun AnimeDetailPane(
             Column(Modifier.width((width * .36f).coerceIn(280.dp, 420.dp)).fillMaxHeight()) {
                 val summaryPosition = rememberScrollState()
                 Box(Modifier.weight(1f).fillMaxWidth()) {
-                    Column(Modifier.fillMaxSize().verticalScroll(summaryPosition).padding(end = 12.dp, bottom = listEnd)) { hero() }
+                    Column(Modifier.fillMaxSize().verticalScroll(summaryPosition)
+                        .padding(end = 12.dp, bottom = if (showDock) 8.dp else listEnd)) { hero() }
                     DesktopVerticalScrollbar(summaryPosition, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                 }
+                if (showDock) playDock(Modifier.fillMaxWidth().padding(top = 6.dp, end = 12.dp, bottom = bottomInset + 4.dp))
             }
             sectionPane(Modifier.weight(1f).fillMaxHeight())
         } else Box(Modifier.widthIn(max = 1080.dp).fillMaxSize()) {
@@ -520,8 +569,41 @@ internal fun AnimeDetailPane(
                     }) { hero() }
                 sectionPane(Modifier.weight(1f).fillMaxWidth())
             }
+            if (showDock) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                .windowInsetsPadding(contentInsets.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
+                .padding(start = 16.dp, end = 16.dp, bottom = 8.dp), contentAlignment = Alignment.BottomCenter) {
+                playDock(Modifier.widthIn(max = 348.dp).fillMaxWidth())
+            }
         }
     }
+}
+
+/** Use the current same-kind continuation; do not advance a completed watch into a known future release. */
+private fun detailPlayEpisode(controller: AnimeController, state: AnimeScreenState, detail: AnimeDetail,
+    progress: AnimeWatchProgress?): AnimeEpisode? {
+    val subjectId = detail.subject.id
+    val candidateId = controller.continuationEpisode(subjectId)?.id ?: return null
+    val candidate = detail.episodes.firstOrNull { it.id == candidateId && it.subjectId == subjectId } ?: return null
+    if (progress?.completed == true && candidate.id != progress.episodeId &&
+        controller.episodeAvailability(candidate.id, state) == AnimeEpisodeAvailability.UPCOMING)
+        return detail.episodes.firstOrNull { it.id == progress.episodeId && it.subjectId == subjectId }
+    return candidate
+}
+
+private fun detailResumeCheckpoint(state: AnimeScreenState, subjectId: String,
+    saved: AnimeWatchProgress): AnimeWatchProgress? = state.episodeProgress[saved.episodeId]?.takeIf {
+    it.subjectId == subjectId && it.updatedAt == saved.updatedAt && it.assetId == saved.assetId &&
+        it.localDownloadId == saved.localDownloadId && it.completed == saved.completed && it.positionMs == saved.positionMs
+}
+
+/** Only the native per-episode checkpoint can reopen a proven offline target. */
+private fun detailOfflineProgress(state: AnimeScreenState, subjectId: String, episode: AnimeEpisode?,
+    previous: AnimeWatchProgress?): AnimeWatchProgress? {
+    if (previous == null) return null
+    val progress = if (!previous.completed && (episode == null || episode.id == previous.episodeId))
+        detailResumeCheckpoint(state, subjectId, previous)
+        else episode?.let { state.episodeProgress[it.id]?.takeIf { row -> row.subjectId == subjectId } }
+    return progress?.takeIf { it.localDownloadId != null }
 }
 
 private fun LazyListScope.nativeMetadataPicker(
@@ -611,7 +693,6 @@ private fun AnimeDetailHero(
     compact: Boolean,
     active: Boolean,
     backdrop: HazeState,
-    artworkAction: @Composable (Modifier) -> Unit,
     followAction: @Composable () -> Unit,
 ) {
     val surface = MaterialTheme.colorScheme.surface
@@ -641,7 +722,6 @@ private fun AnimeDetailHero(
         val bottomGutter = if (compact) 6.dp else 12.dp
         val innerWidth = (maxWidth - gutter * 2).coerceAtLeast(1.dp)
         val stacked = wide && !compact
-        val stackedActions = innerWidth < 270.dp * density.fontScale.coerceAtMost(1.6f)
         val posterWidth = when {
             stacked -> minOf(innerWidth * .65f, 190.dp)
             compact -> minOf(innerWidth * .23f, 66.dp)
@@ -703,14 +783,7 @@ private fun AnimeDetailHero(
                 information(Modifier.fillMaxWidth())
             } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalAlignment = Alignment.CenterVertically) { poster(); information(Modifier.weight(1f)) }
-            if (stackedActions) {
-                artworkAction(Modifier.fillMaxWidth())
-                followAction()
-            } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                artworkAction(Modifier.weight(1f))
-                followAction()
-            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { followAction() }
         }
     }
 }

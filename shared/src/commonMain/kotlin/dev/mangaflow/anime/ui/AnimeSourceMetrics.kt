@@ -62,11 +62,11 @@ internal fun AnimeSourceMetricsStrip(measurements: AnimePlaybackMeasurements?, m
     val scope = episodeLabel?.let { "$it，" }.orEmpty()
     val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     FlowRow(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        SourceMetricToken(if (!measured && declared != null) Icons.AutoMirrored.Outlined.Label else Icons.Outlined.AspectRatio,
+        SourceMetricToken(if (!measured && quality != null) Icons.AutoMirrored.Outlined.Label else Icons.Outlined.AspectRatio,
             quality ?: if (hasVideoEvidence) "未知" else "—", scope + qualityDescription,
             modifier = Modifier.width(58.dp * scale))
         val speed = measurements?.measuredBytesPerSecond?.takeIf { it > 0 }?.let(::animeSourceRate)
-        val probeSpeed = measurements?.takeIf { it.mediaVerified == true }
+        val probeSpeed = measurements?.takeIf { it.mediaVerified == true && it.mediaFailure == null }
             ?.mediaSampleBytesPerSecond?.takeIf { it > 0 }?.let(::animeSourceRate)
         val frame = measurements?.firstFrameMs?.takeIf { it >= 0 }?.let(::animeSourceDuration)
         val address = measurements?.addressMs?.takeIf { it >= 0 }?.let(::animeSourceDuration)
@@ -92,8 +92,8 @@ internal fun AnimeSourceMetricsStrip(measurements: AnimePlaybackMeasurements?, m
                     progress?.phase == AnimeSourceMeasurementPhase.FAILED)
             speed != null -> SourceMetricToken(Icons.Outlined.Speed, speed, scope + "播放实测传输速率 $speed", Modifier.width(82.dp * scale))
             frame != null -> SourceMetricToken(Icons.Outlined.Timer, frame, scope + "播放实测首帧 $frame", Modifier.width(82.dp * scale))
-            probeSpeed != null -> SourceMetricToken(Icons.Outlined.Speed, probeSpeed, scope + "媒体样本传输速率 $probeSpeed", Modifier.width(82.dp * scale))
-            measurements?.mediaVerified == true -> SourceMetricToken(Icons.Outlined.Link, "已读媒体", scope + "已读取媒体样本", Modifier.width(82.dp * scale))
+            probeSpeed != null -> SourceMetricToken(Icons.Outlined.Link, probeSpeed, scope + "媒体样本传输速率 $probeSpeed，非实播速率", Modifier.width(82.dp * scale))
+            measurements?.mediaVerified == true && failure == null -> SourceMetricToken(Icons.Outlined.Link, "样本可读", scope + "已读取媒体样本，非实播结果", Modifier.width(82.dp * scale))
             address != null -> SourceMetricToken(Icons.Outlined.Link, "取址 $address", scope + "解析地址耗时 $address", Modifier.width(82.dp * scale))
             failure != null -> SourceMetricToken(Icons.Outlined.Link, "未验证", scope + failure, Modifier.width(82.dp * scale))
             else -> SourceMetricToken(Icons.Outlined.Speed, "未测", scope + "尚未取得网络实测数据",
@@ -125,7 +125,7 @@ internal fun AnimeSourceMetricsDetails(measurements: AnimePlaybackMeasurements?,
     val declared = measurements?.let(::animeDeclaredQuality)
     val mediaQuality = measurements?.mediaQuality
     val headerHeight = measurements?.mediaHeaderHeight
-    val probeSpeed = measurements?.takeIf { it.mediaVerified == true }
+    val probeSpeed = measurements?.takeIf { it.mediaVerified == true && it.mediaFailure == null }
         ?.mediaSampleBytesPerSecond?.takeIf { it > 0 }?.let(::animeSourceRate)
     val frame = measurements?.firstFrameMs?.takeIf { it >= 0 }?.let(::animeSourceDuration)
     val rate = measurements?.measuredBytesPerSecond?.takeIf { it > 0 }?.let(::animeSourceRate)
@@ -147,7 +147,7 @@ internal fun AnimeSourceMetricsDetails(measurements: AnimePlaybackMeasurements?,
             else -> SourceMetricDetail(Icons.Outlined.AspectRatio, "画质", null)
         }
         SourceMetricDetail(Icons.Outlined.Speed, "播放传输", rate)
-        if (probeSpeed != null) SourceMetricDetail(Icons.Outlined.Speed, "媒体小样本", probeSpeed)
+        if (probeSpeed != null) SourceMetricDetail(Icons.Outlined.Speed, "样本传输", probeSpeed)
         SourceMetricDetail(Icons.Outlined.Timer, "首帧（实播）", frame)
         val addressFailed = address == null && measurements?.addressObservedAt != null
         SourceMetricDetail(Icons.Outlined.Link, "取址", if (addressFailed) "未取得地址" else address, waiting = addressFailed)
@@ -177,7 +177,7 @@ internal fun AnimeSourceMetricsDetails(measurements: AnimePlaybackMeasurements?,
 private fun animeSourceMeasurementLabel(phase: AnimeSourceMeasurementPhase): String = when (phase) {
     AnimeSourceMeasurementPhase.QUEUED -> "排队中"
     AnimeSourceMeasurementPhase.RUNNING -> "测速中"
-    AnimeSourceMeasurementPhase.COMPLETE -> "媒体可读"
+    AnimeSourceMeasurementPhase.COMPLETE -> "已有媒体证据"
     AnimeSourceMeasurementPhase.MANIFEST_ONLY -> "仅清单"
     AnimeSourceMeasurementPhase.ADDRESS_ONLY -> "仅取址"
     AnimeSourceMeasurementPhase.FAILED -> "失败"

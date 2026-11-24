@@ -29,10 +29,17 @@ data class AnimeDownloadEntry(
     val updatedAt: Long,
 )
 
+sealed interface AnimeDownloadReadIssue {
+    data object Partial : AnimeDownloadReadIssue
+    data class Unavailable(val detail: String) : AnimeDownloadReadIssue
+}
+
 data class AnimeDownloadsState(
     val entries: List<AnimeDownloadEntry> = emptyList(),
     val loading: Boolean = true,
     val notice: String? = null,
+    /** Whether this process could read the stored records, independent from action or scheduling notices. */
+    val readIssue: AnimeDownloadReadIssue? = null,
 )
 
 data class AnimeDownloadCapabilities(

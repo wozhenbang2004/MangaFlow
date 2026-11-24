@@ -7,7 +7,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarDuration
@@ -23,6 +22,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -38,6 +39,7 @@ import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.motion.*
+import kotlinx.coroutines.flow.collect
 
 private data class AnimeRoute(
     val key: String,
@@ -52,12 +54,15 @@ private data class AnimeDetailVisit(
 private data class AnimeSourceAssociation(val title: AnimeSourceTitle, val subjectId: String)
 private data class AnimeSearchOpening(val group: AnimeSearchGroup, val version: AnimeSourceTitle?)
 
+/** Display enrichment is harmless; work/edition evidence and native ownership must stay exact. */
 private fun AnimeSourceTitle.sameSearchReference(other: AnimeSourceTitle): Boolean =
-    sourceId == other.sourceId && id == other.id && url == other.url && sourceRevision == other.sourceRevision
+    sourceId == other.sourceId && id == other.id && url == other.url && sourceRevision == other.sourceRevision &&
+        title == other.title && year == other.year && episodeCount == other.episodeCount && externalIds == other.externalIds
 
 private fun AnimeUnifiedSearchState.currentReferences(group: AnimeSearchGroup): List<AnimeSourceTitle> {
     val live = sources.associateBy { it.providerId }
-    return group.sources.filter { title -> live[title.sourceId]?.items?.contains(title) == true }
+    // Source rows can already contain new artwork or a rating while the background group still holds the displayed row.
+    return group.sources.mapNotNull { shown -> live[shown.sourceId]?.items?.singleOrNull { it.sameSearchReference(shown) } }
 }
 
 internal enum class AnimeWorkspaceDestination(val label: String, val icon: ImageVector) {
@@ -74,6 +79,10 @@ private enum class AnimeWorkspacePage(val discovery: AnimeDiscoveryTab? = null) 
     GENRES(AnimeDiscoveryTab.GENRES), LIBRARY,
 }
 private enum class AnimeWorkspacePane { DISCOVERY, DIRECTORY, LIBRARY }
+private sealed interface AnimeRecentChoice {
+    data class Resume(val subjectId: String) : AnimeRecentChoice
+    data object FullHistory : AnimeRecentChoice
+}
 
 /** The root owns one controller/player. Pane identity never follows the player's ticking position. */
 @Composable
@@ -160,6 +169,7 @@ private fun AnimeWorkspaceContent(
     var consumedSearchRequest by rememberSaveable { mutableIntStateOf(0) }
     var consumedBackRequest by rememberSaveable { mutableIntStateOf(0) }
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
+    var followSearchStart by rememberSaveable { mutableStateOf(true) }
     var returnToSearch by rememberSaveable { mutableStateOf(false) }
     var focusSearchInput by rememberSaveable { mutableStateOf(true) }
     var searchPresent by remember { mutableStateOf(false) }
@@ -178,12 +188,15 @@ private fun AnimeWorkspaceContent(
     var storageDestination by remember { mutableStateOf<String?>(null) }
     var browseCandidate by remember { mutableStateOf<AnimeSourceTitle?>(null) }
     var searchVersionChoice by remember { mutableStateOf<AnimeSearchGroup?>(null) }
+    var searchProgressVisible by remember(active, searchExpanded, search.query, search.indexOnly, search.catalogProvider) {
+        mutableStateOf(false)
+    }
     var pendingAssociation by remember { mutableStateOf<AnimeSourceAssociation?>(null) }
     var sourceEpisode by remember { mutableStateOf<AnimeEpisode?>(null) }
     var trackingVisible by remember { mutableStateOf(false) }
     var reviewsVisible by remember { mutableStateOf(false) }
     var recentWatchingOpen by remember { mutableStateOf(false) }
-    var pendingRecentEntry by remember { mutableStateOf<AnimeLibraryEntry?>(null) }
+    var pendingRecentChoice by remember { mutableStateOf<AnimeRecentChoice?>(null) }
     var actionSubject by remember { mutableStateOf<AnimeSubject?>(null) }
     var pendingWorkAction by remember { mutableStateOf<AnimeWorkAction?>(null) }
     val ratingUi = LocalAnimeRatings.current
@@ -209,7 +222,7 @@ private fun AnimeWorkspaceContent(
     }
     val overlayVisible = downloadsVisible || sourcesVisible || sourceManagerVisible || trackingVisible || reviewsVisible ||
         storagePresent || storageModelsVisible || ratingUi.obscured || recentWatchingOpen || actionSubject != null ||
-        searchVersionChoice != null
+        searchVersionChoice != null || searchProgressVisible
     val displayedDestination = when {
         sourceManagerVisible -> AnimeWorkspaceDestination.SOURCES
         downloadsVisible -> AnimeWorkspaceDestination.DOWNLOADS
@@ -223,10 +236,11 @@ private fun AnimeWorkspaceContent(
     val rootActive = active && route.depth == 0 && !searchPresent && !toolsPresent && !layoutPresent && !overlayVisible
     LaunchedEffect(active, route.key, page, directoryOpen) {
         searchVersionChoice = null
+        searchProgressVisible = false
         toolsVisible = false
         pendingSourceManager = false
         recentWatchingOpen = false
-        pendingRecentEntry = null
+        pendingRecentChoice = null
         actionSubject = null
         pendingWorkAction = null
         if (!active) { storageVisible = false; storageModelsVisible = false; storageDestination = null }
@@ -317,8 +331,10 @@ private fun AnimeWorkspaceContent(
         val matchingReference = browseCandidate != null
         val provider = if (matchingReference) AnimeDiscoveryProvider.BANGUMI else AnimeDiscoveryProvider.DOUBAN
         val previous = controller.searchState.value
-        if (previous.query != next || previous.indexOnly != matchingReference || previous.catalogProvider != provider)
+        if (previous.query != next || previous.indexOnly != matchingReference || previous.catalogProvider != provider) {
+            followSearchStart = true
             searchScroll.requestScrollToItem(0)
+        }
         controller.search(next, indexOnly = matchingReference, provider = provider)
     }
     fun beginDetailNavigation() {
@@ -534,9 +550,10 @@ private fun AnimeWorkspaceContent(
             sourcesVisible -> dismissSources()
             trackingVisible -> trackingVisible = false
             reviewsVisible -> reviewsVisible = false
-            recentWatchingOpen -> { recentWatchingOpen = false; pendingRecentEntry = null }
+            recentWatchingOpen -> { recentWatchingOpen = false; pendingRecentChoice = null }
             actionSubject != null -> { actionSubject = null; pendingWorkAction = null }
             searchVersionChoice != null -> searchVersionChoice = null
+            searchProgressVisible -> searchProgressVisible = false
             searchExpanded -> { searchExpanded = false; browseCandidate = null }
             playing && playerFullscreen -> setPlayerFullscreen(false)
             playing -> closePlayback()
@@ -580,7 +597,7 @@ private fun AnimeWorkspaceContent(
         trackingVisible = false
         reviewsVisible = false
         recentWatchingOpen = false
-        pendingRecentEntry = null
+        pendingRecentChoice = null
         actionSubject = null
         pendingWorkAction = null
         when (requestedDestination) {
@@ -640,8 +657,7 @@ private fun AnimeWorkspaceContent(
             MotionTabContent(selected = route, contentKey = { it.key }, order = { it.depth + it.relatedDepth },
                 modifier = Modifier.fillMaxSize()) { shown ->
                 if (shown.depth == 2) {
-                    val playback by controller.player.state.collectAsStateWithLifecycle()
-                    AnimePlayerPane(controller, state, playback, backdrop,
+                    AnimePlayerPane(controller, state, backdrop,
                         active = active && shown.key == route.key, fullscreen = playerFullscreen,
                         onFullscreenChange = ::setPlayerFullscreen,
                         obscured = overlayVisible || state.pendingPlayback != null,
@@ -778,11 +794,11 @@ private fun AnimeWorkspaceContent(
                                                 }
                                             }
                                             MotionIconButton(modifier = Modifier.size(44.dp), enabled = rootActive,
-                                                tooltip = "观看历史", onClick = {
-                                                    pendingRecentEntry = null
+                                                tooltip = "最近观看", onClick = {
+                                                    pendingRecentChoice = null
                                                     recentWatchingOpen = true
                                                 }) {
-                                                HistoryActionIcon(active = recentWatchingOpen, description = "观看历史",
+                                                HistoryActionIcon(active = recentWatchingOpen, description = "最近观看",
                                                     modifier = Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurface)
                                             }
                                             // The rightmost slot matches ExpandingSearchBar's overlaid trigger.
@@ -862,19 +878,41 @@ private fun AnimeWorkspaceContent(
                 onPresenceChange = { searchPresent = it },
                 onForegroundState = { searchForeground = it }, onQuery = { query = it },
                 onSearch = { submitSearch(query) }, placeholder = "搜索番剧",
-                showEmptyResults = state.searchHistory.isNotEmpty(), focusInputOnExpand = focusSearchInput,
+                showEmptyResults = true, focusInputOnExpand = focusSearchInput,
                 modifier = Modifier.fillMaxSize()
                     .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
                     .padding(vertical = 2.dp)) { height, inputActive ->
                 val matchingReference = browseCandidate != null
                 val catalogProvider = if (matchingReference) AnimeDiscoveryProvider.BANGUMI else AnimeDiscoveryProvider.DOUBAN
+                val term = query.trim()
+                val ownsResults = term.isNotEmpty() && term == search.query &&
+                    search.catalogProvider == catalogProvider && search.indexOnly == matchingReference
+                val keyboard = LocalSoftwareKeyboardController.current
+                val focus = LocalFocusManager.current
+                fun releaseSearchInput() {
+                    focusSearchInput = false
+                    keyboard?.hide()
+                    focus.clearFocus(force = true)
+                }
                 LaunchedEffect(searchExpanded, matchingReference, catalogProvider, search.query, search.indexOnly, search.catalogProvider) {
                     if (searchExpanded && search.query.isNotBlank() && search.query == query.trim() &&
                         (search.indexOnly != matchingReference || search.catalogProvider != catalogProvider)) submitSearch(search.query)
                 }
+                if (inputActive && ownsResults) {
+                    val keys = remember(search.groups) { search.groups.map { it.key } }
+                    LaunchedEffect(searchScroll) {
+                        snapshotFlow { searchScroll.isScrollInProgress }.collect { scrolling ->
+                            if (scrolling) followSearchStart = false
+                        }
+                    }
+                    // The ordinary manga search follows incrementally inserted exact hits only
+                    // while the reader has not deliberately taken over the viewport.
+                    LaunchedEffect(keys, followSearchStart) {
+                        if (followSearchStart && !searchScroll.isScrollInProgress) searchScroll.requestScrollToItem(0)
+                    }
+                }
                 val desktop = platformKind == PlatformKind.DESKTOP
-                val canPage = inputActive && !matchingReference && query.trim() == search.query && search.canPageSearch &&
-                    search.groups.isNotEmpty() && search.catalogProvider == catalogProvider && !search.indexOnly
+                val canPage = inputActive && ownsResults && !matchingReference && search.canPageSearch && search.groups.isNotEmpty()
                 val searchPull = rememberBottomPullLoadState(
                     key = listOf(search.query, search.catalogProvider, search.indexOnly),
                     enabled = !desktop && canPage, loading = search.searchLoadingMore,
@@ -904,41 +942,22 @@ private fun AnimeWorkspaceContent(
                                 tooltip = "取消来源关联") { Icon(Icons.Outlined.Close, "取消来源关联", Modifier.size(18.dp)) }
                         })
                     } }
-                    if (query.isBlank() && state.searchHistory.isNotEmpty()) item(key = "search-history") {
-                        Column {
-                            AnimeSectionTitle("最近搜索", action = {
-                                MotionIconButton(onClick = controller::clearSearchHistory, modifier = Modifier.size(44.dp),
-                                    tooltip = "清除搜索历史") { Icon(Icons.Outlined.DeleteOutline, "清除搜索历史", Modifier.size(18.dp)) }
-                            })
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                state.searchHistory.forEach { keyword ->
-                                    MotionTextButton(onClick = { query = keyword; submitSearch(keyword) },
-                                        enabled = inputActive, modifier = Modifier.widthIn(max = 260.dp).heightIn(min = 44.dp),
-                                        colors = ButtonDefaults.textButtonColors(
-                                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                            contentColor = MaterialTheme.colorScheme.onSurface),
-                                        contentPadding = PaddingValues(horizontal = 12.dp)) {
-                                        Text(keyword, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    }
-                                }
-                            }
-                        }
-                    }
                     when {
-                        query.isBlank() -> Unit
-                        query.trim() != search.query -> item {
-                            MotionTextButton(onClick = { submitSearch(query) }, enabled = inputActive,
-                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                                Icon(Icons.Outlined.Search, null, Modifier.size(18.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text("搜索「${query.trim()}」", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
+                        term.isEmpty() || term != search.query -> item(key = "search-draft") {
+                            AnimeSearchDraft(term, state.searchHistory,
+                                state.discoveryFeeds[animeDiscoveryFeedKey(AnimeDiscoveryTab.HOME)]?.items.orEmpty(),
+                                matchingReference, inputActive, onSubmit = { keyword ->
+                                    releaseSearchInput()
+                                    query = keyword
+                                    submitSearch(keyword)
+                                }, onClear = controller::clearSearchHistory)
                         }
-                        search.catalogProvider != catalogProvider || search.indexOnly != matchingReference -> item {
+                        !ownsResults -> item(key = "search-awaiting-scope") {
                             AnimeDiscoveryLoading("正在查找番剧")
                         }
-                        else -> animeSearchResults(search, controller, matchingReference,
-                            onOpenGroup = { openSearchResult(it) }, onManage = ::showWorkActions, pull = searchPull)
+                        else -> animeSearchResults(search, controller, matchingReference, inputActive,
+                            onOpenGroup = { openSearchResult(it) }, onManage = ::showWorkActions,
+                            onShowSources = { releaseSearchInput(); searchProgressVisible = true }, pull = searchPull)
                     }
                 }
                 if (desktop) Box(Modifier.matchParentSize()) {
@@ -959,14 +978,23 @@ private fun AnimeWorkspaceContent(
             onChoose = { openSearchResult(choice, it) })
     }
 
+    if (active && route.depth == 0 && searchExpanded && searchProgressVisible) {
+        AnimeSearchProgressSheet(search, controller, backdrop, onDismiss = { searchProgressVisible = false })
+    }
+
     if (recentWatchingOpen) AnimeRecentWatchingSheet(state.library, state.libraryReadUnavailable, backdrop,
         continuationLabel = { entry -> animeContinuationLabel(entry, controller.continuationEpisode(entry.subject.id)) },
-        onChoose = { pendingRecentEntry = it }, onDismiss = {
-            val entry = pendingRecentEntry
-            pendingRecentEntry = null
+        onChoose = { if (pendingRecentChoice == null) pendingRecentChoice = AnimeRecentChoice.Resume(it.subject.id) },
+        onOpenHistory = { if (pendingRecentChoice == null) pendingRecentChoice = AnimeRecentChoice.FullHistory },
+        onDismiss = {
+            val choice = pendingRecentChoice
+            pendingRecentChoice = null
             recentWatchingOpen = false
-            if (active && route.depth == 0 && entry != null) {
-                controller.state.value.library.firstOrNull { it.subject.id == entry.subject.id }?.let(::resume)
+            if (active && route.depth == 0) when (choice) {
+                is AnimeRecentChoice.Resume ->
+                    controller.state.value.library.firstOrNull { it.subject.id == choice.subjectId }?.let(::resume)
+                AnimeRecentChoice.FullHistory -> selectLibrary(history = true)
+                null -> Unit
             }
         })
     actionSubject?.let { subject ->

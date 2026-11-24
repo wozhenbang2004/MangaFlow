@@ -798,8 +798,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         } else openDetail(entry.subject, episodeId, visitedDetail = current)
     }
 
-    private fun projectEpisodeProgress(stored: AnimeLibraryState, detail: AnimeDetail?): Map<String, AnimeWatchProgress> =
-        stored.progress.mapNotNull { (id, row) ->
+    private fun projectEpisodeProgress(stored: AnimeLibraryState, detail: AnimeDetail?): Map<String, AnimeWatchProgress> {
+        val explicit = stored.progress.mapNotNull { (id, row) ->
             val owner = row.subjectId.takeIf { it.isNotBlank() } ?: stored.entries.values.filter { entry ->
                 entry.resume?.episodeId == id || id in entry.completedEpisodeIds ||
                     entry.catalogDetail?.episodes?.any { it.id == id && it.subjectId == entry.subject.id } == true ||
@@ -811,6 +811,24 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 row.updatedAt <= (stored.clearedHistoryAt[owner] ?: -1L)) null
             else id to if (row.subjectId == owner) row else row.copy(subjectId = owner)
         }.toMap()
+        if (stored.legacyResumeOffsets.isEmpty()) return explicit
+        return explicit + catalogueLegacyOffsets(stored, detail)
+    }
+
+    /** History/Detail may offer a recovered offset only while an exact catalogue proves ownership. */
+    private fun catalogueLegacyOffsets(stored: AnimeLibraryState, detail: AnimeDetail?): Map<String, AnimeWatchProgress> =
+        stored.legacyResumeOffsets.filterValues { row ->
+            val catalogue = detail?.takeIf { it.subject.id == row.subjectId }
+                ?: stored.entries[row.subjectId]?.catalogDetail?.takeIf { it.subject.id == row.subjectId }
+            catalogue?.episodes?.singleOrNull { it.id == row.episodeId }?.subjectId == row.subjectId
+        }
+
+    /** Scope catalogue replacement to its read-only legacy projection, not explicit checkpoints. */
+    private fun refreshCatalogueLegacyOffsets(state: AnimeScreenState, next: AnimeDetail?): Map<String, AnimeWatchProgress> {
+        val stored = library.state.value
+        if (stored.legacyResumeOffsets.isEmpty()) return state.episodeProgress
+        return state.episodeProgress.filterKeys { it !in stored.legacyResumeOffsets } + catalogueLegacyOffsets(stored, next)
+    }
 
     fun sourceSubject(title: AnimeSourceTitle): AnimeSubject = AnimeSubject(
         id = "native:${title.sourceId}:${dev.mangaflow.anime.sources.animeHash(title.id + "\n" + title.url)}",
@@ -1139,7 +1157,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         cancelSourceAggregation()
                         cancelDetailScores()
                         discussion.open(null)
-                        mutableState.update { it.copy(detail = AnimeDetail(subject, emptyList()), episodeOptions = emptyMap(),
+                        val rejected = AnimeDetail(subject, emptyList())
+                        mutableState.update { it.copy(detail = rejected, episodeOptions = emptyMap(),
+                            episodeProgress = refreshCatalogueLegacyOffsets(it, rejected),
                             detailScores = emptyList(), detailScoreChecks = emptyMap()) }
                     }
                     val primaryProvider = if (subject.canonicalDoubanId() != null)
@@ -1430,7 +1450,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         sourceSearchJobs.clear()
         previewJob?.cancel()
         mutableState.update { it.copy(detail = null, detailLoading = false, detailError = null,
-            nativeMetadataSearch = null,
+            episodeProgress = refreshCatalogueLegacyOffsets(it, null), nativeMetadataSearch = null,
             detailScores = emptyList(), detailScoreChecks = emptyMap(),
             groupSourceCandidates = emptyList(), associationChoices = emptyMap(),
             sourceResults = emptyList(), sourceCatalogs = emptyList(), episodeOptions = emptyMap(),
@@ -5274,7 +5294,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     ?: previous?.takeIf { !it.completed && it.assetId == offline.asset.id }?.positionMs ?: 0L
                 discussion.open(null)
                 mutableState.update { it.copy(detail = detail, detailLoading = false, detailError = null,
-                    detailFirstConfirmedLineMs = null, nativeMetadataSearch = null,
+                    episodeProgress = refreshCatalogueLegacyOffsets(it, detail), detailFirstConfirmedLineMs = null, nativeMetadataSearch = null,
                     detailScores = emptyList(), detailScoreChecks = emptyMap(),
                     groupSourceCandidates = emptyList(), associationChoices = emptyMap(),
                     detailFromCache = cached != null, relatedSubjects = emptyList(), sourceResults = emptyList(),

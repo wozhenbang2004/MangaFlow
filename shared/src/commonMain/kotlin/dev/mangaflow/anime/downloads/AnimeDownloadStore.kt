@@ -106,14 +106,18 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
             for (action in actions) {
                 try { ready.await(); action() }
                 catch (cancel: CancellationException) { throw cancel }
-                catch (failure: Throwable) { synchronized(lock) { publish(readablePlayerError(failure)) } }
+                catch (failure: Throwable) {
+                    // A failed initialization already has its own persistent read status.
+                    if (!ready.isCancelled) synchronized(lock) { publish(readablePlayerError(failure)) }
+                }
             }
         }
         scope.launch {
             try {
                 check(root.isDirectory || root.mkdirs()) { "无法创建动漫离线目录" }
+                val folders = root.listFiles()
                 var unreadable = false
-                root.listFiles().orEmpty().filter { it.isDirectory && it.name.matches(ID) }.forEach { folder ->
+                folders.orEmpty().filter { it.isDirectory && it.name.matches(ID) }.forEach { folder ->
                     currentCoroutineContext().ensureActive()
                     try {
                         val manifest = StorageFile(folder, "manifest.json")
@@ -144,9 +148,12 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
                     } catch (cancel: CancellationException) { throw cancel }
                     catch (_: Exception) { unreadable = true }
                 }
-                synchronized(lock) {
-                    publish(if (unreadable) "部分离线记录无法读取，原有文件已保留" else null)
+                val readIssue = when {
+                    folders == null -> AnimeDownloadReadIssue.Unavailable("本机离线目录暂不可读。")
+                    unreadable -> AnimeDownloadReadIssue.Partial
+                    else -> null
                 }
+                synchronized(lock) { publish(notice = null, readIssue = readIssue) }
                 ready.complete(Unit)
                 if (hasPendingWork()) {
                     // Recover intent even if the process exited between saving it and scheduling the worker.
@@ -154,7 +161,11 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
                     action { synchronized(lock) { kick() } }
                 }
             } catch (failure: Throwable) {
-                synchronized(lock) { mutableState.value = mutableState.value.copy(loading = false, notice = readablePlayerError(failure)) }
+                synchronized(lock) {
+                    val error = readablePlayerError(failure)
+                    mutableState.value = if (ready.isCompleted) mutableState.value.copy(notice = error)
+                    else mutableState.value.copy(loading = false, readIssue = AnimeDownloadReadIssue.Unavailable(error))
+                }
                 ready.completeExceptionally(failure)
             }
         }
@@ -537,9 +548,10 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
         }
     }
 
-    private fun publish(notice: String? = mutableState.value.notice) {
+    private fun publish(notice: String? = mutableState.value.notice,
+        readIssue: AnimeDownloadReadIssue? = mutableState.value.readIssue) {
         mutableState.value = AnimeDownloadsState(records.values.filterNot { it.removed }.map { it.entry }
-            .sortedByDescending { it.createdAt }, loading = false, notice = notice)
+            .sortedByDescending { it.createdAt }, loading = false, notice = notice, readIssue = readIssue)
     }
     private fun directory(id: String): StorageFile { require(id.matches(ID)); return StorageFile(root, id) }
     private fun secretKey(id: String) = "anime.download.$id"

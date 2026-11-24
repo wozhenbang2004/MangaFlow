@@ -15,6 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -47,11 +48,14 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
         }
     }
     MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 540.dp) {
+        val detail = state.detail
+        val reviewBlock = detail?.let { trackingReviewBlock(it, state, provider) }
         AnimePanelSurface(backdrop) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
                 Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    Text("追番同步", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                    Text(if (detail == null) "追番账号" else "追番同步", Modifier.weight(1f).semantics { heading() },
+                        style = MaterialTheme.typography.titleLarge)
                     MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭追番账号") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
@@ -61,14 +65,20 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
                     item {
                         MotionTabs(providerIndex, listOf("Bangumi", "AniList"), onSelect = {
                             providerIndex = it; requestedReview = false
-                        }, modifier = Modifier.fillMaxWidth(), controlHeight = 44.dp)
+                        }, modifier = Modifier.fillMaxWidth().motionInputGate(!state.syncing), controlHeight = 44.dp)
                     }
                     item {
                         Text("同步追番状态与看完的正片。看到第几分钟保存在这台设备。",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    if (reviewBlock != null && account == null) item {
+                        AnimeSectionTitle(reviewBlock.first, reviewBlock.second)
+                    }
                     if (account == null) {
-                        item { AnimeSectionTitle("连接 $accountName", "连接后可以查看这部番剧的进度差异") }
+                        item {
+                            AnimeSectionTitle("连接 $accountName", if (detail == null)
+                                "连接后，可从支持的番剧详情核对进度" else null)
+                        }
                         item {
                             AnimeTextField(token, { token = it }, accountName + " 访问令牌", secret = true,
                                 enabled = !state.syncing)
@@ -102,8 +112,15 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
                                     enabled = !state.syncing, modifier = Modifier.heightIn(min = 44.dp)) { Text("断开") }
                             }
                         }
-                        if (state.detail != null) {
-                            item { AnimeSectionTitle("核对这部番剧", state.detail.subject.title) }
+                        if (detail == null) item {
+                            AnimeSectionTitle("同步在番剧详情中进行", "打开一部番剧，再选择核对进度。")
+                        } else if (reviewBlock != null) item {
+                            AnimeSectionTitle(reviewBlock.first, reviewBlock.second)
+                        } else if (state.detailLoading || detail.episodes.isEmpty()) item {
+                            AnimeSectionTitle(if (state.detailLoading) "正在载入剧集目录" else "还没有可核对的剧集",
+                                detail.subject.title)
+                        } else {
+                            item { AnimeSectionTitle("核对这部番剧", detail.subject.title) }
                             if (providerIndex == 1) item {
                                 AnimeTextField(remoteId, { remoteId = it.filter(Char::isDigit) }, "AniList 动画条目 ID（首次关联必填）")
                                 AnimeQuietLabel("只关联你指定的动画条目。已关联后可留空沿用；请先核对季度和版本。",
@@ -114,13 +131,11 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
                                     previousReviewIds = state.reviews.mapTo(mutableSetOf()) { it.id }
                                     requestedReview = true
                                     controller.reviewTracking(provider, remoteId.trim().takeIf { it.isNotBlank() })
-                                }, enabled = !state.syncing && !state.detailLoading && state.detail.episodes.isNotEmpty(),
+                                }, enabled = !state.syncing,
                                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                                     Text(if (state.syncing) "正在读取远端进度" else "查看进度差异")
                                 }
                             }
-                        } else item {
-                            AnimeMessage("先打开一部番剧", "从详情里核对这部番剧的追番进度，避免批量误认同名作品。")
                         }
                     }
                     if (state.notice != null) item {
@@ -131,6 +146,22 @@ internal fun AnimeTrackingPanel(visible: Boolean, state: AnimeScreenState, contr
             }
         }
     }
+}
+
+/** Show only deterministic limitations; the controller still admits every real review. */
+private fun trackingReviewBlock(detail: AnimeDetail, state: AnimeScreenState, provider: String): Pair<String, String>? {
+    if (state.libraryReadUnavailable)
+        return "本机进度暂不可读取" to "本地文件仍保留。恢复记录后再核对。"
+    if (detail.subject.externalIds["native-source"] != null)
+        return "这部番的进度仅保存在本机" to "当前是片源独有条目，还不能同追番平台核对。"
+    if (detail.subject.canonicalDoubanId() == null) return null
+    if (provider == "anime-anilist")
+        return "这部番暂不支持 AniList 核对" to "豆瓣条目可以使用已确认同季资料的 Bangumi 记录。"
+    val saved = state.library.firstOrNull { it.subject.id == detail.subject.id }
+    val reference = saved?.nativeMetadata ?: detail.metadataSubject.takeUnless { saved?.metadataAutoMatchDisabled == true }
+    return if (reference?.canonicalBangumiId() == null)
+        "先确认同季的 Bangumi 资料" to "返回番剧详情，核对 Bangumi 的作品与季度后再同步。"
+    else null
 }
 
 @Composable
@@ -160,7 +191,7 @@ internal fun AnimeProgressReviewPanel(visible: Boolean, state: AnimeScreenState,
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (state.syncing) item { AnimeQuietLabel("正在核对所选内容，请稍候。") }
-                    if (state.reviews.isEmpty()) item {
+                    if (state.reviews.isEmpty() && !state.syncing) item {
                         AnimeMessage("目前没有待复核项",
                             if (state.accounts.isEmpty()) "连接追番账号后，从番剧详情发起核对。"
                             else "从番剧详情读取远端进度后，差异会出现在这里。读取失败不表示远端已删除。",

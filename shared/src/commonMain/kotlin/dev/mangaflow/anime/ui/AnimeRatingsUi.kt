@@ -230,7 +230,7 @@ private fun AnimeRatingProviderRow(
     val failure = check?.error
     val status = when {
         refreshing -> if (score != null) "正在更新，仍显示上次评分" else "正在读取评分"
-        failure != null -> failure
+        failure != null -> if (score == null) failure else "仍显示上次评分 · $failure"
         check?.message != null -> check.message
         score == null -> "暂无评分"
         else -> null
@@ -246,8 +246,10 @@ private fun AnimeRatingProviderRow(
                     Text(name, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     if (score != null) {
                         if (separateScore) AnimeRatingValue(score)
-                        Text(score.ratingCount?.let { "$it 人评分" } ?: "人数未提供",
-                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        score.ratingCount?.let { count ->
+                            Text("$count 人评分", style = MaterialTheme.typography.labelSmall,
+                                color = colors.onSurfaceVariant)
+                        }
                     }
                 }
                 if (score != null && !separateScore) AnimeRatingValue(score)
