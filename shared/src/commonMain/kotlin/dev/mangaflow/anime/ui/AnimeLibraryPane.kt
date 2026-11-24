@@ -122,9 +122,11 @@ internal fun AnimeLibrary(
                 // A newer watch or restored record must not be erased by an older swipe.
                 val current = controller.state.value.library.firstOrNull { it.subject.id == entry.subject.id }
                 if (!undone && current != null && current.resume == original && current.revision == entry.revision &&
-                    current.catalogDetail == entry.catalogDetail) withContext(NonCancellable) {
+                    current.catalogDetail == entry.catalogDetail && current.visibleWatchMillis == entry.visibleWatchMillis
+                ) withContext(NonCancellable) {
                     controller.clearWatchHistory(entry.subject.id, expectedResume = original,
-                        expectedRevision = entry.revision, expectedRestoreEpoch = originalEpoch)?.join()
+                        expectedRevision = entry.revision, expectedRestoreEpoch = originalEpoch,
+                        expectedVisibleWatchMillis = entry.visibleWatchMillis)?.join()
                 }
                 pendingHistory = pendingHistory - entry.subject.id
             }
@@ -175,6 +177,11 @@ internal fun AnimeLibrary(
     }
     val works = remember(entries, continuation) {
         if (continuation == null) entries else entries.filterNot { it.subject.id == continuation.subject.id }
+    }
+    val recordedWatchMillis = remember(filter, entries) {
+        if (filter != 2) 0L else entries.fold(0L) { total, entry ->
+            total + minOf(entry.visibleWatchMillis, Long.MAX_VALUE - total)
+        }
     }
     val surface = MaterialTheme.colorScheme.surface
     val listBackground = remember(surface) {
@@ -274,6 +281,13 @@ internal fun AnimeLibrary(
                                 2 -> "最近观看"
                                 else -> if (continuation == null) "我的番剧" else "其他番剧"
                             }, count = works.size.takeUnless { state.libraryReadUnavailable })
+                        }
+                        if (filter == 2 && !state.libraryReadUnavailable) item(key = "visible-watch-time") {
+                            AnimeQuietLabel(when {
+                                recordedWatchMillis > 0L -> "已记录观看 ${animeWatchElapsed(recordedWatchMillis)} · 仅计新版 Android 可见播放"
+                                platformKind == PlatformKind.ANDROID -> "尚无计时记录 · 旧观看进度不补算"
+                                else -> "观看计时暂仅支持 Android"
+                            }, Modifier.padding(start = 4.dp, end = 4.dp, bottom = 5.dp))
                         }
                         items(works, key = { it.subject.id }, contentType = { "library-work" }) { entry ->
                             val record = entry.resume

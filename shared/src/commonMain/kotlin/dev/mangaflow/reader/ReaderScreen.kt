@@ -594,7 +594,7 @@ fun ReaderScreen(
         listOf(preferences.mode, preferences.panelLayoutKey, preferences.doublePage, preferences.coverAlone)
     val preparationTracker = remember(sourceIdentity, pages, headers) { ReaderPreparationTracker(chapter.sourceId, pages.size) }
     val sharedPrefetchRequests = remember(sourceIdentity, pages, headers) { mutableStateMapOf<Int, ReaderPagePrefetch>() }
-    val sharedPrefetchFailures = remember(sourceIdentity, pages, headers) { mutableStateMapOf<Int, String>() }
+    val sharedPrefetchFailures = remember(sourceIdentity, pages, headers) { mutableStateMapOf<Int, ReaderPrefetchFailure>() }
     val enhancementSources = remember(sourceIdentity, pages, headers) {
         mutableStateMapOf<Int, ReaderEnhancementSourceReceipt>()
     }
@@ -1420,6 +1420,10 @@ fun ReaderScreen(
                     enabled = viewport.active, foregroundActive = viewport.active, sourceId = chapter.sourceId,
                     viewportWidth = viewport.width, viewportHeight = viewport.height,
                     onPageFailure = viewport.failed, onPageRecovered = viewport.recovered,
+                    onOriginalVerified = { index ->
+                        if (sharedPrefetchFailures[index] == ReaderPrefetchFailure.Source)
+                            sharedPrefetchFailures.remove(index)
+                    },
                     onPageDimensions = viewport.dimensions, position = viewport.position, groups = viewport.groups,
                     scrollDirection = viewport.scrollDirection, directionAnchor = viewport.directionAnchor,
                     directionBaseline = viewport.directionBaseline, layoutKey = viewport.layoutKey,
@@ -2042,7 +2046,7 @@ private fun ChapterPages(
     artworkModifier: Modifier,
     sourceId: String,
     prefetchRequests: MutableMap<Int, ReaderPagePrefetch>,
-    prefetchFailures: MutableMap<Int, String>,
+    prefetchFailures: MutableMap<Int, ReaderPrefetchFailure>,
     headers: Map<String, String>,
     resolvePage: ReaderPageResolver,
     retryPage: ReaderPageResolver,
@@ -2665,7 +2669,10 @@ private fun ChapterPages(
         composed = composedPages, loaded = loadedPages, failedLoads = failedLoads,
         width = { contentWidthPx }, height = previewHeightPx,
         active = active, layoutKey = layoutKey,
-        failed = { index, failure -> prefetchFailures[index] = failure; onPrefetchFailure(pages[index]) },
+        failed = { index, failure ->
+            prefetchFailures.recordPrefetchFailure(index, failure)
+            onPrefetchFailure(pages[index])
+        },
         recovered = { index -> prefetchFailures.remove(index) },
         dimensions = { index, size -> pageDimensions[pages[index].url] = size })
 }
@@ -2678,7 +2685,7 @@ internal data class ReaderPrefetchViewport(
     val failedLoads: Map<Int, String> = emptyMap(),
     val width: () -> Int = { 0 }, val height: Int = 0, val active: Boolean = false,
     val foregroundPending: Boolean = false, val layoutKey: Any? = null,
-    val failed: (Int, String) -> Unit = { _, _ -> }, val recovered: (Int) -> Unit = {},
+    val failed: (Int, ReaderPrefetchFailure) -> Unit = { _, _ -> }, val recovered: (Int) -> Unit = {},
     val dimensions: (Int, IntSize) -> Unit = { _, _ -> },
 )
 
@@ -2764,7 +2771,18 @@ private data class PrefetchRecoveryKey(val bytes: Long, val parallel: Int, val r
 /** One exact image request retains its body observer through promotion into the visible page. */
 internal data class ReaderPagePrefetch(val request: Disposable, val transfer: ReaderTransferObserver, val work: PrefetchWork)
 
-private class ReaderPrefetchCacheRecovery(var recovered: Boolean = false)
+/** Failure to prepare a page is not evidence that its retained bytes are invalid. */
+internal sealed interface ReaderPrefetchFailure {
+    data object Source : ReaderPrefetchFailure
+    data class CachedOriginal(val key: String) : ReaderPrefetchFailure
+}
+
+internal fun MutableMap<Int, ReaderPrefetchFailure>.recordPrefetchFailure(index: Int, failure: ReaderPrefetchFailure) {
+    if (get(index) !is ReaderPrefetchFailure.CachedOriginal || failure is ReaderPrefetchFailure.CachedOriginal)
+        put(index, failure)
+}
+
+internal class ReaderPrefetchCacheRecovery(var recovered: Boolean = false)
 
 /** A download took ownership after initial resolution; only a local lookup may retry. */
 private class ReaderPrefetchDownloadOwned : Exception("已有下载负责本页")
@@ -2785,8 +2803,9 @@ internal fun AdjacentPagePrefetch(
     enabled: Boolean, sourceId: String = "", foregroundActive: Boolean = enabled,
     viewportWidth: () -> Int, viewportHeight: Int,
     onPageDimensions: (Int, IntSize) -> Unit = { _, _ -> },
-    onPageFailure: (Int, String) -> Unit = { _, _ -> },
+    onPageFailure: (Int, ReaderPrefetchFailure) -> Unit = { _, _ -> },
     onPageRecovered: (Int) -> Unit = {},
+    onOriginalVerified: (Int) -> Unit = {},
     position: (() -> Float)? = null, groups: List<PageSpread>? = null,
     scrollDirection: (() -> Int)? = null,
     directionAnchor: (() -> Long)? = null,
@@ -2816,6 +2835,7 @@ internal fun AdjacentPagePrefetch(
     val dimensionsKnown by rememberUpdatedState(onPageDimensions)
     val pageFailed by rememberUpdatedState(onPageFailure)
     val pageRecovered by rememberUpdatedState(onPageRecovered)
+    val originalVerified by rememberUpdatedState(onOriginalVerified)
     val currentViewportWidth by rememberUpdatedState(viewportWidth)
     val currentComposed by rememberUpdatedState(composedPages)
     val currentLoaded by rememberUpdatedState(loadedPages)
@@ -2903,7 +2923,7 @@ internal fun AdjacentPagePrefetch(
             }
             val reason = readerPrefetchErrorLabel(failure)
             end(index, stage, if (sourceFailure) ReaderPreparationPhase.FAILED else ReaderPreparationPhase.DEFERRED, reason)
-            if (sourceFailure) { resourceDeferred -= key; pageFailed(index, reason) }
+            if (sourceFailure) { resourceDeferred -= key; pageFailed(index, ReaderPrefetchFailure.Source) }
             else if (key in capacityDeferred || key in transientDeferred ||
                 stage == PrefetchStage.DOWNLOADING && index in budgetDeferred) resourceDeferred -= key
             else resourceDeferred += key
@@ -3025,6 +3045,7 @@ internal fun AdjacentPagePrefetch(
             verifiedOriginals += index
             retriedMissingOriginals.remove(index)
             artifact.originalStamp?.let { originalStamps[index] = it }
+            originalVerified(index)
         }
         val progressSampler = requestScope.launch {
             var cacheAt = 0L
@@ -3492,6 +3513,7 @@ internal fun AdjacentPagePrefetch(
                                     currentCoroutineContext().ensureActive()
                                     if (scriptRequests[index] !== owned) return@launch
                                     originalReady(index, local, cacheKey, bytes)
+                                    if (bytes != null) originalVerified(index)
                                     // Script/JM receipts already charged the actual transfer or cache hit.
                                     if (windowBytes === byteWindow) accountedOriginals += index
                                     // A recovered script/JM original is complete, not a pending
@@ -3579,6 +3601,7 @@ internal fun AdjacentPagePrefetch(
                                     verifiedOriginals += index
                                     retriedMissingOriginals.remove(index)
                                     artifact.originalStamp?.let { originalStamps[index] = it }
+                                    originalVerified(index)
                                 }
                                 publishOriginalObservation(index, artifact, started)
                                 if (result.dataSource != coil3.decode.DataSource.NETWORK) token.ifOptional {
@@ -3652,10 +3675,12 @@ internal fun AdjacentPagePrefetch(
                                     deferredChecks.remove(index)
                                     inspected[index] = epoch
                                     if (warmMemory) previewChecks[index] = size to epoch
-                                    if (result.status == ReaderPagePreflightStatus.FAILED)
-                                        result.failure?.takeIf(::isReaderPrefetchFailure)?.let {
-                                            pageFailed(index, readerPrefetchErrorLabel(it))
-                                        }
+                                    if (result.status == ReaderPagePreflightStatus.FAILED &&
+                                        result.failure?.let(::isReaderPrefetchFailure) == true) {
+                                        val rejected = result.diskCacheKey?.takeIf { resource.url.startsWith("https:") }
+                                        pageFailed(index, rejected?.let { ReaderPrefetchFailure.CachedOriginal(it) }
+                                            ?: ReaderPrefetchFailure.Source)
+                                    }
                                 }
                                 ReaderPagePreflightStatus.DEFERRED -> deferredChecks[index] = monotonicTimeMillis() +
                                     currentBudget.runtime.prefetchRetryBaseSeconds.coerceAtLeast(1).toLong() * 1000L
@@ -3709,7 +3734,7 @@ private fun ReaderPage(
     foreground: Color,
     sourceAlternatives: List<ChapterVariant> = emptyList(),
     readySourceVariants: Map<String, ReaderSourceStandby> = emptyMap(),
-    prefetchFailure: String? = null,
+    prefetchFailure: ReaderPrefetchFailure? = null,
     onQuickSwitch: (ChapterVariant) -> Unit = {},
     onMoreSources: (Rect?) -> Unit = {},
     onRepairPage: () -> Unit = {},
@@ -3827,7 +3852,7 @@ private fun ReaderPageImage(
     foreground: Color,
     sourceAlternatives: List<ChapterVariant> = emptyList(),
     readySourceVariants: Map<String, ReaderSourceStandby> = emptyMap(),
-    prefetchFailure: String? = null,
+    prefetchFailure: ReaderPrefetchFailure? = null,
     onQuickSwitch: (ChapterVariant) -> Unit = {},
     onMoreSources: (Rect?) -> Unit = {},
     onRepairPage: () -> Unit = {},
@@ -3893,9 +3918,10 @@ private fun ReaderPageImage(
     }
     var fileRecoveryAttempted by remember(originalCacheIdentity) { mutableStateOf(false) }
     var failedMaterializedUrl by remember(originalCacheIdentity) { mutableStateOf<String?>(null) }
-    // Keep the failed-prefetch fact after its caption clears. A late discovery creates one
-    // fresh attempt, while a successful foreground image never gets restarted by old evidence.
-    var bypassPrefetchCache by remember(originalCacheIdentity) { mutableStateOf(prefetchFailure != null) }
+    // Latch an exact rejected original only when this page is visible. Optional network
+    // failures cannot cancel a foreground load or bypass an already usable local copy.
+    val rejectedCacheKey = (prefetchFailure as? ReaderPrefetchFailure.CachedOriginal)?.key
+    var bypassPrefetchCache by remember(originalCacheIdentity) { mutableStateOf<String?>(null) }
     val prefetchCacheRecovery = remember(originalCacheIdentity) { ReaderPrefetchCacheRecovery() }
     val attempt = remember(page, headers, sourceId, reload, bypassPrefetchCache) { ReaderLoadAttempt() }
     val transferObserver = remember(attempt) { ReaderTransferObserver() }
@@ -3947,6 +3973,7 @@ private fun ReaderPageImage(
     }
     var waitClock by remember(attempt) { mutableStateOf<TimeMark?>(null) }
     var resolvedPage by remember(attempt) { mutableStateOf<Page?>(null) }
+    var loadedImage by remember(originalCacheIdentity, reload) { mutableStateOf<LoadedReaderImage?>(null) }
     val pageTransfer by rememberReaderPageTransfer(attempt, page, observePageTransfer,
         enabled = pageVisible && loading && error == null && resolvedPage == null)
     LaunchedEffect(attempt, pageVisible, handoffCaptured, loading) {
@@ -3971,10 +3998,13 @@ private fun ReaderPageImage(
     DisposableEffect(attempt) {
         onDispose { attempt.active = false; loadFailed(false) }
     }
-    LaunchedEffect(prefetchFailure, attempt) {
-        if (prefetchFailure != null && !bypassPrefetchCache && (loading || error != null)) {
+    LaunchedEffect(rejectedCacheKey, attempt, pageVisible, resolvedPage) {
+        val resolved = resolvedPage
+        if (rejectedCacheKey != null && pageVisible && attempt.acceptsResult && loadedImage == null &&
+            bypassPrefetchCache == null && resolved != null && resolved.url.startsWith("https:") &&
+            readerPageCacheKey(resolved, headers, sourceId) == rejectedCacheKey) {
             attempt.stopped = true
-            bypassPrefetchCache = true
+            bypassPrefetchCache = rejectedCacheKey
         }
     }
     LaunchedEffect(attempt, pageVisible, loading, error) {
@@ -4038,7 +4068,6 @@ private fun ReaderPageImage(
     }
     var detailStatus by remember(originalCacheIdentity, reload) { mutableStateOf<ReaderDetailStatus?>(null) }
     var detailRetry by remember(originalCacheIdentity, reload) { mutableIntStateOf(0) }
-    var loadedImage by remember(originalCacheIdentity, reload) { mutableStateOf<LoadedReaderImage?>(null) }
     LaunchedEffect(attempt, attempt.stopped, pageVisible, handoffCaptured) {
         if (!attempt.acceptsResult || !pageVisible || !handoffCaptured || resolvedPage != null) return@LaunchedEffect
         loadChanged(false)
@@ -4140,13 +4169,16 @@ private fun ReaderPageImage(
             }
         }
         val request = rememberReaderPageRequest(resource, headers, attempt, previewSize,
-            build = @DontMemoize { requested -> readerImageRequest(context, requested, headers, sourceId)
+            build = @DontMemoize { requested ->
+                val rejected = bypassPrefetchCache != null && requested.url.startsWith("https:") &&
+                    readerPageCacheKey(requested, headers, sourceId) == bypassPrefetchCache
+                readerImageRequest(context, requested, headers, sourceId)
                 .readerTransferProgress(transferObserver)
                 .readerPreparationWork(preparationWork)
                 .apply {
                     // Retry a suspect cached original until a foreground network decode succeeds.
                     // Never evict a key that another visible request may already have replaced.
-                    if (bypassPrefetchCache && !prefetchCacheRecovery.recovered && requested.url.startsWith("https:")) {
+                    if (rejected && !prefetchCacheRecovery.recovered) {
                         diskCachePolicy(CachePolicy.WRITE_ONLY)
                         memoryCachePolicy(CachePolicy.DISABLED)
                     }
@@ -4170,7 +4202,7 @@ private fun ReaderPageImage(
                                 result.memoryCacheKey)
                         }
                         loading = false
-                        if (width > 0 && height > 0 && bypassPrefetchCache && requested.url.startsWith("https:") &&
+                        if (width > 0 && height > 0 && rejected &&
                             result.dataSource == coil3.decode.DataSource.NETWORK) prefetchCacheRecovery.recovered = true
                         loadChanged(true)
                     } },
@@ -4376,7 +4408,7 @@ private fun ReaderPageImage(
                             receivedBytes = it.receivedBytes, expectedBytes = it.expectedBytes)
                     },
                     stage = when {
-                        prefetchFailure != null && transportProgress.receivedBytes == 0L -> "预取发现异常 · 正在重新读取"
+                        prefetchFailure != null && transportProgress.receivedBytes == 0L -> "预读未完成 · 正在载入本页"
                         awaitingPrefetch && reload > 0 -> "正在结束本页旧请求"
                         awaitingPrefetch -> "接续本页预读"
                         recoveryStage == PrefetchStage.CHECKING -> "解码本页图片"

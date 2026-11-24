@@ -23,8 +23,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -50,6 +52,37 @@ import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.MotionIconButton
+
+/** The quiet reading uses only native values; a source rate is not a measured output rate. */
+@Composable
+internal fun AnimeInlineVideoQuality(playback: AnimePlayerState, modifier: Modifier = Modifier) {
+    val width = playback.videoWidth?.takeIf { it > 0 }
+    val height = playback.videoHeight?.takeIf { it > 0 }
+    val dimensions = if (width != null && height != null) "$width×$height" else null
+    val presented = playback.presentedFps?.takeIf { it.isFinite() && it >= 0.0 }
+    val output = playback.frameMetrics?.outputFps?.takeIf { it.isFinite() && it >= 0.0 }
+    val source = playback.sourceFps?.takeIf { it.isFinite() && it > 0.0 }
+    val rate = when {
+        presented != null -> "呈现 ${formatDecimal(presented, 0)} fps"
+        output != null -> "输出 ${formatDecimal(output, 0)} fps"
+        source != null -> "源 ${formatDecimal(source, 0)} fps"
+        else -> null
+    }
+    if (dimensions == null && rate == null) return
+    val caption = listOfNotNull(dimensions, rate).joinToString(" · ")
+    val description = listOfNotNull(dimensions?.let { "视频输入分辨率 $width 乘 $height" }, when {
+        presented != null -> "播放器实际呈现 ${formatDecimal(presented, 0)} 帧每秒"
+        output != null -> "视频输出 ${formatDecimal(output, 0)} 帧每秒，不是屏幕刷新率"
+        source != null -> "片源标称 ${formatDecimal(source, 1)} 帧每秒，未测得当前输出"
+        else -> null
+    }).joinToString("，")
+    AnimePlaybackSurface(null, modifier, cornerRadius = 9.dp) {
+        Text(caption, Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+            .clearAndSetSemantics { contentDescription = description },
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"))
+    }
+}
 
 /** Selected readings stay on the video without consuming the episode/comment pane's height. */
 @Composable

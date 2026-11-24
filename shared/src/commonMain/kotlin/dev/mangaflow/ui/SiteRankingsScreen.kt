@@ -175,48 +175,50 @@ internal fun SiteRankingsScreen(
                         }
                     }
                 })
-            Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+            val selection = state.selection
+            val conditionCount = selection.activeFilterCount
+            val orderLabel = if (selection.site == RankingSite.BANGUMI && selection.filters.query.isNotBlank())
+                "搜索匹配" else selection.kind.label
+            Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                RankingSourceTabs(state.selection.site, contentReady, !state.restoringSelection,
+                RankingSourceTabs(selection.site, contentReady, !state.restoringSelection,
                     onSelect = controller::selectSite, modifier = Modifier.weight(1f))
                 MotionTextButton(onClick = openFilters, enabled = contentReady,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                    colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    colors = ButtonDefaults.textButtonColors(
+                        containerColor = colors.onSurface.copy(alpha = if (conditionCount == 0) .06f else .11f),
+                        contentColor = colors.onSurface),
                     modifier = Modifier.heightIn(min = 44.dp).semantics {
                         contentDescription = "筛选与排序"
-                        stateDescription = state.selection.kind.label + "，" + state.selection.scopeLabel +
-                            if (state.selection.activeFilterCount > 0) "，${state.selection.activeFilterCount}项条件" else ""
+                        stateDescription = if (state.restoringSelection) "正在恢复筛选"
+                            else "$orderLabel，${selection.scopeLabel}，${conditionCount} 项附加条件"
                     }) {
-                    Icon(Icons.Outlined.FilterList, null, Modifier.size(17.dp))
-                    Column(Modifier.padding(start = 5.dp).widthIn(max = 64.dp)) {
-                        Text(when {
-                            state.restoringSelection -> "筛选"
-                            state.selection.site == RankingSite.BANGUMI && state.selection.filters.query.isNotBlank() -> "匹配"
-                            else -> state.selection.kind.label
-                        },
-                            style = MaterialTheme.typography.labelMedium, maxLines = 1,
-                            overflow = TextOverflow.Ellipsis)
-                        if (!state.restoringSelection) Text(state.selection.scopeLabel,
-                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
+                    Icon(Icons.Outlined.FilterList, null, Modifier.size(16.dp))
+                    Text(if (conditionCount > 0 && !state.restoringSelection) "筛选 $conditionCount" else "筛选",
+                        Modifier.padding(start = 5.dp), style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Medium, maxLines = 1)
                 }
             }
-            if (state.selection.activeFilterCount > 0) Row(
-                Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+            if (!state.restoringSelection) Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                MotionTextButton(onClick = openFilters, enabled = contentReady,
-                    modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 0.dp)) {
-                    Text(state.selection.filterSummary, Modifier.fillMaxWidth(), maxLines = 1,
-                        overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall,
+                Column(Modifier.weight(1f).padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("$orderLabel · ${selection.scopeLabel}", style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (conditionCount > 0) Text(selection.filterSummary, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant)
                 }
-                MotionIconButton(onClick = {
-                    controller.applySelection(state.selection.copy(filters = SiteRankingFilters()))
-                }, enabled = contentReady, modifier = Modifier.size(44.dp), tooltip = "清除组合条件") {
-                    Icon(Icons.Outlined.Close, "清除组合条件", Modifier.size(16.dp))
+                if (conditionCount > 0) MotionTextButton(onClick = {
+                    controller.applySelection(selection.copy(filters = SiteRankingFilters()))
+                }, enabled = contentReady, modifier = Modifier.heightIn(min = 44.dp).semantics {
+                    contentDescription = "清除已应用的附加条件，保留排序和站点"
+                }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant)) {
+                    Text("清除条件", style = MaterialTheme.typography.labelSmall, maxLines = 1)
                 }
             }
             state.preferenceError?.let { error ->
@@ -283,19 +285,36 @@ private fun RankingSourceTabs(
 ) {
     val sites = RankingSite.entries
     val labels = sites.map { if (it == RankingSite.MYANIMELIST) "MAL" else it.title }
-    val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    val density = LocalDensity.current
+    val scale = density.fontScale.coerceAtLeast(1f)
+    val scroll = rememberScrollState()
+    val index = sites.indexOf(selected)
+    val selectionColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .52f)
     BoxWithConstraints(modifier) {
         val width = maxWidth.coerceAtLeast(78.dp * scale * sites.size)
-        Box(Modifier.horizontalScroll(rememberScrollState(), enabled = enabled)) {
-            MotionTabs(sites.indexOf(selected), labels, onSelect = { if (enabled) onSelect(sites[it]) },
+        LaunchedEffect(index, width, maxWidth, density, scroll.maxValue) {
+            val cell = with(density) { width.toPx() / sites.size }
+            val viewport = with(density) { maxWidth.toPx() }
+            val start = index * cell
+            val end = start + cell
+            val target = when {
+                start < scroll.value -> start.toInt()
+                end > scroll.value + viewport -> (end - viewport).toInt()
+                else -> scroll.value
+            }.coerceIn(0, scroll.maxValue)
+            if (target != scroll.value) scroll.scrollTo(target)
+        }
+        Box(Modifier.horizontalScroll(scroll, enabled = enabled)) {
+            MotionTabs(index, labels, onSelect = { if (enabled) onSelect(sites[it]) },
                 modifier = Modifier.width(width).motionInputGate(enabled),
-                treatment = MotionTabTreatment.Underline, controlHeight = 44.dp, fontSize = 12.sp,
-                role = Role.RadioButton, selectionVisible = selectionVisible,
-                tooltips = sites.map { it.title }, itemContent = { index, _, color ->
+                treatment = MotionTabTreatment.Underline, indicator = selectionColor, controlHeight = 44.dp, fontSize = 12.sp,
+                role = Role.Tab, selectionVisible = selectionVisible,
+                tooltips = sites.map { it.title }, itemContent = { index, chosen, color ->
                     Row(verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         ReviewSourceMark(sites[index].id, size = 15.dp)
                         Text(labels[index], style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Medium,
                             color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 })

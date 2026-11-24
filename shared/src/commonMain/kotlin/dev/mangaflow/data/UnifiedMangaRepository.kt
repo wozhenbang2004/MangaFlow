@@ -10,6 +10,7 @@ import kotlinx.atomicfu.locks.synchronized
 
 import dev.mangaflow.data.sources.*
 import dev.mangaflow.data.sources.BodySourceInfo
+import dev.mangaflow.data.sources.SourceBrowserAccount
 import dev.mangaflow.data.sources.KomiicBodySource
 import dev.mangaflow.data.sources.MangaDexBodySource
 import dev.mangaflow.data.sources.createJmDownloadSession
@@ -350,6 +351,20 @@ class UnifiedMangaRepository(
     }
 
     suspend fun sourceCapabilities(id: String): SourceCapabilities = if (id == "copy") SourceCapabilities() else adapter(id).capabilities()
+
+    /** The reviewed web destinations carry no app session or script runtime authority. */
+    internal fun reviewedProfileBrowserAccount(source: BodySourceInfo): SourceBrowserAccount? {
+        val eligibility = sourceEligibility
+        if (source.id !in eligibility.ids || eligibility.profiles[source.id] != true || !registrationCurrent(eligibility))
+            return null
+        val installed = sourceSnapshot.adapters[source.id] as? ScriptBodySource ?: return null
+        if (installed.info.revision != source.revision) return null
+        val account = installed.reviewedBrowserAccount() ?: return null
+        return account.takeIf {
+            sourceEligibility === eligibility && registrationCurrent(eligibility) &&
+                sourceSnapshot.adapters[source.id] === installed
+        }
+    }
     suspend fun sourceFeeds(id: String): List<SourceFeed> = if (id == "copy") emptyList() else adapter(id).feeds()
     suspend fun primarySourceFeed(id: String, kind: SourceFeedKind): SourceFeed? =
         if (id == "copy") null else adapter(id).primaryFeed(kind)

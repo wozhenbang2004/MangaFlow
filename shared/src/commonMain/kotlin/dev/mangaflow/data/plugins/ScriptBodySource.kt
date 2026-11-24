@@ -81,7 +81,7 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
             .also { declaredCapabilities = it }
     }
 
-    private fun reviewedBrowserAccount(): SourceBrowserAccount? {
+    internal fun reviewedBrowserAccount(): SourceBrowserAccount? {
         if (!hasReviewedVeneraBase(bundle.metadata)) return null
         return when (bundle.metadata.optString("key")) {
             "nhentai" -> SourceBrowserAccount(
@@ -109,8 +109,15 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
         }
     }
 
-    override suspend fun feedFilters(feedId: String): List<SourceFilter> = if (!venera) super.feedFilters(feedId)
-        else filters(call("feedFilters", JSONArray().put(feedId)).getJSONArray("result"))
+    override suspend fun feedFilters(feedId: String): List<SourceFilter> = when {
+        !venera -> super.feedFilters(feedId)
+        // The Venera bridge declares no filters for explore feeds. The actual
+        // list request still initializes the provider through the normal path.
+        feedId.startsWith("explore:") && feedId.removePrefix("explore:").let { index ->
+            index.toUIntOrNull()?.toString() == index
+        } -> emptyList()
+        else -> filters(call("feedFilters", JSONArray().put(feedId)).getJSONArray("result"))
+    }
 
     override suspend fun browse(request: SourceBrowseRequest): MangaPage = if (!venera) super.browse(request)
         else listing("browse", JSONArray().put(request.feedId).put(upstreamPage(request.page)).put(JSONArray(request.options)))

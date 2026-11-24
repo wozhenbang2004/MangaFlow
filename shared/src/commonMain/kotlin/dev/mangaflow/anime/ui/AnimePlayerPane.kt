@@ -449,6 +449,19 @@ internal fun AnimePlayerPane(
                             nextPreparationEnabled = state.settings.prepareNextEpisode)
                     }
                 }
+                val quietFontScale = density.fontScale.coerceAtLeast(1f)
+                if (active && !showChrome && chromeReveal <= 0f && !locked && !obscured && !panelPresent &&
+                    !readingsVisible && !holdingFast && !playback.inPictureInPicture && !showStage &&
+                    showingCurrentPlayback && playback.isPlaying && !playback.playbackSuppressed &&
+                    playback.hasVideoTracks != false && videoWidth >= 220.dp * quietFontScale &&
+                    videoHeight - (if (headerOverVideo) topInset else 0.dp) >= 90.dp * quietFontScale &&
+                    subject != null && controller.ownsVideoReadout(subject.id, playback)) {
+                    val insetSides = if (headerOverVideo) WindowInsetsSides.Top + WindowInsetsSides.Horizontal
+                        else WindowInsetsSides.Horizontal
+                    AnimeInlineVideoQuality(playback, Modifier.align(Alignment.TopEnd)
+                        .windowInsetsPadding(safeInsets.only(insetSides)).padding(top = 8.dp, end = 10.dp)
+                        .widthIn(max = videoWidth * .75f))
+                }
                 if (centralTransport && canControl && !playback.inPictureInPicture && chromeReveal > 0f) {
                     Box(Modifier.fillMaxSize().padding(top = statusTop, bottom = statusBottom), contentAlignment = Alignment.Center) {
                         AnimePlaybackSurface(artwork, Modifier.graphicsLayer { alpha = chromeReveal }

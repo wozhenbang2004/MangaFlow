@@ -209,7 +209,8 @@ fun DiscoverScreen(
     onToggleFavorite: (Manga) -> Unit,
     onManageSources: (() -> Unit)? = null,
     onExplore: (() -> Unit)? = null,
-    sourceControls: (@Composable (onPresenceChange: (Boolean) -> Unit) -> Unit)? = null,
+    sourceControls: (@Composable (active: Boolean, onPresenceChange: (Boolean) -> Unit) -> Unit)? = null,
+    onRetrySourceFilters: (() -> Unit)? = null,
     adultProfile: Boolean = false,
     active: Boolean = true,
 ) {
@@ -219,13 +220,14 @@ fun DiscoverScreen(
     var actionsManga by remember { mutableStateOf<Manga?>(null) }
     var ratingsManga by remember { mutableStateOf<Manga?>(null) }
     val sourceFan = remember { MetricSourceFanState() }
-    var sourceToolsPresent by remember { mutableStateOf(false) }
+    var sourceToolsOwner by remember { mutableStateOf<String?>(null) }
     val coverTransition = LocalMangaCoverTransition.current
     LaunchedEffect(active, searchExpanded) {
         if (!active || searchExpanded) { actionsManga = null; ratingsManga = null; sourceFan.clear() }
     }
     LaunchedEffect(browseKey) { sourceFan.clear() }
-    val unobscured = active && !searchExpanded && actionsManga == null && ratingsManga == null && sourceFan.request == null && !sourceToolsPresent
+    val unobscured = active && !searchExpanded && actionsManga == null && ratingsManga == null &&
+        sourceFan.request == null && sourceToolsOwner != browseKey
     val desktopActions: (Manga) -> List<DesktopMenuAction> = { manga ->
         listOfNotNull(
             DesktopMenuAction("查看详情") {
@@ -243,49 +245,42 @@ fun DiscoverScreen(
         .motionInputGate(active && !searchExpanded)) {
         // Wallpaper and scroll content are one captured scene. The header remains a foreground sibling.
         wallpaper()
-        Column(Modifier.fillMaxSize().padding(top = if (sourceControls != null) contentTopPadding else 0.dp)) {
-            // The source toolbar survives feed/filter transitions. Its popovers are separate
-            // foreground windows; the captured content contains no glass sampling itself.
-            if (sourceControls != null) BoxWithConstraints(Modifier.fillMaxWidth()) {
-                Box(Modifier.fillMaxWidth().padding(horizontal = MangaLayout.sidePadding(maxWidth))) {
-                    sourceControls { sourceToolsPresent = it }
+        MotionTabContent(
+            selected = browse,
+            modifier = Modifier.fillMaxSize(),
+            // Selection owns one entrance. Cache hydration and network results
+            // update that same pane instead of entering it a second time.
+            contentKey = ::browseContentKey,
+            order = { it.mode.ordinal * 8 + it.period.ordinal * 2 + it.audience.ordinal },
+            soft = true,
+        ) { pane ->
+            val paneKey = browseContentKey(pane)
+            val selectedPane = paneKey == browseKey
+            var exitTopPadding by remember(paneKey) { mutableStateOf(contentTopPadding) }
+            SideEffect { if (selectedPane) exitTopPadding = contentTopPadding }
+            val sourceHeader: (@Composable () -> Unit)? = if (sourceControls == null) null else ({
+                sourceControls(active && !searchExpanded && selectedPane) { present ->
+                    if (present && selectedPane) sourceToolsOwner = paneKey
+                    else if (!present && sourceToolsOwner == paneKey) sourceToolsOwner = null
                 }
-            }
-            Box(Modifier.weight(1f)) {
-            MotionTabContent(
-                selected = browse,
-                modifier = Modifier.fillMaxSize(),
-                // Selection owns one entrance. Cache hydration and network results
-                // update that same pane instead of entering it a second time.
-                contentKey = ::browseContentKey,
-                order = { it.mode.ordinal * 8 + it.period.ordinal * 2 + it.audience.ordinal },
-                soft = true,
-            ) { pane ->
-                val paneKey = browseContentKey(pane)
-                val selectedPane = paneKey == browseKey
-                val paneTopPadding = if (sourceControls != null) 0.dp else contentTopPadding
-                var exitTopPadding by remember(paneKey) { mutableStateOf(paneTopPadding) }
-                SideEffect { if (selectedPane) {
-                    exitTopPadding = paneTopPadding
-                } }
-                // The outgoing ranking keeps its last clearance while its subbar
-                // returns; a new selection cannot jerk that leaving list upward.
-                DiscoveryPane(pane, positions, repository,
-                    columns = (if (pane.mode == DiscoveryMode.LATEST) updateColumns else discoverColumns).let {
-                        if (platformKind == PlatformKind.DESKTOP) it.coerceIn(0, 8) else it.coerceIn(1, 4)
-                    },
-                    onColumnsChange = if (pane.mode == DiscoveryMode.LATEST) onUpdateColumnsChange else onDiscoverColumnsChange,
-                    backdrop = searchBackdrop,
-                    active = unobscured && selectedPane,
-                    canAutoAdvance = canAutoAdvance,
-                    onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
-                    onManageSources = onManageSources, onExplore = onExplore,
-                    adultProfile = adultProfile,
-                    onManage = { actionsManga = it }, onRatings = { ratingsManga = it },
-                    desktopActions = desktopActions,
-                    topPadding = if (selectedPane) paneTopPadding else exitTopPadding)
-            }
-            }
+            })
+            // Header clearance travels with the list; neither source controls nor
+            // the outgoing ranking's last offset constrain the scroll viewport.
+            DiscoveryPane(pane, positions, repository,
+                columns = (if (pane.mode == DiscoveryMode.LATEST) updateColumns else discoverColumns).let {
+                    if (platformKind == PlatformKind.DESKTOP) it.coerceIn(0, 8) else it.coerceIn(1, 4)
+                },
+                onColumnsChange = if (pane.mode == DiscoveryMode.LATEST) onUpdateColumnsChange else onDiscoverColumnsChange,
+                backdrop = searchBackdrop,
+                active = unobscured && selectedPane,
+                canAutoAdvance = canAutoAdvance,
+                onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
+                onManageSources = onManageSources, onExplore = onExplore,
+                sourceHeader = sourceHeader, onRetrySourceFilters = onRetrySourceFilters.takeIf { selectedPane },
+                adultProfile = adultProfile,
+                onManage = { actionsManga = it }, onRatings = { ratingsManga = it },
+                desktopActions = desktopActions,
+                topPadding = if (selectedPane) contentTopPadding else exitTopPadding)
         }
     }
     }
@@ -350,6 +345,9 @@ internal fun DiscoverySearchResults(
     desktopActions: ((Manga) -> List<DesktopMenuAction>)? = null,
     sourceControls: (@Composable (onPresenceChange: (Boolean) -> Unit) -> Unit)? = null,
     translationGroupAvailable: Boolean = true,
+    recentCopyGroupTerms: List<String> = emptyList(),
+    onCopyGroupTerm: ((String) -> Unit)? = null,
+    onClearCopyGroupTerms: (() -> Unit)? = null,
 ) {
     val adultProfile = sourceControls != null
     var retainedSearch by remember { mutableStateOf(state) }
@@ -408,8 +406,10 @@ internal fun DiscoverySearchResults(
     }
     val selectingTags = search.searchTarget == SearchTarget.TAG && search.selectedTags.isEmpty()
     val awaitingKeyword = search.query.isBlank() && search.selectedTags.isEmpty()
+    val selectingCopyGroup = !tagsOnly && !adultProfile && translationGroupAvailable &&
+        search.searchTarget == SearchTarget.TRANSLATION_GROUP
     // A restricted search can narrow its sources before the first query.
-    if (awaitingKeyword && !selectingTags && !adultProfile) return
+    if (awaitingKeyword && !selectingTags && !selectingCopyGroup && !adultProfile) return
     val showResults = search.isSearch && !selectingTags && !awaitingKeyword
     val showCacheStatus = showResults && backdrop != null && !adultProfile
     val showSourceSummary = federated && search.searchSources.isNotEmpty() && sourceControls == null
@@ -455,6 +455,9 @@ internal fun DiscoverySearchResults(
                         search.tagsLoading, search.tagsError, onTarget, onTag, onRetryTags, tagsOnly = tagsOnly,
                         onTagQuery = onTagQuery, maxChoicesHeight = choicesRoom, showScope = !scopeInToolbar,
                         translationGroupAvailable = translationGroupAvailable)
+                    if (selectingCopyGroup && (recentCopyGroupTerms.isNotEmpty() || awaitingKeyword)) {
+                        RecentCopyGroupSearches(recentCopyGroupTerms, search.query, onCopyGroupTerm, onClearCopyGroupTerms)
+                    }
                     if (showSummary) Row(
                         Modifier.fillMaxWidth().heightIn(min = if (showCacheStatus) 44.dp else 28.dp)
                             .padding(horizontal = if (tagsOnly) 0.dp else 6.dp),
@@ -701,6 +704,8 @@ private fun DiscoveryPane(
     onMore: () -> Unit,
     onManageSources: (() -> Unit)?,
     onExplore: (() -> Unit)?,
+    sourceHeader: (@Composable () -> Unit)?,
+    onRetrySourceFilters: (() -> Unit)?,
     adultProfile: Boolean,
     onOpen: (Manga) -> Unit,
     onManage: (Manga) -> Unit,
@@ -804,6 +809,7 @@ private fun DiscoveryPane(
         nearEnd = { count ->
             val info = grid.layoutInfo
             val chromeItems = 1 + (if (ranking) 0 else 1) + (if (showFeatured && !adultProfile) 1 else 0) +
+                (if (sourceHeader == null) 0 else 1) +
                 (if (ranking && aggregateAdult) state.items.asSequence().map(Manga::sourceId).distinct().count() else 0)
             info.totalItemsCount == count + chromeItems &&
                 (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >=
@@ -860,6 +866,8 @@ private fun DiscoveryPane(
                 Modifier.semantics { stateDescription = "正在加载漫画" } else Modifier)
             .motionInputGate(active),
     ) {
+        if (sourceHeader != null) item(span = { GridItemSpan(maxLineSpan) }, key = "source-controls",
+            contentType = "source-controls") { sourceHeader() }
         if (showFeatured && !adultProfile) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "hero", contentType = "featured") {
                 gallery()
@@ -918,11 +926,15 @@ private fun DiscoveryPane(
             }
         } else if (state.items.isEmpty() && state.error != null) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "error") {
-                if (adultProfile && state.searchSources.isEmpty() && state.failedPage == null) {
-                    EmptyMessage("来源尚未就绪", state.error,
-                        action = onManageSources?.let { "选择来源" },
-                        onAction = { onManageSources?.invoke() })
-                } else EmptyMessage("暂时没能加载", state.error, "重试", onRetry)
+                when {
+                    onRetrySourceFilters != null ->
+                        EmptyMessage("暂时无法读取来源筛选", state.error, "重试", onRetrySourceFilters)
+                    adultProfile && state.searchSources.isEmpty() && state.failedPage == null ->
+                        EmptyMessage("来源尚未就绪", state.error,
+                            action = onManageSources?.let { "选择来源" },
+                            onAction = { onManageSources?.invoke() })
+                    else -> EmptyMessage("暂时没能加载", state.error, "重试", onRetry)
+                }
             }
         } else if (state.items.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "empty") {
@@ -1501,6 +1513,10 @@ internal fun RecentReadingSheet(
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(), state = recentPosition,
                     contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    if (history.isEmpty()) item(key = "empty") {
+                        Text("还没有阅读记录", Modifier.padding(horizontal = 4.dp, vertical = 12.dp),
+                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     items(history, key = { it.manga.id }) { progress ->
                         val rowInteraction = remember(progress.manga.id) { MutableInteractionSource() }
                         SwipeToRemove(onRemove = { onRemoveHistory(progress.manga.id) }, label = "删除阅读记录",

@@ -212,6 +212,7 @@ internal class AndroidAnimePlayer(
     private var motionLastReleasedFrames: Long? = null
     private var motionEffect: Effect? = null
     private var baseVideoEffects: List<Effect> = emptyList()
+    private var submittedVideoEffects = false
     @Volatile private var preparedVideo: AndroidPreparedWindow? = null
     private var reusablePreparedVideo: AndroidPreparedWindow? = null
     private val videoPreparationRevision = AtomicLong(0L)
@@ -228,6 +229,8 @@ internal class AndroidAnimePlayer(
     private var lastSampleAt = 0L
     private var outputFrameReleases = AtomicLong(0L)
     private val frameWindow = AnimePlaybackFrameWindow()
+    private data class VisibleWatchSample(val at: Long, val position: Long, val frames: Long, val timeline: Long)
+    private var visibleWatchSample: VisibleWatchSample? = null
     private var bufferingSince: Long? = null
     private var bufferingProgressAt = 0L
     private var bufferingBytes = 0L
@@ -784,6 +787,7 @@ internal class AndroidAnimePlayer(
         val lastPresentationTimeUs = AtomicLong(C.TIME_UNSET)
         outputFrameReleases = releases
         frameWindow.reset()
+        visibleWatchSample = null
         // Media3 routes this listener through the final VideoSink when effects are active,
         // so synthesized frames are counted too. A release is not a physical Present receipt.
         exo.setVideoFrameMetadataListener { presentationTimeUs, releaseTimeNs, _, _ ->
@@ -795,7 +799,18 @@ internal class AndroidAnimePlayer(
         }
         val observer = object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) { synchronize(generation, exo) }
-            override fun onPlayerError(error: PlaybackException) { recoverOrFail(generation, exo, error) }
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (!isPlaying && isCurrent(generation) && engine.value === exo) visibleWatchSample = null
+            }
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int,
+            ) {
+                if (isCurrent(generation) && engine.value === exo) visibleWatchSample = null
+            }
+            override fun onPlayerError(error: PlaybackException) {
+                if (isCurrent(generation) && engine.value === exo) visibleWatchSample = null
+                recoverOrFail(generation, exo, error)
+            }
             override fun onRenderedFirstFrame() {
                 if (!isCurrent(generation) || engine.value !== exo || nativeVideoRecoveryFailed || bufferingTimedOut) return
                 if (nativeVideoOnly) nativeVideoRestored = true
@@ -839,6 +854,7 @@ internal class AndroidAnimePlayer(
             throw failure
         }
         listener = observer
+        submittedVideoEffects = false
         engine.value = exo
     }
 
@@ -862,7 +878,7 @@ internal class AndroidAnimePlayer(
         polling?.cancel()
         polling = playerScope.launch(Dispatchers.Main.immediate) {
             while (isActive && isCurrent(generation)) {
-                synchronize(generation, exo)
+                synchronize(generation, exo, sampleWatchTime = true)
                 checkBufferingProgress(generation, exo)
                 checkNativeFrameRecovery(generation, exo)
                 delay(250L)
@@ -1005,7 +1021,10 @@ internal class AndroidAnimePlayer(
     }
 
     private fun updateVideoEffects(exo: ExoPlayer) {
-        exo.setVideoEffects(listOfNotNull(motionEffect) + baseVideoEffects)
+        val effects = listOfNotNull(motionEffect) + baseVideoEffects
+        // Clearing the list does not guarantee that Media3 retired the old graph.
+        if (engine.value === exo && effects.isNotEmpty()) submittedVideoEffects = true
+        exo.setVideoEffects(effects)
     }
 
     private fun clearRealtimeMotion() {
@@ -1341,6 +1360,7 @@ internal class AndroidAnimePlayer(
     internal fun updateVideoHost(token: Any, hasSize: Boolean) {
         if (hasSize) videoHosts.add(token) else videoHosts.remove(token)
         if (videoHosts.isEmpty()) {
+            visibleWatchSample = null
             nativeFrameWaitSince = null
             clearLiveEnhancement()
         }
@@ -1395,8 +1415,9 @@ internal class AndroidAnimePlayer(
         if (now - since < timeoutMs) return
         if (nativeVideoOnly) {
             failNativeVideoRecovery(generation, IOException("原生画面恢复未收到首帧"))
-        } else if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF && options.realtimeFrames == null &&
-            options.preparedVideoModel == null && hasStartupAlternative()) {
+        } else if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF && options.preparedVideoModel == null &&
+            // Interpolation waits for the first decoded frame before submitting an effect.
+            (options.realtimeFrames == null || !submittedVideoEffects) && hasStartupAlternative()) {
             stopStalledPlayback(generation, exo, "视频轨道已就绪但未收到首帧，正在尝试本集备用线路")
         } else if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF || !recoverNativeVideo(generation, exo)) {
             val message = "视频轨道已就绪，画面未收到首帧。请重试当前播放。"
@@ -1467,7 +1488,22 @@ internal class AndroidAnimePlayer(
         state.value.hasVideoTracks != false && !nativeVideoOnly && (foreground || state.value.inPictureInPicture) &&
         state.value.playWhenReady && !state.value.playbackSuppressed && request?.hasStartupAlternative?.invoke() == true
 
-    private fun synchronize(generation: Long, exo: ExoPlayer) {
+    private fun observeVisibleWatchTime(exo: ExoPlayer, now: Long, position: Long, frames: Long): Long {
+        val snapshot = state.value
+        if (videoHosts.isEmpty() || !(foreground || snapshot.inPictureInPicture) || !exo.isPlaying ||
+            snapshot.firstFrameRendered != true || snapshot.hasVideoTracks == false) {
+            visibleWatchSample = null
+            return 0L
+        }
+        val previous = visibleWatchSample
+        visibleWatchSample = VisibleWatchSample(now, position, frames, snapshot.timelineGeneration)
+        if (previous == null || previous.timeline != snapshot.timelineGeneration ||
+            position <= previous.position || frames <= previous.frames) return 0L
+        // The existing 250 ms poll observes continuous output; don't fill gaps or count a seek's position delta.
+        return (now - previous.at).takeIf { it in 1L..1_000L } ?: 0L
+    }
+
+    private fun synchronize(generation: Long, exo: ExoPlayer, sampleWatchTime: Boolean = false) {
         if (!isCurrent(generation) || engine.value !== exo) return
         if (nativeVideoRecoveryPending || nativeVideoRecoveryFailed || bufferingTimedOut) return
         if (exo.playerError != null) return // The typed error callback alone owns recovery/error publication.
@@ -1476,6 +1512,9 @@ internal class AndroidAnimePlayer(
             mutableState.value = state.value.copy(preparedVideoRetainedBytes = 0L)
         }
         val now = SystemClock.elapsedRealtime()
+        val position = exo.currentPosition.coerceAtLeast(0L)
+        val outputFrames = outputFrameReleases.get()
+        val watchDelta = if (sampleWatchTime) observeVisibleWatchTime(exo, now, position, outputFrames) else 0L
         val enhancementActive = lastEnhancementSubmissionAt?.let { now - it < ANIME4K_ACTIVITY_TIMEOUT_MS } == true &&
             canReportLiveEnhancement(exo)
         if (!enhancementActive) lastEnhancementSubmissionAt = null
@@ -1487,7 +1526,7 @@ internal class AndroidAnimePlayer(
             flowing = exo.isPlaying && exo.playbackSuppressionReason == Player.PLAYBACK_SUPPRESSION_REASON_NONE &&
                 (foreground || state.value.inPictureInPicture) && state.value.hasVideoTracks != false &&
                 state.value.firstFrameRendered == true,
-            outputFrames = outputFrameReleases.get(), droppedFrames = counters?.droppedBufferCount?.toLong(),
+            outputFrames = outputFrames, droppedFrames = counters?.droppedBufferCount?.toLong(),
             // Interpolation mixes pre-synthesis and post-synthesis drop stages. Do not invent
             // a percentage with the decoder's input-frame count as an output denominator.
             comparableDropDenominator = options.realtimeFrames == null,
@@ -1511,7 +1550,7 @@ internal class AndroidAnimePlayer(
             previous.copy(
                 phase = phase,
                 playWhenReady = if (ended) false else exo.playWhenReady,
-                positionMs = exo.currentPosition.coerceAtLeast(0L),
+                positionMs = position,
                 durationMs = exo.duration.takeIf { it != C.TIME_UNSET && it >= 0 } ?: -1L,
                 bufferedMs = exo.bufferedPosition.takeIf { it != C.TIME_UNSET && it >= 0 } ?: -1L,
                 bufferMetrics = loadControls[exo]?.metrics(wallTimeMillis(), exo.isLoading, exo.playbackParameters.speed),
@@ -1531,6 +1570,8 @@ internal class AndroidAnimePlayer(
                 decoderOutputFrames = counters?.renderedOutputBufferCount?.toLong(),
                 droppedFrames = counters?.droppedBufferCount?.toLong(),
                 frameMetrics = frameMetrics,
+                visibleWatchMillis = if (watchDelta > 0L) (previous.visibleWatchMillis ?: 0L) + watchDelta
+                    else previous.visibleWatchMillis,
                 videoEnhancement = previous.videoEnhancement.let { last ->
                     val enhancement = if (enhancementActive) last else last.withoutLiveSample()
                     if (enhancement.phase in setOf(AnimeVideoEnhancementPhase.OFF,
@@ -1814,6 +1855,7 @@ internal class AndroidAnimePlayer(
     }
 
     override fun setForegroundNative(foreground: Boolean, backgroundAudio: Boolean) {
+        if (!foreground) visibleWatchSample = null
         if (!foreground && !state.value.inPictureInPicture) frameWindow.reset()
         resetBufferingObservation()
         nativeFrameWaitSince = null
@@ -1876,6 +1918,7 @@ internal class AndroidAnimePlayer(
         engine.value?.playWhenReady = playing
     }
     override fun seekNative(positionMs: Long) {
+        visibleWatchSample = null
         frameWindow.reset()
         motionOutputs.seek()
         lastMotionSample = null
@@ -1899,6 +1942,7 @@ internal class AndroidAnimePlayer(
         return exo.playbackParameters.speed
     }
     override fun releaseNative() {
+        visibleWatchSample = null
         frameWindow.reset()
         clearRealtimeMotion()
         baseVideoEffects = emptyList()

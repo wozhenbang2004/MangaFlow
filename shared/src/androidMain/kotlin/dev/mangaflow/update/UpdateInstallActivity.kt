@@ -60,8 +60,9 @@ class UpdateInstallActivity : Activity() {
             addView(retryButton)
             continueButton = Button(this@UpdateInstallActivity).apply {
                 text = "继续上次安装确认"
-                visibility = if (intent.getBooleanExtra("recover_only", false)) View.VISIBLE else View.GONE
+                visibility = if (canContinuePrevious(intent)) View.VISIBLE else View.GONE
                 setOnClickListener {
+                    if (!canContinuePrevious(intent)) return@setOnClickListener
                     intent.putExtra("recover_only", false)
                     visibility = View.GONE
                     handle(intent)
@@ -99,8 +100,8 @@ class UpdateInstallActivity : Activity() {
                 updates.installationDisplayMessage(id, token)?.let { statusView.text = it }
                 retryButton.isEnabled = !updates.installRequestTerminal(id, token)
                 continueButton.isEnabled = retryButton.isEnabled
-                if (intent.getBooleanExtra("recover_only", false) && retryButton.isEnabled) {
-                    statusView.text = "上次安装请求仍未结束。取消它后可安装新版本，也可以明确选择继续上次确认。"
+                if (isRecoveryOnly(intent) && retryButton.isEnabled) {
+                    statusView.text = recoveryPrompt(intent)
                     return@collect
                 }
                 val confirmation = updates.pendingInstallConfirmation(id, token)
@@ -151,7 +152,7 @@ class UpdateInstallActivity : Activity() {
 
     @Suppress("DEPRECATION")
     private fun handle(request: Intent) {
-        continueButton.visibility = if (request.getBooleanExtra("recover_only", false)) View.VISIBLE else View.GONE
+        continueButton.visibility = if (canContinuePrevious(request)) View.VISIBLE else View.GONE
         val id = request.getIntExtra("session_id", -1)
         val token = request.getStringExtra("install_token").orEmpty()
         if (!updates.ownsInstallSession(id, token)) {
@@ -166,8 +167,8 @@ class UpdateInstallActivity : Activity() {
                 retryButton.isEnabled = false
                 return
             }
-            if (request.getBooleanExtra("recover_only", false)) {
-                statusView.text = "请先处理上次安装请求"
+            if (isRecoveryOnly(request)) {
+                statusView.text = recoveryPrompt(request)
                 return
             }
             if (request.action == CONFIRM_ACTION) {
@@ -208,6 +209,16 @@ class UpdateInstallActivity : Activity() {
                 ?: "未能继续安装，请返回软件更新"
         }
     }
+
+    private fun isRecoveryOnly(request: Intent): Boolean =
+        request.getBooleanExtra("recover_only", false) || request.getBooleanExtra("cancel_only", false)
+
+    private fun canContinuePrevious(request: Intent): Boolean =
+        request.getBooleanExtra("recover_only", false) && !request.getBooleanExtra("cancel_only", false)
+
+    private fun recoveryPrompt(request: Intent): String = if (canContinuePrevious(request))
+        "上次安装请求仍未结束。可以继续上次确认，或取消这次请求后返回软件更新。"
+    else "无法核对上次请求的安装包。取消这次请求后可返回软件更新；不会卸载应用或清除数据。"
 
     internal companion object {
         private const val CONFIRM_ACTION = "dev.mangaflow.update.CONFIRM_INSTALL"

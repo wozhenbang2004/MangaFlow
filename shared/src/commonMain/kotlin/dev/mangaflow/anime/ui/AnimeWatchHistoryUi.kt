@@ -58,6 +58,16 @@ private fun animeWatchPosition(progress: AnimeWatchProgress): String =
     if (progress.completed) "已看完" else animeTime(progress.positionMs) +
         progress.durationMs.takeIf { it > 0L }?.let { " / " + animeTime(it) }.orEmpty()
 
+internal fun animeWatchElapsed(milliseconds: Long): String {
+    val seconds = milliseconds / 1_000L
+    return when {
+        seconds >= 3_600L -> "${seconds / 3_600L} 小时 ${seconds / 60L % 60L} 分钟"
+        seconds >= 60L -> "${seconds / 60L} 分钟 ${seconds % 60L} 秒"
+        seconds > 0L -> "$seconds 秒"
+        else -> "不足 1 秒"
+    }
+}
+
 internal fun animeContinuationLabel(entry: AnimeLibraryEntry, target: AnimeEpisode?): String = when {
     entry.resume == null -> "查看详情与选集"
     target != null && target.id != entry.resume.episodeId ->
@@ -104,6 +114,8 @@ internal fun AnimeEpisodeHistorySheet(
                         modifier = Modifier.semantics { heading() })
                     Text(entry.subject.title, style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (entry.visibleWatchMillis > 0L)
+                        AnimeQuietLabel("本作品已记录观看 ${animeWatchElapsed(entry.visibleWatchMillis)}")
                 }
                 MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭观看记录") {
                     Icon(Icons.Outlined.Close, "关闭观看记录", Modifier.size(20.dp))

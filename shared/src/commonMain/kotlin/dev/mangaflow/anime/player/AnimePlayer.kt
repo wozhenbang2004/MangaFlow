@@ -249,6 +249,8 @@ data class AnimePlayerState(
     val bufferMetrics: AnimeBufferMetrics? = null,
     /** Measured bounds of the playback surface in pixels, including any letterboxing. */
     val playbackViewportSize: IntSize? = null,
+    /** Cumulative elapsed visible video playback in this session; null without native observations. */
+    val visibleWatchMillis: Long? = null,
 ) {
     val ended: Boolean get() = phase == AnimePlayerPhase.ENDED
     val isPlaying: Boolean get() = phase == AnimePlayerPhase.READY && playWhenReady && !isBuffering
@@ -370,6 +372,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
             videoEnhancement = AnimeVideoEnhancementState(options.videoEnhancement,
                 if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF) AnimeVideoEnhancementPhase.OFF
                 else AnimeVideoEnhancementPhase.WAITING),
+            visibleWatchMillis = previous.visibleWatchMillis.takeIf { sameSession },
         )
         opening = playerScope.launch(Dispatchers.Main.immediate) {
             try {

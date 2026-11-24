@@ -166,6 +166,8 @@ data class AnimeLibraryEntry(
     val metadataAutoMatchDisabled: Boolean = false,
     /** Stable Douban episode ownership survives disposable metadata-cache cleanup. */
     val catalogDetail: AnimeDetail? = null,
+    /** Observed wall time from visible Android playback; never derived from resume position. */
+    val visibleWatchMillis: Long = 0L,
 )
 
 data class AnimeSourceBinding(

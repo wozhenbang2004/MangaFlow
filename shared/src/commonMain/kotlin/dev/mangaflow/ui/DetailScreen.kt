@@ -1002,7 +1002,7 @@ private fun HeroBookInformation(
             if (desktopSummary) HeroSynopsis(manga, ink, infoVisible, onIntroduction, lines = 4)
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
                 DetailTags(manga, includeState = false, enabled = infoVisible, onTag = onTag,
-                    neutral = adultProfile,
+                    largeTouchTarget = adultProfile,
                     maximumVisible = if (editorial) 4 else if (adultProfile) 6 else Int.MAX_VALUE,
                     onMore = if (adultProfile || editorial) onIntroduction else null)
                 if (onRatings != null) DetailRatingStrip(manga, ink.copy(alpha = .86f), enabled = infoVisible,
@@ -1031,7 +1031,7 @@ private fun HeroSynopsis(manga: Manga, ink: Color, enabled: Boolean, onIntroduct
 @Composable
 private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: Boolean = false,
     includeState: Boolean = true, enabled: Boolean = true, onTag: ((String) -> Unit)?,
-    neutral: Boolean = false, maximumVisible: Int = Int.MAX_VALUE, onMore: (() -> Unit)? = null) {
+    largeTouchTarget: Boolean = false, maximumVisible: Int = Int.MAX_VALUE, onMore: (() -> Unit)? = null) {
     val tags = remember(manga.status, manga.tags, manga.latestChapter, includeState) {
         buildList<Pair<String, Boolean>> {
             val status = manga.status.trim()
@@ -1048,11 +1048,11 @@ private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: B
         verticalAlignment = Alignment.CenterVertically,
     ) {
         tags.take(maximumVisible.coerceAtLeast(1)).forEachIndexed { index, (tag, topic) ->
-            DetailTag(tag, index, onArtwork, enabled, neutral = neutral,
+            DetailTag(tag, index, onArtwork, enabled, largeTouchTarget = largeTouchTarget,
                 onClick = if (topic) onTag?.let { action -> { action(tag) } } else null)
         }
         if (tags.size > maximumVisible && onMore != null) DetailTag("+${tags.size - maximumVisible}",
-            maximumVisible, onArtwork, enabled, neutral = neutral, onClickLabel = "查看全部标签", onClick = onMore)
+            maximumVisible, onArtwork, enabled, largeTouchTarget = largeTouchTarget, onClickLabel = "查看全部标签", onClick = onMore)
     }
 }
 
@@ -1077,7 +1077,7 @@ private fun DetailIntroduction(manga: Manga, backdrop: HazeState, onAuthor: ((St
                     color = DetailForeground, fontWeight = FontWeight.SemiBold)
                 AuthorNames(manga.authors, DetailSecondary, onAuthor = onAuthor)
                 if (adultProfile) MangaBrowseSource(manga)
-                DetailTags(manga, onTag = onTag, neutral = adultProfile)
+                DetailTags(manga, onTag = onTag, largeTouchTarget = adultProfile)
                 DetailSourceMetadata(manga, onOriginal)
                 if (!adultProfile) MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = DetailForeground)
                 Text(manga.description.ifBlank { "来源暂无简介" },
@@ -1135,19 +1135,17 @@ private val CopyOriginalPath = Regex("[A-Za-z0-9_-]{1,160}")
 
 @Composable
 private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false,
-    enabled: Boolean = true, neutral: Boolean = false,
+    enabled: Boolean = true, largeTouchTarget: Boolean = false,
     onClickLabel: String = "搜索${label}漫画", onClick: (() -> Unit)? = null) {
     val onDark = onArtwork || DetailForeground.luminance() > .5f
-    val accent = if (neutral) {
-        if (onArtwork) Color.White else DetailSecondary
-    } else when (index % 4) {
+    val accent = when (index % 4) {
         0 -> if (onDark) Color(0xFFD9B49E) else Color(0xFF805C43)
         1 -> if (onDark) Color(0xFFAFC4E2) else Color(0xFF486481)
         2 -> if (onDark) Color(0xFFC7B0DC) else Color(0xFF75588A)
         else -> if (onDark) Color(0xFFD5AFBB) else Color(0xFF865B6B)
     }
     val interaction = remember(label) { MutableInteractionSource() }
-    val touchHeight = if (neutral) 44.dp else 32.dp
+    val touchHeight = if (largeTouchTarget) 44.dp else 32.dp
     if (onArtwork) {
         Box(Modifier.heightIn(min = touchHeight).then(if (onClick != null)
             Modifier.clickable(interactionSource = interaction, indication = null, enabled = enabled,

@@ -93,6 +93,7 @@ import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.PageCollection
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.BrowseSnapshot
+import dev.mangaflow.json.JSONArray
 import dev.mangaflow.update.UpdateManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -185,6 +186,11 @@ data class BrowseState(
         else -> "discover:${mode.name}"
     }
 }
+
+private const val COPY_GROUP_RECENTS_KEY = "copy_group_search_recent"
+private const val COPY_GROUP_RECENTS_LIMIT = 8
+
+private fun String.validCopyGroupTerm(): Boolean = length in 1..120 && none { it.isISOControl() }
 
 private data class TagSearchIdentities(val sourceScope: String, val cacheKey: String, val groups: Map<String, List<Manga>>)
 
@@ -343,6 +349,17 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private var copyShelfRemoteRequest = 0L
     private val _browse = MutableStateFlow(BrowseState())
     val browse = _browse.asStateFlow()
+    private val copyGroupPreferences = preferences(application, "mangaflow_search_choices")
+    private val _recentCopyGroupTerms = MutableStateFlow(runCatching {
+        val encoded = copyGroupPreferences.getString(COPY_GROUP_RECENTS_KEY).orEmpty()
+        if (encoded.length !in 2..6000) emptyList() else {
+            val rows = JSONArray(encoded)
+            List(minOf(rows.length(), COPY_GROUP_RECENTS_LIMIT)) { rows.opt(it) as? String }
+                .filterNotNull().map(String::trim).filter { it.validCopyGroupTerm() }.distinct()
+        }
+    }.getOrDefault(emptyList()))
+    internal val recentCopyGroupTerms = _recentCopyGroupTerms.asStateFlow()
+    private var confirmedCopyGroupKey: String? = null
     private var retainedBrowse: BrowseState? = null
     private var knownSearchTags = CopySearchTags
     private var genreDirectory = MangaGenreDirectory(emptyList())
@@ -576,6 +593,12 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     fun submitSearch() {
         val previous = _browse.value
+        if (previous.searchTarget == SearchTarget.TRANSLATION_GROUP && previous.query.isNotBlank()) {
+            confirmedCopyGroupKey = previous.cacheKey
+            rememberConfirmedCopyGroupResult(previous, previous.error == null && previous.items.any { it.sourceId == "copy" })
+            refresh()
+            return
+        }
         if (previous.searchTarget != SearchTarget.TAG || previous.query.isBlank()) {
             refresh()
             return
@@ -588,6 +611,61 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         cancelTagLookup()
         showBrowse(previous.copy(query = "", selectedTags = (previous.selectedTags + tag).distinctBy(MangaTag::path),
             items = emptyList(), page = 0, error = null, tagsError = null, tagsLoading = false))
+    }
+
+    internal fun chooseRecentCopyGroupTerm(term: String) {
+        val previous = _browse.value
+        if (previous.searchTarget != SearchTarget.TRANSLATION_GROUP || term !in _recentCopyGroupTerms.value ||
+            "copy" !in repository.enabledSources()) return
+        if (previous.query == term && previous.selectedTags.isEmpty()) {
+            if (previous.error == null && previous.items.any { it.sourceId == "copy" }) rememberCopyGroupTerm(previous)
+            else submitSearch()
+            return
+        }
+        cancelTagLookup()
+        showBrowse(BrowseState(query = term, searchTarget = SearchTarget.TRANSLATION_GROUP,
+            mode = previous.mode, period = previous.period, audience = previous.audience), confirmCopyGroupTerm = true)
+    }
+
+    internal fun noteCopyGroupResultOpened(manga: Manga) {
+        if (manga.sourceId != "copy") return
+        val current = _browse.value
+        if (current.searchTarget == SearchTarget.TRANSLATION_GROUP && current.items.any { it.id == manga.id && it.sourceId == "copy" })
+            rememberCopyGroupTerm(current)
+    }
+
+    internal fun clearRecentCopyGroupTerms() {
+        confirmedCopyGroupKey = null
+        saveRecentCopyGroupTerms(emptyList())
+    }
+
+    private fun rememberConfirmedCopyGroupResult(state: BrowseState, hasCopyMatch: Boolean) {
+        if (hasCopyMatch && confirmedCopyGroupKey == state.cacheKey) {
+            confirmedCopyGroupKey = null
+            rememberCopyGroupTerm(state)
+        }
+    }
+
+    private fun rememberCopyGroupTerm(state: BrowseState) {
+        val term = state.query.trim()
+        if (state.searchTarget != SearchTarget.TRANSLATION_GROUP || state.selectedTags.isNotEmpty() ||
+            !term.validCopyGroupTerm() || "copy" !in repository.enabledSources() ||
+            state.sourceScope != repository.sourceConfigurationKey(adult = false)) return
+        saveRecentCopyGroupTerms((listOf(term) + _recentCopyGroupTerms.value.filterNot { it == term })
+            .take(COPY_GROUP_RECENTS_LIMIT))
+    }
+
+    private fun saveRecentCopyGroupTerms(next: List<String>) {
+        if (next == _recentCopyGroupTerms.value) return
+        try {
+            val editor = copyGroupPreferences.edit()
+            if (next.isEmpty()) editor.remove(COPY_GROUP_RECENTS_KEY)
+            else editor.putString(COPY_GROUP_RECENTS_KEY, JSONArray(next).toString())
+            editor.apply()
+            _recentCopyGroupTerms.value = next
+        } catch (_: Exception) {
+            messages.trySend("汉化组搜索记录未能保存。")
+        }
     }
 
     fun toggleSearchTag(tag: MangaTag) {
@@ -832,7 +910,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             ?: background
     }
 
-    private fun showBrowse(selection: BrowseState, debounce: Boolean = false) {
+    private fun showBrowse(selection: BrowseState, debounce: Boolean = false, confirmCopyGroupTerm: Boolean = false) {
         val previous = _browse.value
         if (!previous.isSearch) retainedBrowse = previous
         browseJob?.cancel()
@@ -840,6 +918,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val generation = browseCache.generation
         val configured = selection.copy(sourceScope = repository.sourceConfigurationKey(adult = false),
             alignedTagSources = emptyMap()).withSearchTagDirectory().withCurrentTagBindings()
+        // Carry confirmation through this one selection only; live typing/search-mode changes retire it.
+        confirmedCopyGroupKey = configured.cacheKey.takeIf { confirmCopyGroupTerm }
         val memory = browseCache.cached(configured.cacheKey)
         _browse.value = memory?.restore(configured) ?: configured
         if (configured.searchTarget == SearchTarget.TAG) loadSearchTagDirectories()
@@ -859,6 +939,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                         ).withSearchTagDirectory()
                     }
                 }
+                if (confirmCopyGroupTerm) rememberConfirmedCopyGroupResult(configured, snapshot.items.any { it.sourceId == "copy" })
                 // Fresh selections need no request. Stale rankings refresh their complete
                 // loaded range atomically, so a saved deep position never sees page zero alone.
                 if (isFresh(snapshot.updatedAt, configured) && snapshot.searchSources.values.none { it.error != null }) return@launch
@@ -1012,6 +1093,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             }
             val current = _browse.value
             if (requestId == browseRequestId && current.cacheKey == state.cacheKey) {
+                if (current.searchTarget == SearchTarget.TRANSLATION_GROUP)
+                    rememberConfirmedCopyGroupResult(current, replacement.any { it.sourceId == "copy" })
                 val snapshot = BrowseSnapshot(current.cacheKey, current.items, current.page, current.hasMore, current.updatedAt)
                 browseCache.remember(snapshot, generation)
                 browseCache.write(snapshot, generation)

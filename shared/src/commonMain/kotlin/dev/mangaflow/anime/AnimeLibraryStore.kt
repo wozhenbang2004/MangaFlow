@@ -30,6 +30,12 @@ internal data class AnimeUndo(
     val expectedRevision: Long,
 )
 
+/** A native playback session's cumulative readings can arrive more than once or out of order. */
+internal class AnimeWatchTimeCursor(val subjectId: String, val restoreEpoch: Long, val clearedAt: Long?) {
+    // Advanced only by the atomic library writer, after a successful disk write.
+    var savedThroughMillis = 0L
+}
+
 internal data class AnimeLibraryState(
     val entries: Map<String, AnimeLibraryEntry> = emptyMap(),
     val bindings: List<AnimeSourceBinding> = emptyList(),
@@ -73,6 +79,10 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
     }
 
     suspend fun awaitLoaded() { ready.await() }
+
+    /** An empty state is evidence about saved ownership only after a successful initial read. */
+    fun loadedReadableSnapshot(): AnimeLibraryState? =
+        if (ready.isCompleted) state.value.takeUnless { it.readUnavailable } else null
 
     suspend fun awaitReady() {
         ready.await()
@@ -165,6 +175,25 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         }
     }
 
+    suspend fun recordVisibleWatchTime(cursor: AnimeWatchTimeCursor, observedThroughMillis: Long) {
+        awaitLoaded()
+        writer.withLock {
+            val before = mutableState.value
+            if (before.readUnavailable || before.restoreEpoch != cursor.restoreEpoch ||
+                before.clearedHistoryAt[cursor.subjectId] != cursor.clearedAt ||
+                observedThroughMillis <= cursor.savedThroughMillis) return@withLock
+            val entry = before.entries[cursor.subjectId] ?: return@withLock
+            val elapsed = observedThroughMillis - cursor.savedThroughMillis
+            val updated = entry.copy(visibleWatchMillis = entry.visibleWatchMillis +
+                minOf(elapsed, Long.MAX_VALUE - entry.visibleWatchMillis))
+            // Disk publication and cursor consumption must not separate on cancellation.
+            withContext(NonCancellable) {
+                persist(before.copy(entries = before.entries + (cursor.subjectId to updated)))
+                cursor.savedThroughMillis = observedThroughMillis
+            }
+        }
+    }
+
     suspend fun setTrackingTarget(subjectId: String, providerId: String, ownerId: String, remoteId: String,
         isCurrent: () -> Boolean = { true }) {
         awaitReady()
@@ -210,8 +239,11 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         check(isCurrent()) { "观看记录已变化，新的观看记录已保留。" }
         val entry = before.entries[subjectId] ?: return@update before
         val knownEpisodes = entry.completedEpisodeIds + listOfNotNull(entry.resume?.episodeId)
+        val previousClear = before.clearedHistoryAt[subjectId] ?: -1L
+        val now = wallTimeMillis()
+        val clearedAt = if (previousClear == Long.MAX_VALUE) now else maxOf(now, previousClear + 1L)
         before.copy(entries = if (removeEntry) before.entries - subjectId else before.entries +
-            (subjectId to entry.copy(resume = null, revision = entry.revision + 1, updatedAt = wallTimeMillis())),
+            (subjectId to entry.copy(resume = null, visibleWatchMillis = 0L, revision = entry.revision + 1, updatedAt = now)),
             progress = before.progress.filterValues { it.subjectId != subjectId &&
                 !(it.subjectId.isEmpty() && it.episodeId in knownEpisodes) },
             bindings = if (removeEntry) before.bindings.filterNot { it.subjectId == subjectId } else before.bindings,
@@ -219,7 +251,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
                 JSONObject(it).optString("subject") != subjectId
             } else before.trackingTargets,
             dismissedResume = before.dismissedResume - subjectId,
-            clearedHistoryAt = before.clearedHistoryAt + (subjectId to wallTimeMillis()),
+            clearedHistoryAt = before.clearedHistoryAt + (subjectId to clearedAt),
             undo = before.undo?.takeUnless { it.subjectId == subjectId })
     }
 
@@ -258,10 +290,10 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             val undo = before.undo ?: return@withLock false
             val current = before.entries[undo.subjectId] ?: return@withLock false
             if (current.revision != undo.expectedRevision) return@withLock false
-            // Position checkpoints belong to playback, not to the reviewed field/mapping edit.
+            // Position and viewing time belong to playback, not to the reviewed field/mapping edit.
             val restored = (undo.before ?: AnimeLibraryEntry(current.subject)).copy(
                 subject = current.subject, resume = current.resume, updatedAt = wallTimeMillis(),
-                revision = current.revision + 1L,
+                revision = current.revision + 1L, visibleWatchMillis = current.visibleWatchMillis,
             )
             persist(before.copy(entries = before.entries + (undo.subjectId to restored),
                 bindings = before.bindings.filterNot { it.subjectId == undo.subjectId } + undo.bindings,
@@ -375,6 +407,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("nativeMetadata", entry.nativeMetadata?.let(::encodeSubject))
         .put("metadataAutoMatchDisabled", entry.metadataAutoMatchDisabled)
         .put("catalogDetail", entry.catalogDetail?.let(AnimeDocumentCodec::detail))
+        .put("visibleWatchMillis", entry.visibleWatchMillis.takeIf { it > 0L })
 
     private fun decodeEntry(json: JSONObject) = AnimeLibraryEntry(
         subject = decodeSubject(json.getJSONObject("subject")),
@@ -389,6 +422,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             ?.takeIf { it.canonicalBangumiId() != null },
         metadataAutoMatchDisabled = json.optBoolean("metadataAutoMatchDisabled"),
         catalogDetail = json.optJSONObject("catalogDetail")?.let(AnimeDocumentCodec::detail),
+        visibleWatchMillis = json.optLong("visibleWatchMillis").coerceAtLeast(0L),
     ).also(::validateCatalogueEntry)
 
     private fun catalogueEpisodeKey(subject: AnimeSubject, episodeId: String): Boolean =

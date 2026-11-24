@@ -43,10 +43,12 @@ import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import coil3.decode.DataSource
 import coil3.request.CachePolicy
 import coil3.request.crossfade
 import coil3.size.Scale
 import dev.mangaflow.data.Page
+import dev.mangaflow.reader.ReaderPrefetchCacheRecovery
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlin.math.abs
@@ -154,17 +156,26 @@ internal fun PanelCamera(
 
     val preview = readerPreviewSize(viewport.width, viewport.height,
         maxWidthPx = budget.runtime.previewWidthPx, maxHeightPx = budget.runtime.previewHeightPx)
+    // Success must not rebuild the active model. A later resize can read the repaired entry.
+    val cacheRecovery = remember(cacheIdentity) { ReaderPrefetchCacheRecovery() }
     val request = remember(cacheIdentity, preview, context, transferObserver, bypassFailedCache) {
+        val bypass = bypassFailedCache && !cacheRecovery.recovered && page.url.startsWith("https:")
         readerPageRequest(context, page, headers, sourceId)
             .apply { transferObserver?.let { readerTransferProgress(it) } }
-            .apply { if (bypassFailedCache && page.url.startsWith("https:")) {
+            .apply { if (bypass) {
                 diskCachePolicy(CachePolicy.WRITE_ONLY)
                 memoryCachePolicy(CachePolicy.DISABLED)
             } }
             .size(preview.width, preview.height)
             .scale(Scale.FIT)
             .crossfade(false)
-            .listener(onError = { _, result -> failure = result.throwable.message ?: "原图暂时无法读取" })
+            .listener(
+                onSuccess = { _, result ->
+                    if (bypass && result.dataSource == DataSource.NETWORK && result.image.width > 0 && result.image.height > 0)
+                        cacheRecovery.recovered = true
+                },
+                onError = { _, result -> failure = result.throwable.message ?: "原图暂时无法读取" },
+            )
             .build()
     }
     Box(modifier.fillMaxSize().clipToBounds().onSizeChanged { viewport = it; viewportChanged(it) }

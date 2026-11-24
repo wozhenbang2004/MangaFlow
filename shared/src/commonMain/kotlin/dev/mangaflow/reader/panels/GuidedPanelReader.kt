@@ -27,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import dev.mangaflow.experience.*
+import dev.mangaflow.experience.readerPageCacheKey
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -60,6 +61,8 @@ import dev.mangaflow.reader.ReaderImageRecovery
 import dev.mangaflow.reader.ReaderLoadAttempt
 import dev.mangaflow.reader.ReaderPageResolver
 import dev.mangaflow.reader.ReaderPagePrefetch
+import dev.mangaflow.reader.ReaderPrefetchFailure
+import dev.mangaflow.reader.recordPrefetchFailure
 import dev.mangaflow.reader.LocalReaderPreparationTracker
 import dev.mangaflow.reader.LocalReaderPageRepair
 import dev.mangaflow.reader.ReaderPreparationWorkContext
@@ -100,7 +103,7 @@ internal fun GuidedPanelReader(
     headers: Map<String, String>,
     sourceId: String,
     prefetchRequests: MutableMap<Int, ReaderPagePrefetch>,
-    prefetchFailures: MutableMap<Int, String>,
+    prefetchFailures: MutableMap<Int, ReaderPrefetchFailure>,
     resolvePage: ReaderPageResolver,
     retryPage: ReaderPageResolver,
     observePageTransfer: (Page) -> Flow<DownloadProgress?>,
@@ -456,10 +459,17 @@ internal fun GuidedPanelReader(
     Box(Modifier.fillMaxSize()) {
         Box(Modifier.matchParentSize().then(artworkModifier)) {
             resource?.takeIf { attempt.acceptsResult && error == null }?.let { loaded -> key(attempt, loaded.url) {
+                // A late verdict or clearing the shared marker must not replace this camera's image.
+                val bypassRejectedOriginal = remember(loaded) {
+                    replacement == null && loaded.url.startsWith("https:") &&
+                        (prefetchFailures[pageIndex] as? ReaderPrefetchFailure.CachedOriginal)?.let {
+                            it.key == readerPageCacheKey(loaded, currentHeaders, currentSource)
+                        } == true
+                }
                 PanelCamera(
                     page = loaded, headers = currentHeaders, sourceId = currentSource, box = boxes[selected], overview = overview,
                     transferObserver = transferObserver,
-                    bypassFailedCache = replacement == null && prefetchFailures[pageIndex] != null && imageRetry == 0,
+                    bypassFailedCache = bypassRejectedOriginal,
                     onViewportChanged = { viewport = it },
                     active = active,
                     onTap = { x ->
@@ -517,7 +527,7 @@ internal fun GuidedPanelReader(
                             receivedBytes = it.receivedBytes, expectedBytes = it.expectedBytes)
                     },
                     stage = if (prefetchFailures[pageIndex] != null && transportProgress.receivedBytes == 0L)
-                        "预取发现异常 · 正在重新读取" else if (resource == null) "准备本页图片" else "载入本页图片",
+                        "预读未完成 · 正在载入本页" else if (resource == null) "准备本页图片" else "载入本页图片",
                     attempt = attempt, foreground = recoveryForeground, alternatives = sourceAlternatives,
                     readySourceVariants = readySourceVariants,
                     startedAt = waitClock,
@@ -603,9 +613,17 @@ internal fun GuidedPanelReader(
             (!imageReady || loading),
         recovered = { index -> prefetchFailures.remove(index) },
         failed = { index, failure ->
-            if (active && attempt.acceptsResult && index in pages.indices) {
-                prefetchFailures[index] = failure
-                pageFailed(pages[index])
+            if (active && index in pages.indices) {
+                if (attempt.acceptsResult) {
+                    prefetchFailures.recordPrefetchFailure(index, failure)
+                    pageFailed(pages[index])
+                } else if (attempt.stopped && replacement == null && index == pageIndex &&
+                    failure is ReaderPrefetchFailure.CachedOriginal && resource?.let { resolved ->
+                        resolved.url.startsWith("https:") && readerPageCacheKey(resolved, currentHeaders, currentSource) == failure.key
+                    } == true) {
+                    // Keep the exact local finding for a later manual retry, not a new load or fallback now.
+                    prefetchFailures.recordPrefetchFailure(index, failure)
+                }
             }
         })
 

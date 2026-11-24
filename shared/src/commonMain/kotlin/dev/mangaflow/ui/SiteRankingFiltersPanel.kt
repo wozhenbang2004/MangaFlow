@@ -2,9 +2,9 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -16,6 +16,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.RestartAlt
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -23,13 +24,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.paneTitle
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -38,7 +39,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.RankingSite
@@ -50,9 +50,7 @@ import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
-import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTextButton
-import dev.mangaflow.ui.motion.motionInputGate
 
 /** A retained draft inside the adopted PANEL; only Apply changes the active catalogue request. */
 @Composable
@@ -97,13 +95,15 @@ internal fun SiteRankingFiltersDialog(
                     .semantics { paneTitle = "榜单筛选与排序" }) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        ReviewSourceMark(preview.site.id, size = 17.dp)
-                        Column(Modifier.weight(1f).padding(start = 8.dp)) {
-                            Text("筛选与排序", style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Medium)
-                            Text(preview.site.title + " · " + preview.kind.label,
-                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text("筛选与排序", Modifier.semantics { heading() },
+                                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                ReviewSourceMark(preview.site.id, size = 14.dp)
+                                Text(preview.site.title, style = MaterialTheme.typography.labelSmall,
+                                    color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
                         }
                         MotionIconButton(onClick = dismiss, enabled = open,
                             modifier = Modifier.size(44.dp), tooltip = "关闭筛选，不应用修改") {
@@ -111,12 +111,11 @@ internal fun SiteRankingFiltersDialog(
                         }
                     }
                     Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll)
-                        .padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                            Text("排序", style = MaterialTheme.typography.labelMedium,
-                                color = colors.onSurfaceVariant)
+                        .padding(top = 12.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            RankingFilterHeading("排序")
                             val kinds = preview.availableKinds
-                            RankingFilterTabs(kinds.map { it.label },
+                            RankingFilterChoices(kinds.map { it.label },
                                 selected = kinds.indexOf(preview.kind).coerceAtLeast(0), enabled = open,
                                 onSelect = { draft = draft.copy(kind = kinds[it]) })
                             if (preview.site == RankingSite.BANGUMI && preview.filters.query.isNotBlank())
@@ -125,12 +124,12 @@ internal fun SiteRankingFiltersDialog(
                         }
 
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("范围", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                            RankingFilterHeading("作品范围")
                             val scopes = preview.availableScopes
-                            if (scopes.size > 1) RankingFilterTabs(scopes.map { it.label },
+                            if (scopes.size > 1) RankingFilterChoices(scopes.map { it.label },
                                 selected = scopes.indexOf(preview.scope).coerceAtLeast(0), enabled = open,
                                 onSelect = { draft = draft.copy(scope = scopes[it]) })
-                            else Text(preview.scopeLabel, Modifier.padding(vertical = 8.dp),
+                            else Text(preview.scopeLabel, Modifier.padding(vertical = 5.dp),
                                 style = MaterialTheme.typography.bodyMedium)
                             if (preview.site == RankingSite.BANGUMI && preview.usesBangumiSearch)
                                 Text("当前条件按漫画标签检索，不再限定系列或单行本",
@@ -138,14 +137,11 @@ internal fun SiteRankingFiltersDialog(
                         }
 
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("首发年份", style = MaterialTheme.typography.labelMedium,
-                                color = colors.onSurfaceVariant)
+                            RankingFilterHeading("首发年份")
                             val years = listOf<Int?>(null) + if (currentYear != null)
                                 listOf(currentYear, currentYear - 1, currentYear - 2) else emptyList()
-                            val yearLabels = if (currentYear != null) listOf("全部", "今年", "去年", "前年")
-                                else listOf("全部")
-                            RankingFilterTabs(yearLabels,
-                                selected = years.indexOf(draft.filters.year).coerceAtLeast(0),
+                            RankingFilterChoices(years.map { it?.toString() ?: "不限" },
+                                selected = years.indexOf(draft.filters.year),
                                 selectionVisible = yearValid && draft.filters.year in years,
                                 enabled = open, onSelect = { index ->
                                     val year = years[index]
@@ -192,27 +188,25 @@ internal fun SiteRankingFiltersDialog(
                                     }
                                 }
                             }
-                            Text(if (yearValid) "按首发年筛选，保留当前评分与热度" else "请输入 1900–3000 之间的年份",
+                            Text(when {
+                                !yearValid -> "请输入 1900–3000 之间的年份。"
+                                draft.site.supportsMonth && !preview.supportsMonth -> "选择年份后可再限定首发月份。"
+                                else -> "按作品首发年份筛选。"
+                            },
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (yearValid) colors.onSurfaceVariant else colors.error,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (draft.site.supportsMonth) {
-                                Text("月份", Modifier.padding(top = 8.dp),
-                                    style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                                RankingFilterTabs(listOf("全部") + (1..12).map { "${it}月" },
+                                color = if (yearValid) colors.onSurfaceVariant else colors.error)
+                            if (yearValid && preview.supportsMonth) {
+                                RankingFilterHeading("首发月份", Modifier.padding(top = 7.dp))
+                                RankingFilterChoices(listOf("不限") + (1..12).map { "${it}月" },
                                     selected = preview.filters.month ?: 0,
-                                    enabled = open && preview.supportsMonth, selectionVisible = preview.supportsMonth,
+                                    enabled = open,
                                     onSelect = { index -> changeFilters(draft.filters.copy(month = index.takeIf { it > 0 })) })
-                                Text(if (preview.supportsMonth) "限定该年内的首发月份" else "选择年份后可限定月份",
-                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
 
-
                         if (preview.supportsAdvancedFilters && preview.site.supportsQuery) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("关键词", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                                RankingFilterHeading("关键词")
                                 Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
                                     .background(colors.onSurface.copy(alpha = .045f)).padding(start = 12.dp),
                                     verticalAlignment = Alignment.CenterVertically) {
@@ -245,27 +239,14 @@ internal fun SiteRankingFiltersDialog(
 
                         if (preview.supportsAdvancedFilters && preview.site.supportsGenres) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("题材 · 可多选", style = MaterialTheme.typography.labelMedium,
-                                    color = colors.onSurfaceVariant)
-                                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                RankingFilterHeading("题材 · 可多选")
+                                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     SiteRankingGenre.entries.forEach { genre ->
                                         val chosen = genre.id in draft.filters.genres
-                                        MotionTextButton(onClick = {
+                                        RankingFilterChoice(genre.label, chosen, open, multiple = true) {
                                             changeFilters(draft.filters.copy(genres = if (chosen)
                                                 draft.filters.genres - genre.id else draft.filters.genres + genre.id))
-                                        }, enabled = open, modifier = Modifier.heightIn(min = 44.dp).semantics {
-                                            selected = chosen
-                                            stateDescription = if (chosen) "已选择" else "未选择"
-                                        }, colors = ButtonDefaults.textButtonColors(
-                                            containerColor = if (chosen) colors.onSurface.copy(alpha = .08f) else Color.Transparent,
-                                            contentColor = colors.onSurface),
-                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)) {
-                                            Box(Modifier.size(14.dp), contentAlignment = Alignment.Center) {
-                                                if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(13.dp))
-                                            }
-                                            Text(genre.label, Modifier.padding(start = 4.dp),
-                                                style = MaterialTheme.typography.bodySmall)
                                         }
                                     }
                                 }
@@ -274,29 +255,27 @@ internal fun SiteRankingFiltersDialog(
 
                         if (preview.site.supportsStatus) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("连载状态", style = MaterialTheme.typography.labelMedium,
-                                    color = colors.onSurfaceVariant)
+                                RankingFilterHeading("连载状态")
                                 val statuses = listOf<SiteRankingStatus?>(null) + SiteRankingStatus.entries
-                                RankingFilterTabs(statuses.map { it?.label ?: "全部" },
+                                RankingFilterChoices(statuses.map { it?.label ?: "不限" },
                                     selected = statuses.indexOfFirst { it?.id == draft.filters.status }.coerceAtLeast(0),
                                     enabled = open, onSelect = { changeFilters(draft.filters.copy(status = statuses[it]?.id)) })
                             }
                         }
                         if (preview.site.supportsCountry) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("地区", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                                RankingFilterHeading("地区")
                                 val countries = listOf(null, "JP", "KR", "CN", "TW")
-                                RankingFilterTabs(listOf("全部", "日本", "韩国", "中国", "台湾"),
+                                RankingFilterChoices(listOf("不限", "日本", "韩国", "中国", "台湾"),
                                     selected = countries.indexOf(draft.filters.country).coerceAtLeast(0), enabled = open,
                                     onSelect = { changeFilters(draft.filters.copy(country = countries[it])) })
                             }
                         }
                         if (preview.supportsAdvancedFilters && preview.site.supportsMinScore) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("最低评分 · 10 分制", style = MaterialTheme.typography.labelMedium,
-                                    color = colors.onSurfaceVariant)
+                                RankingFilterHeading("最低评分 · 10 分制")
                                 val scores = listOf(null, 6, 7, 8, 9)
-                                RankingFilterTabs(listOf("不限", "6+", "7+", "8+", "9+"),
+                                RankingFilterChoices(listOf("不限", "6+", "7+", "8+", "9+"),
                                     selected = scores.indexOf(draft.filters.minScore).coerceAtLeast(0), enabled = open,
                                     selectionVisible = draft.filters.minScore in scores,
                                     onSelect = { changeFilters(draft.filters.copy(minScore = scores[it])) })
@@ -304,40 +283,42 @@ internal fun SiteRankingFiltersDialog(
                         }
                         if (preview.supportsAdvancedFilters && preview.site.supportsMinVotes) {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("评分人数至少", style = MaterialTheme.typography.labelMedium,
-                                    color = colors.onSurfaceVariant)
+                                RankingFilterHeading("评分人数至少")
                                 val votes = listOf(null, 50, 100, 500, 1000)
-                                RankingFilterTabs(listOf("不限", "50", "100", "500", "1000"),
+                                RankingFilterChoices(listOf("不限", "50", "100", "500", "1000"),
                                     selected = votes.indexOf(draft.filters.minVotes).coerceAtLeast(0), enabled = open,
                                     selectionVisible = draft.filters.minVotes in votes,
                                     onSelect = { changeFilters(draft.filters.copy(minVotes = votes[it])) })
                             }
                         }
                     }
-                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
+                    HorizontalDivider(color = colors.onSurface.copy(alpha = .08f))
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween) {
                         MotionTextButton(onClick = {
                             draft = draft.copy(filters = SiteRankingFilters()).normalized()
                             yearText = ""
                             focus.clearFocus(force = true)
-                        }, enabled = open, modifier = Modifier.heightIn(min = 44.dp),
+                        }, enabled = open && (draft.filters != SiteRankingFilters() || yearText.isNotEmpty()),
+                            modifier = Modifier.weight(1f, fill = false).heightIn(min = 44.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp),
                             colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant)) {
                             Icon(Icons.Outlined.RestartAlt, null, Modifier.size(17.dp))
-                            Text("重置", Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodySmall)
+                            Text("清除条件", Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodySmall)
                         }
-                        Spacer(Modifier.weight(1f))
+                        Spacer(Modifier.width(8.dp))
                         MotionTextButton(onClick = {
                             focus.clearFocus(force = true)
                             onApply(preview)
                             onDismiss()
                         }, enabled = open && yearValid && preview.valid(),
-                            modifier = Modifier.heightIn(min = 44.dp),
+                            modifier = Modifier.weight(1f, fill = false).heightIn(min = 44.dp),
                             colors = ButtonDefaults.textButtonColors(
-                                containerColor = colors.onSurface.copy(alpha = .09f), contentColor = colors.onSurface),
+                                containerColor = colors.onSurface, contentColor = colors.surface),
                             contentPadding = PaddingValues(horizontal = 16.dp)) {
                             Icon(Icons.Outlined.Check, null, Modifier.size(18.dp))
-                            Text("查看结果", Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodyMedium,
+                            Text("应用筛选", Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Medium)
                         }
                     }
@@ -347,23 +328,47 @@ internal fun SiteRankingFiltersDialog(
     }
 }
 
-/** Compose the existing Ovio selector in a scrollable row; labels and hit regions stay fixed. */
 @Composable
-private fun RankingFilterTabs(
+private fun RankingFilterHeading(label: String, modifier: Modifier = Modifier) {
+    Text(label, modifier.semantics { heading() }, style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.Medium)
+}
+
+/** Adapt the existing SourceBrowseChoice pills: options wrap within the panel, not a second scroll axis. */
+@Composable
+private fun RankingFilterChoices(
     labels: List<String>,
     selected: Int,
     enabled: Boolean,
     onSelect: (Int) -> Unit,
     selectionVisible: Boolean = true,
 ) {
-    val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val width = maxWidth.coerceAtLeast(64.dp * scale * labels.size)
-        Box(Modifier.horizontalScroll(rememberScrollState(), enabled = enabled)) {
-            MotionTabs(selected, labels, onSelect = { if (enabled) onSelect(it) },
-                modifier = Modifier.width(width).motionInputGate(enabled),
-                controlHeight = 44.dp, fontSize = 12.sp, role = Role.RadioButton,
-                selectionVisible = selectionVisible)
+    FlowRow(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        labels.forEachIndexed { index, label ->
+            RankingFilterChoice(label, selectionVisible && index == selected, enabled) { onSelect(index) }
         }
+    }
+}
+
+@Composable
+private fun RankingFilterChoice(label: String, chosen: Boolean, enabled: Boolean,
+    multiple: Boolean = false, onSelect: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    MotionTextButton(onClick = onSelect, enabled = enabled,
+        modifier = Modifier.heightIn(min = 44.dp).semantics {
+            if (!multiple) role = Role.RadioButton
+            selected = chosen
+            stateDescription = if (chosen) "已选择" else "未选择"
+        }, shape = RoundedCornerShape(13.dp),
+        colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface,
+            containerColor = colors.onSurface.copy(alpha = if (chosen) .12f else .045f)),
+        contentPadding = PaddingValues(horizontal = 9.dp, vertical = 7.dp)) {
+        Box(Modifier.size(13.dp), contentAlignment = Alignment.Center) {
+            if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(13.dp))
+        }
+        Text(label, Modifier.padding(start = 4.dp), style = MaterialTheme.typography.bodySmall,
+            fontWeight = if (chosen) FontWeight.Medium else FontWeight.Normal, maxLines = 2,
+            overflow = TextOverflow.Ellipsis)
     }
 }

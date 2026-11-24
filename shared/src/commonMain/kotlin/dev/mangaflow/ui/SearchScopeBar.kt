@@ -29,12 +29,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -43,11 +45,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.PersonOutline
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Translate
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -59,6 +63,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.Dp
@@ -299,6 +304,42 @@ private fun simplifiedTagQuery(value: String): String = value.map { character ->
         else -> character
     }
 }.joinToString("")
+
+/** These are past queries, not a translator catalogue or a multi-select theme filter. */
+@Composable
+internal fun RecentCopyGroupSearches(terms: List<String>, query: String, onChoose: ((String) -> Unit)?, onClear: (() -> Unit)?) {
+    val colors = MaterialTheme.colorScheme
+    if (onChoose == null || terms.isEmpty()) {
+        Text(if (onChoose == null) "启用拷贝来源后可搜索汉化组。"
+            else "输入组名，提交搜索或打开匹配作品后，即可再次点选。",
+            Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        return
+    }
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focus = LocalFocusManager.current
+    Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("最近搜过", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
+                color = colors.onSurfaceVariant)
+            if (onClear != null) MotionIconButton(onClick = onClear, modifier = Modifier.size(44.dp), tooltip = "清除最近搜过的汉化组") {
+                Icon(Icons.Outlined.DeleteOutline, "清除最近搜过的汉化组", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+            }
+        }
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            terms.forEach { term ->
+                val current = term == query.trim()
+                MotionTextButton(onClick = { keyboard?.hide(); focus.clearFocus(force = true); onChoose(term) },
+                    modifier = Modifier.widthIn(max = 200.dp).semantics { selected = current }, shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.textButtonColors(containerColor = colors.onSurface.copy(alpha = if (current) .09f else .035f),
+                        contentColor = colors.onSurface), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp)) {
+                    Text(term, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun SearchTagChoice(tag: MangaTag, selected: Boolean, remove: Boolean = false,

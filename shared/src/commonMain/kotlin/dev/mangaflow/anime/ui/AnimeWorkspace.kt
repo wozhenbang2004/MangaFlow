@@ -73,7 +73,6 @@ private enum class AnimeWorkspacePage(val discovery: AnimeDiscoveryTab? = null) 
     CALENDAR(AnimeDiscoveryTab.CALENDAR), RANKING(AnimeDiscoveryTab.RANKING),
     GENRES(AnimeDiscoveryTab.GENRES), LIBRARY,
 }
-private enum class AnimeWorkspaceTool { SOURCES, RECENT }
 private enum class AnimeWorkspacePane { DISCOVERY, DIRECTORY, LIBRARY }
 
 /** The root owns one controller/player. Pane identity never follows the player's ticking position. */
@@ -168,7 +167,7 @@ private fun AnimeWorkspaceContent(
     var toolsVisible by remember { mutableStateOf(false) }
     var toolsPresent by remember { mutableStateOf(false) }
     var layoutPresent by remember { mutableStateOf(false) }
-    var pendingTool by remember { mutableStateOf<AnimeWorkspaceTool?>(null) }
+    var pendingSourceManager by remember { mutableStateOf(false) }
     var sourcesVisible by remember { mutableStateOf(false) }
     var sourcesOverVideo by remember { mutableStateOf(false) }
     var sourceManagerVisible by remember { mutableStateOf(false) }
@@ -225,7 +224,7 @@ private fun AnimeWorkspaceContent(
     LaunchedEffect(active, route.key, page, directoryOpen) {
         searchVersionChoice = null
         toolsVisible = false
-        pendingTool = null
+        pendingSourceManager = false
         recentWatchingOpen = false
         pendingRecentEntry = null
         actionSubject = null
@@ -270,7 +269,7 @@ private fun AnimeWorkspaceContent(
             returnToSearch = false
             detailHistory.clear()
             toolsVisible = false
-            pendingTool = null
+            pendingSourceManager = false
             sourcesVisible = false
             sourceManagerVisible = false
             downloadsVisible = false
@@ -289,7 +288,7 @@ private fun AnimeWorkspaceContent(
             controller.closePlayback()
             controller.closeDetail()
             toolsVisible = false
-            pendingTool = null
+            pendingSourceManager = false
             sourcesVisible = false
             sourceManagerVisible = false
             downloadsVisible = false
@@ -529,7 +528,7 @@ private fun AnimeWorkspaceContent(
     }
     fun back() {
         when {
-            toolsVisible -> { toolsVisible = false; pendingTool = null }
+            toolsVisible -> { toolsVisible = false; pendingSourceManager = false }
             sourceManagerVisible -> sourceManagerVisible = false
             downloadsVisible -> downloadsVisible = false
             sourcesVisible -> dismissSources()
@@ -550,25 +549,12 @@ private fun AnimeWorkspaceContent(
         }
     }
 
-    fun queueTool(tool: AnimeWorkspaceTool) {
-        pendingTool = tool
-        toolsVisible = false
-    }
-
     fun finishToolMenu(present: Boolean) {
         toolsPresent = present
         if (present) return
-        val next = pendingTool
-        pendingTool = null
-        if (!active || route.depth != 0 || searchExpanded) return
-        when (next) {
-            AnimeWorkspaceTool.SOURCES -> sourceManagerVisible = true
-            AnimeWorkspaceTool.RECENT -> {
-                pendingRecentEntry = null
-                recentWatchingOpen = true
-            }
-            null -> Unit
-        }
+        val openSourceManager = pendingSourceManager
+        pendingSourceManager = false
+        if (openSourceManager && active && route.depth == 0 && !searchExpanded) sourceManagerVisible = true
     }
 
     LaunchedEffect(navigationRequest, active) {
@@ -587,7 +573,7 @@ private fun AnimeWorkspaceContent(
         returnToSearch = false
         detailHistory.clear()
         toolsVisible = false
-        pendingTool = null
+        pendingSourceManager = false
         sourcesVisible = false
         sourceManagerVisible = false
         downloadsVisible = false
@@ -680,7 +666,7 @@ private fun AnimeWorkspaceContent(
                             val hasLayoutControl = tab == 0 || directoryOpen
                             val layoutInMenu = hasLayoutControl && platformKind != PlatformKind.DESKTOP &&
                                 maxWidth < 440.dp * fontScale
-                            val actionsWidth = if (hasLayoutControl && !layoutInMenu) 132.dp else 88.dp
+                            val actionsWidth = if (hasLayoutControl && !layoutInMenu) 176.dp else 132.dp
                             val headerRoom = maxWidth - 16.dp - actionsWidth - if (navigationVisible) 56.dp else 6.dp
                             val tabsWidth = headerRoom.coerceIn(150.dp * fontScale, 240.dp * fontScale)
                             val stackDesktopTabs = workspaceTabs && !navigationVisible && headerRoom < tabsWidth
@@ -740,13 +726,13 @@ private fun AnimeWorkspaceContent(
                                                 onChange = controller::setDiscoveryColumns,
                                                 onPresenceChange = { layoutPresent = it })
                                             Box {
-                                                MotionIconButton(onClick = { pendingTool = null; toolsVisible = !toolsVisible },
+                                                MotionIconButton(onClick = { pendingSourceManager = false; toolsVisible = !toolsVisible },
                                                     modifier = Modifier.size(44.dp), enabled = !layoutPresent && (toolsVisible || !toolsPresent),
                                                     tooltip = "番剧菜单") {
                                                     Icon(Icons.Outlined.MoreHoriz, "番剧菜单", Modifier.size(21.dp))
                                                 }
                                                 CompactGlassPopover(toolsVisible, backdrop,
-                                                    onDismiss = { toolsVisible = false; pendingTool = null },
+                                                    onDismiss = { toolsVisible = false; pendingSourceManager = false },
                                                     onPresenceChange = ::finishToolMenu) {
                                                     if (layoutInMenu) {
                                                         val layoutLabel = when {
@@ -774,24 +760,32 @@ private fun AnimeWorkspaceContent(
                                                         CompactMenuAction(Icons.Outlined.Public, "片源目录",
                                                             onClick = { toolsVisible = false; openDirectory() })
                                                     }
-                                                    if (state.library.any { it.resume != null } || state.libraryReadUnavailable)
-                                                        CompactMenuAction(Icons.Outlined.History, "最近观看",
-                                                            onClick = { queueTool(AnimeWorkspaceTool.RECENT) })
                                                     if (tab == 0 || directoryOpen)
                                                         CompactMenuAction(Icons.Outlined.Refresh, "刷新当前栏目",
                                                             enabled = if (directoryOpen) !sourceBrowseState.loading && !sourceBrowseState.homeLoading
                                                                 else state.discoveryFeeds[animeDiscoveryFeedKey(state.discoveryTab)]?.loading != true,
                                                             onClick = {
-                                                                pendingTool = null
+                                                                pendingSourceManager = false
                                                                 toolsVisible = false
                                                                 if (directoryOpen) controller.sourceBrowse.refresh() else controller.refreshDiscovery()
                                                             })
-                                                    CompactMenuAction(Icons.Outlined.Tune, "管理片源",
-                                                        onClick = { queueTool(AnimeWorkspaceTool.SOURCES) })
+                                                    CompactMenuAction(Icons.Outlined.Tune, "管理片源", onClick = {
+                                                        pendingSourceManager = true
+                                                        toolsVisible = false
+                                                    })
                                                     if (state.canUndo) CompactMenuAction(Icons.Outlined.Undo, "撤销上次修改",
                                                         onClick = { toolsVisible = false; controller.undo() })
                                                 }
                                             }
+                                            MotionIconButton(modifier = Modifier.size(44.dp), enabled = rootActive,
+                                                tooltip = "观看历史", onClick = {
+                                                    pendingRecentEntry = null
+                                                    recentWatchingOpen = true
+                                                }) {
+                                                HistoryActionIcon(active = recentWatchingOpen, description = "观看历史",
+                                                    modifier = Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurface)
+                                            }
+                                            // The rightmost slot matches ExpandingSearchBar's overlaid trigger.
                                             Spacer(Modifier.size(44.dp))
                                         }
                                     }))
@@ -811,8 +805,8 @@ private fun AnimeWorkspaceContent(
                                     AnimeWorkspacePane.DISCOVERY -> AnimeDiscovery(state, controller, backdrop, discoveryScrolls,
                                         onOpenItem = ::openDiscoveryItem,
                                         onManage = ::showWorkActions, active = paneActive,
-                                        onResume = ::resume, onWatchHistory = { selectLibrary(history = true) },
-                                        contentTopPadding = headerInset)
+                                        onResume = ::resume, contentTopPadding = headerInset,
+                                        contentBottomPadding = 32.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding())
                                     AnimeWorkspacePane.DIRECTORY -> Box(Modifier.fillMaxSize()
                                         .padding(top = headerInset).mangaHazeSource(backdrop)) {
                                         AnimeSourceBrowsePane(controller, backdrop, discoveryScrolls,

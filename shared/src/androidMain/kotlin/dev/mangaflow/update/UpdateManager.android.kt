@@ -30,14 +30,17 @@ import dev.mangaflow.net.openDownloadConnection
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.net.URL
+import java.security.DigestInputStream
 import java.security.MessageDigest
 import java.security.Signature
 import java.security.cert.CertificateFactory
@@ -55,6 +58,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -149,14 +153,16 @@ actual class UpdateManager private constructor(private val context: Context) {
                         throw failure
                     }
                     val ready = readyFile(release)
-                    val cached = ready.isFile && runCatching { validateApk(ready, release) }.isSuccess
-                    val delta = if (cached) null else installedBase(manifest, current)?.first
+                    val pending = pendingInstallRequest()?.takeIf { it.versionCode == release.versionCode }
+                    val cached = pending == null && ready.isFile && runCatching { validateApk(ready, release) }.isSuccess
+                    val delta = if (cached || pending != null) null else installedBase(manifest, current)?.first
                     _state.value = UpdateState(
-                        phase = if (cached) UpdatePhase.READY else UpdatePhase.AVAILABLE,
+                        phase = if (cached || pending != null) UpdatePhase.READY else UpdatePhase.AVAILABLE,
                         release = release,
                         downloaded = if (cached) release.bytes else 0,
                         total = delta?.bytes ?: release.bytes,
                         message = when {
+                            pending != null -> installationMessage(release.versionCode, "还有一个系统安装请求，可继续处理")
                             cached -> installationMessage(release.versionCode, "新版本已下载，可继续安装")
                             delta != null -> "发现新版本 ${release.versionName} · 增量更新"
                             else -> "发现新版本 ${release.versionName}"
@@ -462,45 +468,114 @@ actual class UpdateManager private constructor(private val context: Context) {
         if (_state.value.phase != UpdatePhase.READY || !operation.compareAndSet(false, true)) return
         scope.launch {
             try {
-                val previous = preferences.getInt("install_session", -1)
-                if (previous >= 0 && preferences.getLong("install_version", -1) != expected.versionCode &&
-                    context.packageManager.packageInstaller.getSessionInfo(previous) != null) {
-                    withContext(Dispatchers.Main) {
-                        if (!activity.isFinishing && !activity.isDestroyed) {
-                            activity.startActivity(Intent(activity, UpdateInstallActivity::class.java)
-                                .putExtra("session_id", previous)
-                                .putExtra("install_token", preferences.getString("install_token", ""))
-                                .putExtra("recover_only", true))
-                        }
-                    }
-                    return@launch
-                }
-                val release = verifyManifest(envelopeFor(expected))
-                val apk = readyFile(release)
-                validateApk(apk, release)
-                withContext(Dispatchers.Main) {
-                    if (activity.isFinishing || activity.isDestroyed) return@withContext
-                    if (!context.packageManager.canRequestPackageInstalls()) {
-                        _state.value = _state.value.copy(message = "请允许漫流安装应用，返回后再次点击安装")
-                        activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
-                    } else {
-                        // Session owns its copy; cache cleanup cannot revoke the installer's APK.
-                        val sessionId = withContext(Dispatchers.IO) { prepareInstallSession(apk, release) }
-                        if (activity.isFinishing || activity.isDestroyed) {
-                            _state.value = _state.value.copy(message = "安装包已准备好，请返回应用后继续安装")
-                            return@withContext
-                        }
-                        activity.startActivity(Intent(activity, UpdateInstallActivity::class.java)
-                            .putExtra("session_id", sessionId)
-                            .putExtra("install_token", preferences.getString("install_token", "")))
-                        _state.value = _state.value.copy(message = "等待系统安装确认；安装结果将在此保留")
-                    }
-                }
+                installRelease(activity, expected)
             } catch (failure: Exception) {
-                _state.value = _state.value.copy(message = failure.message ?: "无法打开安装程序，请重试")
+                _state.update { state ->
+                    if (state.phase == UpdatePhase.READY && state.release == expected)
+                        state.copy(message = failure.message ?: "无法打开安装程序，请重试") else state
+                }
             } finally {
                 operation.set(false)
             }
+        }
+    }
+
+    private suspend fun installRelease(activity: Activity, expected: AppRelease) {
+        try {
+            val previous = pendingInstallRequest()
+            if (previous != null && previous.versionCode != expected.versionCode) {
+                withContext(Dispatchers.Main) {
+                    showInstallRequest(activity, previous.id, previous.token, recoverOnly = true)
+                }
+                return
+            }
+            val release = verifyManifest(envelopeFor(expected))
+            val current = installed()
+            if (versionCode(current) >= release.versionCode) {
+                replaceInstallReadyState(expected, current)
+                return
+            }
+            if (previous?.sha256 != null && previous.sha256 != release.sha256) {
+                withContext(Dispatchers.Main) {
+                    showInstallRequest(activity, previous.id, previous.token, recoverOnly = true, cancelOnly = true)
+                }
+                return
+            }
+            val staged = previous?.takeIf { it.sha256 == release.sha256 }
+            val apk = readyFile(release)
+            if (staged == null) validateApk(apk, release)
+            withContext(Dispatchers.Main) {
+                if (activity.isFinishing || activity.isDestroyed) return@withContext
+                if (!context.packageManager.canRequestPackageInstalls()) {
+                    _state.value = _state.value.copy(message = "请允许漫流安装应用，返回后再次点击安装")
+                    activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
+                } else {
+                    // Session owns its copy; cache cleanup cannot revoke the installer's APK.
+                    val sessionId = staged?.id ?: withContext(Dispatchers.IO) { prepareInstallSession(apk, release) }
+                    if (activity.isFinishing || activity.isDestroyed) {
+                        _state.value = _state.value.copy(message = "安装包已准备好，请返回应用后继续安装")
+                        return@withContext
+                    }
+                    val token = staged?.token ?: preferences.getString("install_token", "").orEmpty()
+                    if (showInstallRequest(activity, sessionId, token) && previous == null) {
+                        _state.update { state ->
+                            if (state.phase == UpdatePhase.READY && state.release == expected)
+                                state.copy(message = "等待系统安装确认；安装结果将在此保留") else state
+                        }
+                    }
+                }
+            }
+        } catch (unusable: UnusableApkBytes) {
+            val previous = pendingInstallRequest()?.takeIf { it.versionCode == expected.versionCode }
+            if (previous != null) {
+                // A sealed session can only continue its original system confirmation.
+                // An unverified legacy copy must not be committed from this entry.
+                withContext(Dispatchers.Main) {
+                    showInstallRequest(activity, previous.id, previous.token,
+                        recoverOnly = true, cancelOnly = !previous.sealed)
+                }
+            } else replaceInstallReadyState(expected, installed(), unusable.message)
+        }
+    }
+
+    private data class OwnedInstallRequest(
+        val id: Int, val token: String, val versionCode: Long, val sha256: String?, val sealed: Boolean,
+    )
+
+    private fun pendingInstallRequest(): OwnedInstallRequest? {
+        val request = synchronized(installLock) {
+            val id = preferences.getInt("install_session", -1)
+            val token = preferences.getString("install_token", "").orEmpty()
+            val code = preferences.getLong("install_version", -1)
+            if (!ownsInstallSession(id, token) || code <= 0 || preferences.getInt("install_status", -1) >= 0) return null
+            OwnedInstallRequest(id, token, code, preferences.getString("install_sha256", null), sealed = false)
+        }
+        val session = context.packageManager.packageInstaller.getSessionInfo(request.id) ?: return null
+        if (session.installerPackageName != context.packageName || session.appPackageName != context.packageName) return null
+        return synchronized(installLock) {
+            request.copy(sealed = session.isSealed).takeIf {
+                ownsInstallSession(it.id, it.token) && preferences.getInt("install_status", -1) < 0
+            }
+        }
+    }
+
+    private fun showInstallRequest(activity: Activity, id: Int, token: String,
+        recoverOnly: Boolean = false, cancelOnly: Boolean = false): Boolean {
+        if (activity.isFinishing || activity.isDestroyed || installRequestTerminal(id, token)) return false
+        activity.startActivity(Intent(activity, UpdateInstallActivity::class.java)
+            .putExtra("session_id", id).putExtra("install_token", token)
+            .putExtra("recover_only", recoverOnly).putExtra("cancel_only", cancelOnly))
+        return true
+    }
+
+    private fun replaceInstallReadyState(expected: AppRelease, current: PackageInfo, unusable: String? = null) {
+        _state.update { state ->
+            if (state.phase != UpdatePhase.READY || state.release != expected) state
+            else if (versionCode(current) >= expected.versionCode)
+                UpdateState(UpdatePhase.CURRENT, message = "当前已安装 ${current.versionName}", lastChecked = state.lastChecked)
+            else if (unusable != null) state.copy(phase = UpdatePhase.AVAILABLE, downloaded = 0,
+                total = expected.bytes, message = unusable)
+            else state
         }
     }
 
@@ -514,19 +589,32 @@ actual class UpdateManager private constructor(private val context: Context) {
             require(preferences.getLong("install_version", -1) == release.versionCode) {
                 "另一个版本仍在系统安装器中，请先完成或取消它"
             }
+            require(!installRequestTerminal(previous, previousIdentity.second)) {
+                "系统正在处理上次安装请求的结果，请稍后重试"
+            }
             return previous
         }
         if (previous >= 0) clearInstallConfirmation(previous, previousIdentity.second)
+        // Session allocation may make Android reclaim our cache. Pin the source file
+        // before that allocation and verify the exact bytes flowing to the session.
+        return openUpdateApk(apk).use { input -> stageInstallSession(installer, input, release, previousIdentity) }
+    }
+
+    private fun stageInstallSession(installer: PackageInstaller, input: InputStream, release: AppRelease,
+        previousIdentity: Pair<Int, String>): Int {
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(context.packageName)
-            setSize(apk.length())
+            setSize(release.bytes)
             if (Build.VERSION.SDK_INT >= 31) setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_REQUIRED)
         }
         val id = installer.createSession(params)
         try {
             installer.openSession(id).use { session ->
-                session.openWrite("base.apk", 0, apk.length()).use { output ->
-                    apk.inputStream().use { it.copyTo(output) }
+                session.openWrite("base.apk", 0, release.bytes).use { output ->
+                    val digest = MessageDigest.getInstance("SHA-256")
+                    val copied = DigestInputStream(input, digest).copyTo(output)
+                    if (copied != release.bytes || digest.digest().hex() != release.sha256)
+                        throw UnusableApkBytes("安装包复制时校验不一致，请重新下载")
                     session.fsync(output)
                 }
             }
@@ -538,6 +626,7 @@ actual class UpdateManager private constructor(private val context: Context) {
                 check(preferences.edit().putInt("install_session", id)
                     .putString("install_token", UUID.randomUUID().toString())
                     .putLong("install_version", release.versionCode).remove("install_status")
+                    .putString("install_sha256", release.sha256)
                     .putString("install_result", "等待系统安装确认")
                     .putLong("install_result_version", release.versionCode).commit()) { "无法保存安装会话，请重试" }
                 installationNotice = null
@@ -745,14 +834,17 @@ actual class UpdateManager private constructor(private val context: Context) {
                 return
             }
             val ready = readyFile(release)
-            val valid = ready.isFile && runCatching { validateApk(ready, release) }.isSuccess
+            val pending = pendingInstallRequest()?.takeIf { it.versionCode == release.versionCode }
+            val valid = pending == null && ready.isFile && runCatching { validateApk(ready, release) }.isSuccess
             val ownedTask = task?.takeIf { it.payload.optString("sha256") == release.sha256 }
             _state.value = _state.value.copy(
-                phase = if (valid) UpdatePhase.READY else if (ownedTask?.resumable == true) UpdatePhase.DOWNLOADING else UpdatePhase.AVAILABLE,
+                phase = if (valid || pending != null) UpdatePhase.READY else if (ownedTask?.resumable == true) UpdatePhase.DOWNLOADING else UpdatePhase.AVAILABLE,
                 release = release,
                 total = release.bytes,
                 downloaded = if (valid) release.bytes else 0,
-                message = if (valid) installationMessage(release.versionCode, "新版本已下载，可继续安装") else ownedTask?.message?.takeIf { it.isNotBlank() }
+                message = if (pending != null) installationMessage(release.versionCode, "还有一个系统安装请求，可继续处理")
+                    else if (valid) installationMessage(release.versionCode, "新版本已下载，可继续安装")
+                    else ownedTask?.message?.takeIf { it.isNotBlank() }
                     ?: if (ownedTask?.resumable == true) "等待系统恢复后台下载" else "发现新版本 ${release.versionName}",
             )
         } catch (_: Exception) {
@@ -842,10 +934,24 @@ actual class UpdateManager private constructor(private val context: Context) {
         return VerifiedManifest(release, deltas)
     }
 
+    private class UnusableApkBytes(message: String) : IOException(message)
+
+    private fun openUpdateApk(file: File) = try {
+        file.inputStream()
+    } catch (failure: FileNotFoundException) {
+        if (!file.isFile) throw UnusableApkBytes("已下载的安装包不再可用，请重新下载")
+        throw failure
+    }
+
     private fun validateApk(file: File, release: AppRelease) {
-        require(file.isFile && file.length() == release.bytes) { "安装包不完整，请重新下载" }
-        require(sha256(file) == release.sha256) { "安装包摘要不匹配，请重新下载" }
-        val candidate = context.packageManager.getPackageArchiveInfo(file.absolutePath, signatureFlags()) ?: throw IOException("无法读取安装包")
+        if (!file.isFile) throw UnusableApkBytes("已下载的安装包不再可用，请重新下载")
+        if (file.length() != release.bytes) throw UnusableApkBytes("安装包不完整，请重新下载")
+        if (openUpdateApk(file).use { sha256(it) } != release.sha256)
+            throw UnusableApkBytes("安装包摘要不匹配，请重新下载")
+        val candidate = context.packageManager.getPackageArchiveInfo(file.absolutePath, signatureFlags()) ?: run {
+            if (!file.isFile) throw UnusableApkBytes("已下载的安装包不再可用，请重新下载")
+            throw IOException("无法读取安装包")
+        }
         val current = installed()
         require(candidate.packageName == context.packageName && versionCode(candidate) == release.versionCode && candidate.versionName == release.versionName) { "安装包版本或应用身份不匹配" }
         val candidateVersion = versionCode(candidate)
@@ -873,18 +979,20 @@ actual class UpdateManager private constructor(private val context: Context) {
 
     private fun readyFile(release: AppRelease): File = File(root, release.sha256 + ".apk")
 
-    private fun sha256(file: File): String {
+    private fun sha256(file: File): String = file.inputStream().use { sha256(it) }
+
+    private fun sha256(input: InputStream): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { input ->
-            val buffer = ByteArray(64 * 1024)
-            while (true) {
-                val read = input.read(buffer)
-                if (read < 0) break
-                digest.update(buffer, 0, read)
-            }
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            digest.update(buffer, 0, read)
         }
-        return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return digest.digest().hex()
     }
+
+    private fun ByteArray.hex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     private fun readBytes(url: String, limit: Int, route: DownloadRouteSnapshot): ByteArray {
         val active = open(url, route = route)

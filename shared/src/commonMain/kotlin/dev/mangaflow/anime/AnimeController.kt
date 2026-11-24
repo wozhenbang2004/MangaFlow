@@ -89,6 +89,7 @@ private const val ANIME_STARTUP_HEDGE_DELAY_MS = 650L
 private const val ANIME_AUTO_LINE_LIMIT = 10
 private const val ANIME_EARLY_PLAYBACK_MS = 10_000L
 private const val ANIME_STANDBY_LIFETIME_MS = 15_000L
+private const val ANIME_WATCH_CHECKPOINT_MS = 15_000L
 
 /** Application-owned data and playback. Screens keep only disclosure, drafts and scroll state. */
 class AnimeController(private val context: PlatformContext, private val scope: CoroutineScope,
@@ -152,6 +153,21 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private var playerInstance: AnimePlayer? = null
     /** Diagnostic reads must never create a native player or start an anime session. */
     fun peekNativeVideoStatistics(): AnimeNativeVideoStatistics? = playerInstance?.state?.value?.nativeVideoStatistics
+
+    /** The UI and native player flows can publish in different orders during a line or asset change. */
+    internal fun ownsVideoReadout(subjectId: String, snapshot: AnimePlayerState): Boolean {
+        val owner = active ?: return false
+        val current = playerInstance?.state?.value ?: return false
+        val screen = mutableState.value
+        return owner.detail.subject.id == subjectId && screen.detail?.subject?.id == subjectId &&
+            screen.selectedEpisodeId == owner.episode.id &&
+            !screen.resolving && screen.playbackTarget == null && screen.pendingPlayback == null &&
+            owner.libraryEpoch == library.state.value.restoreEpoch && belongsTo(owner, snapshot) &&
+            belongsTo(owner, current) && current.timelineGeneration == snapshot.timelineGeneration &&
+            current.isPlaying && !current.inPictureInPicture && !current.playbackSuppressed && current.firstFrameRendered != false &&
+            current.hasVideoTracks != false
+    }
+
     private val mutablePlaybackPhase = MutableStateFlow(AnimePlayerPhase.IDLE)
     internal val playbackPhase = mutablePlaybackPhase.asStateFlow()
     val player: AnimePlayer
@@ -306,6 +322,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val playerGeneration: Long,
         val libraryEpoch: Long,
         val openedAt: Long,
+        val watchTime: AnimeWatchTimeCursor,
+        var requestedWatchMillis: Long = 0L,
         val intent: PlaybackIntentTiming? = null,
         val sourceRevision: String? = null,
         val localMedia: AnimeLocalMedia? = null,
@@ -698,11 +716,21 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             searchTerm = query)
     }
 
-    /** Open a unique exact source hit directly. A saved canonical entry owns its existing history. */
+    /** A saved work keeps its owner; a new, independently covered catalogue need not wait for one provider. */
     internal fun searchOpeningReference(group: AnimeSearchGroup): AnimeSourceTitle? {
-        if (group.subject?.id?.let { it in library.state.value.entries } == true) return null
-        return currentVideoCandidates(group.sources).groupBy { it.sourceId }.values.mapNotNull { it.singleOrNull() }
-            .minByOrNull { searchSourceOrder(it.sourceId) }
+        val subject = group.subject
+        val loadedLibrary = library.loadedReadableSnapshot()
+        val entries = (loadedLibrary ?: library.state.value).entries
+        if (subject != null && subject.id in entries) return null
+        val uniqueHits = currentVideoCandidates(group.sources).groupBy { it.sourceId }.values
+            .mapNotNull { it.singleOrNull() }
+        val direct = uniqueHits.minByOrNull { searchSourceOrder(it.sourceId) } ?: return null
+        // The card alone is not evidence. If two different providers have strict
+        // same-work hits, the existing canonical detail can verify their native
+        // catalogues independently instead of pinning this click to the first one.
+        if (loadedLibrary != null && subject != null && subject.canonicalDoubanId() != null &&
+            sourceSubject(direct).id !in entries && uniqueHits.count { autoPlaySubjectMatches(subject, it) } >= 2) return null
+        return direct
     }
 
     internal fun currentVideoCandidates(candidates: List<AnimeSourceTitle>): List<AnimeSourceTitle> =
@@ -3977,7 +4005,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             // Use the latest seek and pause state at the handoff.
             oldSnapshot
         } else null
-        if (old != null) savePlaybackAtHandoff(old, oldSnapshot)
+        if (old != null) {
+            savePlaybackAtHandoff(old, oldSnapshot)
+            checkpointWatchTime(old, oldSnapshot, force = true)
+        }
         if (rememberPrevious && old != null && old.detail.subject.id == choice.detail.subject.id &&
             belongsTo(old, oldSnapshot) && oldSnapshot.phase == AnimePlayerPhase.READY && hasPlaybackOutput(oldSnapshot))
             rollback = PlaybackReceipt(old, oldSnapshot.positionMs, oldSnapshot.playWhenReady)
@@ -3991,9 +4022,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val labelledAsset = choice.asset.copy(subjectId = choice.detail.subject.id,
             subjectTitle = choice.detail.subject.title, episodeTitle = choice.episode.title)
         val healthNetwork = playbackNetworkClass().takeIf { choice.localMedia == null && choice.resolutionId == null }
+        val libraryState = library.state.value
         active = ActivePlayback(choice.detail, choice.episode, choice.option, labelledAsset,
-            nextEpoch, engine.state.value.sessionGeneration + 1, library.state.value.restoreEpoch,
+            nextEpoch, engine.state.value.sessionGeneration + 1, libraryState.restoreEpoch,
             openedAt = monotonicTimeMillis(),
+            watchTime = AnimeWatchTimeCursor(choice.detail.subject.id, libraryState.restoreEpoch,
+                libraryState.clearedHistoryAt[choice.detail.subject.id]),
             intent = playbackIntent?.takeIf { it.subjectId == choice.detail.subject.id && it.episodeId == choice.episode.id },
             sourceRevision = choice.sourceRevision, localMedia = choice.localMedia, openingSkipped = position > 0,
             automaticIntent = choice.automaticIntent, explicitResolutionId = choice.resolutionId,
@@ -4157,6 +4191,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val owner = active ?: return
         val snapshot = playerInstance?.state?.value ?: return
         checkpoint(owner, snapshot, force = true)
+        checkpointWatchTime(owner, snapshot, force = true)
     }
 
     private fun belongsTo(owner: ActivePlayback, snapshot: AnimePlayerState) =
@@ -4279,6 +4314,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 danmaku.updatePosition(playbackKey(owner), snapshot.positionMs, snapshot.isPlaying)
                 if (downloadsOwner.isInitialized()) downloads.setPlaybackBusy(playbackBusy(snapshot))
                 checkpoint(owner, snapshot, force = snapshot.phase != lastSavedPhase || snapshot.ended || !snapshot.playWhenReady)
+                checkpointWatchTime(owner, snapshot,
+                    force = snapshot.ended || snapshot.phase == AnimePlayerPhase.ERROR || !snapshot.playWhenReady)
                 if (snapshot.phase == AnimePlayerPhase.ERROR) {
                     if (owner.localMedia?.enhancedVersion == true && !owner.recoveryHandled) {
                         owner.recoveryHandled = true
@@ -4368,6 +4405,21 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         nextEpisode(owner)?.let { next -> play(next.id) }
                     }
                 }
+            }
+        }
+    }
+
+    private fun checkpointWatchTime(owner: ActivePlayback, snapshot: AnimePlayerState, force: Boolean) {
+        val observed = snapshot.visibleWatchMillis ?: return
+        if (!belongsTo(owner, snapshot) || library.state.value.readUnavailable) return
+        val elapsed = observed - owner.requestedWatchMillis
+        if (elapsed <= 0L || !force && elapsed < ANIME_WATCH_CHECKPOINT_MS) return
+        owner.requestedWatchMillis = observed
+        scope.launch {
+            try { library.recordVisibleWatchTime(owner.watchTime, observed) }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) {
+                if (active?.detail?.subject?.id == owner.detail.subject.id) notice("观看时长暂未保存。")
             }
         }
     }
@@ -5277,12 +5329,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     internal val libraryRestoreEpoch: Long get() = library.state.value.restoreEpoch
 
     fun clearWatchHistory(subjectId: String, expectedResume: AnimeWatchProgress? = null,
-        expectedRevision: Long? = null, expectedRestoreEpoch: Long? = null) =
+        expectedRevision: Long? = null, expectedRestoreEpoch: Long? = null, expectedVisibleWatchMillis: Long? = null) =
         clearEntryHistory(subjectId, removeEntry = false) {
             val stored = library.state.value
             val entry = stored.entries[subjectId]
             (expectedRestoreEpoch == null || stored.restoreEpoch == expectedRestoreEpoch) &&
                 (expectedRevision == null || entry?.revision == expectedRevision) &&
+                (expectedVisibleWatchMillis == null || entry?.visibleWatchMillis == expectedVisibleWatchMillis) &&
                 (expectedResume == null && expectedRevision == null && expectedRestoreEpoch == null ||
                     entry?.resume == expectedResume)
         }
@@ -5303,7 +5356,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     mutableState.update { it.copy(sourceCatalogs = emptyList()) }
                     rebuildOptions()
                 }
-                notice(if (removeEntry) "已移除这部番的本机记录。" else "已清除观看位置；追番状态与已看标记保留。")
+                notice(if (removeEntry) "已移除这部番的本机记录。" else "已清除观看位置和时长；追番状态与已看标记保留。")
             }
             catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) { notice(failure.message ?: "操作尚未保存，请重试。") }
