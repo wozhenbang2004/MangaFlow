@@ -290,7 +290,8 @@ internal fun AnimePlayerPane(
                     }
                 }
             }.focusable()) {
-            val sideBySide = episodesVisible && maxWidth >= 680.dp &&
+            val widePlayer = maxWidth >= 680.dp
+            val sideBySide = episodesVisible && widePlayer &&
                 (desktop || maxWidth >= 900.dp || maxHeight < 540.dp)
             val railWidth = (maxWidth * .29f).coerceIn(234.dp, 340.dp)
             val videoWidth = if (fillVideo || !sideBySide) maxWidth else maxWidth - railWidth
@@ -510,7 +511,7 @@ internal fun AnimePlayerPane(
                                 }, tooltip = label) {
                                 Icon(Icons.Outlined.ViewSidebar, label, Modifier.size(20.dp))
                             }
-                        } else if (desktop && !fillVideo && !episodesVisible && maxWidth >= 680.dp && detail != null) {
+                        } else if (desktop && !fillVideo && !episodesVisible && widePlayer && detail != null) {
                             MotionIconButton(onClick = { episodesVisible = true; interact() },
                                 modifier = Modifier.size(44.dp), tooltip = "展开选集与评论") {
                                 Icon(Icons.Outlined.ViewSidebar, "展开选集与评论", Modifier.size(20.dp))

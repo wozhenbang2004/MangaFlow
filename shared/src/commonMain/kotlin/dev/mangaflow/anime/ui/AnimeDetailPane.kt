@@ -619,6 +619,7 @@ private fun AnimeDetailHero(
     val openRatings = { ratings.open(AnimeRatingRequest(subject.id, subject.title, subject, scores)) }
     BoxWithConstraints(Modifier.fillMaxWidth().clipToBounds()) {
         val stacked = wide && !compact
+        val stackedActions = maxWidth < 302.dp * density.fontScale.coerceAtMost(1.5f)
         val posterWidth = when {
             stacked -> minOf(maxWidth * .52f, 194.dp)
             compact -> minOf(maxWidth * .23f, 66.dp)
@@ -676,7 +677,7 @@ private fun AnimeDetailHero(
                 information(Modifier.fillMaxWidth())
             } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalAlignment = Alignment.CenterVertically) { poster(); information(Modifier.weight(1f)) }
-            if (maxWidth < 302.dp * density.fontScale.coerceAtMost(1.5f)) {
+            if (stackedActions) {
                 artworkAction(Modifier.fillMaxWidth())
                 followAction()
             } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
