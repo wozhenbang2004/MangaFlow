@@ -685,7 +685,18 @@ internal fun selectReaderEnhancementModel(inventory: EngineInventory, selected: 
             selected.scale in it.supportedScales }
     }
     if (model != null) {
-        require(image in model.contents && model.nativeScale == selected.scale) { "模型不支持当前图片类型或倍率" }
+        require(image in model.contents) {
+            val content = when (image) {
+                EngineContent.BLACK_WHITE -> "黑白漫画"
+                EngineContent.COLOR -> "彩色漫画"
+                EngineContent.WEBTOON -> "条漫"
+                EngineContent.VIDEO -> "视频"
+            }
+            "${model.title} 不支持${content}，这页继续显示原图"
+        }
+        require(model.nativeScale == selected.scale) {
+            "${model.title} 支持 ${model.nativeScale}×，当前设为 ${selected.scale}×"
+        }
         val engine = inventory.engines.firstOrNull { it.id == model.engineId } ?: error("增强引擎尚未安装")
         check(engine.readiness in setOf(EngineReadiness.BUILT_IN, EngineReadiness.READY_FOR_TRIAL) &&
             selected.scale in engine.supportedScales) { engine.detail }

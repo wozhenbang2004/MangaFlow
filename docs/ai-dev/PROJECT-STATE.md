@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## 漫画阅读排队与发布构建 · 2026-11-24
+
+用户报告拷贝漫画阅读的原图与解码长期等待，以及 CI 发布失败。照片、源码原因、修复与待验收场景见[阅读预取停在排队](../design/reader-prefetch-direction.md#manga-prefetch-wait-20261124)。新增保留稳定的邻页计划与传输账本、从真实可见或终止的读图请求决定前台等待、原图到达后再解码，以及磁盘可写时自动恢复的重试。任务面板显示实际等待原因。
+
+Android 0.1.475、Windows 和 iOS 同时在两处 Compose 宽度作用域错误上中止。主线 `e379791` 已分别在外层捕捉宽度，保持原断点。Windows 更早一轮还出现 ProGuard 在现有 Commons Logging 可选适配器和 PDFBox 的证书路径及 JDK 签名多态方法上报错。本轮针对日志中的引用类补齐精确打包规则。发布与真机阅读体验分别核对证据。
+
 ## 番剧界面与完整观看路径 · 2026-11-24
 
 Route/Stage：DELIVERY。正式基线 `2315c2cf9e858cb0d96b30403c5b914ea6428b1b`。用户要求从番剧产品与观众视角全面重做。完整原话、现有交互差距、参考产品、设计决定和设备验收动作见[番剧界面与完整观看路径](../design/anime-redesign-20261119.md#anime-experience-redesign-20261124)。

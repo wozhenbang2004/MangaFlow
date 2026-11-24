@@ -736,6 +736,15 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                 mutableState.value.prefetchBytes < reserved || !mutableState.value.foreground ||
                     browseOnly && (!mutableState.value.browseWarmup || readerUsers > 0)
             },
+            waiting = {
+                val cooldown = (sources[source]?.blockedUntil ?: 0L) - monotonicTimeMillis()
+                when {
+                    readerWaiting -> AdmissionWait(AdmissionWaitReason.READING_PRIORITY)
+                    cooldown > 0L -> AdmissionWait(AdmissionWaitReason.SOURCE_BACKOFF, cooldown)
+                    !sourceAvailable(source) -> AdmissionWait(AdmissionWaitReason.SOURCE_LIMIT)
+                    else -> AdmissionWait(AdmissionWaitReason.GLOBAL_LIMIT)
+                }
+            },
             onWaiting = onWaiting, block = block,
         )
     }
@@ -1088,6 +1097,11 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     }
     internal fun canWritePrefetch(): Boolean = synchronized(lock) {
         mutableState.value.prefetchBytes > 0L && diskCache?.acceptsPrefetchWrites != false
+    }
+
+    internal fun requirePrefetchWrite() = synchronized(lock) {
+        if (mutableState.value.prefetchBytes <= 0L) throw PrefetchBudgetExceeded()
+        if (diskCache?.acceptsPrefetchWrites == false) throw PrefetchDiskQuotaDeferred()
     }
     fun recordFrame(durationNanos: Long) = synchronized(lock) {
         if (measurements.recordFrame(durationNanos)) {

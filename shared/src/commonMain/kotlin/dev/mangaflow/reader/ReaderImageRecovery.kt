@@ -48,6 +48,7 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.data.ReaderSourceStandby
 import dev.mangaflow.data.approximateReaderPage
 import dev.mangaflow.experience.PrefetchBudgetExceeded
+import dev.mangaflow.experience.PrefetchDiskQuotaDeferred
 import dev.mangaflow.experience.PrefetchPromoted
 import dev.mangaflow.experience.ExperienceAdmissionDeferred
 import dev.mangaflow.experience.PrefetchWorkSnapshot
@@ -121,7 +122,8 @@ internal fun readerPrefetchErrorLabel(failure: Throwable): String {
         cause = current.cause
     }
     return when {
-        chain.any { it is PrefetchBudgetExceeded } -> "预读容量暂受限"
+        chain.any { it is PrefetchDiskQuotaDeferred } -> "原图缓存暂满，腾出空间后继续"
+        chain.any { it is PrefetchBudgetExceeded } -> "已达本次预取额度"
         chain.any { it is ExperienceAdmissionDeferred } -> "资源保护暂缓"
         chain.any { it is PrefetchPromoted } -> "交由当前页继续"
         chain.any { it is OutOfMemoryError } -> "内存保护暂缓"

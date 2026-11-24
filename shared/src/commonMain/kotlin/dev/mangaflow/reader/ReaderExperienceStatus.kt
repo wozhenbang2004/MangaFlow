@@ -559,6 +559,7 @@ internal fun ReaderExperienceStatus(
                                     }
                                 }
                                 ReaderStatusSection.WORK -> {
+                                    preparation.pauseReason?.let { StatusExplanation(it) }
                                     val enhancementRow: @Composable () -> Unit = {
                                         ReaderEnhancementWork(enhancement, enhancementPolicy,
                                             expandedWork == ReaderWork.ENHANCEMENT, bodyEnabled,
@@ -569,9 +570,11 @@ internal fun ReaderExperienceStatus(
                                     listOf(ReaderWork.RESOLVE, ReaderWork.ORIGINAL, ReaderWork.PREVIEW).forEach { work ->
                                         val counts = work.counts(preparation)
                                         WorkDisclosure(work.icon, work.title, counts.active.toLong(), workMaximum,
-                                            workSummary(preparation, work), expandedWork == work, bodyEnabled, counts.failed > 0,
+                                            workSummary(preparation, counts), expandedWork == work, bodyEnabled, counts.failed > 0,
                                             counts.queued.toLong(), counts.complete.toLong(), counts.deferred.toLong(), counts.failed.toLong(),
-                                            known = preparation.pages.isNotEmpty()) { toggle(work) }
+                                            known = preparation.pages.isNotEmpty(),
+                                            queuedReason = workWaitReason(preparation, work, ReaderPreparationPhase.QUEUED),
+                                            deferredReason = workWaitReason(preparation, work, ReaderPreparationPhase.DEFERRED)) { toggle(work) }
                                         StatusReveal(expandedWork == work) { PreparationDetails(preparation, work) }
                                     }
                                     if (android) enhancementRow()
@@ -814,7 +817,7 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
         horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         listOf(Triple(Icons.Outlined.CheckCircle, "已确认", status.success),
             Triple(Icons.Outlined.PlayArrow, "进行", status.activity),
-            Triple(Icons.Outlined.Schedule, "等待", status.waiting),
+            Triple(Icons.Outlined.Schedule, "排队", status.waiting),
             Triple(Icons.Outlined.Pause, "暂缓", status.waiting),
             Triple(Icons.Outlined.ErrorOutline, "失败", status.error),
             Triple(Icons.Outlined.HelpOutline, "未知", status.neutral)).forEach { (icon, label, color) ->
@@ -831,10 +834,14 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
         }
         StatusExplanation(when (section) {
             ReaderStatusSection.PREPARATION -> "已核实原图 / 目标页。？表示有待核实的页。"
-            ReaderStatusSection.WORK -> "进行中按任务计，完成按页计。"
+            ReaderStatusSection.WORK -> "排队是等待前序工作或处理名额。暂缓时需等当前条件恢复。进行中按任务计，完成按页计。"
             ReaderStatusSection.SOURCES -> "单页补图先核对画面。整章切换在来源选择。"
             ReaderStatusSection.CACHE -> "内存可按闲置到期，磁盘按容量或保留规则回收。"
         })
+        if (section == ReaderStatusSection.WORK) {
+            StatusExplanation("并发上限 · 解析 ${budget.resolveRequests} · 原图 ${budget.prefetchRequests} · 解码 ${budget.decodeRequests}")
+            StatusExplanation("相邻页原图额度 ${experienceCacheSize(budget.adjacentPrefetchBytes)}")
+        }
         return
     }
     StatusExplanation("底栏四项为预读、任务、补页、缓存；缓存详情再分内存和磁盘。数字是已备页数、活动任务数与可用源数；99+ 只缩写显示，不限制配置。? 表示尚有未核实项。")
@@ -937,6 +944,8 @@ private fun NextWorkRow(next: ReaderNextChapterPreparation, maximum: Long, expan
         next.queuedPages.toLong() + if (next.manifestQueued) 1L else 0L,
         next.originalReadyPages.toLong().takeIf { next.requestedPages > 0 }, next.deferredPages.toLong(), next.failedPages.toLong(),
         completedLabel = "原图已备", phaseDeferred = next.phase == ReaderNextChapterPreparationPhase.DEFERRED,
+        queuedReason = next.reason.takeIf { next.phase == ReaderNextChapterPreparationPhase.QUEUED },
+        deferredReason = next.reason.takeIf { next.phase == ReaderNextChapterPreparationPhase.DEFERRED },
         onToggle = onToggle)
 }
 
@@ -1061,18 +1070,30 @@ private fun StatusMetricSlots(reserve: String, modifier: Modifier = Modifier, co
 private fun WorkDisclosure(icon: ImageVector, title: String, active: Long, maximum: Long, summary: String,
     expanded: Boolean, enabled: Boolean, hasFailure: Boolean, queued: Long, completed: Long?, deferred: Long,
     failed: Long, known: Boolean = true, completedLabel: String = "阶段完成",
-    phaseDeferred: Boolean = false, onToggle: () -> Unit) {
+    phaseDeferred: Boolean = false, queuedReason: String? = null, deferredReason: String? = null, onToggle: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val status = mangaStatusColors()
     val reserve = "8".repeat(maximum.coerceAtLeast(1L).toString().length)
     val android = platformKind == PlatformKind.ANDROID
     val compact = android && !expanded
+    val queuedLabel = if (known && queued > 0L) "排队 $queued" else null
+    val deferredLabel = when {
+        known && deferred > 0L -> "暂缓 $deferred"
+        known && phaseDeferred -> "暂缓"
+        else -> null
+    }
+    val waiting = listOfNotNull(
+        queuedLabel?.let { Icons.Outlined.Schedule to listOfNotNull(it, queuedReason).joinToString(" · ") },
+        deferredLabel?.let { Icons.Outlined.Pause to listOfNotNull(it, deferredReason).joinToString(" · ") },
+    )
+    val presentSummary = summary.takeIf { waiting.isEmpty() || active > 0L || hasFailure }
+    val rowStatus = (listOfNotNull(presentSummary) + waiting.map { it.second }).joinToString("，")
     MotionTextButton(onClick = onToggle, enabled = enabled,
         modifier = Modifier.fillMaxWidth().heightIn(min = if (android) 48.dp else 44.dp)
             .background(if (expanded) colors.primary.copy(alpha = .065f) else Color.Transparent, RoundedCornerShape(12.dp))
             .semantics(mergeDescendants = true) {
             contentDescription = title
-            stateDescription = "$summary，${if (expanded) "收起" else "展开"}详情"
+            stateDescription = "$rowStatus，${if (expanded) "收起" else "展开"}详情"
         }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -1085,19 +1106,13 @@ private fun WorkDisclosure(icon: ImageVector, title: String, active: Long, maxim
                         hasFailure -> StatusToken(Icons.Outlined.ErrorOutline, "准备阶段", "失败", status.error)
                         !known -> StatusToken(Icons.Outlined.HelpOutline, "准备阶段", "待核实", status.neutral)
                         active > 0L -> StatusCounter(Icons.Outlined.PlayArrow, active, "进行中任务", color = status.activity)
-                        queued > 0L -> StatusCounter(Icons.Outlined.Schedule, queued, "排队任务", iconColor = status.waiting)
-                        deferred > 0L -> StatusCounter(Icons.Outlined.Pause, deferred, "暂缓页", iconColor = status.waiting)
-                        phaseDeferred -> StatusToken(Icons.Outlined.Pause, "准备阶段", "暂缓", status.waiting)
+                        waiting.isNotEmpty() -> Unit
                         completed != null && completed > 0L ->
                             StatusCounter(Icons.Outlined.Check, completed, "$completedLabel，页", iconColor = status.success)
                         completed == null -> StatusToken(Icons.Outlined.HelpOutline, "完成页数", "待核实", status.neutral)
                         else -> Text("空闲", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                     }
                 } else {
-                    if (known && phaseDeferred) {
-                        StatusToken(Icons.Outlined.Pause, "准备阶段", "暂缓", status.waiting)
-                        Spacer(Modifier.width(8.dp))
-                    }
                     StatusCounter(Icons.Outlined.PlayArrow, active.takeIf { known }, "进行中的任务，不是线程数",
                         reserve = reserve, iconColor = if (known && active > 0L) status.activity else status.neutral)
                     Box(Modifier.width(19.dp), contentAlignment = Alignment.CenterEnd) {
@@ -1118,24 +1133,30 @@ private fun WorkDisclosure(icon: ImageVector, title: String, active: Long, maxim
                         iconColor = if (known && failed > 0L) status.error else status.neutral)
                 }
             }
+            waiting.forEach { (phaseIcon, detail) ->
+                Row(Modifier.padding(start = 25.dp), horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Icon(phaseIcon, null, Modifier.size(13.dp), tint = status.waiting)
+                    Text(detail, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                }
+            }
         }
     }
 }
 
-private fun workSummary(state: ReaderPreparationState, work: ReaderWork): String {
-    val counts = work.counts(state)
-    val reason = state.pages.map(work::step).firstNotNullOfOrNull { step -> step.reason?.takeIf {
-        step.phase == ReaderPreparationPhase.QUEUED || step.phase == ReaderPreparationPhase.DEFERRED
-    } }
-    return when {
-        state.pages.isEmpty() -> state.pauseReason ?: "等待当前阅读窗口"
-        counts.failed > 0 -> "${counts.failed} 页失败" + if (counts.queued > 0) " · 排队 ${counts.queued}" else ""
-        counts.queued > 0 -> "排队 ${counts.queued}" + (reason?.let { " · $it" } ?: "")
-        counts.deferred > 0 -> reason ?: "暂缓 ${counts.deferred} 页"
-        counts.active > 0 -> "准备中"
-        counts.complete > 0 -> "${counts.complete} 页阶段已完成"
-        else -> "当前未安排此项工作"
-    }
+private fun workSummary(state: ReaderPreparationState, counts: ReaderPreparationCounts): String = when {
+    state.pages.isEmpty() -> state.pauseReason ?: "等待当前阅读窗口"
+    counts.failed > 0 -> "${counts.failed} 页失败"
+    counts.active > 0 -> "准备中"
+    counts.complete > 0 -> "${counts.complete} 页阶段已完成"
+    else -> "当前未安排此项工作"
+}
+
+private fun workWaitReason(state: ReaderPreparationState, work: ReaderWork, phase: ReaderPreparationPhase): String? {
+    val steps = state.pages.map(work::step).filter { it.phase == phase }
+    val reason = steps.mapNotNull { it.reason?.takeIf { reason -> reason != state.pauseReason && reason.isNotBlank() } }
+        .groupingBy { it }.eachCount().maxByOrNull { it.value } ?: return null
+    return if (reason.value == steps.size) reason.key else "${reason.key}（${reason.value} 页）"
 }
 
 private fun nextWorkSummary(next: ReaderNextChapterPreparation): String = when {

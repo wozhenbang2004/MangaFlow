@@ -21,3 +21,20 @@
 -dontwarn com.oracle.svm.core.annotate.Delete
 -dontwarn com.oracle.svm.core.annotate.Substitute
 -dontwarn com.oracle.svm.core.annotate.TargetClass
+
+# Commons Logging can use java.util.logging in the bundled JDK. These adapters
+# reference optional logging and servlet backends that the app does not install.
+-dontwarn org.apache.commons.logging.impl.AvalonLogger
+-dontwarn org.apache.commons.logging.impl.Log4JLogger
+-dontwarn org.apache.commons.logging.impl.Log4jApiLogFactory
+-dontwarn org.apache.commons.logging.impl.Log4jApiLogFactory$*
+-dontwarn org.apache.commons.logging.impl.LogKitLogger
+-dontwarn org.apache.commons.logging.impl.ServletContextCleaner
+-dontwarn org.apache.commons.logging.jakarta.ServletContextCleaner
+
+# PDF import uses password-based loading. PDFBox's certificate handler needs
+# optional Bouncy Castle classes. IOUtils calls the JDK's signature-polymorphic
+# MethodHandle.invokeExact(ByteBuffer) for optional mapped-buffer cleanup.
+-dontwarn org.apache.pdfbox.pdmodel.encryption.PublicKeySecurityHandler
+-dontwarn org.apache.pdfbox.pdmodel.encryption.SecurityProvider
+-dontwarn org.apache.pdfbox.io.IOUtils

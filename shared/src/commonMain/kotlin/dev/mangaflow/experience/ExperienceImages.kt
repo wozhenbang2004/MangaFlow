@@ -224,6 +224,7 @@ internal class PrefetchByteBudget(private val maximum: Long, private val parent:
     }
 }
 internal open class PrefetchBudgetExceeded : IOException("本次预取已达到资源预算")
+internal class PrefetchDiskQuotaDeferred : PrefetchBudgetExceeded()
 /** One transport/materialization attempt; fields are owned by ExperiencePolicyStore's lock. */
 internal class PrefetchResourceOwner {
     var streaming = 0L
@@ -716,7 +717,8 @@ private class ExperienceImageNetworkClient(
                     val remaining = minOf(policy.state.value.prefetchBytes,
                         request.extras[bytesKey]?.remaining ?: Long.MAX_VALUE)
                     token?.ifOptional {
-                        if (!policy.canWritePrefetch() || remaining <= 0L) throw PrefetchBudgetExceeded()
+                        if (remaining <= 0L) throw PrefetchBudgetExceeded()
+                        policy.requirePrefetchWrite()
                     }
                     // Unknown images start with an estimate, not an observed minimum size.
                     // Admit a bounded attempt; response/body bytes enforce the real ceiling.
@@ -772,7 +774,7 @@ private class ExperienceImageNetworkClient(
                 }
                 if (optional) {
                     requireNotNull(token).ifOptional {
-                        if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded()
+                        policy.requirePrefetchWrite()
                         val length = response.headers["Content-Length"]?.toLongOrNull()
                         if (length != null && length > (budget?.remaining ?: 0L)) throw PrefetchBudgetExceeded()
                     }
@@ -783,7 +785,7 @@ private class ExperienceImageNetworkClient(
                             override fun write(source: Buffer, byteCount: Long) {
                                 if (optional) {
                                     requireNotNull(token).ifOptional {
-                                        if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded()
+                                        policy.requirePrefetchWrite()
                                         val windowReceipt = receipt ?: throw PrefetchBudgetExceeded()
                                         policy.acceptPrefetchChunk(byteCount, resourceOwner)
                                         try { windowReceipt.accept(byteCount) }

@@ -590,9 +590,11 @@ internal fun GuidedPanelReader(
     return ReaderPrefetchViewport(
         visibleRange = { pageIndex to pageIndex }, position = { pageIndex.toFloat() },
         composed = mapOf(pageIndex to true),
-        // Recognition must finish before any NEW optional preparation is admitted.
+        // Let active recognition finish before starting new optional preparation.
+        // A terminal error yields this turn without claiming a readable image.
         // Already owned originals can remain within the shared host's bounded window.
         loaded = if (preparationReady) mapOf(pageIndex to primaryPage.url) else emptyMap(),
+        failedLoads = if (!loading && error != null) mapOf(pageIndex to primaryPage.url) else emptyMap(),
         width = { viewport.width }, height = viewport.height, active = active, layoutKey = preparationLayout,
         foregroundPending = active && error == null && attempt.acceptsResult && detectionRun.acceptsResult &&
             (!imageReady || loading),
