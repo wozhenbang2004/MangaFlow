@@ -602,8 +602,9 @@ internal fun RankingControls(
                 tools()
             }
         } else {
+            val wrapLabels = maxWidth < periodWidth
             Column(Modifier.fillMaxWidth()) {
-                RankingPeriods(state.period, onPeriod, Modifier.fillMaxWidth(), maxWidth < periodWidth)
+                RankingPeriods(state.period, onPeriod, Modifier.fillMaxWidth(), wrapLabels = wrapLabels)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically) { tools() }
             }
