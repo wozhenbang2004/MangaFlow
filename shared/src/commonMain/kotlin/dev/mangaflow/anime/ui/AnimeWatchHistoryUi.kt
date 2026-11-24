@@ -82,7 +82,7 @@ internal fun AnimeHistoryActionLine(playback: AnimeHistoryPlayback, updatedAt: L
 }
 
 /** Saved native fields and exact catalogue IDs only; a display name never establishes identity. */
-private fun animeWatchedEpisodeName(
+internal fun animeWatchedEpisodeName(
     entry: AnimeLibraryEntry,
     progress: AnimeWatchProgress,
     catalogued: AnimeEpisode? = entry.catalogDetail?.takeIf { it.subject.id == entry.subject.id }
@@ -104,7 +104,7 @@ internal fun animeWatchLocation(entry: AnimeLibraryEntry, progress: AnimeWatchPr
     return animeWatchedEpisodeName(entry, progress) + " · " + animeWatchPosition(progress)
 }
 
-private fun animeWatchPosition(progress: AnimeWatchProgress): String =
+internal fun animeWatchPosition(progress: AnimeWatchProgress): String =
     if (progress.completed) "已看完" else animeTime(progress.positionMs) +
         progress.durationMs.takeIf { it > 0L }?.let { " / " + animeTime(it) }.orEmpty()
 

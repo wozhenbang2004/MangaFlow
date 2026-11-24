@@ -56,6 +56,8 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
                 AnimeDirectoryPicker(controller, state.sources, source, state.recentSourceIds, backdrop,
                     active = active && !filtersPresent, modifier = Modifier.weight(1f),
                     onPresenceChange = { sourcePresent = it })
+                AnimeCatalogueGridActions(LocalMangaWindow.current.width, columns, backdrop, contentActive,
+                    controller::setDiscoveryColumns)
                 if (category?.filters?.isNotEmpty() == true) {
                     val filterLabel = if (appliedFilters > 0) "目录筛选，已选 $appliedFilters 项" else "目录筛选"
                     MotionIconButton(onClick = { filtersPresent = true; filtersVisible = true }, enabled = contentActive,
@@ -84,7 +86,7 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
                 onSelect = { owner.selectCategory(sections[it].first) }, active = contentActive,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         }
-        if (source == null && state.sources.isEmpty()) AnimeMessage("暂无可浏览的片源", "可以在番剧菜单中管理片源。")
+        if (source == null && state.sources.isEmpty()) AnimeMessage("暂无可浏览的片源", "可以在侧边栏管理片源。")
         else if (source == null) AnimeDiscoveryLoading("正在打开片源目录")
         else MotionTabContent(source to state,
             contentKey = { (selected, snapshot) -> selected.id + ":" + selected.revision + ":" + (snapshot.selectedTitle?.id ?: "catalog") },

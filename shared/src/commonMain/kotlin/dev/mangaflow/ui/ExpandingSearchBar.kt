@@ -113,6 +113,8 @@ internal fun ExpandingSearchBar(
     translationGroupAvailable: Boolean = true,
     showEmptyResults: Boolean = false,
     focusInputOnExpand: Boolean = true,
+    titleAndTagsOnly: Boolean = false,
+    collapsedLabel: String? = null,
     results: @Composable (maxHeight: Dp, active: Boolean) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
@@ -327,6 +329,7 @@ internal fun ExpandingSearchBar(
             target = searchTarget, expanded = scopeExpanded,
             enabled = expanded && active, copyOnly = scopeCopyOnly,
             translationGroupAvailable = translationGroupAvailable,
+            titleAndTagsOnly = titleAndTagsOnly,
             backdrop = backdrop, maxWidth = (panelWidth - 52.dp).coerceAtLeast(36.dp),
             onExpandedChange = {
                 if (it) { keyboard?.hide(); focus.clearFocus(force = true) }
@@ -342,7 +345,8 @@ internal fun ExpandingSearchBar(
             enabled = active,
             modifier = Modifier.align(Alignment.TopEnd).padding(end = 8.dp).size(44.dp)
                 .semantics {
-                    contentDescription = if (expanded) "关闭搜索" else if (searchTarget == null) placeholder else "搜索漫画、作者"
+                    contentDescription = if (expanded) "关闭搜索" else collapsedLabel
+                        ?: if (searchTarget == null) placeholder else "搜索漫画、作者"
                     stateDescription = if (expanded) "已展开" else "已收起"
                 },
         ) {

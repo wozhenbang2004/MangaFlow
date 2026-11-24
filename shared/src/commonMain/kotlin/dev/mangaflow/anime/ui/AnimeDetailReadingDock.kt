@@ -1,20 +1,7 @@
 package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.DoneAll
@@ -22,22 +9,15 @@ import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
@@ -46,11 +26,11 @@ import dev.mangaflow.anime.AnimeEpisodeAvailability
 import dev.mangaflow.anime.AnimeWatchProgress
 import dev.mangaflow.anime.downloads.AnimeDownloadStatus
 import dev.mangaflow.anime.downloads.AnimeDownloadsState
-import dev.mangaflow.ui.GlassSurfaceRole
-import dev.mangaflow.ui.LiquidGlassSurface
-import dev.mangaflow.ui.motion.MotionBusyIndicator
+import dev.mangaflow.ui.DetailActionDock
+import dev.mangaflow.ui.DetailDockContent
+import dev.mangaflow.ui.DetailDockOption
 import dev.mangaflow.ui.motion.MotionSwap
-import dev.mangaflow.ui.motion.motionPress
+import kotlin.math.roundToInt
 
 internal fun animeWatchFraction(progress: AnimeWatchProgress?): Float? = progress?.let {
     if (it.completed) 1f else if (it.durationMs > 0)
@@ -103,11 +83,17 @@ internal fun animeDetailOffline(snapshot: AnimeDownloadsState, subjectId: String
 
 internal enum class AnimeDetailPlayMode { PLAY, FIND, SOURCES, UPCOMING, WAIT }
 
-internal data class AnimeDetailPlayControl(val title: String, val caption: String, val mode: AnimeDetailPlayMode)
+internal data class AnimeDetailPlayControl(
+    val title: String,
+    val compactTitle: String,
+    val caption: String,
+    val mode: AnimeDetailPlayMode,
+    val fraction: Float?,
+)
 
 internal fun animeDetailPlayControl(episode: AnimeEpisode?, previous: AnimeWatchProgress?,
     availability: AnimeEpisodeAvailability?, checking: Boolean, canRetry: Boolean,
-    offline: AnimeDetailOffline?, resumePositionKnown: Boolean): AnimeDetailPlayControl? {
+    offline: AnimeDetailOffline?, resumeCheckpoint: AnimeWatchProgress?): AnimeDetailPlayControl? {
     // The catalogue already owns the empty/loading view. A saved record, however, stays discoverable.
     if (episode == null && previous == null) return null
     val next = previous != null && episode != null && episode.id != previous.episodeId
@@ -115,7 +101,7 @@ internal fun animeDetailPlayControl(episode: AnimeEpisode?, previous: AnimeWatch
     val progress = previous.takeUnless { next }
     val episodeLabel = episode?.let(::animeEpisodeLabel)
         ?: progress?.episodeTitle?.takeIf(String::isNotBlank) ?: "上次观看集"
-    val resuming = progress != null && !replay && resumePositionKnown
+    val resuming = progress != null && !replay && resumeCheckpoint != null
     val time = progress?.positionMs?.takeIf { resuming && it > 0L }?.let(::animeTime)
     val caption = listOfNotNull(episodeLabel, time?.let { "看至 $it" },
         "上次位置未确认".takeIf { progress != null && !replay && !resuming && episode != null }).joinToString(" · ")
@@ -126,8 +112,24 @@ internal fun animeDetailPlayControl(episode: AnimeEpisode?, previous: AnimeWatch
         progress != null -> "播放本集"
         else -> "播放"
     }
-    fun control(title: String, mode: AnimeDetailPlayMode, note: String? = null) =
-        AnimeDetailPlayControl(title, listOfNotNull(caption, note).joinToString(" · "), mode)
+    val compactPlayback = when {
+        next -> "下一集"
+        replay -> "重看"
+        resuming -> "继续"
+        else -> "播放"
+    }
+    fun control(title: String, mode: AnimeDetailPlayMode, note: String? = null) = AnimeDetailPlayControl(
+        title, when (mode) {
+            AnimeDetailPlayMode.PLAY -> compactPlayback
+            AnimeDetailPlayMode.FIND -> "找片源"
+            AnimeDetailPlayMode.SOURCES -> "线路"
+            AnimeDetailPlayMode.UPCOMING -> "未放送"
+            AnimeDetailPlayMode.WAIT -> "核对中"
+        }, listOfNotNull(caption, note).joinToString(" · "), mode,
+        animeWatchFraction(resumeCheckpoint.takeIf {
+            resuming && (mode == AnimeDetailPlayMode.PLAY || mode == AnimeDetailPlayMode.FIND)
+        }),
+    )
     return when {
         offline == AnimeDetailOffline.CHECKING -> control("正在核对离线记录", AnimeDetailPlayMode.WAIT)
         offline == AnimeDetailOffline.READY -> control(playback, AnimeDetailPlayMode.PLAY, "离线")
@@ -153,49 +155,41 @@ internal fun animeDetailPlayControl(episode: AnimeEpisode?, previous: AnimeWatch
     }
 }
 
-/** Adapted from the ordinary manga reading dock; one action, independent of the artwork scroll. */
+/** Anime retains the exact episode and availability model; the manga dock owns the presentation. */
 @Composable
 internal fun AnimeDetailPlayAction(
+    subjectId: String,
     control: AnimeDetailPlayControl,
     active: Boolean,
-    compact: Boolean,
+    persistent: Boolean,
+    collapseProgress: () -> Float,
     backdrop: HazeState,
     modifier: Modifier = Modifier,
+    onHeightChanged: (Int) -> Unit,
     onActivate: () -> Unit,
+    onEpisodes: () -> Unit,
+    onLines: (() -> Unit)?,
 ) {
-    val colors = MaterialTheme.colorScheme
-    val interaction = remember { MutableInteractionSource() }
-    val enabled = active && control.mode != AnimeDetailPlayMode.WAIT
-    LiquidGlassSurface(backdrop, modifier.motionPress(interaction, enabled = enabled, pressedScale = .985f),
-        cornerRadius = if (compact) 22.dp else 26.dp, role = GlassSurfaceRole.READING_DOCK, preferSource = true,
-        interactionSource = interaction.takeIf { enabled }, elevation = 2.dp, softCard = true) {
-        val ink = if (enabled) LocalContentColor.current else colors.onSurfaceVariant
-        Row(
-            Modifier.fillMaxWidth().heightIn(min = if (compact) 48.dp else 56.dp)
-                .clickable(enabled = enabled, role = Role.Button, interactionSource = interaction,
-                    indication = null, onClickLabel = if (control.mode == AnimeDetailPlayMode.UPCOMING)
-                        "查看放送与本集线路" else control.title, onClick = onActivate)
-                .padding(start = 10.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(Modifier.size(if (compact) 28.dp else 32.dp).background(ink, RoundedCornerShape(50)),
-                contentAlignment = Alignment.Center) {
-                if (control.mode == AnimeDetailPlayMode.WAIT)
-                    MotionBusyIndicator(Modifier.size(16.dp), color = colors.surface, strokeWidth = 1.5.dp)
-                else Icon(when (control.mode) {
-                    AnimeDetailPlayMode.FIND -> Icons.Outlined.Search
-                    AnimeDetailPlayMode.SOURCES -> Icons.Outlined.Link
-                    AnimeDetailPlayMode.UPCOMING -> Icons.Outlined.Schedule
-                    else -> Icons.Filled.PlayArrow
-                }, null, Modifier.size(19.dp), tint = colors.surface)
-            }
-            Spacer(Modifier.width(8.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                Text(control.title, color = ink, style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(control.caption, style = MaterialTheme.typography.labelSmall,
-                    color = ink, maxLines = if (compact) 1 else 2, overflow = TextOverflow.Ellipsis)
-            }
-        }
-    }
+    val percent = control.fraction?.let { (it * 100).roundToInt().coerceIn(0, if (it == 1f) 100 else 99) }
+    DetailActionDock(subjectId, backdrop, DetailDockContent(
+        title = control.title,
+        compactTitle = control.compactTitle,
+        caption = control.caption,
+        description = listOfNotNull(control.title, control.caption, percent?.let { "上次看到 $it%" }).joinToString("，"),
+        fraction = control.fraction,
+        percent = percent,
+        icon = when (control.mode) {
+            AnimeDetailPlayMode.FIND -> Icons.Outlined.Search
+            AnimeDetailPlayMode.SOURCES -> Icons.Outlined.Link
+            AnimeDetailPlayMode.UPCOMING -> Icons.Outlined.Schedule
+            else -> Icons.Filled.PlayArrow
+        },
+        busy = control.mode == AnimeDetailPlayMode.WAIT,
+        clickLabel = if (control.mode == AnimeDetailPlayMode.UPCOMING) "查看放送与本集线路" else control.title,
+    ), canActivate = control.mode != AnimeDetailPlayMode.WAIT, active = active, persistent = persistent,
+        collapseProgress = collapseProgress, modifier = modifier, onHeightChanged = onHeightChanged,
+        optionsLabel = "播放选项", options = listOfNotNull(
+            onLines?.let { DetailDockOption("本集线路", onClick = it) },
+            DetailDockOption("集数列表", onClick = onEpisodes),
+        ), onActivate = onActivate)
 }

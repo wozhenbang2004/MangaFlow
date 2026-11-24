@@ -217,12 +217,14 @@ internal fun AnimeLibrary(
                     tooltips = listOf("全部番剧", "已追番", "观看历史"))
                 if (!showingHistory || optionsPresent) Box {
                     MotionIconButton(onClick = { optionsOpen = true }, enabled = contentActive,
-                        modifier = Modifier.size(44.dp), tooltip = "文件夹与排序") {
+                        modifier = Modifier.size(44.dp), tooltip = "片单选项") {
                         Icon(if (folder == null) Icons.Outlined.FilterList else Icons.Outlined.Folder,
-                            "文件夹与排序", Modifier.size(20.dp))
+                            "片单选项", Modifier.size(20.dp))
                     }
                     CompactGlassPopover(optionsOpen && active && !showingHistory, backdrop, onDismiss = { optionsOpen = false },
                         onPresenceChange = { optionsPresent = it }) {
+                        if (state.canUndo) CompactMenuAction(Icons.Outlined.Undo, "撤销上次修改",
+                            onClick = { optionsOpen = false; controller.undo() })
                         AnimeQuietLabel("文件夹", Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
                         CompactMenuAction(if (folder == null) Icons.Outlined.Check else Icons.Outlined.Folder, "全部文件夹",
                             onClick = { viewState.folder = null; optionsOpen = false })

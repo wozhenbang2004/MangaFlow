@@ -51,7 +51,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.platform.LocalDensity
@@ -223,7 +222,7 @@ internal fun AnimeDetailPane(
     } else AnimeDetailOffline.MISSING.takeIf { savedProgress?.localDownloadId != null && !savedProgress.completed &&
         (first == null || first.id == savedProgress.episodeId) }
     val playControl = animeDetailPlayControl(first, savedProgress, firstAvailability,
-        state.detailLoading || sourceSearchInProgress, firstCanRetry, offline, resumeCheckpoint != null)
+        state.detailLoading || sourceSearchInProgress, firstCanRetry, offline, resumeCheckpoint)
     val pendingNativeCatalog = state.sourceCatalogs.firstOrNull {
         it.title.sourceId == nativeSource && !it.notice.isNullOrBlank() && detail.episodes.isEmpty()
     }
@@ -262,14 +261,58 @@ internal fun AnimeDetailPane(
         val showDock = playControl != null && WindowInsets.ime.getBottom(density) == 0
         var measuredDock by remember(subject.id, width, density, compactHero) { mutableIntStateOf(0) }
         // Lists draw edge-to-edge, but their last row must scroll completely clear of the dock.
-        val dockClearance = if (showDock && !wide) maxOf(if (compactHero) 48.dp else 56.dp,
-            with(density) { measuredDock.toDp() }) + 8.dp else 0.dp
+        val dockClearance = if (showDock && !wide) maxOf((38f * fontScale + 10f).coerceAtLeast(56f).dp,
+            with(density) { measuredDock.toDp() }) + 16.dp else 0.dp
         val listEnd = 18.dp + bottomInset + dockClearance
+        fun locateSavedEpisode() {
+            val alreadyInCatalogue = detailTab == 0
+            savedEpisode?.let { episodeTab = if (native || it.kind == AnimeEpisodeKind.MAIN) 0 else 1 }
+            episodeQuery = ""
+            episodeSearch = false
+            locateRevision++
+            contentsRequested = true
+            selectDetailTab(0)
+            if (!wide && alreadyInCatalogue) {
+                headerJump?.cancel()
+                headerJump = scope.launch {
+                    if (motion) Animatable(header.heightOffset).animateTo(header.heightOffsetLimit,
+                        tween(320, easing = MangaMotion.EnterEasing)) { header.heightOffset = value }
+                    else header.heightOffset = header.heightOffsetLimit
+                    contentsRequested = false
+                }
+            } else if (wide) contentsRequested = false
+        }
+        val dockTravel = with(density) { 96.dp.toPx() }
+        val dockCollapse by remember(header, subject.id, detailTab, wide, dockTravel) {
+            derivedStateOf {
+                if (wide || detailTab != 0) 0f else {
+                    val coverTravel = (-header.heightOffset).coerceIn(0f, measuredHero.toFloat())
+                    val listTravel = if (activeCatalogScroll.firstVisibleItemIndex > 0) 1f
+                        else (activeCatalogScroll.firstVisibleItemScrollOffset / dockTravel).coerceIn(0f, 1f)
+                    maxOf((coverTravel / dockTravel).coerceIn(0f, 1f), listTravel)
+                }
+            }
+        }
         val playDock: @Composable (Modifier) -> Unit = { dockModifier ->
             playControl?.let { control ->
-                AnimeDetailPlayAction(control, compact = compactHero, backdrop = backdrop,
-                    active = active && !statusPresent && !discussionChecksPresent && !discussionFilter && episodeMenuOwner == null,
-                    modifier = dockModifier.onSizeChanged { measuredDock = maxOf(measuredDock, it.height) },
+                val dockActive = active && !statusPresent && !discussionChecksPresent && !discussionFilter && episodeMenuOwner == null
+                AnimeDetailPlayAction(subject.id, control, backdrop = backdrop, active = dockActive,
+                    persistent = wide, collapseProgress = { dockCollapse }, modifier = dockModifier,
+                    onHeightChanged = { measuredDock = maxOf(measuredDock, it) },
+                    onEpisodes = {
+                        if (dockActive && controller.state.value.detail?.subject?.id == subject.id) locateSavedEpisode()
+                    },
+                    onLines = first?.takeUnless { state.resolving || state.playbackTarget != null }?.let { target ->
+                        {
+                            val latest = controller.state.value
+                            val current = latest.detail?.takeIf { it.subject.id == subject.id }
+                            if (dockActive && current != null && !latest.resolving && latest.playbackTarget == null) {
+                                val previous = latest.library.firstOrNull { it.subject.id == subject.id }?.resume
+                                val episode = detailPlayEpisode(controller, latest, current, previous)
+                                if (episode != null && episode.id == target.id) onSources(episode)
+                            }
+                        }
+                    },
                     onActivate = play@{
                         val latest = controller.state.value
                         val liveDetail = latest.detail?.takeIf { it.subject.id == subject.id } ?: return@play
@@ -332,24 +375,6 @@ internal fun AnimeDetailPane(
                 return behavior.nestedScrollConnection.onPreScroll(available, source)
             }
         } }
-        fun locateSavedEpisode() {
-            val alreadyInCatalogue = detailTab == 0
-            savedEpisode?.let { episodeTab = if (native || it.kind == AnimeEpisodeKind.MAIN) 0 else 1 }
-            episodeQuery = ""
-            episodeSearch = false
-            locateRevision++
-            contentsRequested = true
-            selectDetailTab(0)
-            if (!wide && alreadyInCatalogue) {
-                headerJump?.cancel()
-                headerJump = scope.launch {
-                    if (motion) Animatable(header.heightOffset).animateTo(header.heightOffsetLimit,
-                        tween(320, easing = MangaMotion.EnterEasing)) { header.heightOffset = value }
-                    else header.heightOffset = header.heightOffsetLimit
-                    contentsRequested = false
-                }
-            } else if (wide) contentsRequested = false
-        }
         val hero: @Composable () -> Unit = {
             AnimeDetailHero(subject, canonicalInfo, liveScores, wide, compactHero, active, backdrop,
                 contentTopPadding = contentTopPadding + if (wide) 8.dp else 0.dp,
@@ -608,8 +633,8 @@ internal fun AnimeDetailPane(
             }
             if (showDock) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                 .windowInsetsPadding(contentInsets.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
-                .padding(start = 16.dp, end = 16.dp, bottom = 8.dp), contentAlignment = Alignment.BottomCenter) {
-                playDock(Modifier.widthIn(max = 348.dp).fillMaxWidth())
+                .padding(horizontal = 16.dp, vertical = 8.dp), contentAlignment = Alignment.BottomCenter) {
+                playDock(Modifier.fillMaxWidth())
             }
         }
     }

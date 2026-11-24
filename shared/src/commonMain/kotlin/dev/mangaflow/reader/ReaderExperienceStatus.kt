@@ -220,7 +220,8 @@ internal fun ReaderExperienceStatus(
     val behindPages = remember(preparation.pages) { preparation.pages.filter { it.role == ReaderPreparationRole.BEHIND } }
     val visibleFailure = preparation.pages.firstOrNull { it.role == ReaderPreparationRole.VISIBLE &&
         (it.resolve.phase == ReaderPreparationPhase.FAILED || it.original.phase == ReaderPreparationPhase.FAILED) }
-    val nextIndex = if (preparation.direction < 0) preparation.firstVisible - 1 else preparation.lastVisible + 1
+    val preparingBackwards = preparation.direction < 0
+    val nextIndex = if (preparingBackwards) preparation.firstVisible - 1 else preparation.lastVisible + 1
     val nextPage = aheadPages.firstOrNull { it.pageIndex == nextIndex }
     val failure = (visibleFailure ?: nextPage)?.let { page ->
         listOf(page.resolve, page.original).firstOrNull { it.phase == ReaderPreparationPhase.FAILED }?.let {
@@ -304,7 +305,8 @@ internal fun ReaderExperienceStatus(
                             .padding(horizontal = 4.dp, vertical = 5.dp).motionInputGate(bodyEnabled)) {
                             when (shownSection) {
                                 ReaderStatusSection.PREPARATION -> {
-                                    ReadinessRow(Icons.Outlined.KeyboardDoubleArrowRight, "前方原图",
+                                    ReadinessRow(if (preparingBackwards) Icons.Outlined.KeyboardDoubleArrowLeft else Icons.Outlined.KeyboardDoubleArrowRight,
+                                        if (preparingBackwards) "往回预读原图" else "前方原图",
                                         aheadPages,
                                         preparation.pauseReason, expandedWork == ReaderWork.AHEAD, bodyEnabled) { toggle(ReaderWork.AHEAD) }
                                     StatusReveal(expandedWork == ReaderWork.AHEAD) {
@@ -313,12 +315,12 @@ internal fun ReaderExperienceStatus(
                                     val wait = preparation.pauseReason
                                     if (aheadPages.isEmpty() && wait == null) {
                                         val atEdge = preparation.pageCount > 0 && preparation.lastVisible >= preparation.firstVisible &&
-                                            if (preparation.direction < 0) preparation.firstVisible == 0 else preparation.lastVisible == preparation.pageCount - 1
+                                            if (preparingBackwards) preparation.firstVisible == 0 else preparation.lastVisible == preparation.pageCount - 1
                                         StatusExplanation(when {
                                             preparation.pages.isEmpty() -> "预读范围尚未建立"
-                                            atEdge && preparation.direction < 0 -> "已到本章首页"
+                                            atEdge && preparingBackwards -> "已到本章首页"
                                             atEdge -> "已到本章末页"
-                                            else -> "当前窗口没有前方预读页"
+                                            else -> "当前窗口没有可预读页"
                                         })
                                     }
                                     if (wait != null) {
@@ -334,7 +336,9 @@ internal fun ReaderExperienceStatus(
                                             nextPage?.resolve?.phase == ReaderPreparationPhase.FAILED) ReaderWork.RESOLVE else ReaderWork.ORIGINAL
                                         inspect(ReaderStatusSection.WORK)
                                     } }
-                                    if (behindPages.isNotEmpty()) ReadinessRow(Icons.Outlined.KeyboardDoubleArrowLeft, "回看原图",
+                                    if (behindPages.isNotEmpty()) ReadinessRow(
+                                        if (preparingBackwards) Icons.Outlined.KeyboardDoubleArrowRight else Icons.Outlined.KeyboardDoubleArrowLeft,
+                                        if (preparingBackwards) "后续原图" else "回看原图",
                                         behindPages,
                                         preparation.pauseReason, expandedWork == ReaderWork.BEHIND, bodyEnabled) { toggle(ReaderWork.BEHIND) }
                                     StatusReveal(expandedWork == ReaderWork.BEHIND) {
@@ -484,12 +488,13 @@ private enum class ReaderStatusSection(val title: String) {
     SOURCES("来源与补页"), CACHE("缓存与空间")
 }
 
-private data class ButtonReadiness(val value: String, val mark: ReaderStatusMark, val reason: String?, val hasPages: Boolean)
+private data class ButtonReadiness(val value: String, val mark: ReaderStatusMark, val reason: String?,
+    val hasPages: Boolean, val backwards: Boolean)
 
 private fun ReaderPreparationState.buttonReadiness(): ButtonReadiness {
     val ahead = pages.filter { it.role == ReaderPreparationRole.AHEAD }
     return ButtonReadiness(originalReadinessValue(ahead), originalReadinessMark(ahead, pauseReason),
-        pauseReason, ahead.isNotEmpty())
+        pauseReason, ahead.isNotEmpty(), direction < 0)
 }
 
 @Composable
@@ -502,10 +507,11 @@ internal fun ReaderPrefetchButton(preparation: StateFlow<ReaderPreparationState>
     MotionTextButton(onClick = onClick, enabled = enabled, modifier = modifier.heightIn(min = 48.dp)
         .semantics(mergeDescendants = true) {
             contentDescription = "原图预读"
-            stateDescription = "前方原图 ${reading.value}，${reading.reason ?: reading.mark.description}"
+            val label = if (reading.backwards) "往回预读原图" else "前方原图"
+            stateDescription = "$label ${reading.value}，${reading.reason ?: reading.mark.description}"
         }, contentPadding = PaddingValues(horizontal = 2.dp)) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("预读", style = MaterialTheme.typography.labelMedium)
+            Text(if (reading.backwards) "回看" else "预读", style = MaterialTheme.typography.labelMedium)
             if (reading.hasPages || reading.reason != null) Row(
                 horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (reading.mark == ReaderStatusMark.PAUSED || reading.mark == ReaderStatusMark.ERROR) StatusMark(reading.mark, Modifier.size(10.dp))
@@ -578,7 +584,7 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
     when (section) {
         ReaderStatusSection.MORE, ReaderStatusSection.QUALITY -> return
         ReaderStatusSection.PREPARATION -> {
-            StatusExplanation("已备 / 目标显示当前前读或回看范围内已核实的原图。自动模式按阅读速度逐步派发；? 表示待核实。内存预览和任务完成单独显示。")
+            StatusExplanation("手动模式按章节页序分别预读和回看；智能模式跟随连续翻页。? 表示有原图待核实，内存预览和任务完成单独统计。")
             FlowRow(Modifier.fillMaxWidth().padding(vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 StatusToken(Icons.Outlined.KeyboardDoubleArrowRight, "前读配置", "${budget.prefetchAhead} 页")

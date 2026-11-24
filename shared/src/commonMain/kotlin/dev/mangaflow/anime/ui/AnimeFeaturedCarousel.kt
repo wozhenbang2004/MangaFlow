@@ -25,11 +25,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -57,10 +60,14 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.rememberAsyncImagePainter
 import coil3.request.ImageRequest
 import coil3.request.crossfade
+import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.anime.AnimeDiscoveryItem
 import dev.mangaflow.anime.discoveryProvider
 import dev.mangaflow.platform.*
+import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LocalMangaWindow
+import dev.mangaflow.ui.LiquidGlassSurface
+import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.mangaCoverCard
 import dev.mangaflow.ui.mangaFontFamily
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -184,6 +191,7 @@ internal fun AnimeFeaturedCarousel(
                     }.mangaCoverCard(20.dp),
                     offset = { if (motion) (index - position.value).coerceIn(-1f, 1f) *
                         (if (rtl) -1f else 1f) else 0f },
+                    useGlass = visible && acceptTap && settled && readyCovers[entries[index].coverUrl] == true,
                     enabled = acceptTap, scoresEnabled = acceptTap && settled,
                     actionLabel = if (settled) "查看详情" else "选中这部推荐番剧",
                     onOpenScores = onOpenScores, onOpen = { entry ->
@@ -234,6 +242,7 @@ private fun AnimeFeaturedCard(
     onReady: () -> Unit,
     modifier: Modifier,
     offset: () -> Float,
+    useGlass: Boolean,
     enabled: Boolean,
     scoresEnabled: Boolean,
     actionLabel: String,
@@ -254,9 +263,10 @@ private fun AnimeFeaturedCard(
     val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Crop,
         onSuccess = { latestOnReady() })
     val colors = MaterialTheme.colorScheme
-    val titleGradient = remember {
-        Brush.verticalGradient(0f to Color.Transparent, .36f to Color.Black.copy(alpha = .57f),
-            1f to Color.Black.copy(alpha = .82f))
+    val coverGlass = rememberHazeState()
+    val titleShade = remember {
+        Brush.verticalGradient(0f to Color.Transparent, .36f to Color.Black.copy(alpha = .56f),
+            1f to Color.Black.copy(alpha = .73f))
     }
     Box(modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button,
         enabled = enabled, onClickLabel = actionLabel, onClick = { onOpen(entry) })
@@ -268,32 +278,52 @@ private fun AnimeFeaturedCard(
             Icon(Icons.Outlined.Tv, null, Modifier.size(24.dp), tint = colors.onSurfaceVariant)
             Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
                 alignment = BiasAlignment(0f, -.65f),
-                modifier = Modifier.matchParentSize().graphicsLayer {
-                    if (motion) {
-                        scaleX = 1.04f; scaleY = 1.04f
-                        translationX = offset() * 4.dp.toPx()
-                    }
-                })
+                modifier = Modifier.matchParentSize()
+                    .then(if (useGlass) Modifier.mangaHazeSource(coverGlass) else Modifier)
+                    .graphicsLayer {
+                        if (motion) {
+                            scaleX = 1.04f; scaleY = 1.04f
+                            translationX = offset() * 4.dp.toPx()
+                        }
+                    })
         }
-        Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().background(titleGradient)
-            .padding(start = 14.dp, top = 26.dp, end = 14.dp, bottom = 9.dp)) {
-            Text(entry.title, Modifier.fillMaxWidth().clearAndSetSemantics { }, color = Color.White,
-                fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                style = MaterialTheme.typography.titleLarge.copy(
-                    fontSize = if (narrow) 19.sp else 22.sp, lineHeight = if (narrow) 24.sp else 28.sp,
-                    lineBreak = LineBreak.Heading),
-                fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            if (entry.caption.isNotBlank() || primaryScore != null) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (entry.caption.isNotBlank()) Text(entry.caption,
-                        Modifier.weight(1f, fill = false).clearAndSetSemantics { },
-                        color = Color.White.copy(alpha = .87f), style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (primaryScore != null) AnimeDiscoveryPrimaryScore(primaryScore,
-                        foreground = Color.White, onScores = ({
-                            onOpenScores(entry.copy(discoveryItem = item.copy(sourceScores = scores)))
-                        }).takeIf { scoresEnabled })
+        Box(Modifier.align(Alignment.BottomStart).fillMaxWidth()) {
+            // Only the selected, stationary card samples its own cover. During a swipe the
+            // same readable caption remains, without an optical layer on every moving card.
+            if (useGlass) LiquidGlassSurface(coverGlass,
+                modifier = Modifier.matchParentSize().graphicsLayer {
+                    compositingStrategy = CompositingStrategy.Offscreen
+                }.drawWithCache {
+                    val feather = Brush.verticalGradient(0f to Color.Transparent,
+                        .22f to Color.Transparent, .65f to Color.Black, 1f to Color.Black)
+                    onDrawWithContent {
+                        drawContent()
+                        drawRect(feather, blendMode = BlendMode.DstIn)
+                    }
+                },
+                cornerRadius = 0.dp, role = GlassSurfaceRole.GALLERY, elevation = 0.dp,
+                softCard = false, surfaceColor = Color(0xFF202029), preferSource = true,
+                contentColor = Color.White) {}
+            Column(Modifier.fillMaxWidth().background(titleShade)
+                .padding(start = 14.dp, top = 26.dp, end = 14.dp, bottom = 9.dp)) {
+                Text(entry.title, Modifier.fillMaxWidth().clearAndSetSemantics { }, color = Color.White,
+                    fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                    style = MaterialTheme.typography.titleLarge.copy(
+                        fontSize = if (narrow) 19.sp else 22.sp, lineHeight = if (narrow) 24.sp else 28.sp,
+                        lineBreak = LineBreak.Heading),
+                    fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (entry.caption.isNotBlank() || primaryScore != null) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (entry.caption.isNotBlank()) Text(entry.caption,
+                            Modifier.weight(1f, fill = false).clearAndSetSemantics { },
+                            color = Color.White.copy(alpha = .87f), style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (primaryScore != null) AnimeDiscoveryPrimaryScore(primaryScore,
+                            foreground = Color.White, onScores = ({
+                                onOpenScores(entry.copy(discoveryItem = item.copy(sourceScores = scores)))
+                            }).takeIf { scoresEnabled })
+                    }
                 }
             }
         }

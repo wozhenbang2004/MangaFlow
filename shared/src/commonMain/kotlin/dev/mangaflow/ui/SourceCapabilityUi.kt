@@ -22,7 +22,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -169,7 +168,7 @@ internal fun SourceCapabilityBrowseControls(
     }
     val colors = MaterialTheme.colorScheme
     val controlColors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)
-    // Only the restricted discovery header offers shortcuts into tag/author search.
+    // Tags use the shared search scope; the discovery header keeps its author shortcut.
     val compactHome = !searching && onOpenSearch != null
     val status = when {
         failed.size == 1 -> failed.single().let { lane ->
@@ -226,10 +225,6 @@ internal fun SourceCapabilityBrowseControls(
             Icon(Icons.Outlined.ViewModule, "${sourceName}分类与栏目", Modifier.size(19.dp))
         }
         if (compactHome && onOpenSearch != null) {
-            MotionIconButton(onClick = { onOpenSearch(SearchTarget.TAG) }, enabled = active && !present,
-                modifier = Modifier.size(44.dp), tooltip = "标签") {
-                Icon(Icons.AutoMirrored.Outlined.Label, "标签", Modifier.size(19.dp), tint = colors.onSurfaceVariant)
-            }
             MotionIconButton(onClick = { onOpenSearch(SearchTarget.AUTHOR) }, enabled = active && !present,
                 modifier = Modifier.size(44.dp), tooltip = "作者") {
                 Icon(Icons.Outlined.PersonOutline, "作者", Modifier.size(19.dp), tint = colors.onSurfaceVariant)
@@ -264,7 +259,7 @@ internal fun SourceCapabilityBrowseControls(
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         if (compactHome) BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val iconCount = 2 + (if (hasFeeds) 1 else 0) + (if (hasFilters) 1 else 0)
+            val iconCount = 1 + (if (hasFeeds) 1 else 0) + (if (hasFilters) 1 else 0)
             val toolsWidth = 46.dp * iconCount + (if (status != null) statusWidth + 6.dp else 0.dp)
             if (maxWidth >= toolsWidth + 52.dp + 56.dp * fontScale) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,

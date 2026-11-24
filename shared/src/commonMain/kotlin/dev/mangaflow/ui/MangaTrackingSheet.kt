@@ -1,7 +1,6 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -44,7 +43,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.tracking.*
@@ -52,13 +50,12 @@ import dev.mangaflow.ui.motion.*
 import dev.mangaflow.ui.platform.NativeTrackingWebsiteLogin
 import dev.mangaflow.ui.platform.trackingWebsiteLoginSupported
 
-/** Retained Ovio panel: account, explicit identity review, then one visible sync direction. */
+/** Opaque Ovio panel: account, explicit identity review, then one visible sync direction. */
 @Composable
 internal fun MangaTrackingSheet(
     visible: Boolean,
     state: MangaTrackingState,
     controller: MangaTrackingController,
-    backdrop: HazeState,
     onContinueRead: (Manga, Chapter) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -136,7 +133,8 @@ internal fun MangaTrackingSheet(
     }
     LaunchedEffect(bound?.subject?.id) { if (bound != null) showSearch = false }
 
-    MotionBottomSheet(onDismissRequest = dismissPanel, backdrop = backdrop) { dismiss ->
+    // Account inputs and login actions must never sample the chapter grid underneath this sheet.
+    MotionBottomSheet(onDismissRequest = dismissPanel, containerColor = colors.surface.copy(alpha = 1f)) { dismiss ->
         val website = authorization
         Column(Modifier.fillMaxWidth().then(if (website != null)
             Modifier.height(LocalMangaWindow.current.panelHeight.coerceAtMost(720.dp))
@@ -225,23 +223,20 @@ internal fun MangaTrackingSheet(
                             val websiteConfigured = provider == MangaTrackingProvider.BANGUMI || state.aniListClientId.isNotBlank()
                             if (trackingWebsiteLoginSupported() && websiteConfigured) {
                                 TrackingHint("同步收藏、话数和卷数，本机页码会保留。")
-                                val interaction = remember { MutableInteractionSource() }
-                                LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().padding(top = 10.dp),
-                                    cornerRadius = 18.dp, role = GlassSurfaceRole.CONTROL,
-                                    interactionSource = interaction, elevation = 1.dp) {
-                                    MotionButton(onClick = {
-                                        externalError = null; token = ""
-                                        authorization = controller.beginWebsiteAuthorization(provider)
-                                    }, enabled = enabled, interactionSource = interaction,
-                                        shape = RoundedCornerShape(18.dp),
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = colors.surface.copy(alpha = .54f), contentColor = colors.onSurface),
-                                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                                        ReviewSourceMark(provider.id, size = 17.dp)
-                                        Text(if (account == null) "登录 " + provider.label else "重新登录 " + provider.label,
-                                            Modifier.weight(1f).padding(horizontal = 10.dp))
-                                        Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp))
-                                    }
+                                MotionButton(onClick = {
+                                    externalError = null; token = ""
+                                    authorization = controller.beginWebsiteAuthorization(provider)
+                                }, enabled = enabled, shape = RoundedCornerShape(18.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = colors.surfaceContainerHigh.copy(alpha = 1f),
+                                        contentColor = colors.onSurface,
+                                        disabledContainerColor = colors.surfaceContainer.copy(alpha = 1f),
+                                        disabledContentColor = colors.onSurfaceVariant),
+                                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp).heightIn(min = 48.dp)) {
+                                    ReviewSourceMark(provider.id, size = 17.dp)
+                                    Text(if (account == null) "登录 " + provider.label else "重新登录 " + provider.label,
+                                        Modifier.weight(1f).padding(horizontal = 10.dp))
+                                    Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp))
                                 }
                                 TrackingHint(if (provider == MangaTrackingProvider.BANGUMI)
                                     "在 Bangumi 官网确认创建授权后会自动返回。"

@@ -188,6 +188,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     private var discoveryDate: String? = null
     private var discoveryVisible = false
+    private var discoveryTagsVisible = false
     private val discoveryOptions = mutableMapOf<Pair<AnimeDiscoveryTab, AnimeDiscoveryProvider>, AnimeDiscoveryQuery>()
     private var detailGeneration = 0L
     private var detailOpenedAt: Long? = null
@@ -551,6 +552,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 invalidatePreparation()
                 prepareDetailOpeningAddresses()
                 if (discoveryVisible && foreground) ensureDiscovery()
+                else if (discoveryTagsVisible && foreground) updateTagDiscoveryVisibility()
                 mutableState.value.detail?.subject?.id?.let { owner ->
                     val providers = detailRatingRequests.keys.toSet() + mutableState.value.detailScoreChecks.keys +
                         AnimeDiscoveryProvider.ANILIST
@@ -598,7 +600,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val mainCatalog = AnimeDiscoveryQuery(provider = AnimeDiscoveryProvider.DOUBAN)
         val defaults = mapOf(AnimeDiscoveryTab.HOME to mainCatalog,
             AnimeDiscoveryTab.RANKING to mainCatalog, AnimeDiscoveryTab.SEASON to seasonal,
-            AnimeDiscoveryTab.CALENDAR to calendar, AnimeDiscoveryTab.GENRES to mainCatalog)
+            AnimeDiscoveryTab.CALENDAR to calendar)
         if (discoveryDate != today.toString() || defaults.keys.any { animeDiscoveryFeedKey(it) !in mutableState.value.discoveryFeeds }) {
             discoveryDate = today.toString()
             val before = mutableState.value
@@ -610,18 +612,38 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             mutableState.update { it.copy(discoveryFeeds = feeds) }
         }
         if (!loadHome) return
+        val visibleKeys = visibleDiscoveryKeys()
+        discoveryLoads.visible(visibleKeys)
         val tab = mutableState.value.discoveryTab
-        val keys = when (tab) {
-            AnimeDiscoveryTab.SOURCES -> emptySet()
-            else -> setOf(animeDiscoveryFeedKey(tab))
-        }
-        discoveryLoads.visible(keys.takeIf { discoveryVisible && foreground }.orEmpty())
-        keys.forEach(discoveryLoads::ensure)
+        if (tab != AnimeDiscoveryTab.SOURCES) discoveryLoads.ensure(animeDiscoveryFeedKey(tab))
+        if (discoveryTagsVisible && tab != AnimeDiscoveryTab.GENRES)
+            selectedTagFeedKey()?.takeIf { it in visibleKeys }?.let(discoveryLoads::ensure)
     }
 
-    internal fun setDiscoveryVisible(visible: Boolean) {
+    private fun visibleDiscoveryKeys(): Set<String> = if (!foreground) emptySet() else buildSet {
+        val current = mutableState.value.discoveryTab
+        if (discoveryVisible && current != AnimeDiscoveryTab.SOURCES) add(animeDiscoveryFeedKey(current))
+        if (discoveryTagsVisible) selectedTagFeedKey()?.let(::add)
+    }
+
+    private fun selectedTagFeedKey(): String? = animeDiscoveryFeedKey(AnimeDiscoveryTab.GENRES).takeIf { key ->
+        key in mutableState.value.discoveryFeeds
+    }
+
+    internal fun setDiscoveryVisible(visible: Boolean, showTags: Boolean = false) {
         discoveryVisible = visible
-        if (visible && foreground) ensureDiscovery() else discoveryLoads.visible(emptySet())
+        discoveryTagsVisible = showTags
+        if (visible && foreground) ensureDiscovery() else updateTagDiscoveryVisibility()
+    }
+
+    private fun updateTagDiscoveryVisibility() {
+        val keys = visibleDiscoveryKeys()
+        discoveryLoads.visible(keys)
+        selectedTagFeedKey()?.takeIf { discoveryTagsVisible && it in keys }?.let(discoveryLoads::ensure)
+    }
+
+    internal fun refreshDiscoveryTags() {
+        if (discoveryTagsVisible && foreground) selectedTagFeedKey()?.let(discoveryLoads::refresh)
     }
 
     fun selectDiscoveryTab(tab: AnimeDiscoveryTab) {
@@ -636,7 +658,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     internal fun rememberedDiscoveryOptions(tab: AnimeDiscoveryTab, provider: AnimeDiscoveryProvider): AnimeDiscoveryQuery? =
         discoveryOptions[tab to provider]
 
-    fun configureDiscovery(tab: AnimeDiscoveryTab, query: AnimeDiscoveryQuery) {
+    fun configureDiscovery(tab: AnimeDiscoveryTab, query: AnimeDiscoveryQuery) =
+        configureDiscovery(tab, query, selectTab = true)
+
+    internal fun configureDiscoveryTags(query: AnimeDiscoveryQuery) =
+        configureDiscovery(AnimeDiscoveryTab.GENRES, query, selectTab = false)
+
+    private fun configureDiscovery(tab: AnimeDiscoveryTab, query: AnimeDiscoveryQuery, selectTab: Boolean) {
         if (tab == AnimeDiscoveryTab.SOURCES) return
         ensureDiscovery(loadHome = false)
         val key = animeDiscoveryFeedKey(tab)
@@ -659,9 +687,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             current?.query?.let { discoveryOptions[tab to it.provider] = it }
             discoveryOptions[tab to normalized.provider] = normalized
         }
-        mutableState.update { it.copy(discoveryTab = tab, discoveryFeeds = it.discoveryFeeds +
+        mutableState.update { it.copy(discoveryTab = if (selectTab) tab else it.discoveryTab, discoveryFeeds = it.discoveryFeeds +
             (key to if (current != null && current.query == normalized) current else AnimeDiscoveryFeed(normalized))) }
-        ensureDiscovery()
+        if (selectTab) ensureDiscovery() else updateTagDiscoveryVisibility()
     }
 
     fun refreshDiscovery() {
@@ -4359,6 +4387,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
         if (value) prepareDetailOpeningAddresses()
         if (value && discoveryVisible) ensureDiscovery()
+        else if (value && discoveryTagsVisible) updateTagDiscoveryVisibility()
         else if (!value) discoveryLoads.visible(emptySet())
     }
 

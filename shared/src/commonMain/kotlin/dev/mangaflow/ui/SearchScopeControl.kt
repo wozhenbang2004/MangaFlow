@@ -66,13 +66,16 @@ internal fun SearchScopeControl(
     onTarget: (SearchTarget) -> Unit,
     modifier: Modifier = Modifier,
     translationGroupAvailable: Boolean = true,
+    titleAndTagsOnly: Boolean = false,
 ) {
-    val targets = remember(translationGroupAvailable) {
-        listOf(SearchTarget.TITLE, SearchTarget.AUTHOR, SearchTarget.TAG) +
+    val targets = remember(translationGroupAvailable, titleAndTagsOnly) {
+        if (titleAndTagsOnly) listOf(SearchTarget.TITLE, SearchTarget.TAG)
+        else listOf(SearchTarget.TITLE, SearchTarget.AUTHOR, SearchTarget.TAG) +
             if (translationGroupAvailable) listOf(SearchTarget.TRANSLATION_GROUP) else emptyList()
     }
-    val labels = remember(translationGroupAvailable) {
-        listOf("作品", "作者", "标签") + if (translationGroupAvailable) listOf("汉化组") else emptyList()
+    val labels = remember(translationGroupAvailable, titleAndTagsOnly) {
+        if (titleAndTagsOnly) listOf("作品", "标签")
+        else listOf("作品", "作者", "标签") + if (translationGroupAvailable) listOf("汉化组") else emptyList()
     }
     val selected = targets.indexOf(target).coerceAtLeast(0)
     val direction = LocalLayoutDirection.current
@@ -151,8 +154,11 @@ internal fun SearchScopeControl(
                             SearchTarget.AUTHOR -> Icons.Outlined.PersonOutline
                             SearchTarget.TAG -> Icons.AutoMirrored.Outlined.Label
                             SearchTarget.TRANSLATION_GROUP -> Icons.Outlined.Translate
-                        }, labels[index] + if (targets[index] == SearchTarget.TRANSLATION_GROUP)
-                            "，拷贝来源" else "，当前分区已启用来源",
+                        }, labels[index] + when {
+                            titleAndTagsOnly -> ""
+                            targets[index] == SearchTarget.TRANSLATION_GROUP -> "，拷贝来源"
+                            else -> "，当前分区已启用来源"
+                        },
                             Modifier.align(Alignment.Center).size(17.dp), tint = color)
 
                     }
@@ -165,8 +171,11 @@ internal fun SearchScopeControl(
             .motionPress(interaction, enabled, pressedScale = .94f)
             .semantics(mergeDescendants = true) {
                 contentDescription = "搜索范围：" + labels[selected]
-                stateDescription = if (target == SearchTarget.TRANSLATION_GROUP) "拷贝来源，已收起"
-                    else "当前分区全部已启用来源，已收起"
+                stateDescription = when {
+                    titleAndTagsOnly -> "已收起"
+                    target == SearchTarget.TRANSLATION_GROUP -> "拷贝来源，已收起"
+                    else -> "当前分区全部已启用来源，已收起"
+                }
             }
         else Modifier.clearAndSetSemantics { }
         Box(Modifier.align(Alignment.CenterEnd).size(44.dp).then(trigger)

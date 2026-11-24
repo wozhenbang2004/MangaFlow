@@ -100,11 +100,12 @@ internal fun ReaderSourceStack(chapter: Chapter, modifier: Modifier = Modifier, 
 }
 
 private object BodySourceVectors {
-    private fun glyph(name: String, draw: PathBuilder.() -> Unit): ImageVector = ImageVector.Builder(
+    private fun glyph(name: String, filled: Boolean = false, draw: PathBuilder.() -> Unit): ImageVector = ImageVector.Builder(
         name = "MangaFlowBody$name", defaultWidth = 24.dp, defaultHeight = 24.dp,
         viewportWidth = 24f, viewportHeight = 24f,
     ).apply {
-        path(fill = null, stroke = SolidColor(Color.Black), strokeLineWidth = 1.8f,
+        val ink = SolidColor(Color.Black)
+        path(fill = if (filled) ink else null, stroke = if (filled) null else ink, strokeLineWidth = 1.8f,
             strokeLineCap = StrokeCap.Round, strokeLineJoin = StrokeJoin.Round, pathBuilder = draw)
     }.build()
 
@@ -160,6 +161,28 @@ private object BodySourceVectors {
         moveTo(7.5f, 14f); lineTo(11.5f, 14f)
     }
 
+    // An angular index card and one large inset hook are readable at 13 dp.
+    private val jmcomic = glyph("JmComic") {
+        moveTo(4f, 4f); lineTo(20f, 4f); lineTo(20f, 20f); lineTo(4f, 20f); close()
+        moveTo(10f, 8f); lineTo(15f, 8f); lineTo(15f, 13.4f)
+        curveTo(15f, 16.9f, 9.8f, 17.1f, 9f, 14.2f)
+    }
+
+    // A round three-toed stamp; shape, not just tint, distinguishes the two tiny marks.
+    private val picacg = glyph("Picacg", filled = true) {
+        moveTo(12f, 11f); curveTo(9.7f, 11f, 9f, 12.7f, 7f, 14.4f)
+        curveTo(3.6f, 17.2f, 6.1f, 21.2f, 9.4f, 20.3f)
+        curveTo(11f, 19.8f, 13f, 19.8f, 14.6f, 20.3f)
+        curveTo(17.9f, 21.2f, 20.4f, 17.2f, 17f, 14.4f)
+        curveTo(15f, 12.7f, 14.3f, 11f, 12f, 11f); close()
+        moveTo(12f, 3f); curveTo(8.5f, 3f, 8.5f, 9f, 12f, 9f)
+        curveTo(15.5f, 9f, 15.5f, 3f, 12f, 3f); close()
+        moveTo(4.2f, 6.5f); curveTo(1f, 7.3f, 3f, 12.9f, 6.2f, 12f)
+        curveTo(9.4f, 11.1f, 7.2f, 5.7f, 4.2f, 6.5f); close()
+        moveTo(19.8f, 6.5f); curveTo(23f, 7.3f, 21f, 12.9f, 17.8f, 12f)
+        curveTo(14.6f, 11.1f, 16.8f, 5.7f, 19.8f, 6.5f); close()
+    }
+
     private val generic = glyph("Source") {
         moveTo(3f, 5f); lineTo(8f, 5f); curveTo(10f, 5f, 12f, 6.6f, 12f, 8f)
         curveTo(12f, 6.6f, 14f, 5f, 16f, 5f); lineTo(21f, 5f); lineTo(21f, 19f)
@@ -174,6 +197,8 @@ private object BodySourceVectors {
         "mangabz" -> mangabz
         "komiic" -> komiic
         "mangadex" -> mangadex
+        "jmcomic" -> jmcomic
+        "picacg" -> picacg
         else -> generic
     }
 }

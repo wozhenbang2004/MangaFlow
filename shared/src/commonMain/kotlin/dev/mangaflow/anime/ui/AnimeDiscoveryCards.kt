@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
@@ -47,6 +48,7 @@ import kotlin.math.roundToInt
 internal class AnimeDiscoveryScrolls {
     private val grids = linkedMapOf<Any, LazyGridState>()
     var featuredKey: String? = null
+    val watchHistory = LazyListState()
     fun grid(key: String, query: AnimeDiscoveryQuery? = null): LazyGridState {
         val identity = if (query == null) key else key to query
         val state = grids.remove(identity) ?: LazyGridState()

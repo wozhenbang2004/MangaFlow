@@ -944,7 +944,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     if (!restrictedMode && lanReadingSyncOpen) LanReadingSyncSheet(
         controller = model.services.lanReadingSync, onDismiss = { lanReadingSyncOpen = false })
     MangaTrackingSheet(visible = mangaTrackingOpen && !restrictedMode,
-        state = mangaTrackingState, controller = model.services.mangaTracking, backdrop = drawerBackdrop,
+        state = mangaTrackingState, controller = model.services.mangaTracking,
         onContinueRead = { manga, chapter ->
             mangaTrackingOpen = false
             model.continueTrackedManga(manga, chapter)

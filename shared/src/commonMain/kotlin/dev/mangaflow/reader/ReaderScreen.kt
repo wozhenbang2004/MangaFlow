@@ -2555,6 +2555,9 @@ private fun ChapterPages(
             }
         }
         prefetchViewport = ReaderPrefetchViewport(groups = groups,
+            // During a drag, currentPage is only the page nearest the snap point. Do not
+            // change the long-window direction for a turn that the user hasn't settled.
+            directionAnchor = { pager.settledPage.toLong() },
             position = { pager.currentPage + pager.currentPageOffsetFraction }, visibleRange = {
                 val shown = groups.getOrNull(pager.currentPage) ?: groups.getOrNull(pager.settledPage)
                     ?: groups.getOrNull(groups.indexOfReaderPage(initialPage)) ?: groups[startingGroup]
@@ -2769,7 +2772,7 @@ private data class ReaderDownloadAvailability(val generation: String, val status
 
 private data class PrefetchWindow(
     val first: Int, val last: Int, val composed: Set<Int>, val inFlight: Set<Int>, val enabled: Boolean,
-    val visibleReady: Boolean, val ahead: Int, val behind: Int,
+    val visibleReady: Boolean, val ahead: Int, val behind: Int, val prefetchMode: PrefetchMode,
     val position: Float, val bytes: Long, val parallel: Int, val decoded: Int,
     val viewport: IntSize, val checking: Set<Int>, val resolving: Set<Int>, val resolved: Set<Int>,
     val resolveParallel: Int, val decodeParallel: Int, val decodeEnabled: Boolean, val foregroundActive: Boolean,
@@ -3172,7 +3175,7 @@ internal fun AdjacentPagePrefetch(
                 val (first, last) = visible()
                 PrefetchWindow(first, last, currentComposed.keys.toSet(), transfers(), prefetchEnabled,
                     readerRangeSettled(pages, first, last, currentLoaded, currentFailedLoads),
-                    currentBudget.prefetchAhead, currentBudget.prefetchBehind,
+                    currentBudget.prefetchAhead, currentBudget.prefetchBehind, currentOverrides.prefetchMode,
                     ((currentPosition?.invoke() ?: first.toFloat()) * 10f).roundToInt() / 10f,
                     currentBudget.adjacentPrefetchBytes, currentBudget.prefetchRequests,
                     currentBudget.decodedPrefetchPages, IntSize(currentViewportWidth(), currentHeight),
@@ -3226,8 +3229,12 @@ internal fun AdjacentPagePrefetch(
                     ?.takeIf { it >= 0 } ?: window.first).toLong()
                 val baseline = window.layoutKey to (window.directionBaseline?.first ?: 0L)
                 if (observedBaseline != baseline) { observedBaseline = baseline; intentEpoch++ }
-                val nextDirection = readingIntent.update(logicalPage, window.scrollDirection, intentEpoch,
+                val intentDirection = readingIntent.update(logicalPage, window.scrollDirection, intentEpoch,
                     window.directionBaseline?.second ?: logicalPage)
+                // Manual "待读" and "回看" have separate limits in chapter order. Looking
+                // back must not exchange them (or cancel still-needed forward originals).
+                val manual = window.prefetchMode == PrefetchMode.MANUAL
+                val nextDirection = if (manual) 1 else intentDirection
                 if (nextDirection != direction) speed = 0f
                 direction = nextDirection
                 // Do not cancel overlapping work merely for a direction change. The
@@ -3246,7 +3253,7 @@ internal fun AdjacentPagePrefetch(
                 val readyLead = maxOf(1, window.decoded, window.parallel)
                 // Explicit advance enhancement needs the same original window. The original
                 // cache, byte budget and admission owners still decide when work can start.
-                val ahead = if (window.prepareEnhancementAhead || currentOverrides.prefetchMode == PrefetchMode.MANUAL) window.ahead else
+                val ahead = if (window.prepareEnhancementAhead || manual) window.ahead else
                     minOf(window.ahead.toLong(), if (now - lastMove > window.runtime.idleWindowSeconds.coerceAtLeast(1).toLong() * 1000L)
                         readyLead.toLong() else if (speed == 0f) readyLead.toLong() * 2L else
                         maxOf(readyLead.toLong(), kotlin.math.ceil(speed.toDouble() * seconds.toDouble()).toLong()))
