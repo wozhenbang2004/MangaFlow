@@ -23,5 +23,5 @@ internal actual fun platformRelayLinkController(context: PlatformContext): Relay
 
 actual fun currentRelayBinding(mode: DownloadRouteMode): RelayRouteBinding? = null
 actual fun resolveRelayEndpoint(binding: RelayRouteBinding, mode: DownloadRouteMode): RelayManagedEndpoint =
-    throw DownloadRouteException("此平台不支持 Relay Android 联动，原任务不能改用其他网络路径。")
+    throw DownloadRouteException("此平台不支持 Relay 联动，原任务不能改用其他网络路径。")
 actual fun recordRelayRequest(binding: RelayRouteBinding, mode: DownloadRouteMode, observationEpoch: String) = Unit

@@ -41,7 +41,8 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
     private val calendarMutex = Mutex()
 
     internal fun route(query: AnimeDiscoveryQuery): DownloadRouteSnapshot =
-        DownloadRoutingStore.activeSourceSnapshot(providerId(query), DownloadCategory.ANIME)
+        if (query.provider == AnimeDiscoveryProvider.DOUBAN) douban.browseRoute()
+        else DownloadRoutingStore.activeSourceSnapshot(providerId(query), DownloadCategory.ANIME)
 
     internal val cacheEpoch: Long get() = cache.generation
 

@@ -32,6 +32,10 @@ data class RelayLinkState(
     val realRequestVerified: Boolean = false,
     val verifiedAtMillis: Long? = null,
     val verifiedMode: DownloadRouteMode? = null,
+    val desktopCompanion: Boolean = false,
+    val desktopCatalogueMode: DownloadRouteMode = DownloadRouteMode.SYSTEM,
+    val desktopCompanionProtected: Boolean = false,
+    val desktopCatalogueEpoch: String? = null,
 )
 
 /** Short-lived authenticated loopback entry; never log, serialize or put it in a route snapshot. */
@@ -50,6 +54,8 @@ class RelayLinkController internal constructor(private val platform: RelayPlatfo
     fun retry() = platform.refresh()
     fun revoke() = platform.revoke()
     fun openProvider() = platform.openProvider()
+    fun setDesktopCatalogueMode(mode: DownloadRouteMode) = platform.setDesktopCatalogueMode(mode)
+    internal fun desktopCatalogueRoute(): DownloadRouteSnapshot? = platform.desktopCatalogueRoute()
     /** Only installed source metadata is supplied; CDN domains are never inferred from a title. */
     fun updateSources(sources: Map<String, String>) = platform.updateSources(sources)
 
@@ -68,6 +74,8 @@ internal interface RelayPlatformLink {
     fun revoke()
     fun openProvider()
     fun updateSources(sources: Map<String, String>)
+    fun setDesktopCatalogueMode(mode: DownloadRouteMode) = Unit
+    fun desktopCatalogueRoute(): DownloadRouteSnapshot? = null
 }
 
 internal expect fun platformRelayLinkController(context: PlatformContext): RelayLinkController

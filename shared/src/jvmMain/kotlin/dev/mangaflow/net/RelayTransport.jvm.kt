@@ -18,18 +18,26 @@ private data class RelaySocketObservation(val binding: RelayRouteBinding, val mo
 private val relaySocketObservations = java.util.concurrent.ConcurrentHashMap<Int, RelaySocketObservation>()
 
 /** Carry the hostname to CONNECT. Per-host ULA identities prevent cross-host HTTP/2 coalescing. */
-private val relayDeferredDns = okhttp3.Dns { hostname ->
+internal val relayDeferredDns = okhttp3.Dns { hostname ->
     val identity = java.security.MessageDigest.getInstance("SHA-256").digest(hostname.toByteArray(Charsets.UTF_8)).copyOf(16)
     identity[0] = 0xfd.toByte()
     // This address is an internal route identity; RelayTunnelSocketFactory never connects to it.
     listOf(InetAddress.getByAddress(hostname, identity))
 }
 
-internal class RelayTunnelSocketFactory(
-    private val binding: RelayRouteBinding,
-    private val mode: DownloadRouteMode,
-    private val checkedDestination: ((InetAddress) -> Boolean)? = null,
+private class RelayConnectEntry(val endpoint: RelayManagedEndpoint, val provePeer: ((Socket) -> Unit)? = null)
+
+internal class RelayTunnelSocketFactory private constructor(
+    private val resolveEntry: (InetSocketAddress) -> RelayConnectEntry,
+    private val checkedDestination: ((InetAddress) -> Boolean)?,
+    private val observationFor: ((String) -> RelaySocketObservation)?,
 ) : SocketFactory() {
+    constructor(binding: RelayRouteBinding, mode: DownloadRouteMode,
+        checkedDestination: ((InetAddress) -> Boolean)? = null) : this(
+        { RelayConnectEntry(resolveRelayEndpoint(binding, mode)) }, checkedDestination,
+        { epoch -> RelaySocketObservation(binding, mode, epoch) },
+    )
+
     override fun createSocket(): Socket = object : Socket(Proxy.NO_PROXY) {
         private var observation: RelaySocketObservation? = null
         private var observationPort = -1
@@ -41,8 +49,9 @@ internal class RelayTunnelSocketFactory(
             val target = endpoint as? InetSocketAddress ?: throw IOException("Relay 请求目标无效。")
             if (checkedDestination != null && (target.isUnresolved || target.address == null ||
                     !checkedDestination.invoke(target.address))) throw IOException("漫画源只能连接已核对的公开网络地址。")
-            val managed = try { resolveRelayEndpoint(binding, mode) }
+            val entry = try { resolveEntry(target) }
                 catch (failure: DownloadRouteException) { throw IOException(failure.message, failure) }
+            val managed = entry.endpoint
             if (managed.host != "127.0.0.1" || managed.port !in 1..65535 ||
                 managed.username.isBlank() || managed.password.isBlank() ||
                 managed.username.length > 256 || managed.password.length > 512 ||
@@ -61,6 +70,7 @@ internal class RelayTunnelSocketFactory(
                     if (timeout > 0) minOf(timeout, 15_000) else 15_000)
                 val priorTimeout = soTimeout
                 soTimeout = 15_000
+                entry.provePeer?.invoke(this)
                 getOutputStream().write(("CONNECT $authority HTTP/1.1\r\nHost: $authority\r\n" +
                     "Proxy-Authorization: Basic $authorization\r\n\r\n").toByteArray(Charsets.US_ASCII))
                 getOutputStream().flush()
@@ -75,8 +85,9 @@ internal class RelayTunnelSocketFactory(
                 val status = header.toString("US-ASCII").substringBefore("\r\n")
                 if (!status.matches(Regex("HTTP/1\\.[01] 200(?: .*)?"))) throw IOException("Relay 未接受此请求，请检查联动状态。")
                 soTimeout = priorTimeout
-                observationPort = localPort
-                observation = RelaySocketObservation(binding, mode, managed.observationEpoch).also {
+                observationFor?.invoke(managed.observationEpoch)?.let {
+                    observationPort = localPort
+                    observation = it
                     relaySocketObservations[observationPort] = it
                 }
             } catch (failure: Exception) {
@@ -91,6 +102,16 @@ internal class RelayTunnelSocketFactory(
     override fun createSocket(host: InetAddress, port: Int): Socket = unsupported()
     override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int): Socket = unsupported()
     private fun unsupported(): Nothing = throw IOException("Relay 请求需要由网络客户端建立连接。")
+
+    companion object {
+        // Desktop entries always carry their own connected-socket proof; it cannot be
+        // recovered from a subsequent request or a process-wide last-found endpoint.
+        internal fun catalogue(resolveEntry: (InetSocketAddress) -> Pair<RelayManagedEndpoint, (Socket) -> Unit>) =
+            RelayTunnelSocketFactory({ target ->
+                val (endpoint, provePeer) = resolveEntry(target)
+                RelayConnectEntry(endpoint, provePeer)
+            }, null, null)
+    }
 }
 
 internal fun OkHttpClient.Builder.observeRelayRoute(route: DownloadRouteSnapshot?, observeTraffic: Boolean = true): OkHttpClient.Builder = apply {

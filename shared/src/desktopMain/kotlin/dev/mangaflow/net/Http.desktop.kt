@@ -16,17 +16,24 @@ internal actual fun platformHttpClient(http1Only: Boolean, route: DownloadRouteS
             followRedirects(false)
             followSslRedirects(false)
             retryOnConnectionFailure(false)
-            if (http1Only) protocols(listOf(Protocol.HTTP_1_1))
-            when (route?.mode) {
-                DownloadRouteMode.DIRECT -> proxy(Proxy.NO_PROXY)
-                DownloadRouteMode.PROXY -> {
-                    val endpoint = requireNotNull(route.proxy)
-                    val type = if (endpoint.type == DownloadProxyType.HTTP) Proxy.Type.HTTP else Proxy.Type.SOCKS
-                    proxy(Proxy(type, InetSocketAddress.createUnresolved(endpoint.host, endpoint.port)))
+            val desktopBinding = route?.desktopRelayBinding
+            if (desktopBinding != null) {
+                if (publicMediaOnly) throw DownloadRouteException("Relay 桌面联动仅适用于公开动画目录。")
+                requireNotNull(route).checkedActiveForHttp()
+                applyDesktopCatalogueRelay(desktopBinding)
+            } else {
+                if (http1Only) protocols(listOf(Protocol.HTTP_1_1))
+                when (route?.mode) {
+                    DownloadRouteMode.DIRECT -> proxy(Proxy.NO_PROXY)
+                    DownloadRouteMode.PROXY -> {
+                        val endpoint = requireNotNull(route.proxy)
+                        val type = if (endpoint.type == DownloadProxyType.HTTP) Proxy.Type.HTTP else Proxy.Type.SOCKS
+                        proxy(Proxy(type, InetSocketAddress.createUnresolved(endpoint.host, endpoint.port)))
+                    }
+                    DownloadRouteMode.SYSTEM, null -> Unit
                 }
-                DownloadRouteMode.SYSTEM, null -> Unit
+                if (publicMediaOnly) applyPublicMediaNetwork(route)
             }
-            if (publicMediaOnly) applyPublicMediaNetwork(route)
         }
     }
     configure(this)

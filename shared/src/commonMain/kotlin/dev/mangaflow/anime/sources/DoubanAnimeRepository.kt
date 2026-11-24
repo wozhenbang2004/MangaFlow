@@ -12,6 +12,7 @@ import dev.mangaflow.experience.ContentCacheKind
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.RelayLinkController
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
@@ -40,12 +41,15 @@ internal const val DOUBAN_BROWSE_PAGE_SIZE = 20
 class DoubanAnimeRepository(context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
     private val cache = AnimeMetadataCache.get(context)
+    private val relay = RelayLinkController.get(context)
     private val cursorMutex = Mutex()
     // Pagination state remains available when the user disables the disposable metadata cache.
     private val cursors = LinkedHashMap<String, SearchCursor>()
 
     internal fun route(): DownloadRouteSnapshot =
         DownloadRoutingStore.activeSourceSnapshot(DOUBAN_PROVIDER, DownloadCategory.ANIME)
+
+    internal fun browseRoute(): DownloadRouteSnapshot = relay.desktopCatalogueRoute() ?: route()
 
     suspend fun cachedSearch(query: String, page: Int): AnimeMetadataPage? = withContext(Dispatchers.Default) {
         val keyword = validateSearch(query, page)
@@ -149,7 +153,7 @@ class DoubanAnimeRepository(context: PlatformContext) {
             val generation = cache.generation
             val document = cache.read(browseKey(query, page, selectedRoute)) ?: return@withContext null
             val result = decodeBrowse(document.text, page)
-            checkScope(selectedRoute, generation)
+            checkScope(selectedRoute, generation, catalogue = true)
             result
         }
 
@@ -158,10 +162,10 @@ class DoubanAnimeRepository(context: PlatformContext) {
         validateBrowse(query, page)
         val generation = cache.generation
         val key = browseKey(query, page, requestedRoute)
-        checkScope(requestedRoute, generation)
+        checkScope(requestedRoute, generation, catalogue = true)
         if (!forceRefresh) cache.read(key)?.takeIf { cache.isFresh(it, browseKind(query)) }
             ?.let { decodeBrowse(it.text, page) }?.let {
-                checkScope(requestedRoute, generation)
+                checkScope(requestedRoute, generation, catalogue = true)
                 return@withContext it
             }
         val kind = if (query.format == AnimeDiscoveryFormat.MOVIE) "movie" else "tv"
@@ -177,8 +181,8 @@ class DoubanAnimeRepository(context: PlatformContext) {
             .addQueryParameter("refresh", "0").addQueryParameter("start", ((page - 1L) * DOUBAN_BROWSE_PAGE_SIZE).toString())
             .addQueryParameter("count", DOUBAN_BROWSE_PAGE_SIZE.toString()).addQueryParameter("tags", tags.joinToString(","))
             .addQueryParameter("sort", sort).build()
-        val response = read(url, AnimeSourceStage.METADATA, requestedRoute, referer = "https://movie.douban.com/explore")
-        checkScope(requestedRoute, generation)
+        val response = read(url, AnimeSourceStage.METADATA, requestedRoute, referer = "https://movie.douban.com/explore", catalogue = true)
+        checkScope(requestedRoute, generation, catalogue = true)
         val payload = try { JSONObject(response.text) } catch (failure: Exception) {
             throw AnimeSourceException(DOUBAN_PROVIDER, AnimeSourceStage.METADATA,
                 "豆瓣没有返回动画目录，可能需要原站验证，请稍后重试。", cause = failure)
@@ -186,7 +190,7 @@ class DoubanAnimeRepository(context: PlatformContext) {
         val fetchedAt = wallTimeMillis()
         val result = DoubanAnimeParser.browse(payload, page, fetchedAt)
         cache.write(key, JSONObject().put("payload", payload).put("fetchedAt", fetchedAt).toString(), generation)
-        checkScope(requestedRoute, generation)
+        checkScope(requestedRoute, generation, catalogue = true)
         result
     }
 
@@ -235,8 +239,8 @@ class DoubanAnimeRepository(context: PlatformContext) {
     }
 
     private suspend fun read(url: HttpUrl, stage: AnimeSourceStage, requestedRoute: DownloadRouteSnapshot,
-        referer: String, timeoutMillis: Long = 12_000L): AnimeHttpResponse {
-        if (route() != requestedRoute) throw DownloadRouteException("豆瓣资料的网络线路已更改，请按当前线路重新读取。")
+        referer: String, timeoutMillis: Long = 12_000L, catalogue: Boolean = false): AnimeHttpResponse {
+        if ((if (catalogue) browseRoute() else route()) != requestedRoute) throw DownloadRouteException("豆瓣资料的网络线路已更改，请按当前线路重新读取。")
         val http = AnimeHttp(DOUBAN_PROVIDER, requestedRoute)
         return try {
             withTimeoutOrNull(timeoutMillis) {
@@ -306,8 +310,8 @@ class DoubanAnimeRepository(context: PlatformContext) {
         return query.trim().also { require(it.isNotBlank() && it.length <= 180) { "请输入 1 至 180 个字的番剧名称。" } }
     }
 
-    private fun checkScope(requestedRoute: DownloadRouteSnapshot, generation: Long) {
-        if (route() != requestedRoute) throw DownloadRouteException("豆瓣资料的网络线路已更改，请按当前线路重新读取。")
+    private fun checkScope(requestedRoute: DownloadRouteSnapshot, generation: Long, catalogue: Boolean = false) {
+        if ((if (catalogue) browseRoute() else route()) != requestedRoute) throw DownloadRouteException("豆瓣资料的网络线路已更改，请按当前线路重新读取。")
         if (cache.generation != generation) throw AnimeSourceException(DOUBAN_PROVIDER, AnimeSourceStage.METADATA,
             "番剧资料缓存已更新，请重新读取。")
     }

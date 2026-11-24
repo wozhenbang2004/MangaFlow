@@ -148,7 +148,7 @@ class NetworkClient(
     private val onTransfer: ((NetworkTransferObservation) -> Unit)? = null,
 ) {
     private val timeouts = Triple(connectTimeoutMillis, readTimeoutMillis, callTimeoutMillis)
-    private val selectedRoute = route?.checkedActive()
+    private val selectedRoute = route?.let { if (publicMediaOnly) it.checkedActive() else it.checkedActiveForHttp() }
     private val clientFactory: (Boolean) -> HttpClient = { publicMedia ->
         platformHttpClient(http1Only, selectedRoute, observeRelayTraffic, publicMedia) {
             expectSuccess = false
@@ -223,7 +223,7 @@ class NetworkClient(
         prefixOnly: Boolean = false,
         acceptResponse: (Int, Map<String, String>) -> Boolean = { _, _ -> true },
     ): Pair<Int, Map<String, String>> = coroutineScope {
-        selectedRoute?.checkedActive()
+        selectedRoute?.checkedActiveForHttp()
         require(maximumBytes >= 0)
         val job = currentCoroutineContext()[Job]!!
         synchronized(activeLock) { active.add(job) }

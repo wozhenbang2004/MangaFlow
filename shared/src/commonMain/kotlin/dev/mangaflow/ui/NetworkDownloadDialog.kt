@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
@@ -70,6 +71,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
     val context = LocalMangaContext.current
     val relay = remember(context) { RelayLinkController.get(context) }
     val relayState by relay.state.collectAsStateWithLifecycle()
+    val desktopCompanion = relayState.desktopCompanion
     val autoCheck = remember(context) { NetworkAutoCheckController.get(context) }
     val autoState by autoCheck.state.collectAsStateWithLifecycle()
     val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
@@ -91,7 +93,9 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
     var suggestedProxy by remember { mutableStateOf<DownloadProxyEndpoint?>(null) }
     var suggestionRevision by remember { mutableIntStateOf(0) }
     val active = visible && foreground
-    LaunchedEffect(active, environmentRevision, context) { if (active && relayLinkAvailable) relay.refresh() }
+    LaunchedEffect(active, environmentRevision, context, desktopCompanion) {
+        if (active && (relayLinkAvailable || desktopCompanion)) relay.refresh()
+    }
     LaunchedEffect(visible) {
         resolvingOpen = visible
         if (visible && initialScene != NetworkDownloadScene.CATEGORIES && autoCheck.state.value.restoring)
@@ -232,7 +236,9 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                                         enabled = active && shown == scene, compact = true,
                                         onRefresh = { environmentRevision++ }, onUse = ::useReportedProxy)
                                 }, repository = repository, registry = registry, relaySummary = {
-                                    RelayLinkSummary(relayState, relay, enabled = active && shown == scene,
+                                    if (desktopCompanion) DesktopRelaySummary(relayState, enabled = active && shown == scene,
+                                        onDetails = { showInfo = true })
+                                    else RelayLinkSummary(relayState, relay, enabled = active && shown == scene,
                                         onDetails = { showInfo = true })
                                 })
                         }
@@ -266,13 +272,14 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                     if (scene == NetworkDownloadScene.CHECK) {
                         NetworkAutoEvidenceDetails(autoState, autoInfoRow, autoReceipt)
                     } else {
-                        if (relayLinkAvailable) RelayLinkDetails(relayState, relay, enabled = active && showInfo)
+                        if (desktopCompanion) DesktopRelayDetails(relayState, relay, enabled = active && showInfo)
+                        else if (relayLinkAvailable) RelayLinkDetails(relayState, relay, enabled = active && showInfo)
                         NetworkEnvironmentSummary(environment, environmentLoading, environmentError,
                             enabled = active && showInfo, onRefresh = { environmentRevision++ }, onUse = { endpoint ->
                                 pendingReportedProxy = endpoint
                                 showInfo = false
                             })
-                        NetworkConnectionHelp(relayState.installed)
+                        NetworkConnectionHelp(relayState.installed && !desktopCompanion, desktopCompanion)
                     }
                 }
             }
@@ -318,6 +325,85 @@ internal fun <T : Any> NetworkSceneContent(
             }
             target.placeRelative(0, 0)
         }
+    }
+}
+
+private data class DesktopRelayStatus(val label: String, val detail: String)
+
+private fun desktopRelayReady(state: RelayLinkState): Boolean = state.desktopCompanion && state.installed &&
+    state.supported && state.authorized && state.phase == RelayLinkPhase.APPLIED && !state.desktopCompanionProtected
+
+private fun desktopRelayStatus(state: RelayLinkState): DesktopRelayStatus = when {
+    state.desktopCompanionProtected -> DesktopRelayStatus("受保护，未联动", "Relay 的保护策略不允许此应用使用伴侣线路。")
+    desktopRelayReady(state) -> DesktopRelayStatus("可选 Relay 线路", "服务身份与授权已核对；尚不能据此判断实际请求走了哪条线路。")
+    else -> when (state.phase) {
+        RelayLinkPhase.NOT_AVAILABLE -> DesktopRelayStatus("伴侣能力不可用", "尚未发现可核验的桌面伴侣，未接入 Relay。")
+        RelayLinkPhase.NOT_INSTALLED -> DesktopRelayStatus("未检测到 Relay", "未找到可用于此联动的 Relay 服务。")
+        RelayLinkPhase.INCOMPATIBLE -> DesktopRelayStatus("Relay 版本不支持", "请先在 Relay 中确认版本是否支持桌面伴侣。")
+        RelayLinkPhase.AUTHORIZATION_REQUIRED -> DesktopRelayStatus("尚未获得授权", "请先确认 MangaFlow 安装受支持，再到 Relay 查看伴侣授权。")
+        RelayLinkPhase.AUTHORIZING -> DesktopRelayStatus("等待 Relay 批准", "授权由 Relay 确认；MangaFlow 不会代为批准。")
+        RelayLinkPhase.CONNECTING, RelayLinkPhase.SYNCING -> DesktopRelayStatus("正在核对伴侣", "正在核对 Relay 服务，未改变目录线路。")
+        else -> DesktopRelayStatus("Relay 暂不可用", "未确认当前有可用的伴侣会话。")
+    }
+}
+
+private val desktopCatalogueModes = listOf(DownloadRouteMode.SYSTEM, DownloadRouteMode.DIRECT, DownloadRouteMode.PROXY)
+
+private fun desktopCatalogueModeLabel(mode: DownloadRouteMode): String = when (mode) {
+    DownloadRouteMode.SYSTEM -> "沿用现有设置"
+    DownloadRouteMode.DIRECT -> "Relay 直连"
+    DownloadRouteMode.PROXY -> "Relay 代理"
+}
+
+@Composable
+private fun DesktopRelaySummary(state: RelayLinkState, enabled: Boolean, onDetails: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val status = desktopRelayStatus(state)
+    MotionTextButton(onClick = onDetails, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+        Icon(Icons.Outlined.Link, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("Relay 伴侣 · 豆瓣番剧目录", style = MaterialTheme.typography.labelMedium)
+            Text(status.label, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        }
+        Icon(Icons.Outlined.Info, "查看伴侣状态与目录线路", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun DesktopRelayDetails(state: RelayLinkState, controller: RelayLinkController, enabled: Boolean) {
+    val colors = MaterialTheme.colorScheme
+    val status = desktopRelayStatus(state)
+    val ready = desktopRelayReady(state)
+    var notice by remember(state.desktopCatalogueMode) { mutableStateOf<String?>(null) }
+    fun choose(mode: DownloadRouteMode) {
+        val latest = controller.state.value
+        if (!enabled || !latest.desktopCompanion || latest.desktopCatalogueMode == mode ||
+            (mode != DownloadRouteMode.SYSTEM && !desktopRelayReady(latest))) return
+        notice = null
+        try { controller.setDesktopCatalogueMode(mode) }
+        catch (_: Exception) { notice = "目录线路未能保存，请重试。" }
+    }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("豆瓣番剧目录线路", style = MaterialTheme.typography.titleSmall)
+        Text(status.label + " · " + desktopCatalogueModeLabel(state.desktopCatalogueMode),
+            style = MaterialTheme.typography.labelMedium, color = colors.onSurface)
+        Text(status.detail, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        if (ready) MotionTabs(desktopCatalogueModes.indexOf(state.desktopCatalogueMode).coerceAtLeast(0),
+            desktopCatalogueModes.map(::desktopCatalogueModeLabel),
+            onSelect = { index -> desktopCatalogueModes.getOrNull(index)?.let(::choose) },
+            modifier = Modifier.fillMaxWidth().motionInputGate(enabled), role = Role.RadioButton,
+            treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 44.dp,
+            track = colors.onSurface.copy(alpha = .035f), indicator = colors.surface)
+        else if (state.desktopCatalogueMode != DownloadRouteMode.SYSTEM) {
+            MotionTextButton(onClick = { choose(DownloadRouteMode.SYSTEM) }, enabled = enabled) {
+                Text("改回沿用现有设置")
+            }
+        }
+        // The desktop owner commits on its worker. Never infer a save from the button press.
+        (notice ?: state.error)?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
+        Text("只影响豆瓣番剧目录。漫画、播放、下载和其他线路设置不变；指定的 Relay 线路不可用时，目录不会自动换线。",
+            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
     }
 }
 
@@ -552,7 +638,7 @@ private fun NetworkEnvironmentSummary(
 }
 
 @Composable
-private fun NetworkConnectionHelp(relayInstalled: Boolean) {
+private fun NetworkConnectionHelp(relayInstalled: Boolean, desktopCompanion: Boolean) {
     val colors = MaterialTheme.colorScheme
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("连接与识别", style = MaterialTheme.typography.labelMedium, color = colors.onSurface)
@@ -563,7 +649,8 @@ private fun NetworkConnectionHelp(relayInstalled: Boolean) {
                 else "直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。外部软件需提供相应的分流能力。",
             "立即检测会发起新检查；上次结果仅查看历史。开启自动优化后，只改已验证且未锁定的项目；使用范围可按来源锁定。检测不代表带宽或全部图片可用。",
             "Steam 等独立连接会单独标记覆盖范围，普通接口可用不代表其所有连接都可用。",
-            "来源线路用于该来源的搜索、阅读、账号与新下载；网页认证遵循系统网络。系统报告了VPN或代理，不代表请求已经使用它。",
+            if (desktopCompanion) "除豆瓣番剧目录联动外，来源照常使用现有网络设置；网页认证遵循系统网络。"
+                else "来源线路用于该来源的搜索、阅读、账号与新下载；网页认证遵循系统网络。系统报告了VPN或代理，不代表请求已经使用它。",
             "手动选择用于后续请求；开启自动优化时，检测也可调整未锁定项目。下载来源尚未确定时，入口只显示“线路”。",
             "切换用于后续请求；已在途不强切。旧下载的固定线路若与当前代理方式不兼容，会提示使用当前设置重试。手工代理地址目前不支持账号密码。",
         ).forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }

@@ -3,6 +3,7 @@ package dev.mangaflow.desktop
 import androidx.compose.runtime.*
 import kotlinx.coroutines.*
 import dev.mangaflow.MangaViewModel
+import dev.mangaflow.desktop.relay.registerWindowsRelayCompanion
 import dev.mangaflow.platform.storage.flushLocalPreferences
 import dev.mangaflow.platform.storage.getSharedPreferences
 import dev.mangaflow.platform.storage.Preferences
@@ -49,6 +50,7 @@ fun main() {
     check(data.isDirectory || data.mkdirs()) { "无法创建漫流数据目录：$data" }
     check(cache.isDirectory || cache.mkdirs()) { "无法创建漫流缓存目录：$cache" }
     val context = object : PlatformContext(data.absolutePath, cache.absolutePath) {}
+    registerWindowsRelayCompanion()
     initializeMangaFlow(context)
     val performance = DesktopPerformance(context)
     val windowPreferences = DesktopWindowPreferences(context)

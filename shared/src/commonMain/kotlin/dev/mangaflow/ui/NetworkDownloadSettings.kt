@@ -226,6 +226,7 @@ private fun DownloadConnectionSettings(
         stableSize = true) { editing ->
         val interactive = active && editing == proxyEditing
         if (!editing) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (relayState.desktopCompanion) relaySummary()
             if (relayLinkAvailable) {
                 Text("代理方式", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
                 MotionTabs(if (settings.proxyProvider == DownloadProxyProvider.RELAY) 0 else 1,
@@ -240,7 +241,8 @@ private fun DownloadConnectionSettings(
                     track = colors.onSurface.copy(alpha = .035f), indicator = colors.surface)
                 if (settings.proxyProvider == DownloadProxyProvider.RELAY) relaySummary()
             } else if (settings.proxyProvider == DownloadProxyProvider.RELAY) {
-                Text("现有代理配置需要 Android Relay。可在此设备改用自定义地址。",
+                Text(if (relayState.desktopCompanion) "现有全局 Relay 配置不适用于桌面伴侣。需要全局代理时，可改用自定义地址。"
+                    else "现有代理配置需要 Android Relay。可在此设备改用自定义地址。",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                 MotionTextButton(onClick = {
                     try {
