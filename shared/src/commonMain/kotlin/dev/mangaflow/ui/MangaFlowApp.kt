@@ -578,6 +578,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     var androidSearchReturnedFromDetail by rememberSaveable { mutableStateOf(false) }
     var desktopNavigationMode by rememberSaveable { mutableIntStateOf(0) }
     var desktopSearchRequest by remember { mutableIntStateOf(0) }
+    // A root search field is recreated after details; consumed requests belong to the app.
+    var desktopSearchAppliedRequest by remember { mutableIntStateOf(0) }
     var desktopFindRequest by remember { mutableIntStateOf(0) }
     var desktopFindOwner by remember { mutableStateOf<String?>(null) }
     fun finishDesktopFind(owner: String, request: Int) {
@@ -804,15 +806,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         if (desktopFindOwner != frame.key) desktopFindOwner = null
     }
     val desktop = platformKind == PlatformKind.DESKTOP
-    val desktopNavigationVisible = desktop && reading == null && windowSize.width >= 760.dp &&
+    val desktopNavigationVisible = desktop && reading == null && windowSize.canDockDesktopNavigation() &&
         !(section == Section.ANIME && animeImmersive)
     val desktopWorkspaceBackdrop = if (desktop) rememberHazeState() else drawerBackdrop
     val desktopRoot = desktopNavigationVisible && frame is Frame.Root
-    val desktopNavigationWide = when (desktopNavigationMode) {
-        1 -> true
-        2 -> false
-        else -> windowSize.width >= 1060.dp * windowSize.fontScale.coerceAtLeast(1f)
-    }
+    val desktopNavigationCanExpand = desktopNavigationVisible && windowSize.canExpandDesktopNavigation()
+    val desktopNavigationWide = desktopNavigationCanExpand && desktopNavigationMode != 2
+    val desktopNavigationWidth = if (desktopNavigationWide) desktopNavigationLabelWidth(windowSize.fontScale)
+        else DesktopNavigationRailWidth
     val profileSections = remember(contentProfile) {
         if (contentProfile == ContentProfile.ANIME) {
             animeSidebarGroups.flatMap(AnimeSidebarGroup::destinations) +
@@ -1100,6 +1101,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     ) {
     DesktopNavigationWorkspace(
         visible = desktopNavigationVisible, expanded = desktopNavigationWide,
+        canExpand = desktopNavigationCanExpand, sidebarWidth = desktopNavigationWidth,
         destinations = desktopDestinations,
         selectedIndex = profileSections.indexOf(pendingSidebarDestination ?: highlightedSection)
             .let { if (animeMode) it else it.coerceAtLeast(0) },
@@ -2016,7 +2018,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         DesktopSearchField(
                                             query = browse.query, target = browse.searchTarget,
                                             copyOnly = false,
-                                            active = rootActive, focusRequest = desktopSearchRequest,
+                                            active = rootActive,
+                                            focusRequest = desktopSearchRequest.takeIf { it > desktopSearchAppliedRequest } ?: 0,
+                                            takeFocusRequest = { request ->
+                                                (request == desktopSearchRequest && request > desktopSearchAppliedRequest).also {
+                                                    if (it) desktopSearchAppliedRequest = request
+                                                }
+                                            },
                                             backdrop = searchBackdrop, modifier = inputModifier,
                                             showScopeSelector = true, translationGroupAvailable = !restrictedMode,
                                             onOpen = { browseActions.resumeBrowseSearch(); searchExpanded = true },

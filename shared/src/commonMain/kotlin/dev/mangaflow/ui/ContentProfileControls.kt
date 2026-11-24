@@ -68,6 +68,15 @@ internal fun ContentProfileSwitch(
     enabled: Boolean = true,
 ) {
     val scopeName = profile.title
+    val sourceAction = if (profile == ContentProfile.ANIME) "管理片源" else "当前分区来源"
+    val manage: @Composable () -> Unit = {
+        MotionIconButton(onClick = onManage, enabled = enabled,
+            modifier = Modifier.size(44.dp), tooltip = sourceAction,
+        ) {
+            Icon(Icons.Outlined.Tune, sourceAction, Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
     if (compact) {
         Column(modifier.fillMaxWidth().semantics { stateDescription = scopeName },
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -86,6 +95,7 @@ internal fun ContentProfileSwitch(
                         tint = if (current) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+            manage()
         }
     } else {
         Row(modifier.fillMaxWidth().semantics { stateDescription = scopeName },
@@ -101,13 +111,7 @@ internal fun ContentProfileSwitch(
                 modifier = Modifier.weight(1f).motionInputGate(enabled),
                 controlHeight = 44.dp, fontSize = 13.sp,
             )
-            MotionIconButton(
-                onClick = onManage, enabled = enabled,
-                modifier = Modifier.size(44.dp), tooltip = if (profile == ContentProfile.ANIME) "管理片源" else "当前分区来源",
-            ) {
-                Icon(Icons.Outlined.Tune, if (profile == ContentProfile.ANIME) "管理片源" else "当前分区来源", Modifier.size(20.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+            manage()
         }
     }
 }

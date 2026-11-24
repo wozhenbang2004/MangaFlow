@@ -47,6 +47,10 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -102,6 +106,34 @@ internal fun ReaderDialogSurface(
 
 /** Icon actions can return to the page without stealing focus from a settings editor. */
 internal val LocalReaderActionFinished = staticCompositionLocalOf<() -> Unit> { {} }
+
+/** Watch the artwork viewport itself, not an invisible overlay that could intercept a drag or wheel. */
+internal fun Modifier.readerMouseEdgeReveal(topWidth: Dp, dockWidth: Dp, onReveal: () -> Unit): Modifier =
+    pointerInput(topWidth, dockWidth) {
+        val edge = 16.dp.toPx()
+        val sideClearance = 12.dp.toPx()
+        val topHalf = topWidth.toPx() / 2f
+        val dockHalf = dockWidth.toPx() / 2f
+        awaitPointerEventScope {
+            var atEdge = false
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Final)
+                val mouse = event.changes.firstOrNull { it.type == PointerType.Mouse } ?: continue
+                if (event.type == PointerEventType.Exit) { atEdge = false; continue }
+                if (event.type != PointerEventType.Enter && event.type != PointerEventType.Move) continue
+                val x = mouse.position.x
+                val y = mouse.position.y
+                val band = edge.coerceAtMost(size.height / 4f)
+                val withinWidth = x >= sideClearance && x < size.width - sideClearance
+                val fromCenter = kotlin.math.abs(x - size.width / 2f)
+                val inside = withinWidth && y >= 0f && y < size.height &&
+                    (y < band && fromCenter <= topHalf || y >= size.height - band && fromCenter <= dockHalf)
+                // Only an edge entry can change UI state, not every Windows mouse move.
+                if (inside && !atEdge && !mouse.pressed && !mouse.previousPressed && !mouse.isConsumed) onReveal()
+                atEdge = inside
+            }
+        }
+    }
 
 /** Keep the actual page tree in one slot while an optional desktop inspector opens beside it. */
 @Composable

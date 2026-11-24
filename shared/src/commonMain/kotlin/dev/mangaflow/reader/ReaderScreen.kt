@@ -824,6 +824,7 @@ fun ReaderScreen(
         }
     }
     val toolbarTravel = with(LocalDensity.current) { 12.dp.roundToPx() }
+    val readerDockWidth = 440.dp
     val touchExploration = rememberReaderTouchExploration()
     val chapterWaitVisible = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
         !showComments && !showSpreadAdjustment && !showPageNavigator && !sourcePickerBlocking
@@ -1127,11 +1128,21 @@ fun ReaderScreen(
     val keyboard = LocalReaderKeyboard.current
     val keyboardFocus = remember { FocusRequester() }
     var keyboardFocused by remember { mutableStateOf(false) }
-    var keyboardSerial by remember(chapterId) { mutableIntStateOf(0) }
-    var keyboardRequest by remember(chapterId) { mutableStateOf<ReaderKeyboardRequest?>(null) }
-    val keyboardReady = keyboard != null && readingEligible && !showPageNavigator &&
-        preferences.panelEngine == PanelEngine.OFF
-    LaunchedEffect(keyboardReady, keyboardFocusRestore, readerToolsVisible, readerStatusInspecting) {
+    var keyboardSerial by remember(sourceIdentity) { mutableIntStateOf(0) }
+    var keyboardRequest by remember(sourceIdentity) { mutableStateOf<ReaderKeyboardRequest?>(null) }
+    val desktopCanvasReady = desktop && readerForeground && !leavingReader && !panelBlocksReading &&
+        !showPanelModels && !showEnhancement && !compareEnhancement && !showComments && !showSpreadAdjustment &&
+        !showPageNavigator && !showReaderActions && !readerActionsPresent && !sourcePickerBlocking &&
+        !readerStatusOpen && !readerStatusInspecting && !progressInteracting && repairState.selection == null
+    // Focusing the canvas and revealing its tools need no decoded image. A new page turn
+    // still requires the existing reading proof; a turn in flight can expose a placeholder.
+    val keyboardReady = keyboard != null && desktopCanvasReady
+    val keyboardTurnOwned = keyboardReady && !sourceLoading && !chapterChangeRequested &&
+        !loading && error == null && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF
+    LaunchedEffect(keyboardTurnOwned) {
+        if (!keyboardTurnOwned) keyboardRequest = null
+    }
+    LaunchedEffect(keyboardReady, keyboardFocusRestore, readerStatusInspecting, showSettings, showChapters) {
         // Let closing chrome settle first. An open inspector keeps its own focused editor.
         if (restoreStatusFocus && readerToolsVisible && readerForeground && !leavingReader &&
             statusPlacement != ReaderStatusPlacement.HIDDEN) {
@@ -1153,11 +1164,22 @@ fun ReaderScreen(
             if (!keyboardReady || !keyboardFocused || event.type != KeyEventType.KeyDown) false
             else keyboard.actionFor(event, preferences.mode != ReadingMode.VERTICAL &&
                 preferences.swipeRightForNext(desktop = true))?.let { action ->
-                if (action == ReaderKeyboardAction.TOGGLE_CONTROLS) controlsVisible = !controlsVisible
-                else keyboardRequest = ReaderKeyboardRequest(++keyboardSerial, action)
-                true
+                if (action == ReaderKeyboardAction.TOGGLE_CONTROLS) {
+                    controlsVisible = !controlsVisible
+                    true
+                } else if (keyboardTurnOwned && readingEligible) {
+                    keyboardRequest = ReaderKeyboardRequest(++keyboardSerial, action)
+                    true
+                } else false
             } ?: false
         }.focusable(enabled = keyboardReady)
+    val desktopMouseRevealAllowed = desktopCanvasReady && !showSettings && !showChapters && !touchExploration
+    val revealDesktopTools by rememberUpdatedState<() -> Unit> {
+        if (desktopMouseRevealAllowed && !controlsVisible) controlsVisible = true
+    }
+    val mouseReveal = if (desktopMouseRevealAllowed)
+        Modifier.readerMouseEdgeReveal(MangaLayout.ListWidth, readerDockWidth) { revealDesktopTools() }
+    else Modifier
 
     CompositionLocalProvider(LocalReaderActionFinished provides { if (desktop) keyboardFocusRestore++ },
         LocalReaderEnhancement provides enhancement,
@@ -1185,7 +1207,7 @@ fun ReaderScreen(
         },
     ) {
     val cutout = WindowInsets.displayCutout
-    Box(Modifier.fillMaxSize().then(keyboardModifier).drawBehind {
+    Box(Modifier.fillMaxSize().then(keyboardModifier).then(mouseReveal).drawBehind {
         // A full page already paints its paper. Only gutters and the brief handoff expose this backing.
         if (sourceArrival.value < 1f || cutout.getLeft(this, layoutDirection) > 0 || cutout.getRight(this, layoutDirection) > 0) {
             drawRect(Color.Black.copy(alpha = dimPreview.value ?: preferences.dimAmount).compositeOver(background))
@@ -1304,7 +1326,7 @@ fun ReaderScreen(
                         initialOffset = cursor.scrollOffset,
                         targetPage = targetPage,
                         targetOffset = targetOffset,
-                        keyboardRequest = keyboardRequest,
+                        keyboardRequest = keyboardRequest.takeIf { keyboardTurnOwned },
                         onKeyboardConsumed = { serial -> if (keyboardRequest?.serial == serial) keyboardRequest = null },
                         onTargetConsumed = { targetPage = null; targetOffset = 0 },
                         onLocation = { index, offset -> cursor.scrollOffset = offset; pageIndex = index },
@@ -1577,7 +1599,7 @@ fun ReaderScreen(
                 .windowInsetsPadding(dev.mangaflow.reader.readerNavigationInsets().union(WindowInsets.displayCutout)
                     .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                 .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 12.dp)
-                .widthIn(max = 440.dp).fillMaxWidth()) {
+                .widthIn(max = readerDockWidth).fillMaxWidth()) {
                 LiquidGlassSurface(
                     state = readerBackdrop,
                     role = GlassSurfaceRole.READING_DOCK,

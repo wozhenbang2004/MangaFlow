@@ -1755,6 +1755,22 @@ The ten existing UIUX axes are applied through task-specific layout and stable h
 Scope/writers: root owns App/AdaptiveLayout/search workspace and these existing records; browse, detail/catalogue, management, reader workspace, shared interactions and native window/picker have isolated source ownership. All use GitHub connector reads and in-memory blobs; root alone integrates one finished batch on latest main with an expected-head lease. No local files/commands, browser/device/service probes, tests, local builds, benchmarks or extra review gate. Existing compile/package/release workflows remain, Lint is manual-only, and CI trigger/build/actual Windows experience are separate evidence. Actual layout, high DPI, focus, motion and wheel feel await the built application/user feedback; no visual/runtime PASS is asserted by source.
 
 
+<a id="pc-overhaul-20261124"></a>
+
+## Windows 主链路与操作流畅度 · 2026-11-24
+
+用户先要求全队优先重做 PC，补齐桌面端缺失能力、布局和动画，同时补手机共用动效。随后明确性能指「它操作的那种性能……PC 端卡卡的」，不是下载速度；帧率为待查原因而不是已证实根因。基线为主线 `741f6bf` 的源树。延续 DESKTOP-125–135、WIN-PERF-01–08；不把桌面做成拉宽的移动端，也不牺牲画质、键鼠可达性和已有数据。
+
+| 目标 | 选择与落点 | 可观察验收 |
+| --- | --- | --- |
+| PC-INPUT-01 · 先保交互帧 | 优先查工作区布局是否在每一动画帧重测量、滚动时未打开的浮层是否持有动画状态、诊断在关闭时是否仍消耗 EDT。仅减少已确认的无效工作，保留正常 Haze、Direct3D/VSync、资源准入。 | 同 Windows、同刷新率与视口查看滚动、侧栏、窗口缩放的卡顿；CPU 场景录制和实际显示分别读，不由计数猜测 GPU 结果。 |
+| PC-READ-01 · 点开接着看 | 以既有章节、页码、退出键和画面为主焦点，键盘／边缘工具能在慢页或故障时恢复操作；桌面指针不把触屏阅读手势挪过去。YACReader 的快速翻页双页与稳定阅读位置是对照，不移植其代码。 | 书架／历史继续阅读，缩窗、滚动、翻页、打开工具后从原位置继续；已保存章节、原图、两侧跨页和全屏不退化。 |
+| PC-WATCH-01 · 看番与查集 | 搜索和注释输入由实际编辑控件拥有，播放器快捷键仅在正确焦点下操作；保留原生全屏与节目、来源、进度归属。 | 播放中找集、输入、Tab 出去按快捷键；输入不会误暂停、跳播或关面板。恢复上一集保持原进度。 |
+| PC-MANAGE-01 · 对象就地处理 | 足够宽的窗口继续利用已有作品／任务双区，正文保持有界宽度，所选任务细节只在同一上下文渐进披露；窄窗退回已有浮层。 | 浏览和查看任务不丢左边选择或滚动；只展示当前作品及筛选里的实际任务，不更改传输策略。 |
+| PC-MOTION-01 · 从对象展开 | 使用已采用的 beUI/Ovio/Haze、现有标题字体和可读表面；榜单多来源从所属列表行展开，沿用章节目录的真实高度动画，文字不缩放；不改原生弹层的点击区域。键盘焦点、按压、返回、反转和减弱动效优先于装饰。 | 开关、反向、键鼠换焦点不跳位，收起时不可误点旧区域。手机检查同一现有组件；不另建新动画或皮肤体系。 |
+
+参照： [YACReader 10.5.1 与发布记录](https://github.com/YACReader/yacreader/releases/tag/10.5.1)，[其现有阅读／进度维护记录](https://github.com/YACReader/yacreader/blob/develop/CHANGELOG.md)。这是阅读交互下限旁证，不是 MangaFlow 或 Windows 性能实测。既有首屏、密度、分组、材料、状态、可达性仍依 DESKTOP-125–135；代码差异核对不等于视觉或帧率验收。无新依赖、无服务探测或自动测试；发布与实机验收分开。
+
 ## Font picker redesign · 2026-11-14 (FONT-PICKER-20261114)
 
 Raw user: “字体的uiux好好重新设计啊”, with1000121663.jpg (installed version not identified). The observed before-state nests four role disclosures inside the outer font disclosure; names/samples/descriptions repeat, while delete and information targets consume the selected candidate's width. The screenshot shows HarmonyOS Sans for interface/titles, system prose and Geist numbers; the redesign must preserve real saved selections.

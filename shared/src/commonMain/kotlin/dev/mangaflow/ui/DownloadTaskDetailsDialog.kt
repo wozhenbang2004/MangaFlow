@@ -5,6 +5,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.Refresh
@@ -17,6 +18,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
@@ -36,14 +39,15 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionInputGate
 
-/** The existing retained PANEL shows one live task; no polling request or second queue owns it. */
+/** A single task facts/control surface for the queue pane and the retained narrow/modal PANEL. */
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
-internal fun DownloadTaskDetailsDialog(
+internal fun DownloadTaskDetails(
     entry: DownloadEntry?,
     active: Boolean,
     refreshing: Boolean,
     backdrop: HazeState,
+    inPane: Boolean,
     onDismiss: () -> Unit,
     onPause: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
@@ -56,6 +60,7 @@ internal fun DownloadTaskDetailsDialog(
     onQualitySettings: (() -> Unit)? = null,
     onClosed: (() -> Unit)? = null,
 ) {
+    if (inPane && entry == null) return
     var retained by remember { mutableStateOf(entry) }
     var retainedEnhancement by remember { mutableStateOf(enhancement) }
     SideEffect { if (entry != null) { retained = entry; retainedEnhancement = enhancement } }
@@ -74,27 +79,36 @@ internal fun DownloadTaskDetailsDialog(
             chapterSourceMangaId(shown.manga.id, shown.chapter), shown.chapter.id).sourceId) }
             .getOrElse { sourceDisplayName(shown.chapter.sourceId) }
     }
-    MotionDialog(visible = entry != null, onDismissRequest = onDismiss, onClosed = onClosed,
-        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp) {
-        Box(Modifier.padding(horizontal = 12.dp)) {
-        LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
-            role = GlassSurfaceRole.PANEL, elevation = 0.dp) {
-            Column(Modifier.fillMaxWidth().heightIn(max = minOf(LocalMangaWindow.current.height * .86f, 580.dp))
-                .padding(horizontal = 18.dp, vertical = 10.dp)) {
-                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(shown.chapter.title, style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(shown.manga.title, style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    val content: @Composable () -> Unit = {
+        val bounds = if (inPane) Modifier else Modifier.heightIn(max = minOf(LocalMangaWindow.current.height * .86f, 580.dp))
+        Column(Modifier.fillMaxWidth().then(bounds).padding(horizontal = if (inPane) 0.dp else 18.dp, vertical = 10.dp)) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (inPane) {
+                    val backFocus = remember { FocusRequester() }
+                    LaunchedEffect(backFocus) {
+                        withFrameNanos { }
+                        backFocus.requestFocus()
                     }
-                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭下载状态") {
-                        Icon(Icons.Outlined.Close, "关闭下载状态", Modifier.size(20.dp))
+                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp).focusRequester(backFocus),
+                        tooltip = "返回章节") {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回章节", Modifier.size(20.dp))
                     }
+                    Spacer(Modifier.width(6.dp))
                 }
-                Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState())
-                    .motionInputGate(enabled).padding(top = 14.dp, bottom = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(shown.chapter.title, style = MaterialTheme.typography.titleMedium,
+                        maxLines = if (inPane) 2 else 1, overflow = TextOverflow.Ellipsis)
+                    if (!inPane) Text(shown.manga.title, style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (!inPane) MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭下载状态") {
+                    Icon(Icons.Outlined.Close, "关闭下载状态", Modifier.size(20.dp))
+                }
+            }
+            val scroll = rememberScrollState()
+            val facts: @Composable (Modifier) -> Unit = { modifier ->
+                Column(modifier.fillMaxWidth().verticalScroll(scroll).motionInputGate(enabled)
+                    .padding(top = 14.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     DownloadFactRow("原始下载", downloadTransferPhaseLabel(shown, now))
                     shown.progress.httpStatus?.let { DownloadFactRow("来源响应", "HTTP $it") }
                     DownloadFactRow("已保存", shown.completedPages.toString() +
@@ -171,25 +185,37 @@ internal fun DownloadTaskDetailsDialog(
                         }
                     }
                 }
-                if (pausable || retryable) FlowRow(Modifier.fillMaxWidth().motionInputGate(enabled),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    if (pausable) MotionTextButton(onClick = { onPause(shown) }, enabled = enabled && !refreshing) {
-                        Icon(Icons.Outlined.Pause, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp))
-                        Text("暂停")
+            }
+            if (inPane) {
+                Box(Modifier.weight(1f, fill = false).fillMaxWidth()) {
+                    facts(Modifier.padding(end = 12.dp))
+                    DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd))
+                }
+            } else facts(Modifier.weight(1f, fill = false))
+            if (pausable || retryable) FlowRow(Modifier.fillMaxWidth().motionInputGate(enabled),
+                horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
+                verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                if (pausable) MotionTextButton(onClick = { onPause(shown) }, enabled = enabled && !refreshing) {
+                    Icon(Icons.Outlined.Pause, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp))
+                    Text("暂停")
+                }
+                if (retryable) {
+                    MotionTextButton(onClick = { onRetryUsingLatestRoute(shown) }, enabled = enabled && !refreshing) {
+                        Text("使用当前设置重试", style = MaterialTheme.typography.labelMedium)
                     }
-                    if (retryable) {
-                        MotionTextButton(onClick = { onRetryUsingLatestRoute(shown) }, enabled = enabled && !refreshing) {
-                            Text("使用当前设置重试", style = MaterialTheme.typography.labelMedium)
-                        }
-                        MotionTextButton(onClick = { onRetry(shown) }, enabled = enabled && !refreshing) {
-                            Icon(Icons.Outlined.Refresh, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp))
-                            Text(if (refreshing) "正在准备" else "原线路重试", style = MaterialTheme.typography.labelMedium)
-                        }
+                    MotionTextButton(onClick = { onRetry(shown) }, enabled = enabled && !refreshing) {
+                        Icon(Icons.Outlined.Refresh, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp))
+                        Text(if (refreshing) "正在准备" else "原线路重试", style = MaterialTheme.typography.labelMedium)
                     }
                 }
             }
         }
+    }
+    if (inPane) content() else MotionDialog(visible = entry != null, onDismissRequest = onDismiss, onClosed = onClosed,
+        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp) {
+        Box(Modifier.padding(horizontal = 12.dp)) {
+            LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
+                role = GlassSurfaceRole.PANEL, elevation = 0.dp) { content() }
         }
     }
 }

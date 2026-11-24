@@ -88,10 +88,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -161,7 +163,27 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 
-private enum class DownloadFilter(val label: String) { ALL("全部"), ACTIVE("未完成"), SAVED("已下载") }
+private enum class DownloadFilter(val label: String) {
+    ALL("全部"), ACTIVE("未完成"), SAVED("已下载");
+
+    fun includes(saved: Boolean): Boolean = when (this) {
+        ALL -> true
+        ACTIVE -> !saved
+        SAVED -> saved
+    }
+}
+
+/** A desktop inspection is of one visible download, not a work, chapter name or reusable row ID. */
+private data class DesktopDownloadInspection(
+    val filter: DownloadFilter, val id: String, val mangaId: String, val chapterId: String, val createdAt: Long,
+) {
+    constructor(filter: DownloadFilter, entry: DownloadEntry) :
+        this(filter, entry.id, entry.manga.id, entry.chapter.id, entry.createdAt)
+
+    fun matches(entry: DownloadEntry): Boolean = id == entry.id && mangaId == entry.manga.id &&
+        chapterId == entry.chapter.id && createdAt == entry.createdAt &&
+        filter.includes(entry.status == DownloadStatus.COMPLETED)
+}
 
 // Layout depends on membership/order/completion, never on page or byte progress.
 private data class DownloadDirectoryEntry(
@@ -219,6 +241,11 @@ fun DownloadsScreen(
     val snackbar = remember { SnackbarHostState() }
     var filter by rememberSaveable { mutableStateOf(DownloadFilter.ALL) }
     var inspectedTaskId by remember { mutableStateOf<String?>(null) }
+    // A retained tab/menu callback cannot act after leaving this page or changing content ownership.
+    val desktopScope = remember(store, adultProfile, includedSourceIds, excludedSourceIds, active) { Any() }
+    val currentDesktopScope by rememberUpdatedState(desktopScope)
+    var desktopInspection by remember(desktopScope) { mutableStateOf<DesktopDownloadInspection?>(null) }
+    var desktopQualityReturn by remember(desktopScope) { mutableStateOf<DesktopDownloadInspection?>(null) }
     var removingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var pendingDeletion by remember { mutableStateOf<List<DownloadEntry>?>(null) }
     var managing by rememberSaveable { mutableStateOf(false) }
@@ -229,8 +256,8 @@ fun DownloadsScreen(
     var queueActionsPresent by remember { mutableStateOf(false) }
     var pendingNetworkSettings by remember { mutableStateOf(false) }
     var showNetworkSettings by remember { mutableStateOf(false) }
-    var showEnhancement by remember { mutableStateOf(false) }
-    var pendingEnhancement by remember { mutableStateOf(false) }
+    var showEnhancement by remember(if (desktop) desktopScope else Unit) { mutableStateOf(false) }
+    var pendingEnhancement by remember(if (desktop) desktopScope else Unit) { mutableStateOf(false) }
     var qualityReturnTaskId by remember { mutableStateOf<String?>(null) }
     var filterMenuExpanded by remember { mutableStateOf(false) }
     val filterChoices = remember { listOf(
@@ -281,16 +308,51 @@ fun DownloadsScreen(
     }
     val orderedBooks = remember(directory) {
         DownloadFilter.entries.associateWith { page ->
-            directory.filter { entry -> when (page) {
-                DownloadFilter.ALL -> true
-                DownloadFilter.ACTIVE -> !entry.saved
-                DownloadFilter.SAVED -> entry.saved
-            } }.groupBy(DownloadDirectoryEntry::mangaId).mapValues { (_, chapters) ->
-                chapters.groupBy(DownloadDirectoryEntry::group).values.flatMap { group ->
-                    group.sortedBy(DownloadDirectoryEntry::chapterIndex).map(DownloadDirectoryEntry::id)
+            directory.filter { entry -> page.includes(entry.saved) }
+                .groupBy(DownloadDirectoryEntry::mangaId).mapValues { (_, chapters) ->
+                    chapters.groupBy(DownloadDirectoryEntry::group).values.flatMap { group ->
+                        group.sortedBy(DownloadDirectoryEntry::chapterIndex).map(DownloadDirectoryEntry::id)
+                    }
                 }
-            }
         }
+    }
+    val shownDesktopInspection = desktopInspection
+    val desktopTask = shownDesktopInspection?.takeIf { active && !managing && it.filter == filter }
+        ?.let { target -> entriesById[target.id]?.takeIf { it.id !in removingIds && target.matches(it) } }
+    LaunchedEffect(shownDesktopInspection, desktopTask != null) {
+        if (shownDesktopInspection != null && desktopTask == null && desktopInspection === shownDesktopInspection) {
+            desktopInspection = null
+        }
+    }
+
+    fun resolveDesktopInspection(target: DesktopDownloadInspection): DownloadEntry? {
+        if (!active || currentDesktopScope !== desktopScope || managing || target.filter != filter) return null
+        // Resolve at the click, not from an outgoing tab or the detail row's previous composition.
+        return store.entries.value.firstOrNull { it.id !in removingIds && target.matches(it) && sourceIncluded(it.manga.sourceId) }
+    }
+
+    fun clearDesktopInspection() {
+        desktopInspection = null
+        if (desktopQualityReturn != null) {
+            desktopQualityReturn = null
+            pendingEnhancement = false
+        }
+    }
+
+    fun selectFilter(next: DownloadFilter) {
+        if (filter != next && desktop) clearDesktopInspection()
+        filter = next
+    }
+
+    fun inspectDownload(entry: DownloadEntry, shownFilter: DownloadFilter, selectWork: Boolean) {
+        if (!desktop) {
+            inspectedTaskId = entry.id
+            return
+        }
+        val target = DesktopDownloadInspection(shownFilter, entry)
+        if (resolveDesktopInspection(target) == null) return
+        if (selectWork) expandedBooks = listOf(target.mangaId)
+        desktopInspection = target
     }
     val motion = LocalMotionEnabled.current
     val activeEntries = manageableEntries.filter { it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING) }
@@ -309,7 +371,7 @@ fun DownloadsScreen(
             catch (_: Exception) { spaceReadFailed = true }
         }
     }
-    LaunchedEffect(active, includedSourceIds, excludedSourceIds) {
+    LaunchedEffect(active, includedSourceIds, excludedSourceIds, if (desktop) desktopScope else Unit) {
         showQueueActions = false
         filterMenuExpanded = false
         showNetworkSettings = false
@@ -326,25 +388,36 @@ fun DownloadsScreen(
             if (active) showNetworkSettings = true
         }
     }
-    LaunchedEffect(active, pendingEnhancement, queueActionsPresent, showQueueActions, qualityReturnTaskId) {
-        if (pendingEnhancement && qualityReturnTaskId == null && !queueActionsPresent && !showQueueActions) {
+    LaunchedEffect(active, pendingEnhancement, queueActionsPresent, showQueueActions, qualityReturnTaskId, desktopQualityReturn) {
+        if (pendingEnhancement && qualityReturnTaskId == null && desktopQualityReturn == null &&
+            !queueActionsPresent && !showQueueActions) {
             pendingEnhancement = false
             if (active) showEnhancement = true
         }
     }
 
-    fun openQuality(entry: DownloadEntry? = null) {
-        qualityReturnTaskId = entry?.id
-        inspectedTaskId = null
-        pendingEnhancement = true
+    fun openQuality(entry: DownloadEntry? = null, inPane: Boolean = false) {
+        if (desktop) {
+            if (!active || currentDesktopScope !== desktopScope) return
+            desktopQualityReturn = entry?.let { selected ->
+                desktopInspection?.takeIf { it.matches(selected) && resolveDesktopInspection(it) != null } ?: return
+            }
+            desktopInspection = null
+        } else {
+            qualityReturnTaskId = entry?.id
+            inspectedTaskId = null
+        }
+        // The inline surface has no exit window. The narrow/modal path still waits for its own close.
+        pendingEnhancement = !inPane
+        if (inPane) showEnhancement = true
         showQueueActions = false
     }
-    fun enhanceChapters(chapters: List<DownloadEntry>) {
+    fun enhanceChapters(chapters: List<DownloadEntry>, openSettings: () -> Unit = { openQuality() }) {
         val complete = chapters.filter { it.status == DownloadStatus.COMPLETED }
         if (complete.isEmpty()) return
         val policy = enhancementCenter.settings.policy(enhancementContent)
         if (policy.tier == QualityTier.ORIGINAL) {
-            openQuality(complete.singleOrNull()?.takeIf { it.id == inspectedTaskId })
+            openSettings()
             scope.launch { snackbar.showSnackbar("先选择增强档位，再建立整章任务") }
             return
         }
@@ -357,6 +430,53 @@ fun DownloadsScreen(
         showQueueActions = false
         scope.launch { snackbar.showSnackbar(if (failure == null) "已加入 $queued 话增强任务"
             else "已加入 $queued 话；${failure}") }
+    }
+
+    val renderTaskDetails: @Composable (DownloadEntry?, Boolean) -> Unit = { entry, inPane ->
+        val selection = shownDesktopInspection?.takeIf { entry != null && it.matches(entry) }
+        val enhancement = entry?.let { chapterEnhancementFor(it, enhancementTasks) }
+        fun currentTarget(shown: DownloadEntry): DownloadEntry? {
+            if (!desktop) return shown
+            return selection?.takeIf { desktopInspection === it && it.matches(shown) }
+                ?.let(::resolveDesktopInspection)?.takeIf { it.status == shown.status }
+        }
+        fun currentEnhancement(id: String): Boolean {
+            if (!desktop) return true
+            val download = entry?.let(::currentTarget) ?: return false
+            val shown = enhancement?.takeIf { it.id == id } ?: return false
+            return enhancementCenter.chapters.state.value.any {
+                it.id == id && it.content == enhancementContent && it.mangaId == download.manga.id &&
+                    it.chapterId == download.chapter.id && it.downloadCreatedAt == download.createdAt &&
+                    it.generation == shown.generation && it.phase == shown.phase
+            }
+        }
+        DownloadTaskDetails(
+            entry = entry, active = active, refreshing = entry?.let { it.id in refreshingIds } == true,
+            backdrop = backdrop, inPane = inPane,
+            onDismiss = {
+                if (!desktop) inspectedTaskId = null
+                else if (desktopInspection === selection) desktopInspection = null
+            },
+            onPause = { currentTarget(it)?.let { target -> store.pause(target.id) } },
+            onRetry = { currentTarget(it)?.let(onRetry) },
+            onRetryUsingLatestRoute = { currentTarget(it)?.let(onRetryUsingLatestRoute) },
+            enhancement = enhancement,
+            onEnhance = { shown -> currentTarget(shown)?.let { target ->
+                enhanceChapters(listOf(target)) { openQuality(target, inPane) }
+            } },
+            onPauseEnhancement = { if (currentEnhancement(it)) enhancementCenter.chapters.pause(it) },
+            onResumeEnhancement = { if (currentEnhancement(it)) enhancementCenter.chapters.resume(it) },
+            onCancelEnhancement = { if (currentEnhancement(it)) enhancementCenter.chapters.cancel(it) },
+            onQualitySettings = { entry?.let(::currentTarget)?.let { openQuality(it, inPane) } },
+            onClosed = {
+                if (pendingEnhancement && (desktopQualityReturn != null || qualityReturnTaskId != null)) {
+                    pendingEnhancement = false
+                    if (active && (!desktop || desktopQualityReturn?.let(::resolveDesktopInspection) != null)) {
+                        showEnhancement = true
+                    } else if (desktop) desktopQualityReturn = null
+                }
+            },
+        )
     }
 
     BackHandler(enabled = managing) { managing = false; selectedIds = emptySet() }
@@ -423,7 +543,7 @@ fun DownloadsScreen(
         if (operation.phase == ApplicationOperationPhase.SUCCEEDED) {
             operations.result<DownloadEntry>(operation.id)?.let {
                 it.await()
-                filter = DownloadFilter.SAVED
+                selectFilter(DownloadFilter.SAVED)
                 operations.consumeResult(operation.id)
             }
         } else if (operation.phase == ApplicationOperationPhase.FAILED ||
@@ -559,7 +679,8 @@ fun DownloadsScreen(
     }
 
     BoxWithConstraints(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
-        if (!active || !desktop || event.type != KeyEventType.KeyDown) false
+        // An inspection owns text selection, including the frame before its pane is drawn.
+        if (!active || !desktop || desktopInspection != null || desktopTask != null || event.type != KeyEventType.KeyDown) false
         else if ((event.isCtrlPressed || event.isMetaPressed) && event.key == Key.A && manageableEntries.isNotEmpty()) {
             val currentEntries = when (filter) {
                 DownloadFilter.ALL -> manageableEntries
@@ -580,9 +701,17 @@ fun DownloadsScreen(
             (maxWidth - if (managing) 224.dp else 180.dp).coerceAtLeast(70.dp))
         val contentInset = MangaLayout.sidePadding(maxWidth)
         val desktopSplit = desktop && maxWidth >= 1040.dp && orderedBooks.getValue(filter).isNotEmpty()
-        val visibleBookIds = orderedBooks.getValue(filter).keys
-        val inspectedBook = expandedBooks.lastOrNull { it in visibleBookIds } ?: visibleBookIds.firstOrNull()
-        val inspectedChapters = inspectedBook?.let { orderedBooks.getValue(filter)[it]?.mapNotNull(entriesById::get) }.orEmpty()
+        // A short wide window also needs the original scrollable dialog rather than a clipped inspector.
+        val inPane = desktopSplit && maxHeight - contentTopPadding - bottomInset >= 240.dp * density.fontScale.coerceAtLeast(1f)
+        val paneFilter = filter
+        val paneWorks = orderedBooks.getValue(paneFilter)
+        fun selectedWork(taskWorkId: String?): String? = taskWorkId ?: expandedBooks.lastOrNull { it in paneWorks }
+            ?: paneWorks.keys.firstOrNull()
+        val inspectedBook = selectedWork(desktopTask?.manga?.id)
+        val inspectedChapters = inspectedBook?.let { paneWorks[it]?.mapNotNull(entriesById::get) }.orEmpty()
+        BackHandler(enabled = inPane && desktopTask != null) {
+            if (desktopInspection === shownDesktopInspection) desktopInspection = null
+        }
         // A transfer row needs room for its title, source and a separate action target.
         // Reusing the four-column catalogue geometry clips that information on phones.
         val downloadChapterColumns = if (desktop) 1 else MangaLayout.columns(maxWidth, 3,
@@ -671,10 +800,10 @@ fun DownloadsScreen(
                                         "任务尚未完成，可在“未完成”查看。" else "下载完成后，就能在这里离线阅读。"
                                 }, style = MaterialTheme.typography.bodySmall, color = secondary)
                                 if (pageFilter == DownloadFilter.ACTIVE && completedEntries.isNotEmpty()) {
-                                    TextButton(onClick = { filter = DownloadFilter.SAVED }) { Text("查看已下载") }
+                                    TextButton(onClick = { selectFilter(DownloadFilter.SAVED) }) { Text("查看已下载") }
                                 } else if (pageFilter == DownloadFilter.SAVED &&
                                     (manageableEntries.isNotEmpty() || visiblePreparations.isNotEmpty())) {
-                                    TextButton(onClick = { filter = DownloadFilter.ACTIVE }) { Text("查看未完成") }
+                                    TextButton(onClick = { selectFilter(DownloadFilter.ACTIVE) }) { Text("查看未完成") }
                                 } else if (pageFilter == DownloadFilter.ALL) {
                                     TextButton(enabled = localImportAllowed,
                                         onClick = { if (localImportAllowed) showImportSources = true }) {
@@ -720,13 +849,20 @@ fun DownloadsScreen(
                                             },
                                             onSelect = { toggleSelection(chapters) },
                                             onManage = { if (managing) toggleSelection(chapters) else { managing = true; selectedIds = chapters.map(DownloadEntry::id).toSet() } },
-                                            onExpand = { expandedBooks = if (desktopSplit) listOf(mangaId)
-                                                else if (expanded) expandedBooks - mangaId else expandedBooks + mangaId },
+                                            onExpand = {
+                                                if (desktopSplit) {
+                                                    if (active && currentDesktopScope === desktopScope && pageFilter == filter) {
+                                                        clearDesktopInspection()
+                                                        expandedBooks = listOf(mangaId)
+                                                    }
+                                                } else expandedBooks = if (expanded) expandedBooks - mangaId else expandedBooks + mangaId
+                                            },
                                             onPause = { store.pause(it.id) }, onRetry = onRetry,
                                             onDetails = onDetails?.let { open -> { open(chapters.first().manga) } },
                                             onRemove = { pendingDeletion = chapters }, inspectMode = desktopSplit,
                                             active = active && pageFilter == filter,
-                                            onInspect = { inspectedTaskId = it.id }, enhancementTasks = enhancementTasks)
+                                            onInspect = { inspectDownload(it, pageFilter, selectWork = desktopSplit) },
+                                            enhancementTasks = enhancementTasks)
                                     }
                                 }
                             }
@@ -746,7 +882,8 @@ fun DownloadsScreen(
                                                     onPause = { store.pause(it.id) }, onRetry = onRetry,
                                                     onRemove = { pendingDeletion = listOf(entry) },
                                                     active = active && pageFilter == filter,
-                                                    onInspect = { inspectedTaskId = it.id }, enhancementTasks = enhancementTasks)
+                                                    onInspect = { inspectDownload(it, pageFilter, selectWork = false) },
+                                                    enhancementTasks = enhancementTasks)
                                             }
                                         }
                                     }
@@ -778,8 +915,15 @@ fun DownloadsScreen(
                     onManage = { managing = true; selectedIds = setOf(it.id) },
                     onRemove = { pendingDeletion = listOf(it) },
                     onPause = { store.pause(it.id) }, onRetry = onRetry,
-                    active = active, onInspect = { inspectedTaskId = it.id },
+                    active = active, onInspect = { entry ->
+                        if (entry.manga.id == selectedWork(desktopInspection?.mangaId)) {
+                            inspectDownload(entry, paneFilter, selectWork = true)
+                        }
+                    },
                     enhancementTasks = enhancementTasks,
+                    inspection = if (inPane && desktopTask != null) {
+                        { key(shownDesktopInspection) { renderTaskDetails(desktopTask, true) } }
+                    } else null,
                 )
             }
             }
@@ -790,7 +934,7 @@ fun DownloadsScreen(
                 .onSizeChanged { headerHeightPx = it.height },
                 navigation = navigation, minimumToolsWidth = 840.dp) {
                 MotionTabs(filter.ordinal, DownloadFilter.entries.map { it.label }, { index ->
-                    filter = DownloadFilter.entries[index]; selectedIds = emptySet()
+                    selectFilter(DownloadFilter.entries[index]); selectedIds = emptySet()
                 }, modifier = if (stackedTools) Modifier.width(360.dp * density.fontScale.coerceAtLeast(1f))
                     else Modifier.widthIn(max = 420.dp).weight(1f, fill = false),
                     treatment = MotionTabTreatment.Soft, controlHeight = 36.dp)
@@ -824,10 +968,12 @@ fun DownloadsScreen(
             expanded = filterMenuExpanded && active, onDismiss = { filterMenuExpanded = false },
             onSelect = { index ->
                 filterMenuExpanded = false
-                filter = DownloadFilter.entries[index]
+                selectFilter(DownloadFilter.entries[index])
                 selectedIds = emptySet()
             })
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 12.dp))
+        // Keep the modal host composed through a resize so its exit and settings handoff can settle.
+        if (desktop) renderTaskDetails(if (inPane) null else desktopTask, false)
     }
 
     NetworkDownloadDialog(showNetworkSettings && active, backdrop, { showNetworkSettings = false },
@@ -906,33 +1052,18 @@ fun DownloadsScreen(
     LaunchedEffect(active, inspectedTaskId, inspectedTask != null) {
         if (!active || inspectedTask == null) inspectedTaskId = null
     }
-    DownloadTaskDetailsDialog(
-        entry = if (active) inspectedTask else null,
-        active = active,
-        refreshing = inspectedTaskId?.let { it in refreshingIds } == true,
-        backdrop = backdrop,
-        onDismiss = { inspectedTaskId = null },
-        onPause = { store.pause(it.id) },
-        onRetry = onRetry,
-        onRetryUsingLatestRoute = onRetryUsingLatestRoute,
-        enhancement = inspectedTask?.let { chapterEnhancementFor(it, enhancementTasks) },
-        onEnhance = { enhanceChapters(listOf(it)) },
-        onPauseEnhancement = enhancementCenter.chapters::pause,
-        onResumeEnhancement = enhancementCenter.chapters::resume,
-        onCancelEnhancement = enhancementCenter.chapters::cancel,
-        onQualitySettings = { inspectedTask?.let { openQuality(it) } },
-        onClosed = {
-            if (pendingEnhancement && qualityReturnTaskId != null) {
-                pendingEnhancement = false
-                if (active) showEnhancement = true
-            }
-        },
-    )
+    if (!desktop) renderTaskDetails(if (active) inspectedTask else null, false)
     EnhancementCenterPanel(visible = showEnhancement && active, backdrop = backdrop,
         initialContent = enhancementContent, allowMediaSwitch = false, onDismiss = { showEnhancement = false }, onClosed = {
-            val returnId = qualityReturnTaskId
-            qualityReturnTaskId = null
-            if (active && returnId != null && manageableEntries.any { it.id == returnId }) inspectedTaskId = returnId
+            if (desktop) {
+                val returnTo = desktopQualityReturn
+                desktopQualityReturn = null
+                if (returnTo != null && resolveDesktopInspection(returnTo) != null) desktopInspection = returnTo.copy()
+            } else {
+                val returnId = qualityReturnTaskId
+                qualityReturnTaskId = null
+                if (active && returnId != null && manageableEntries.any { it.id == returnId }) inspectedTaskId = returnId
+            }
         })
 
     LocalImportDetailsDialog(
@@ -1111,10 +1242,11 @@ private fun DesktopDownloadChapterPane(
     active: Boolean,
     onInspect: (DownloadEntry) -> Unit,
     enhancementTasks: List<ReaderChapterEnhancementTask>,
+    inspection: (@Composable () -> Unit)?,
 ) {
-    val scroll = rememberLazyListState()
     val workId = entries.firstOrNull()?.manga?.id
-    LaunchedEffect(workId) { scroll.scrollToItem(0) }
+    // The exact work owns its chapter offset even while its list is not mounted.
+    val scroll = key(workId) { rememberLazyListState() }
     val colors = MaterialTheme.colorScheme
     Column(modifier.padding(start = 16.dp, end = 20.dp, top = topPadding)) {
         Row(Modifier.fillMaxWidth().padding(bottom = 12.dp),
@@ -1127,7 +1259,7 @@ private fun DesktopDownloadChapterPane(
                 Text("${entries.size} 话 · ${downloadBytes(entries.sumOf { it.downloadedBytes })}",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             }
-            if (entries.isNotEmpty() && !managing) TextButton(onClick = {
+            if (entries.isNotEmpty() && !managing && inspection == null) TextButton(onClick = {
                 val target = entries.firstOrNull { it.chapter.id == resumeChapterId }
                     ?: entries.firstOrNull { it.status == DownloadStatus.COMPLETED }
                     ?: entries.firstOrNull { it.completedPages > 0 } ?: entries.first()
@@ -1136,18 +1268,22 @@ private fun DesktopDownloadChapterPane(
         }
         HorizontalDivider(color = colors.onSurface.copy(alpha = .06f))
         Box(Modifier.weight(1f).fillMaxWidth()) {
-        LazyColumn(Modifier.fillMaxSize(), state = scroll,
-            contentPadding = PaddingValues(top = 10.dp, bottom = bottomPadding),
-            verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(entries, key = DownloadEntry::id, contentType = { "desktop-download-chapter" }) { entry ->
-                DownloadChapterRow(entry, managing, entry.id in selectedIds, refreshingIds,
-                    onRead = { onRead(entry) }, onSelect = { onSelect(entry) },
-                    onManage = { onManage(entry) }, onPause = onPause, onRetry = onRetry,
-                    onRemove = { onRemove(entry) }, active = active, onInspect = onInspect,
-                    enhancementTasks = enhancementTasks)
+            if (inspection != null) {
+                Box(Modifier.fillMaxSize().padding(top = 10.dp, bottom = bottomPadding)) { inspection() }
+            } else {
+                LazyColumn(Modifier.fillMaxSize(), state = scroll,
+                    contentPadding = PaddingValues(top = 10.dp, bottom = bottomPadding),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(entries, key = DownloadEntry::id, contentType = { "desktop-download-chapter" }) { entry ->
+                        DownloadChapterRow(entry, managing, entry.id in selectedIds, refreshingIds,
+                            onRead = { onRead(entry) }, onSelect = { onSelect(entry) },
+                            onManage = { onManage(entry) }, onPause = onPause, onRetry = onRetry,
+                            onRemove = { onRemove(entry) }, active = active, onInspect = onInspect,
+                            enhancementTasks = enhancementTasks)
+                    }
+                }
+                DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd))
             }
-        }
-        DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd))
         }
     }
 }

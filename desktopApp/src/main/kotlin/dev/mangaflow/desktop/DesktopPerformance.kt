@@ -96,6 +96,8 @@ private data class TimingSnapshot(
 )
 
 private class DesktopTimings {
+    private enum class Capture { OFF, RECORDING, DRAINING }
+
     private val lock = Any()
     private val render = TimingRing()
     private val cadence = TimingRing()
@@ -112,9 +114,41 @@ private class DesktopTimings {
     private var longestOverBudgetRun = 0L
     val captureFrames = ArrayBlockingQueue<FrameRecord>(16_384)
     val captureOverflow = AtomicLong()
-    @Volatile var capturing = false
+    private var panel = false
+    private var capture = Capture.OFF
+    private var nextSession = 0L
+    @Volatile var session = 0L
+        private set
 
-    fun onInput(now: Long, eventAgeMillis: Long) = synchronized(lock) {
+    // Normal interaction pays only the opt-in check, not the recording lock or counters.
+    private inline fun record(observedSession: Long, action: () -> Unit) {
+        if (observedSession == 0L) return
+        synchronized(lock) { if (session == observedSession && capture != Capture.DRAINING) action() }
+    }
+
+    fun setPanelVisible(visible: Boolean, onNewSession: () -> Unit = {}): Unit = synchronized(lock) {
+        panel = visible
+        if (visible && session == 0L) {
+            beginSession()
+            onNewSession()
+        } else if (!visible && capture == Capture.OFF) session = 0L
+    }
+
+    fun startCapture() = synchronized(lock) {
+        capture = Capture.RECORDING
+        beginSession()
+    }
+
+    // Seal the capture, but keep its generation until the writer drains the last samples.
+    fun stopCapture() = synchronized(lock) { capture = Capture.DRAINING }
+
+    fun captureDrained(): Unit = synchronized(lock) {
+        capture = Capture.OFF
+        if (!panel) session = 0L
+    }
+
+    fun onInput(now: Long, eventWhen: Long) = record(session) {
+        val eventAgeMillis = System.currentTimeMillis() - eventWhen
         if (now - lastInteraction > INTERACTION_WINDOW_NANOS) {
             interactionStart = now
             pendingInput = 0L
@@ -124,7 +158,7 @@ private class DesktopTimings {
         if (eventAgeMillis in 0..120_000) eventAge.add(eventAgeMillis * 1_000_000)
     }
 
-    fun onRender(start: Long, end: Long, budget: Long?) = synchronized(lock) {
+    fun onRender(observedSession: Long, start: Long, end: Long, budget: Long?) = record(observedSession) {
         val duration = end - start
         render.add(duration)
         rendered++
@@ -147,11 +181,12 @@ private class DesktopTimings {
             overBudgetRun++
             longestOverBudgetRun = maxOf(longestOverBudgetRun, overBudgetRun)
         } else overBudgetRun = 0L
-        if (capturing && !captureFrames.offer(FrameRecord(start, duration, interval, interactive, inputDelay, budget)))
+        if (capture == Capture.RECORDING && !captureFrames.offer(FrameRecord(start, duration, interval, interactive, inputDelay, budget)))
             captureOverflow.incrementAndGet()
     }
 
-    fun onEdtProbe(delay: Long) = synchronized(lock) { edt.add(delay) }
+    fun onEdtProbe(observedSession: Long, delay: Long) = record(observedSession) { edt.add(delay) }
+    fun publishIfCurrent(observedSession: Long, publish: () -> Unit) = record(observedSession, publish)
 
     fun snapshot(): TimingSnapshot {
         val (arrays, counts) = synchronized(lock) {
@@ -162,11 +197,12 @@ private class DesktopTimings {
             arrays[3].distribution(), arrays[4].distribution(), counts[0], counts[1], counts[2])
     }
 
-    fun reset() = synchronized(lock) {
+    private fun beginSession() {
         listOf(render, cadence, input, eventAge, edt).forEach { it.clear() }
         previousRender = 0L; lastInteraction = 0L; interactionStart = 0L; pendingInput = 0L
         rendered = 0L; overBudget = 0L; overBudgetRun = 0L; longestOverBudgetRun = 0L
         captureFrames.clear(); captureOverflow.set(0L)
+        session = ++nextSession
     }
 }
 
@@ -216,9 +252,14 @@ internal class DesktopPerformance(private val context: PlatformContext) {
                 if (!active) return@collectLatest
                 val stopObserving = policy.startObserving()
                 try { while (isActive) {
-                    requestEdtObservation()
+                    val observedSession = timings.session
+                    if (observedSession == 0L) { delay(1_000); continue }
+                    requestEdtObservation(observedSession)
                     val (data, rows) = sample()
                     captureLock.withLock {
+                        // A snapshot made while viewing the panel must not become the first
+                        // sample of a newly started recording after acquiring the writer lock.
+                        if (observedSession != timings.session) return@withLock
                         capture?.let { current ->
                             try {
                                 current.metrics.appendLine(data.toString())
@@ -232,7 +273,9 @@ internal class DesktopPerformance(private val context: PlatformContext) {
                             }
                         }
                     }
-                    snapshot.value = DesktopPerformanceSnapshot(rows, captureActive.value, status)
+                    timings.publishIfCurrent(observedSession) {
+                        snapshot.value = DesktopPerformanceSnapshot(rows, captureActive.value, status)
+                    }
                     delay(1_000)
                 } } finally { stopObserving() }
             }
@@ -251,12 +294,13 @@ internal class DesktopPerformance(private val context: PlatformContext) {
             val candidate = findSkiaLayer(target) ?: return
             val delegate = candidate.renderDelegate ?: return
             val observer = SkikoRenderDelegate { canvas, width, height, time ->
+                val observedSession = timings.session
                 val start = System.nanoTime()
                 try { delegate.onRender(canvas, width, height, time) }
                 finally {
                     val end = System.nanoTime()
                     val budget = observation.refreshHz?.let { 1_000_000_000L / it }
-                    timings.onRender(start, end, budget)
+                    if (observedSession != 0L) timings.onRender(observedSession, start, end, budget)
                     budget?.let { policy.recordDesktopFrameWork(end - start, it) }
                 }
             }
@@ -283,15 +327,16 @@ internal class DesktopPerformance(private val context: PlatformContext) {
             override fun componentResized(e: ComponentEvent?) { if (target.isShowing) noteInteractiveWork(System.nanoTime()) }
         }
         target.addComponentListener(visibility)
-        val input = AWTEventListener { event ->
-            val component = event.source as? Component
-            if (event is InputEvent && component != null && SwingUtilities.getWindowAncestor(component) === target &&
-                (event is KeyEvent || event.id == MouseEvent.MOUSE_PRESSED || event.id == MouseEvent.MOUSE_RELEASED ||
-                    event.id == MouseEvent.MOUSE_DRAGGED || event.id == MouseEvent.MOUSE_WHEEL)) {
-                val now = System.nanoTime()
-                timings.onInput(now, System.currentTimeMillis() - event.`when`)
-                noteInteractiveWork(now)
-            }
+        val input = AWTEventListener input@{ event ->
+            // Plain pointer moves do not own an interaction lease or a latency sample.
+            if (event !is InputEvent || !(event is KeyEvent || event.id == MouseEvent.MOUSE_PRESSED ||
+                    event.id == MouseEvent.MOUSE_RELEASED || event.id == MouseEvent.MOUSE_DRAGGED ||
+                    event.id == MouseEvent.MOUSE_WHEEL)) return@input
+            val component = event.source as? Component ?: return@input
+            if (SwingUtilities.getWindowAncestor(component) !== target) return@input
+            val now = System.nanoTime()
+            timings.onInput(now, event.`when`)
+            noteInteractiveWork(now)
         }
         Toolkit.getDefaultToolkit().addAWTEventListener(input,
             AWTEvent.KEY_EVENT_MASK or AWTEvent.MOUSE_EVENT_MASK or AWTEvent.MOUSE_MOTION_EVENT_MASK or AWTEvent.MOUSE_WHEEL_EVENT_MASK)
@@ -311,8 +356,16 @@ internal class DesktopPerformance(private val context: PlatformContext) {
         return { release(); detach = null }
     }
 
-    fun togglePanel() { panelVisible.value = !panelVisible.value }
-    fun hidePanel() { panelVisible.value = false }
+    fun togglePanel() {
+        if (panelVisible.value) { hidePanel(); return }
+        timings.setPanelVisible(true) { snapshot.value = DesktopPerformanceSnapshot(status = status) }
+        panelVisible.value = true
+    }
+
+    fun hidePanel() {
+        timings.setPanelVisible(false)
+        panelVisible.value = false
+    }
 
     /** EDT-only input/geometry notifications share one bounded policy lease update. */
     private fun noteInteractiveWork(now: Long) {
@@ -354,18 +407,18 @@ internal class DesktopPerformance(private val context: PlatformContext) {
         )
     }
 
-    private fun requestEdtObservation() {
+    private fun requestEdtObservation(observedSession: Long) {
         if (!probePending.compareAndSet(false, true)) return
         val sent = System.nanoTime()
         probeStarted.set(sent)
         EventQueue.invokeLater {
             try {
-                if (!disposed.get()) {
-                    timings.onEdtProbe(System.nanoTime() - sent)
+                if (!disposed.get() && observedSession == timings.session) {
+                    timings.onEdtProbe(observedSession, System.nanoTime() - sent)
                     window?.let(::updateWindowObservation)
                     video = peekDesktopNativeVideoStatistics(context)
                 }
-            } finally { probePending.set(false); probeStarted.set(0L) }
+            } finally { probeStarted.set(0L); probePending.set(false) }
         }
     }
 
@@ -480,12 +533,13 @@ internal class DesktopPerformance(private val context: PlatformContext) {
                     start()
                 } } catch (failure: Exception) { candidate.close(); throw failure }
             }.getOrNull()
-            timings.reset()
             val now = System.nanoTime()
             capture = PerformanceCapture(stem.name, now, now + seconds * 1_000_000_000L,
                 metrics, frames, recording, File("${stem.path}.jfr"))
-            timings.capturing = true
+            timings.startCapture()
             status = "正在采集 ${seconds} 秒 · ${stem.name}${if (recording == null) " · JFR 不可用，仍保存 CPU/资源日志" else ""}"
+            // Do not present the open panel's older rows as samples of this new capture.
+            snapshot.value = DesktopPerformanceSnapshot(recording = true, status = status)
             captureActive.value = true
         } catch (_: Exception) {
             runCatching { metrics?.close() }; runCatching { frames?.close() }; runCatching { recording?.close() }
@@ -505,16 +559,18 @@ internal class DesktopPerformance(private val context: PlatformContext) {
 
     private fun finishCapture() {
         val current = capture ?: return
-        timings.capturing = false
+        timings.stopCapture()
         capture = null
-        val saved = runCatching {
-            drainFrames(current)
-            current.metrics.appendLine(buildJsonObject {
-                sample().first.forEach { (key, value) -> put(key, value) }
-                put("capture_finished", true)
-            }.toString())
-            current.metrics.flush(); current.frames.flush()
-        }.isSuccess
+        val saved = try {
+            runCatching {
+                drainFrames(current)
+                current.metrics.appendLine(buildJsonObject {
+                    sample().first.forEach { (key, value) -> put(key, value) }
+                    put("capture_finished", true)
+                }.toString())
+                current.metrics.flush(); current.frames.flush()
+            }.isSuccess
+        } finally { timings.captureDrained() }
         runCatching { current.metrics.close() }; runCatching { current.frames.close() }
         val jfrSaved = current.jfr?.let { recording ->
             try { recording.stop(); recording.dump(current.jfrFile.toPath()); true }

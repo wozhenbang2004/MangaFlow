@@ -1,6 +1,6 @@
 package dev.mangaflow.ui
 
-import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
@@ -36,10 +36,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.selected
@@ -47,9 +48,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.unit.constrainWidth
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.SearchTarget
 import dev.mangaflow.platform.PlatformKind
@@ -62,6 +63,18 @@ import dev.mangaflow.ui.motion.MotionNavigationColumn
 import dev.mangaflow.ui.motion.motionPress
 
 internal data class DesktopDestination(val title: String, val icon: ImageVector, val groupHeading: String? = null)
+
+internal val DesktopNavigationRailWidth = 64.dp
+
+internal fun desktopNavigationLabelWidth(fontScale: Float): Dp =
+    (204.dp + 24.dp * (fontScale - 1f)).coerceIn(204.dp, 240.dp)
+
+/** Keep enough of the actual workspace for a dock, and protect the existing desktop
+ * detail/management layout before disclosing labels. A user's compact choice still wins. */
+internal fun MangaWindowSize.canDockDesktopNavigation(): Boolean = width - DesktopNavigationRailWidth >= 460.dp
+
+internal fun MangaWindowSize.canExpandDesktopNavigation(): Boolean =
+    width - desktopNavigationLabelWidth(fontScale) >= maxOf(900.dp, 840.dp * fontScale.coerceAtMost(1.5f))
 
 /** Headers occupy space in the one motion column, but never own a route or a tap target. */
 internal sealed interface SidebarNavigationRow {
@@ -89,11 +102,57 @@ internal fun SidebarGroupLabel(title: String, modifier: Modifier = Modifier, com
         color = ink, fontWeight = FontWeight.Medium)
 }
 
+private fun Modifier.revealDesktopNavigationLabel(progress: State<Float>): Modifier = graphicsLayer {
+    alpha = progress.value.coerceIn(0f, 1f)
+    translationX = -4.dp.toPx() * (1f - alpha)
+}
+
+/** Keep the same focus/hit target and icon origin; only the label slot is disclosed. */
+@Composable
+private fun DesktopNavigationAction(
+    title: String,
+    icon: ImageVector,
+    expanded: Boolean,
+    labels: State<Float>,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    current: Boolean? = null,
+    shortcut: String? = null,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val ink = MaterialTheme.colorScheme.onSurface
+    val hint = listOfNotNull(title, shortcut).joinToString(" · ")
+    Box(modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+        .clickable(role = Role.Button, interactionSource = interaction, indication = null, onClick = onClick)
+        .motionPress(interaction).semantics {
+            contentDescription = hint
+            if (current != null) selected = current
+        }, contentAlignment = Alignment.CenterStart) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.width(40.dp), contentAlignment = Alignment.Center) {
+                Icon(icon, null, Modifier.size(20.dp), tint = ink.copy(alpha = if (current == true) 1f else .76f))
+            }
+            if (expanded) {
+                Text(title, Modifier.weight(1f).revealDesktopNavigationLabel(labels).clearAndSetSemantics {},
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = if (current == true) FontWeight.SemiBold else FontWeight.Normal,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (shortcut != null) Text(shortcut,
+                    Modifier.padding(horizontal = 8.dp).revealDesktopNavigationLabel(labels).clearAndSetSemantics {},
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, maxLines = 1)
+            }
+        }
+        DesktopIconTooltip(hint.takeUnless { expanded }, interaction, enabled = true)
+    }
+}
+
 /** Recompose the current glass drawer as persistent navigation; content owns the remaining window. */
 @Composable
 internal fun DesktopNavigationWorkspace(
     visible: Boolean,
     expanded: Boolean,
+    canExpand: Boolean,
+    sidebarWidth: Dp,
     destinations: List<DesktopDestination>,
     selectedIndex: Int,
     version: String,
@@ -114,85 +173,55 @@ internal fun DesktopNavigationWorkspace(
             content()
         } else {
             val motion = LocalMotionEnabled.current
-            val width = animateDpAsState(
-                if (expanded) (204.dp + 24.dp * (LocalMangaWindow.current.fontScale - 1f)).coerceAtMost(240.dp) else 64.dp,
+            val labels = animateFloatAsState(if (expanded) 1f else 0f,
                 if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
-                label = "desktop-navigation-width",
-            )
+                label = "desktop-navigation-labels")
             if (visible) {
                 Box(Modifier.matchParentSize().mangaHazeSource(workspaceBackdrop, zIndex = -1f)
                     .background(MaterialTheme.colorScheme.background)) { wallpaper() }
             }
             Row(Modifier.fillMaxSize()) {
-                if (visible) LiquidGlassSurface(workspaceBackdrop, Modifier.layout { measurable, constraints ->
-                    // Width changes must remeasure the workspace, but they do not need
-                    // to recompose the navigation, its glass styles and every action.
-                    val pixels = constraints.constrainWidth(width.value.roundToPx())
-                    val placeable = measurable.measure(constraints.copy(minWidth = pixels, maxWidth = pixels))
-                    layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
-                }.fillMaxHeight().padding(start = 8.dp, top = 8.dp, bottom = 8.dp),
+                // Commit the workspace width once. Label motion is draw-only; a sidebar click
+                // no longer remeasures the gallery and its breakpoints through a spring.
+                if (visible) LiquidGlassSurface(workspaceBackdrop, Modifier.width(sidebarWidth)
+                    .fillMaxHeight().padding(start = 8.dp, top = 8.dp, bottom = 8.dp),
                     cornerRadius = 20.dp, role = GlassSurfaceRole.DRAWER, elevation = 0.dp) {
                     Column(Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 8.dp)) {
-                        Row(Modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically) {
-                            MotionIconButton(onClick = onToggle, modifier = Modifier.size(36.dp),
-                                tooltip = if (expanded) "收起导航" else "展开导航") {
-                                Icon(Icons.Outlined.Menu, "切换导航宽度", Modifier.size(20.dp))
-                            }
-                            if (expanded) Text("漫流", style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Clip)
-                        }
-                        val searchInteraction = remember { MutableInteractionSource() }
-                        if (expanded) Row(Modifier.fillMaxWidth().height(40.dp).clip(RoundedCornerShape(12.dp))
-                            .clickable(role = Role.Button, interactionSource = searchInteraction, indication = null, onClick = onSearch)
-                            .motionPress(searchInteraction).padding(horizontal = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Icon(Icons.Outlined.Search, null, Modifier.size(18.dp))
-                            Text("搜索", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                            Text("Ctrl K", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
-                        } else MotionIconButton(onClick = onSearch, modifier = Modifier.size(40.dp), tooltip = "搜索 · Ctrl+K") {
-                            Icon(Icons.Outlined.Search, "搜索", Modifier.size(19.dp))
-                        }
-                        profileControl(!expanded)
-                        Spacer(Modifier.height(12.dp))
+                        DesktopNavigationAction("搜索", Icons.Outlined.Search, expanded, labels, onSearch,
+                            modifier = Modifier.height(40.dp), shortcut = "Ctrl+K")
                         val scroll = rememberScrollState()
                         val rows = remember(destinations) { sidebarNavigationRows(destinations.map(DesktopDestination::groupHeading)) }
                         val selectedRow = rows.indexOf(SidebarNavigationRow.Destination(selectedIndex))
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 3.dp)) {
+                                profileControl(!expanded)
+                                Spacer(Modifier.height(12.dp))
                                 MotionNavigationColumn(selected = selectedRow, itemCount = rows.size,
                                     selectionVisible = selectedRow >= 0) { index, itemModifier ->
                                     when (val row = rows[index]) {
                                         is SidebarNavigationRow.Heading -> SidebarGroupLabel(row.title, itemModifier, compact = !expanded)
                                         is SidebarNavigationRow.Destination -> {
                                             val destination = destinations[row.index]
-                                            val interaction = remember(row.index) { MutableInteractionSource() }
-                                            val current = selectedIndex == row.index
-                                            if (expanded) Row(itemModifier.fillMaxWidth().height(46.dp).clip(RoundedCornerShape(14.dp))
-                                                .clickable(role = Role.Button, interactionSource = interaction, indication = null,
-                                                    onClick = { onNavigate(row.index) })
-                                                .motionPress(interaction).semantics { selected = current }
-                                                .padding(horizontal = 10.dp),
-                                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                                Icon(destination.icon, null, Modifier.size(20.dp),
-                                                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (current) 1f else .76f))
-                                                Text(destination.title, style = MaterialTheme.typography.bodyMedium,
-                                                    fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
-                                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            } else MotionIconButton(onClick = { onNavigate(row.index) },
-                                                modifier = itemModifier.fillMaxWidth().height(46.dp).semantics { selected = current },
-                                                tooltip = destination.title) {
-                                                Icon(destination.icon, destination.title, Modifier.size(20.dp),
-                                                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (current) 1f else .76f))
-                                            }
+                                            DesktopNavigationAction(destination.title, destination.icon, expanded, labels,
+                                                onClick = { onNavigate(row.index) }, modifier = itemModifier.height(46.dp),
+                                                current = selectedIndex == row.index)
                                         }
                                     }
                                 }
                             }
                             DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(5.dp))
                         }
-                        if (expanded) Text(version, modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        // Keep the search anchor at the top in every docked width. The
+                        // display preference belongs in the footer, not in the task list.
+                        if (canExpand) Row(Modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically) {
+                            val action = if (expanded) "收起导航" else "展开导航"
+                            MotionIconButton(onClick = onToggle, modifier = Modifier.size(40.dp), tooltip = action) {
+                                Icon(Icons.Outlined.Menu, action, Modifier.size(20.dp))
+                            }
+                            if (expanded) Text(version, modifier = Modifier.revealDesktopNavigationLabel(labels),
+                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                 }
                 Box(Modifier.weight(1f).fillMaxHeight().clipToBounds()) {
@@ -211,6 +240,7 @@ internal fun DesktopSearchField(
     copyOnly: Boolean,
     active: Boolean,
     focusRequest: Int,
+    takeFocusRequest: (Int) -> Boolean,
     backdrop: HazeState,
     onOpen: () -> Unit,
     onQuery: (String) -> Unit,
@@ -223,7 +253,6 @@ internal fun DesktopSearchField(
 ) {
     val requester = remember { FocusRequester() }
     val focus = LocalFocusManager.current
-    var appliedRequest by remember { mutableIntStateOf(0) }
     var scopeOpen by remember { mutableStateOf(false) }
     val inputInteraction = remember { MutableInteractionSource() }
     val searchLabel = when {
@@ -232,10 +261,9 @@ internal fun DesktopSearchField(
         else -> "搜索漫画、作者或标签"
     }
     LaunchedEffect(focusRequest, active) {
-        if (active && focusRequest > appliedRequest) {
+        if (active && focusRequest > 0) {
             withFrameNanos { }
-            requester.requestFocus()
-            appliedRequest = focusRequest
+            if (takeFocusRequest(focusRequest)) requester.requestFocus()
         }
     }
     LaunchedEffect(active, showScopeSelector) { if (!active || !showScopeSelector) scopeOpen = false }

@@ -165,6 +165,10 @@ private fun DesktopActionPopup(
     anchor: IntOffset? = null,
     onPresenceChange: (Boolean) -> Unit = {},
 ) {
+    // Closed menus belong to every visible and precomposed item. Only install the
+    // transition once that particular menu opens, then retain it through its exit.
+    var mounted by remember { mutableStateOf(false) }
+    if (!visible && !mounted) return
     val motion = LocalMotionEnabled.current
     val density = LocalDensity.current
     val presence = remember { MutableTransitionState(false) }
@@ -178,8 +182,11 @@ private fun DesktopActionPopup(
     }, label = "desktop-actions-scale") { if (it) 1f else .94f }
     val present = presence.currentState || presence.targetState || !presence.isIdle
     val reportPresence by rememberUpdatedState(onPresenceChange)
-    SideEffect { reportPresence(present) }
-    DisposableEffect(Unit) { onDispose { reportPresence(false) } }
+    SideEffect { mounted = present }
+    DisposableEffect(present) {
+        if (present) reportPresence(true)
+        onDispose { if (present) reportPresence(false) }
+    }
     if (!present) return
     val enabledIndices = actions.indices.filter { actions[it].enabled }
     val requesters = remember(actions.size) { List(actions.size) { FocusRequester() } }

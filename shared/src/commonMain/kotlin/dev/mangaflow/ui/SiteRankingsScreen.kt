@@ -3,6 +3,15 @@
     androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package dev.mangaflow.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.clickable
@@ -575,6 +584,12 @@ internal fun RankedWorkDetailScreen(
         state.rankedSources.filter { it.verified }.mapTo(hashSetOf()) { federatedMangaIdentity(it.manga) }
     }
     val sourceReady = active && state.rankedOpeningSourceId == null
+    val discloseWithMotion = LocalMotionEnabled.current && !LocalTouchExplorationEnabled.current
+    val sourceEnter = if (discloseWithMotion) fadeIn(tween(MangaMotion.Content)) +
+        expandVertically(spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness),
+            expandFrom = Alignment.Top) else EnterTransition.None
+    val sourceExit = if (discloseWithMotion) fadeOut(tween(MangaMotion.Quick)) +
+        shrinkVertically(tween(MangaMotion.Quick), shrinkTowards = Alignment.Top) else ExitTransition.None
     val submit = {
         if (active && query.isNotBlank()) {
             focus.clearFocus(); otherResults = false; failures = false; expandedGroup = null
@@ -716,24 +731,30 @@ internal fun RankedWorkDetailScreen(
                                     if (showChoices) expandedGroup = groupKey.takeUnless { expanded }
                                     else onUseSource(work.key, group.manga)
                                 })
-                            if (expanded) {
-                                val counts = remember(group.matches) { group.matches.groupingBy { it.sourceId }.eachCount() }
-                                group.matches.forEach { manga ->
-                                    val identity = federatedMangaIdentity(manga)
-                                    key(identity) {
-                                        val selected = preview?.takeIf { federatedMangaIdentity(it.selected) == identity }
-                                        RankedSourceChoice(manga, linked = identity == linked, matched = identity in verified,
-                                            selected = selected != null, repeated = (counts[manga.sourceId] ?: 0) > 1,
-                                            opening = manga.id == state.rankedOpeningSourceId,
-                                            enabled = sourceReady && selected == null,
-                                            onClick = { onUseSource(work.key, manga) })
-                                        if (selected != null) RankedSourceConfirmation(work, selected, backdrop,
-                                            enabled = sourceReady, onConfirm = {
-                                                onConfirmSource(work.key, selected.canonical.id, selected.request)
-                                            }, onCancel = { onCancelPreview(work.key, selected.request) })
+                            if (showChoices) AnimatedVisibility(visible = expanded,
+                                enter = sourceEnter, exit = sourceExit, label = "ranked-reading-sources") {
+                                // Grow the real row bounds below the trigger. Retained exit visuals
+                                // cannot select a source or keep a confirmation action active.
+                                val canChoose = expanded && sourceReady
+                                Column(Modifier.fillMaxWidth().motionInputGate(expanded && active)) {
+                                    val counts = remember(group.matches) { group.matches.groupingBy { it.sourceId }.eachCount() }
+                                    group.matches.forEach { manga ->
+                                        val identity = federatedMangaIdentity(manga)
+                                        key(identity) {
+                                            val selected = preview?.takeIf { federatedMangaIdentity(it.selected) == identity }
+                                            RankedSourceChoice(manga, linked = identity == linked, matched = identity in verified,
+                                                selected = selected != null, repeated = (counts[manga.sourceId] ?: 0) > 1,
+                                                opening = manga.id == state.rankedOpeningSourceId,
+                                                enabled = canChoose && selected == null,
+                                                onClick = { onUseSource(work.key, manga) })
+                                            if (selected != null) RankedSourceConfirmation(work, selected, backdrop,
+                                                enabled = canChoose, onConfirm = {
+                                                    onConfirmSource(work.key, selected.canonical.id, selected.request)
+                                                }, onCancel = { onCancelPreview(work.key, selected.request) })
+                                        }
                                     }
                                 }
-                            } else if (!showChoices && preview != null) {
+                            } else if (preview != null) {
                                 RankedSourceConfirmation(work, preview, backdrop, enabled = sourceReady,
                                     onConfirm = { onConfirmSource(work.key, preview.canonical.id, preview.request) },
                                     onCancel = { onCancelPreview(work.key, preview.request) })

@@ -176,6 +176,7 @@ internal fun AnimePlayerPane(
     val watchingFocus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     val touchExploration = LocalTouchExplorationEnabled.current
+    var videoWorkspaceFocused by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
     var controlsHeld by remember { mutableStateOf(false) }
     var readingsHeld by remember { mutableStateOf(false) }
@@ -307,8 +308,10 @@ internal fun AnimePlayerPane(
     CompositionLocalProvider(LocalContentColor provides colors.onSurface) {
         BoxWithConstraints(modifier.fillMaxSize().background(if (headerOverVideo) videoColors.background else colors.surface)
             .focusRequester(focus)
+            .onFocusChanged { videoWorkspaceFocused = it.isFocused }
             .onPreviewKeyEvent { event ->
-                if (active && !showChrome && !locked && !obscured && !settingsPresent && !watchPanelPresent &&
+                if (active && (!desktop || videoWorkspaceFocused) && !showChrome && !locked && !obscured &&
+                    !settingsPresent && !watchPanelPresent &&
                     !playback.inPictureInPicture && event.key == Key.Tab && event.type == KeyEventType.KeyDown) {
                     focusChromeOnReveal = chromeFocus
                     interact()
@@ -316,8 +319,10 @@ internal fun AnimePlayerPane(
                 } else false
             }
             .onKeyEvent { event ->
-                // Focused buttons and the native slider get first refusal.
-                    if (!active || event.isCtrlPressed || event.isAltPressed || event.isMetaPressed ||
+                // Desktop editors and controls own both halves of a keystroke, even if
+                // they only consume KeyDown and leave KeyUp unhandled.
+                if (!active || (desktop && !videoWorkspaceFocused) ||
+                    event.isCtrlPressed || event.isAltPressed || event.isMetaPressed ||
                     event.type != KeyEventType.KeyUp || obscured || settingsPresent || watchPanelPresent || playback.inPictureInPicture) false
                 else if (locked) { if (event.key == Key.Escape) { locked = false; true } else false }
                 else when (event.key) {
@@ -377,8 +382,10 @@ internal fun AnimePlayerPane(
                     detectTapGestures(
                         onTap = {
                             if (!accelerated) {
-                                if (latestRequiredControls) controlsVisible = true
-                                else {
+                                if (latestRequiredControls) {
+                                    if (desktop) focus.requestFocus()
+                                    controlsVisible = true
+                                } else {
                                     val revealControls = !latestChromeVisible
                                     focusManager.clearFocus()
                                     focus.requestFocus()
