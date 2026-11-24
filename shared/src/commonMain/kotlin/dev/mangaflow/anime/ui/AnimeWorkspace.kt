@@ -673,7 +673,7 @@ private fun AnimeWorkspaceContent(
                     val shownState = shown.detailState
                     val shownDetail = shownState?.detail
                     var heroCollapsed by remember(shown.key) { mutableStateOf(false) }
-                    AnimeHeaderViewport(floating = shown.depth == 0, header = {
+                    AnimeHeaderViewport(header = {
                         BoxWithConstraints(Modifier.fillMaxWidth()) {
                             val preferred = animePreferredColumns(maxWidth, state.discoveryColumns)
                             val actualColumns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
@@ -849,11 +849,11 @@ private fun AnimeWorkspaceContent(
                                         },
                                         onPlay = { requestPlayback(it, null) }, onOpenRelated = ::openRelated, onSources = ::showSources,
                                         onTracking = { trackingVisible = true }, modifier = Modifier.fillMaxSize(),
-                                        onHeroCollapsed = { heroCollapsed = it },
+                                        onHeroCollapsed = { heroCollapsed = it }, contentTopPadding = headerInset,
                                         active = active && shown.key == route.key && !overlayVisible && !searchPresent)
                                 }
                             }
-                        } else Box(Modifier.fillMaxSize()) {
+                        } else Box(Modifier.fillMaxSize().padding(top = headerInset)) {
                             AnimeMessage(if (state.detailLoading) "正在载入番剧" else "番剧详情未取得",
                                 state.detailError ?: openingSubject?.title ?: openingReference?.title,
                                 action = if (state.detailLoading) null else "重试",
@@ -1065,17 +1065,9 @@ private fun AnimeWorkspaceContent(
         onDismiss = controller::dismissPlaybackChoice)
 }
 
-/** Measures the header before the feed, so the first item starts clear and later items can scroll underneath. */
+/** Measures the floating chrome without reducing the page viewport. */
 @Composable
-private fun AnimeHeaderViewport(floating: Boolean, header: @Composable () -> Unit,
-    content: @Composable (Dp) -> Unit) {
-    if (!floating) {
-        Column(Modifier.fillMaxSize()) {
-            header()
-            Box(Modifier.weight(1f)) { content(0.dp) }
-        }
-        return
-    }
+private fun AnimeHeaderViewport(header: @Composable () -> Unit, content: @Composable (Dp) -> Unit) {
     SubcomposeLayout(Modifier.fillMaxSize()) { constraints ->
         val toolbar = subcompose("header", header).single().measure(constraints.copy(minHeight = 0))
         val inset = toolbar.height.toDp()

@@ -22,6 +22,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -29,6 +30,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.stateDescription
@@ -167,15 +169,38 @@ internal fun SourceCapabilityBrowseControls(
     }
     val colors = MaterialTheme.colorScheme
     val controlColors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 52.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-            MotionTextButton(onClick = onSources, enabled = active && !present,
-                modifier = Modifier.weight(1f).heightIn(min = 48.dp).semantics {
-                    stateDescription = "当前来源：$sourceName" + selectedFeed?.title?.let { "，$it" }.orEmpty()
-                },
-                colors = controlColors,
-                contentPadding = PaddingValues(start = 2.dp, end = 8.dp, top = 6.dp, bottom = 6.dp)) {
+    // Only the restricted discovery header offers shortcuts into tag/author search.
+    val compactHome = !searching && onOpenSearch != null
+    val status = when {
+        failed.size == 1 -> failed.single().let { lane ->
+            lane.sourceName + if (sourceAccountRequired(lane.error)) "需要登录" else "暂不可用"
+        }
+        failed.size > 1 -> "${failed.size} 个来源暂不可用"
+        current.error != null -> "筛选暂未读取"
+        preparation?.error != null -> "来源准备未完成"
+        preparation?.running == true && current.sources.isEmpty() -> "正在准备来源"
+        else -> null
+    }
+    val fontScale = LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
+    val failureCount = failed.size.takeIf { it > 0 }?.toString().orEmpty()
+    val statusWidth = (30.dp + 9.dp * failureCount.length * fontScale).coerceAtLeast(44.dp)
+    val sourceControl: @Composable (Modifier) -> Unit = { placement ->
+        MotionTextButton(onClick = onSources, enabled = active && !present,
+            modifier = placement.heightIn(min = 48.dp).semantics {
+                stateDescription = "当前来源：$sourceName" + selectedFeed?.title?.let { "，$it" }.orEmpty()
+            },
+            colors = controlColors,
+            contentPadding = PaddingValues(start = 2.dp, end = 8.dp, top = 6.dp, bottom = 6.dp)) {
+            if (compactHome) {
+                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (current.selectedSource == "*") Icon(Icons.Outlined.Layers, null, Modifier.size(20.dp))
+                    else ChapterSourceLogo(current.selectedSource, sourceName, Modifier.size(20.dp))
+                    Text(sourceName, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(15.dp), tint = colors.onSurfaceVariant)
+                }
+            } else {
                 if (current.selectedSource == "*") Icon(Icons.Outlined.Layers, null, Modifier.size(23.dp))
                 else ChapterSourceLogo(current.selectedSource, sourceName, Modifier.size(23.dp))
                 Column(Modifier.weight(1f).padding(start = 9.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -192,38 +217,74 @@ internal fun SourceCapabilityBrowseControls(
                 }
                 Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
             }
-            if (hasFeeds) MotionIconButton(onClick = { feedPicker = true },
-                enabled = active && !current.loading && !present, modifier = Modifier.size(44.dp),
-                tooltip = "${sourceName}分类与栏目") {
-                Icon(Icons.Outlined.ViewModule, "${sourceName}分类与栏目", Modifier.size(19.dp))
+        }
+    }
+    val sourceTools: @Composable () -> Unit = {
+        if (hasFeeds) MotionIconButton(onClick = { feedPicker = true },
+            enabled = active && !current.loading && !present, modifier = Modifier.size(44.dp),
+            tooltip = "${sourceName}分类与栏目") {
+            Icon(Icons.Outlined.ViewModule, "${sourceName}分类与栏目", Modifier.size(19.dp))
+        }
+        if (compactHome && onOpenSearch != null) {
+            MotionIconButton(onClick = { onOpenSearch(SearchTarget.TAG) }, enabled = active && !present,
+                modifier = Modifier.size(44.dp), tooltip = "标签") {
+                Icon(Icons.AutoMirrored.Outlined.Label, "标签", Modifier.size(19.dp), tint = colors.onSurfaceVariant)
             }
-            if (!searching && onOpenSearch != null) {
-                MotionTextButton(onClick = { onOpenSearch(SearchTarget.TAG) }, enabled = active && !present,
-                    modifier = Modifier.heightIn(min = 44.dp), colors = controlColors,
-                    contentPadding = PaddingValues(horizontal = 7.dp)) {
-                    Text("标签", style = MaterialTheme.typography.labelLarge, maxLines = 1)
+            MotionIconButton(onClick = { onOpenSearch(SearchTarget.AUTHOR) }, enabled = active && !present,
+                modifier = Modifier.size(44.dp), tooltip = "作者") {
+                Icon(Icons.Outlined.PersonOutline, "作者", Modifier.size(19.dp), tint = colors.onSurfaceVariant)
+            }
+        }
+        if (hasHotTags) MotionIconButton(onClick = { hotTagsOpen = true },
+            enabled = active && !present, modifier = Modifier.size(44.dp), tooltip = "禁漫热门标签") {
+            Icon(Icons.Outlined.Tag, "禁漫热门标签", Modifier.size(19.dp))
+        }
+        if (hasFilters) Box {
+            MotionIconButton(onClick = { filtersVisible = true },
+                enabled = active && !current.loading && !present,
+                modifier = Modifier.size(44.dp).semantics {
+                    stateDescription = if (modifiedFilters == 0) "未调整筛选" else "$modifiedFilters 项筛选已调整"
+                }, tooltip = "筛选与排序") {
+                Icon(Icons.Outlined.Tune, "筛选与排序", Modifier.size(19.dp))
+            }
+            if (modifiedFilters > 0) Box(Modifier.align(Alignment.TopEnd).padding(7.dp).size(5.dp)
+                .background(MaterialTheme.colorScheme.onSurface, CircleShape))
+        }
+        if (compactHome && status != null) {
+            val statusLabel = "查看来源状态：$status"
+            MotionIconButton(onClick = { failuresOpen = true }, enabled = active && !present,
+                modifier = Modifier.width(statusWidth).heightIn(min = 44.dp), tooltip = statusLabel) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Icon(Icons.Outlined.Info, statusLabel, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                    if (failureCount.isNotEmpty()) Text(failureCount, Modifier.clearAndSetSemantics { },
+                        style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant, maxLines = 1)
                 }
-                MotionTextButton(onClick = { onOpenSearch(SearchTarget.AUTHOR) }, enabled = active && !present,
-                    modifier = Modifier.heightIn(min = 44.dp), colors = controlColors,
-                    contentPadding = PaddingValues(horizontal = 7.dp)) {
-                    Text("作者", style = MaterialTheme.typography.labelLarge, maxLines = 1)
+            }
+        }
+    }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        if (compactHome) BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val iconCount = 2 + (if (hasFeeds) 1 else 0) + (if (hasFilters) 1 else 0)
+            val toolsWidth = 46.dp * iconCount + (if (status != null) statusWidth + 6.dp else 0.dp)
+            if (maxWidth >= toolsWidth + 52.dp + 56.dp * fontScale) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    sourceControl(Modifier.weight(1f))
+                    sourceTools()
+                }
+            } else {
+                // Keep all controls reachable without shrinking their hit areas at large text sizes.
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    sourceControl(Modifier.fillMaxWidth())
+                    FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.End)) {
+                        sourceTools()
+                    }
                 }
             }
-            if (hasHotTags) MotionIconButton(onClick = { hotTagsOpen = true },
-                enabled = active && !present, modifier = Modifier.size(44.dp), tooltip = "禁漫热门标签") {
-                Icon(Icons.Outlined.Tag, "禁漫热门标签", Modifier.size(19.dp))
-            }
-            if (hasFilters) Box {
-                MotionIconButton(onClick = { filtersVisible = true },
-                    enabled = active && !current.loading && !present,
-                    modifier = Modifier.size(44.dp).semantics {
-                        stateDescription = if (modifiedFilters == 0) "未调整筛选" else "$modifiedFilters 项筛选已调整"
-                    }, tooltip = "筛选与排序") {
-                    Icon(Icons.Outlined.Tune, "筛选与排序", Modifier.size(19.dp))
-                }
-                if (modifiedFilters > 0) Box(Modifier.align(Alignment.TopEnd).padding(7.dp).size(5.dp)
-                    .background(MaterialTheme.colorScheme.onSurface, CircleShape))
-            }
+        } else Row(Modifier.fillMaxWidth().heightIn(min = 52.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            sourceControl(Modifier.weight(1f))
+            sourceTools()
         }
         if (searching && browse.searchTarget in listOf(SearchTarget.AUTHOR, SearchTarget.TAG)) {
             browse.searchSources.values.filter { it.coverage != null }.groupBy { it.coverage }.forEach { (coverage, lanes) ->
@@ -238,21 +299,11 @@ internal fun SourceCapabilityBrowseControls(
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             }
         }
-        if (selectionSummary.isNotBlank()) Text(selectionSummary,
+        if (!compactHome && selectionSummary.isNotBlank()) Text(selectionSummary,
             Modifier.fillMaxWidth().padding(start = 34.dp, end = 4.dp, bottom = 5.dp),
             style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
             maxLines = 2, overflow = TextOverflow.Ellipsis)
-        val status = when {
-            failed.size == 1 -> failed.single().let { lane ->
-                lane.sourceName + if (sourceAccountRequired(lane.error)) "需要登录" else "暂不可用"
-            }
-            failed.size > 1 -> "${failed.size} 个来源暂不可用"
-            current.error != null -> "筛选暂未读取"
-            preparation?.error != null -> "来源准备未完成"
-            preparation?.running == true && current.sources.isEmpty() -> "正在准备来源"
-            else -> null
-        }
-        if (status != null) MotionTextButton(onClick = { failuresOpen = true }, enabled = active && !present,
+        if (!compactHome && status != null) MotionTextButton(onClick = { failuresOpen = true }, enabled = active && !present,
             modifier = Modifier.fillMaxWidth(), colors = controlColors,
             contentPadding = PaddingValues(horizontal = 2.dp, vertical = 6.dp)) {
             Icon(Icons.Outlined.Info, null, Modifier.size(15.dp))

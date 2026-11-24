@@ -81,6 +81,7 @@ import dev.mangaflow.anime.AnimeWatchProgress
 import dev.mangaflow.anime.AnimeWatchStatus
 import dev.mangaflow.anime.canonicalBangumiId
 import dev.mangaflow.anime.canonicalDoubanId
+import dev.mangaflow.anime.sources.isRetiredAnimeSource
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.typography.MangaFontScene
@@ -118,19 +119,24 @@ internal fun AnimeDetailPane(
     modifier: Modifier = Modifier,
     active: Boolean = true,
     onHeroCollapsed: (Boolean) -> Unit = {},
+    contentTopPadding: Dp = 0.dp,
 ) {
     val subject = detail.subject
     val nativeSource = subject.externalIds["native-source"]
     val native = nativeSource != null
+    val retiredNativeSource = nativeSource?.let(::isRetiredAnimeSource) == true
     val douban = subject.canonicalDoubanId() != null
     val supportsMetadataLink = native || douban
     val entry = state.library.firstOrNull { it.subject.id == subject.id }
     val linkedMetadata = (detail.metadataSubject ?: entry?.nativeMetadata.takeIf { supportsMetadataLink })
         ?.takeIf { it.canonicalBangumiId() != null }
     val canonicalInfo = subject.takeIf { it.canonicalBangumiId() != null } ?: linkedMetadata
+    val workReferenceId = subject.canonicalBangumiId() ?: (entry?.nativeMetadata
+        ?: detail.metadataSubject.takeUnless { entry?.metadataAutoMatchDisabled == true })?.canonicalBangumiId()
     val currentDiscussion by controller.discussion.state.collectAsStateWithLifecycle()
-    val discussion = currentDiscussion.takeIf { it.subjectId == subject.id }
-    val commentSources = discussion?.sources.orEmpty()
+    val observedWork = currentDiscussion.workContext?.takeIf {
+        it.subjectId == subject.id && it.referenceId == workReferenceId
+    }
     var detailTab by rememberSaveable(subject.id, "detail-sections") { mutableIntStateOf(0) }
     var discussionFilter by remember(subject.id) { mutableStateOf(false) }
     var discussionFilterChanged by remember(subject.id) { mutableStateOf(false) }
@@ -146,15 +152,33 @@ internal fun AnimeDetailPane(
         discussionFilter = false
         detailTab = index
     }
-    val commentsVisible = active && detailTab == 2
-    DisposableEffect(controller, subject.id, commentsVisible) {
-        if (commentsVisible) controller.discussion.setVisible(subject.id, true)
-        onDispose { if (commentsVisible) controller.discussion.setVisible(subject.id, false) }
+    val commentsVisible = active && detailTab == 2 && observedWork != null
+    DisposableEffect(controller, observedWork, commentsVisible) {
+        if (commentsVisible && observedWork != null) controller.discussion.setVisible(observedWork, true)
+        onDispose { if (commentsVisible && observedWork != null) controller.discussion.setVisible(observedWork, false) }
     }
     val metadataSearch = state.nativeMetadataSearch?.takeIf { it.subjectId == subject.id }
     var metadataQuery by rememberSaveable(subject.id, "metadata-query") { mutableStateOf(subject.title) }
     var reviewedMetadata by rememberSaveable(subject.id, "metadata-candidate") { mutableStateOf<String?>(null) }
     var unlinkMetadata by rememberSaveable(subject.id, "metadata-unlink") { mutableStateOf(false) }
+    fun LazyListScope.metadataPicker(paneActive: Boolean, forComments: Boolean = false) {
+        nativeMetadataPicker(linkedMetadata.takeUnless { forComments }, metadataSearch, paneActive,
+            metadataQuery, reviewedMetadata, unlinkMetadata && !forComments,
+            onQueryChange = { metadataQuery = it },
+            onSearch = {
+                reviewedMetadata = null
+                unlinkMetadata = false
+                controller.searchNativeMetadata(subject.id, metadataQuery)
+            },
+            onReview = { reviewedMetadata = it },
+            onRequestUnlink = { unlinkMetadata = it },
+            onSave = { controller.setNativeMetadata(subject.id, it) },
+            onClose = {
+                unlinkMetadata = false
+                reviewedMetadata = null
+                controller.dismissNativeMetadataSearch(subject.id)
+            }, forComments = forComments)
+    }
     val completed = entry?.completedEpisodeIds.orEmpty()
     var episodeTab by rememberSaveable(subject.id) { mutableIntStateOf(0) }
     var episodeReversed by rememberSaveable(subject.id) { mutableStateOf(false) }
@@ -228,7 +252,8 @@ internal fun AnimeDetailPane(
         Box(Modifier.matchParentSize().mangaHazeSource(backdrop, zIndex = -.5f)
             .background(colors.surface.copy(alpha = .94f)))
         val fontScale = density.fontScale.coerceAtLeast(1f)
-        val compactHero = maxHeight < 450.dp
+        val compactHero = maxHeight - contentTopPadding < 450.dp
+        val toolbarPixels = with(density) { contentTopPadding.roundToPx() }
         val wide = maxWidth >= (if (compactHero) 650.dp else 840.dp) * fontScale.coerceAtMost(1.5f)
         val width = minOf(maxWidth, if (wide) 1400.dp else 1080.dp)
         val horizontal = if (wide) 24.dp else 16.dp
@@ -327,6 +352,7 @@ internal fun AnimeDetailPane(
         }
         val hero: @Composable () -> Unit = {
             AnimeDetailHero(subject, canonicalInfo, liveScores, wide, compactHero, active, backdrop,
+                contentTopPadding = contentTopPadding + if (wide) 8.dp else 0.dp,
                 followAction = {
                     AnimeDetailFollow(entry, backdrop, !state.libraryReadUnavailable, active, native,
                         onFollow = { controller.setFollowed(subject, entry?.followed != true) },
@@ -346,17 +372,17 @@ internal fun AnimeDetailPane(
                                 fontSize = 13.sp, fullWidthIndicator = true)
                         }
                     }
-                    if (detailTab == 2) {
-                        AnimeDiscussionSourcesStrip(subject.id, discussion?.checks.orEmpty(), backdrop,
-                            enabled = active, canRetry = canonicalInfo != null,
-                            onRetry = { controller.discussion.retry(subject.id, it) },
+                    if (detailTab == 2 && observedWork != null) {
+                        AnimeDiscussionSourcesStrip(subject.id, currentDiscussion.checks, backdrop,
+                            enabled = active, canRetry = true,
+                            onRetry = { controller.discussion.retry(observedWork, it) },
                             onPresence = { discussionChecksPresent = it }, compact = true)
                         DetailAction(Icons.Outlined.Refresh, "刷新评论",
-                            enabled = active && !discussionChecksPresent && canonicalInfo != null &&
-                                discussion?.matching != true && commentSources.none { it.loadingMore },
+                            enabled = active && !discussionChecksPresent &&
+                                !currentDiscussion.matching && currentDiscussion.sources.none { it.loadingMore },
                             onClick = {
-                                commentSources.forEach { controller.discussion.retry(subject.id, it.id) }
-                                controller.discussion.retryMatch(subject.id)
+                                currentDiscussion.sources.forEach { controller.discussion.retry(observedWork, it.id) }
+                                controller.discussion.retryMatch(observedWork)
                             })
                         DetailAction(Icons.Outlined.FilterList, "筛选评论",
                             selected = discussionFilter || discussionFilterChanged,
@@ -369,16 +395,29 @@ internal fun AnimeDetailPane(
                         val paneActive = active && target == detailTab && !statusPresent &&
                             !discussionChecksPresent && episodeMenuOwner == null
                         when (target) {
-                            2 -> if (supportsMetadataLink && canonicalInfo == null) {
-                                Box(Modifier.fillMaxSize().padding(horizontal = horizontal, vertical = 8.dp)) {
-                                    AnimeDetailStatus("补充评论资料", Icons.Outlined.Info,
-                                        detail = "确认对应作品和季度后，可读取 Bangumi 等来源的评论。",
-                                        actionLabel = "补充资料", onAction = { selectDetailTab(1) })
-                                }
-                            } else CommunityPanel(mangaId = "anime:${subject.id}", sources = commentSources,
-                                loading = discussion == null || discussion.matching,
-                                onMore = { controller.discussion.loadMore(subject.id, it) },
-                                onRetry = { controller.discussion.retry(subject.id, it) },
+                            2 -> if (workReferenceId == null) {
+                                if (supportsMetadataLink && !state.libraryReadUnavailable) {
+                                    val position = rememberLazyListState()
+                                    Box(Modifier.fillMaxSize()) {
+                                        LazyColumn(Modifier.fillMaxSize().mangaHazeSource(backdrop).motionInputGate(paneActive),
+                                            state = position, userScrollEnabled = paneActive,
+                                            contentPadding = PaddingValues(start = horizontal, top = 8.dp,
+                                                end = horizontal, bottom = listEnd)) {
+                                            metadataPicker(paneActive, forComments = true)
+                                        }
+                                        if (wide) DesktopVerticalScrollbar(position, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                                    }
+                                } else AnimeMessage("作品评论暂不可用",
+                                    if (state.libraryReadUnavailable) "本机资料关联无法读取，暂不能关联评论。"
+                                    else "没有可核对的作品评论来源。", icon = Icons.Outlined.Info)
+                            } else if (observedWork == null) {
+                                val opening = state.detailLoading || currentDiscussion.subjectId == subject.id
+                                AnimeMessage(if (opening) "正在核对作品评论来源" else "作品评论暂不可用",
+                                    detail = "请重新打开这部番剧后重试。".takeUnless { opening }, icon = Icons.Outlined.Info)
+                            } else CommunityPanel(mangaId = "anime:${observedWork.subjectId}:${observedWork.referenceId}",
+                                sources = currentDiscussion.sources, loading = currentDiscussion.matching,
+                                onMore = { controller.discussion.loadMore(observedWork, it) },
+                                onRetry = { controller.discussion.retry(observedWork, it) },
                                 onMatch = { _, _ -> }, onRelink = {}, loadReplies = { _, _, _ -> ReviewPage(emptyList()) },
                                 modifier = Modifier.fillMaxSize().motionInputGate(paneActive),
                                 backdrop = backdrop, active = paneActive, bottomPadding = listEnd,
@@ -397,16 +436,7 @@ internal fun AnimeDetailPane(
                                             if (info.description.isNotBlank() || info.tags.isNotEmpty()) AnimeDetailDescription(info)
                                             else AnimeMessage("暂无简介", subject.originalTitle.takeIf { it != subject.title && it.isNotBlank() })
                                         }
-                                        if (supportsMetadataLink && !state.libraryReadUnavailable) {
-                                            nativeMetadataPicker(linkedMetadata, metadataSearch, paneActive, metadataQuery, reviewedMetadata, unlinkMetadata,
-                                                onQueryChange = { metadataQuery = it },
-                                                onSearch = { reviewedMetadata = null; unlinkMetadata = false
-                                                    controller.searchNativeMetadata(subject.id, metadataQuery) },
-                                                onReview = { reviewedMetadata = it }, onRequestUnlink = { unlinkMetadata = it },
-                                                onSave = { controller.setNativeMetadata(subject.id, it) },
-                                                onClose = { unlinkMetadata = false; reviewedMetadata = null
-                                                    controller.dismissNativeMetadataSearch(subject.id) })
-                                        }
+                                        if (supportsMetadataLink && !state.libraryReadUnavailable) metadataPicker(paneActive)
                                         if (state.relatedSubjects.isNotEmpty()) {
                                             item(key = "related-heading") { AnimeSectionTitle("相关番剧", modifier = Modifier.semantics { heading() }) }
                                             items(state.relatedSubjects, key = { "related:" + it.id }) { related ->
@@ -488,7 +518,9 @@ internal fun AnimeDetailPane(
                                                             state.detailLoading -> AnimeDetailStatus(if (detail.episodes.isEmpty()) "正在加载集数" else "正在更新集数",
                                                                 Icons.Outlined.Info, loading = true)
                                                             state.detailError != null && detail.episodes.isEmpty() -> AnimeDetailStatus("集数暂不可用",
-                                                                Icons.Outlined.CloudOff, detail = state.detailError, actionLabel = "重新加载", onAction = controller::retryCurrentDetail)
+                                                                Icons.Outlined.CloudOff, detail = state.detailError,
+                                                                actionLabel = "重新加载".takeUnless { retiredNativeSource },
+                                                                onAction = controller::retryCurrentDetail)
                                                             pendingNativeCatalog != null -> AnimeDetailStatus(if (missingSelectedGroup) "原线路暂不可用" else "原线路尚未加载完整",
                                                                 Icons.Outlined.Info, detail = pendingNativeCatalog.notice,
                                                                 actionLabel = if (missingSelectedGroup) null else "继续加载原线路",
@@ -535,7 +567,7 @@ internal fun AnimeDetailPane(
                 }
             }
         }
-        if (wide) Row(Modifier.width(width).fillMaxHeight().padding(horizontal = 24.dp, vertical = 8.dp),
+        if (wide) Row(Modifier.width(width).fillMaxHeight().padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(20.dp)) {
             Column(Modifier.width((width * .36f).coerceIn(280.dp, 420.dp)).fillMaxHeight()) {
                 val summaryPosition = rememberScrollState()
@@ -546,11 +578,14 @@ internal fun AnimeDetailPane(
                 }
                 if (showDock) playDock(Modifier.fillMaxWidth().padding(top = 6.dp, end = 12.dp, bottom = bottomInset + 4.dp))
             }
-            sectionPane(Modifier.weight(1f).fillMaxHeight())
+            sectionPane(Modifier.weight(1f).fillMaxHeight().padding(top = contentTopPadding + 8.dp))
         } else Box(Modifier.widthIn(max = 1080.dp).fillMaxSize()) {
+            // Like the manga detail, drags outside a tile share the current catalogue's scroll owner.
+            val catalogueDrag = Modifier.scrollable(activeCatalogScroll, Orientation.Vertical, reverseDirection = true,
+                enabled = active && detailTab == 0 && !statusPresent && !discussionChecksPresent &&
+                    !discussionFilter && episodeMenuOwner == null)
             Column(Modifier.fillMaxSize().then(if (detailTab == 0) Modifier.nestedScroll(scrolling) else Modifier)) {
-                Box(Modifier.fillMaxWidth().clipToBounds()
-                    .scrollable(activeCatalogScroll, Orientation.Vertical, reverseDirection = true, enabled = active && detailTab == 0)
+                Box(Modifier.fillMaxWidth().clipToBounds().then(catalogueDrag)
                     .layout { measurable, constraints ->
                         val content = measurable.measure(constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity))
                         val expanded = content.height
@@ -563,11 +598,13 @@ internal fun AnimeDetailPane(
                             header.heightOffset = if (fullyCollapsed) limit else header.heightOffset.coerceIn(limit, 0f)
                         }
                         val offset = header.heightOffset.roundToInt().coerceIn(-expanded, 0)
-                        layout(content.width, (expanded + offset).coerceIn(constraints.minHeight, constraints.maxHeight)) {
+                        // The artwork moves under Back; only the pinned section controls need a safe floor.
+                        val visible = maxOf(toolbarPixels, expanded + offset).coerceIn(constraints.minHeight, constraints.maxHeight)
+                        layout(content.width, visible) {
                             content.placeRelative(0, offset)
                         }
                     }) { hero() }
-                sectionPane(Modifier.weight(1f).fillMaxWidth())
+                sectionPane(Modifier.weight(1f).fillMaxWidth().then(catalogueDrag))
             }
             if (showDock) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                 .windowInsetsPadding(contentInsets.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
@@ -619,10 +656,15 @@ private fun LazyListScope.nativeMetadataPicker(
     onRequestUnlink: (Boolean) -> Unit,
     onSave: (String?) -> Unit,
     onClose: () -> Unit,
+    forComments: Boolean,
 ) {
     item(key = "native-metadata") {
         Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            AnimeSectionTitle("补充资料", linked?.let { listOfNotNull(it.title, it.year?.toString()).joinToString(" · ") }) {
+            AnimeSectionTitle(
+                if (forComments) "尚未关联作品评论" else "补充资料",
+                if (forComments) "确认同一部番剧和季度后，可读取 Bangumi 等来源的作品评论。"
+                else linked?.let { listOfNotNull(it.title, it.year?.toString()).joinToString(" · ") },
+            ) {
                 if (search == null) MotionTextButton(onClick = onSearch,
                     enabled = active && query.isNotBlank(), modifier = Modifier.heightIn(min = 44.dp)) {
                     Text(if (linked == null) "关联 Bangumi" else "更换关联")
@@ -693,6 +735,7 @@ private fun AnimeDetailHero(
     compact: Boolean,
     active: Boolean,
     backdrop: HazeState,
+    contentTopPadding: Dp,
     followAction: @Composable () -> Unit,
 ) {
     val surface = MaterialTheme.colorScheme.surface
@@ -776,7 +819,7 @@ private fun AnimeDetailHero(
             }
         }
         Column(Modifier.fillMaxWidth().padding(start = gutter, end = gutter,
-            top = if (compact) 6.dp else 18.dp, bottom = bottomGutter),
+            top = contentTopPadding + if (compact) 6.dp else 18.dp, bottom = bottomGutter),
             verticalArrangement = Arrangement.spacedBy(if (compact) 7.dp else 14.dp)) {
             if (stacked) {
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { poster() }

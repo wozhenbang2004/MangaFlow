@@ -10,6 +10,7 @@ import dev.mangaflow.anime.player.AnimeLocalMediaLease
 import dev.mangaflow.anime.player.AnimeLocalResource
 import dev.mangaflow.anime.player.playbackIdentity
 import dev.mangaflow.anime.player.readablePlayerError
+import dev.mangaflow.anime.sources.isRetiredAnimeSource
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadProxyEndpoint
@@ -129,7 +130,10 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
                             return@forEach
                         }
                         val valid = saved.entry.status == AnimeDownloadStatus.COMPLETED && filesValid(saved)
-                        val pending = saved.desired && capabilities.systemBackgroundExecution &&
+                        // Only online resumption is retired. Keep the original manifest, any
+                        // partial bytes and ordinary validated local playback unchanged.
+                        val retired = isRetiredAnimeSource(saved.entry.sourceId)
+                        val pending = !retired && saved.desired && capabilities.systemBackgroundExecution &&
                             saved.entry.status in PENDING_STATUSES
                         val entry = saved.entry.copy(status = when {
                             valid -> AnimeDownloadStatus.COMPLETED
@@ -139,6 +143,7 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
                             else -> AnimeDownloadStatus.PAUSED
                         }, error = when {
                             valid || pending -> null
+                            retired -> RETIRED_SOURCE_DOWNLOAD
                             saved.entry.status == AnimeDownloadStatus.COMPLETED -> "离线文件缺失或大小改变，请重新下载"
                             saved.entry.status in PENDING_STATUSES ->
                                 "上次下载已暂停；点继续可恢复下载，来源不支持续传时会重新下载"
@@ -174,6 +179,7 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
     /** Calling this is the user action; restoring metadata never starts network transfers. */
     suspend fun enqueue(subject: AnimeSubject, episode: AnimeEpisode, asset: AnimePlaybackAsset,
         sourceName: String = asset.sourceId): String = withContext(Dispatchers.IO) {
+        check(!isRetiredAnimeSource(asset.sourceId)) { RETIRED_SOURCE_DOWNLOAD }
         ready.await()
         require(episode.subjectId == subject.id && asset.episodeId == episode.id) { "下载内容与当前番剧或剧集不匹配" }
         require(episode.id.isNotBlank() && episode.number.isFinite() && asset.sourceId.isNotBlank()) { "离线任务缺少有效身份" }
@@ -230,6 +236,7 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
         synchronized(lock) {
             val old = records[id]?.takeUnless { it.removed || it.entry.status == AnimeDownloadStatus.COMPLETED }
                 ?: return@synchronized
+            check(!isRetiredAnimeSource(old.entry.sourceId)) { RETIRED_SOURCE_DOWNLOAD }
             val next = old.copy(generation = randomUuid(), desired = true,
                 entry = old.entry.copy(status = AnimeDownloadStatus.QUEUED, error = null, updatedAt = wallTimeMillis()))
             save(next); records[id] = next
@@ -294,7 +301,10 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
         ready.await()
         synchronized(lock) {
             val record = checkNotNull(records[id]?.takeUnless { it.removed }) { "这份离线内容已删除" }
-            check(record.entry.status == AnimeDownloadStatus.COMPLETED && filesValid(record)) { "离线文件尚未完成或已损坏，请继续下载" }
+            check(record.entry.status == AnimeDownloadStatus.COMPLETED && filesValid(record)) {
+                if (isRetiredAnimeSource(record.entry.sourceId)) RETIRED_SOURCE_DOWNLOAD
+                else "离线文件尚未完成或已损坏，请继续下载"
+            }
             val row = record.entry
             val media = record.resources.single { it.name == record.entryName }
             val asset = AnimePlaybackAsset(row.assetId, row.sourceId, row.sourceEpisodeId,
@@ -361,7 +371,7 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
 
     private fun kick() {
         if (activeJob != null || !scope.isActive) return
-        val candidate = records.values.firstOrNull { it.desired && !it.removed } ?: return
+        val candidate = records.values.firstOrNull { it.desired && !it.removed && !isRetiredAnimeSource(it.entry.sourceId) } ?: return
         if (!executionAllowed() || playbackBusy.value) {
             if (candidate.entry.status != AnimeDownloadStatus.WAITING || candidate.entry.error != waitReason()) {
                 val next = candidate.copy(entry = candidate.entry.copy(status = AnimeDownloadStatus.WAITING, error = waitReason()))
@@ -621,6 +631,7 @@ class AnimeDownloadStore(context: PlatformContext, applicationScope: CoroutineSc
         val FILE_NAME = Regex("(?:media\\.bin|(?:media|video|audio)\\.m3u8|(?:segment|init)-[0-9]+\\.bin)")
         val PENDING_STATUSES = setOf(AnimeDownloadStatus.QUEUED, AnimeDownloadStatus.DOWNLOADING, AnimeDownloadStatus.WAITING)
         const val BACKGROUND_SCHEDULE_ERROR = "Android 暂未接收后台下载任务，留在应用内可继续下载"
+        const val RETIRED_SOURCE_DOWNLOAD = "原来源已下架，此下载不能续传；已保存的文件仍保留。"
         const val MAX_MANIFEST_BYTES = 4L * 1024 * 1024
     }
 }

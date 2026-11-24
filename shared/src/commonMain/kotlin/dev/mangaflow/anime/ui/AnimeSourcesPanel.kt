@@ -44,6 +44,10 @@ import dev.mangaflow.ui.motion.*
 
 private data class EpisodeMappingDraft(val sourceId: String, val catalogKey: String, val episode: AnimeSourceEpisode)
 
+private fun episodeRangeLabel(localNumber: Int, endpoint: AnimeController.EpisodeRangeEndpoint): String =
+    "本番第 $localNumber 集 → 来源第 ${endpoint.number} 集" +
+        endpoint.caption.takeIf(String::isNotBlank)?.let { " · $it" }.orEmpty()
+
 private enum class AnimeSourceTools { CANDIDATES, SEARCH, DIAGNOSTICS }
 
 private enum class AnimeBoundSourceMark { CURRENT, AUTOMATIC, MANUAL, LOADING, ISSUE }
@@ -75,6 +79,7 @@ internal fun AnimeSourcesPanel(
     }
     var query by remember(subject?.id) { mutableStateOf(subject?.title.orEmpty()) }
     var mapping by remember(subject?.id, focusEpisode?.id) { mutableStateOf<EpisodeMappingDraft?>(null) }
+    var rangeReview by remember(subject?.id, focusEpisode?.id, visible) { mutableStateOf<AnimeController.EpisodeRangeReview?>(null) }
     var expandedSource by remember(subject?.id, focusEpisode?.id) { mutableStateOf<String?>(null) }
     var sourceDetails by remember(subject?.id, focusEpisode?.id) { mutableStateOf<String?>(null) }
     var lineDetails by remember(subject?.id, focusEpisode?.id, sourceDetails) { mutableStateOf<AnimeEpisodeOption?>(null) }
@@ -97,6 +102,7 @@ internal fun AnimeSourcesPanel(
     SideEffect { if (visible) presentedOwner = subjectId }
     val presenting = visible || presentedOwner != null
     fun openPreview(title: AnimeSourceTitle) {
+        rangeReview = null
         requestedPreview = title
         controller.previewSource(title)
     }
@@ -220,6 +226,7 @@ internal fun AnimeSourcesPanel(
             pendingSourceWork = null
             presentedOwner = null
             mapping = null
+            rangeReview = null
             expandedSource = null
             sourceDetails = null
             tools = null
@@ -649,6 +656,7 @@ internal fun AnimeSourcesPanel(
                                         sourceDetails = if (expanded) null else sourceId
                                         expandedSource = null
                                         mapping = null
+                                        rangeReview = null
                                         episodeQuery = ""
                                     }, onPlay = if (focusEpisode != null && directPlay != null) ({ onPlay(focusEpisode.id, directPlay) }) else null,
                                     metrics = {
@@ -765,6 +773,7 @@ internal fun AnimeSourcesPanel(
                                                     onClickLabel = "使用此线路组", enabled = !sourceDisabled, onClick = {
                                                         expandedSource = null
                                                         mapping = null
+                                                        rangeReview = null
                                                         controller.selectSourceGroup(sourceId, group)
                                                     }, showMark = false)
                                             }
@@ -773,12 +782,48 @@ internal fun AnimeSourcesPanel(
                                             MotionTextButton(onClick = {
                                                 expandedSource = if (expandedSource == sourceId) null else sourceId
                                                 mapping = null
+                                                rangeReview = null
                                                 episodeQuery = ""
                                             }, modifier = Modifier.heightIn(min = 44.dp)) {
                                                 Text(if (expandedSource == sourceId) "收起集数映射" else
                                                     if (lines.isEmpty()) "为本集手动对应" else "调整本集对应")
                                             }
                                             if (expandedSource == sourceId) {
+                                                val offeredRange = if (visible && !overVideo && lines.isEmpty() && catalog != null) {
+                                                    val entryRevision = state.library.firstOrNull { it.subject.id == subjectId }?.revision
+                                                    remember(binding, catalog, state.detail, state.sourceCatalogs, state.sourceAggregation,
+                                                        state.sourceRoutes, state.sourceCatalogErrors, entryRevision, state.resolving, state.playbackTarget) {
+                                                        state.detail?.let { controller.reviewEpisodeRange(it, binding, catalog) }
+                                                    }
+                                                } else null
+                                                val selectedRange = rangeReview?.takeIf { it.binding.catalog.sourceId == sourceId }
+                                                if (selectedRange == null && offeredRange != null) {
+                                                    MotionTextButton(onClick = {
+                                                        mapping = null
+                                                        rangeReview = state.detail?.let {
+                                                            controller.reviewEpisodeRange(it, binding, offeredRange.catalog)
+                                                        }
+                                                    },
+                                                        modifier = Modifier.heightIn(min = 44.dp)) { Text("核对当前可见区间") }
+                                                } else if (selectedRange != null && selectedRange != offeredRange) {
+                                                    AnimeQuietLabel("原集数或线路已变化，未应用任何对应。")
+                                                    MotionTextButton(onClick = { rangeReview = null }) { Text("返回核对") }
+                                                } else if (selectedRange != null) {
+                                                    val count = selectedRange.mappings.size
+                                                    AnimeSectionTitle("核对当前可见区间", "$name · ${animeSourceGroupLabel(selectedGroup)}")
+                                                    AnimeQuietLabel("来源作品：${selectedRange.catalog.title.title}")
+                                                    AnimeQuietLabel(episodeRangeLabel(1, selectedRange.first))
+                                                    AnimeQuietLabel(episodeRangeLabel(count, selectedRange.last))
+                                                    AnimeQuietLabel("两边各有 $count 个连续、不重复的正片编号。只保存这条线路组，不开始播放。")
+                                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                        MotionTextButton(onClick = { rangeReview = null },
+                                                            modifier = Modifier.heightIn(min = 44.dp)) { Text("取消") }
+                                                        MotionButton(onClick = {
+                                                            rangeReview = null
+                                                            controller.applyEpisodeRange(selectedRange)
+                                                        }, modifier = Modifier.heightIn(min = 48.dp)) { Text("应用 $count 集对应") }
+                                                    }
+                                                }
                                                 AnimeTextField(episodeQuery, { episodeQuery = it }, "筛选来源集名或编号")
                                                 val matchingEpisodes = sourceGroups[selectedGroup].orEmpty().filter { episode ->
                                                     episodeQuery.isBlank() || episode.title.contains(episodeQuery, ignoreCase = true) ||
@@ -789,7 +834,10 @@ internal fun AnimeSourcesPanel(
                                                     val summary = animeSourceEpisodeSummary(episode) + if (selected) " · 待应用" else ""
                                                     AnimeSourceProviderRow(sourceId, episode.title, summary,
                                                         onClickLabel = "选择此映射",
-                                                        onClick = { mapping = EpisodeMappingDraft(sourceId, title.referenceKey(), episode) },
+                                                        onClick = {
+                                                            rangeReview = null
+                                                            mapping = EpisodeMappingDraft(sourceId, title.referenceKey(), episode)
+                                                        },
                                                         showMark = false)
                                                 }
                                                 if (matchingEpisodes.size > mappingLimit) MotionTextButton(onClick = { mappingLimit += 40 }) {

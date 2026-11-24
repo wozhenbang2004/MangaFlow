@@ -73,6 +73,26 @@ private fun animeSeasonNumber(label: String): Int? {
     return first * 10 + last
 }
 
+private val rangeNamedSeason = Regex("""^(.+?)\s*第\s*([一二三四五六七八九十0-9]{1,3})\s*季$""")
+
+/** User-reviewed range matching compares the two actual catalogue titles, never borrowed aliases. */
+internal fun sameObservedAnimeSeason(left: String, right: String): Boolean {
+    val leftTitle = normalizeNfkc(left).trim().lowercase()
+    val rightTitle = normalizeNfkc(right).trim().lowercase()
+    // A separated sequel number can explain the spelling of an observed season, not prove one by itself.
+    if (!rangeNamedSeason.matches(leftTitle) && !rangeNamedSeason.matches(rightTitle)) return false
+    fun signature(title: String): Pair<String, Int>? {
+        if (animeEditionMarkers.any { (_, pattern) -> pattern.containsMatchIn(title) }) return null
+        val named = rangeNamedSeason.matchEntire(title) ?: return autoSeasonSignature(title)
+        val number = animeSeasonNumber(named.groupValues[2]) ?: return null
+        val base = named.groupValues[1]
+        if (animeExplicitSeason.containsMatchIn(base)) return null
+        return animeWorkTitleKey(base).takeIf { it.length >= 2 }?.let { it to number }
+    }
+    val expected = signature(leftTitle) ?: return false
+    return expected == signature(rightTitle)
+}
+
 /** A generic alias must not erase a different season, film, fan edit or live-action version.
  * Shared IDs may explain an omitted format label, but never contradictory explicit labels. */
 internal fun animeWorkTitlesConflict(
@@ -301,7 +321,6 @@ internal fun autoPlayMovieEpisodes(subject: AnimeSubject, catalog: AnimeSourceCa
         }
         "anime-girigiri" -> catalog.title.externalIds["girigiri"] == catalog.title.id &&
             groups.keys.all { Regex("""^(chs|cht) \[\d+\]$""").matches(it) }
-        "anime-native-yzx" -> true // Its adapter reads one requested work's playUrlList.
         else -> false
     }
     if (groups.size > 1 && !sameWork && selectedGroup == null) return emptyMap()
@@ -623,13 +642,6 @@ internal class AnimeEpisodeMatcher(private val detail: AnimeDetail, private val 
                 // Parsing order only, not measured speed or a promise of playable streams.
                 return eligible.keys.sortedBy { if (route(it) == "xigua") 1 else 0 }
             }
-        }
-        // yzx builds its groups from the same native playUrlList work record. Only completely
-        // equivalent number/kind and original episode labels can be rotated automatically.
-        if (catalog.title.sourceId == "anime-native-yzx" && eligible.size == groups.size) {
-            val labels = literalLabels.values.toList()
-            if (labels.distinct().size == 1 && labels.first().values.all { it.isNotBlank() })
-                return eligible.keys.sorted()
         }
         // Only adapters with a typed, audited automatic-line contract can select among groups.
         // Equal numbering with an empty edition is not proof that arbitrary groups are the same season.

@@ -201,7 +201,7 @@ private class Anime4KGlProgram(
         if (observedStreamRevision != streamRevision()) resetObservations()
         val startedAt = if (enhancing) SystemClock.elapsedRealtime() else 0L
         val sampleStart = sampleStartedAt?.takeUnless {
-            lastSubmissionAt?.let { last -> startedAt - last >= ANIME4K_ACTIVITY_TIMEOUT_MS } == true
+            lastSubmissionAt?.let { last -> startedAt - last >= ANIME_ENHANCED_FRAME_FRESH_MS } == true
         }
         val sampleSubmission = enhancing && (sampleStart == null || startedAt - sampleStart >= ANIME4K_SAMPLE_MS)
         var cpuStartedAt = -1L
@@ -374,7 +374,6 @@ private class Anime4KGlProgram(
     }
 }
 
-internal const val ANIME4K_ACTIVITY_TIMEOUT_MS = 1_500L
 private const val ANIME4K_SAMPLE_MS = 750L
 private const val RGBA16F_BYTES_PER_PIXEL = 8L
 

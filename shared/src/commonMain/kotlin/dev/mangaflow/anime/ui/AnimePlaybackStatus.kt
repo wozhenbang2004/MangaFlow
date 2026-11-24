@@ -22,7 +22,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -32,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.anime.player.AnimePlayerPhase
 import dev.mangaflow.anime.AnimeNextEpisodePreparation
+import dev.mangaflow.anime.player.ANIME_ENHANCED_FRAME_FRESH_MS
 import dev.mangaflow.anime.player.AnimePlayerState
 import dev.mangaflow.anime.player.AnimeVideoEnhancementPhase
 import dev.mangaflow.enhancement.EnhancementCenter
@@ -53,12 +56,51 @@ import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.MotionIconButton
 
+private fun videoDimensions(width: Int?, height: Int?): String? =
+    if (width != null && width > 0 && height != null && height > 0) "$width×$height" else null
+
+/** The player publishes these receipts only for its current asset/timeline. Configuration and viewport do not count. */
+private fun observedEnhancedDimensions(playback: AnimePlayerState, now: Long): String? {
+    if (playback.preEnhanced || !playback.isPlaying || playback.playbackSuppressed ||
+        playback.firstFrameRendered == false || playback.hasVideoTracks == false) return null
+    val effect = playback.videoEnhancement
+    if (effect.renderedOriginalFallback) return null
+    val observation = effect.observation
+    val submitted = observation?.lastSubmittedAtMillis
+    // A prepared window may retain its sampled use across a brief pause or surface detach.
+    // The quiet badge needs a new live submission, not that retained diagnostic.
+    if (effect.phase != AnimeVideoEnhancementPhase.ACTIVE || observation?.recentlySubmitting != true ||
+        observation.submittedFrames <= 0L || submitted == null ||
+        now - submitted !in 0L until ANIME_ENHANCED_FRAME_FRESH_MS) return null
+    return videoDimensions(effect.outputWidth, effect.outputHeight)
+}
+
 /** The quiet reading uses only native values; a source rate is not a measured output rate. */
 @Composable
 internal fun AnimeInlineVideoQuality(playback: AnimePlayerState, modifier: Modifier = Modifier) {
-    val width = playback.videoWidth?.takeIf { it > 0 }
-    val height = playback.videoHeight?.takeIf { it > 0 }
-    val dimensions = if (width != null && height != null) "$width×$height" else null
+    val context = LocalMangaContext.current
+    val center = remember(context) { EnhancementCenter.get(context) }
+    val defaults by center.settings.state.collectAsStateWithLifecycle()
+    val sessions by center.settings.sessions.collectAsStateWithLifecycle()
+    val policy = sessions[animeEnhancementSessionKey(playback)]?.takeIf { it.content == EnhancementContent.ANIME }?.policy
+        ?: defaults.getValue(EnhancementContent.ANIME)
+    val requested = policy.realtimeEnhancementEnabled && policy.tier != QualityTier.ORIGINAL
+    val input = videoDimensions(playback.videoWidth, playback.videoHeight)
+    val enhanced = if (requested) observedEnhancedDimensions(playback, monotonicTimeMillis()) else null
+    val dimensions = when {
+        enhanced != null -> "增强帧 $enhanced"
+        input == null -> null
+        playback.preEnhanced -> "增强文件 $input"
+        else -> "片源 $input"
+    }
+    val effect = playback.videoEnhancement
+    val status = if (!requested || enhanced != null || playback.preEnhanced || platformKind != PlatformKind.ANDROID) null
+    else if (effect.renderedOriginalFallback) "增强已回落" else when (effect.phase) {
+        AnimeVideoEnhancementPhase.OFF, AnimeVideoEnhancementPhase.UNAVAILABLE -> "增强未应用"
+        AnimeVideoEnhancementPhase.WAITING, AnimeVideoEnhancementPhase.CONFIGURED -> "增强待输出"
+        AnimeVideoEnhancementPhase.ACTIVE -> "增强待确认"
+        AnimeVideoEnhancementPhase.FAILED -> "增强异常"
+    }
     val presented = playback.presentedFps?.takeIf { it.isFinite() && it >= 0.0 }
     val output = playback.frameMetrics?.outputFps?.takeIf { it.isFinite() && it >= 0.0 }
     val source = playback.sourceFps?.takeIf { it.isFinite() && it > 0.0 }
@@ -70,18 +112,29 @@ internal fun AnimeInlineVideoQuality(playback: AnimePlayerState, modifier: Modif
     }
     if (dimensions == null && rate == null) return
     val caption = listOfNotNull(dimensions, rate).joinToString(" · ")
-    val description = listOfNotNull(dimensions?.let { "视频输入分辨率 $width 乘 $height" }, when {
+    val dimensionDescription = when {
+        enhanced != null -> "已观测增强帧尺寸 ${enhanced.replace("×", " 乘 ")}，不是屏幕分辨率或呈现回执"
+        input == null -> null
+        playback.preEnhanced -> "增强文件的解码尺寸 ${input.replace("×", " 乘 ")}"
+        else -> "片源输入分辨率 ${input.replace("×", " 乘 ")}"
+    }
+    val description = listOfNotNull(dimensionDescription, status, when {
         presented != null -> "播放器实际呈现 ${formatDecimal(presented, 0)} 帧每秒"
         output != null -> "视频输出 ${formatDecimal(output, 0)} 帧每秒，不是屏幕刷新率"
         source != null -> "片源标称 ${formatDecimal(source, 1)} 帧每秒，未测得当前输出"
         else -> null
     }).joinToString("，")
-    AnimePlaybackSurface(null, modifier, cornerRadius = 9.dp) {
-        Text(caption, Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
-            .clearAndSetSemantics { contentDescription = description },
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"))
-    }
+    Text(
+        text = caption,
+        modifier = modifier.clearAndSetSemantics { contentDescription = description },
+        color = Color.White.copy(alpha = .56f),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        style = MaterialTheme.typography.labelSmall.copy(
+            fontFeatureSettings = "tnum",
+            shadow = Shadow(Color.Black.copy(alpha = .52f), Offset(0f, 1f), 2f),
+        ),
+    )
 }
 
 /** Selected readings stay on the video without consuming the episode/comment pane's height. */

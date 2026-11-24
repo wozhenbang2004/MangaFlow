@@ -2,8 +2,12 @@ package dev.mangaflow.anime.sources.lanerc
 
 import dev.mangaflow.anime.sources.BUNDLED_ANIME_SOURCE_IDS
 import dev.mangaflow.anime.sources.BUNDLED_API_ANIME_IDS
+import dev.mangaflow.anime.sources.RETIRED_ANIME_SOURCE_IDS
+import dev.mangaflow.anime.sources.RETIRED_YZX_SCRIPT
+import dev.mangaflow.anime.sources.STORED_BUNDLED_ANIME_SOURCE_IDS
 import dev.mangaflow.anime.sources.bundledAnimeSourceVersion
 import dev.mangaflow.anime.sources.animeHash
+import dev.mangaflow.anime.sources.isRetiredAnimeSource
 import dev.mangaflow.data.plugins.fetchPluginText
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
@@ -71,18 +75,18 @@ class LanercSourceStore private constructor(context: PlatformContext) {
                     val root = JSONObject(text)
                     require(root.getInt("version") in 1..3)
                     val choices = root.optJSONArray("builtIns") ?: JSONArray()
-                    require(choices.length() <= BUNDLED_ANIME_SOURCE_IDS.size)
+                    require(choices.length() <= STORED_BUNDLED_ANIME_SOURCE_IDS.size)
                     builtIns = (0 until choices.length()).associate { index ->
                         val item = choices.getJSONObject(index)
                         val id = item.getString("id")
-                        require(id in BUNDLED_ANIME_SOURCE_IDS)
+                        require(id in STORED_BUNDLED_ANIME_SOURCE_IDS)
                         val revision = item.getString("revision")
                         require(revision.matches(Regex("[A-Za-z0-9-]{1,100}")))
                         id to BuiltInChoice(item.getBoolean("enabled"), item.getBoolean("removed"), revision)
                     }
                     require(builtIns.size == choices.length())
                     val array = root.getJSONArray("packages")
-                    require(array.length() <= LANERC_SOURCE_DIRECTORY.size)
+                    require(array.length() <= STORED_SOURCE_COUNT)
                     val restored = (0 until array.length()).map { decode(array.getJSONObject(it)) }
                     require(restored.map { it.id }.distinct().size == restored.size)
                     val migrated = restored.map { installed ->
@@ -127,9 +131,11 @@ class LanercSourceStore private constructor(context: PlatformContext) {
     // User removal/restoration spans both the persistent preference and package mutation.
     // Background install jobs never acquire this gate, so removal may cancel/join them safely.
     private fun actionGate(id: String): Mutex = synchronized(operationGuard) {
+        requireActiveSource(id)
         sourceActions.getOrPut(id) { Mutex() }
     }
     private fun packageGate(id: String): Mutex = synchronized(operationGuard) {
+        requireActiveSource(id)
         packageOperations.getOrPut(id) { Mutex() }
     }
     init { scope.launch { ready.await(); automatic.start() } }
@@ -253,6 +259,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         } }
     }
     suspend fun setOptions(id: String, optionsJson: String) {
+        requireActiveSource(id)
         check(id !in BUNDLED_ANIME_SOURCE_IDS) { "此内建来源仅使用匿名接口，不需要私密参数。" }
         require(optionsJson.encodeToByteArray().size <= 65_536) { "来源参数过大。" }
         val options = JSONObject(optionsJson).toString()
@@ -301,7 +308,9 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         return withContext(Dispatchers.IO) { writer.withLock {
             check(!loadFailure) { "来源存储未能读取，不能导出不完整的来源备份。" }
             val installed = packages.value
-            val choices = BUNDLED_ANIME_SOURCE_IDS.map { id ->
+            // Retain an archived built-in choice if it was actually stored. Never synthesize
+            // an active default or a new tombstone for retirement.
+            val choices = (BUNDLED_ANIME_SOURCE_IDS + builtIns.keys).map { id ->
                 val choice = builtIns[id] ?: defaultBuiltInChoice(id, installed)
                 JSONObject().put("id", id).put("builtIn", true).put("enabled", choice.enabled)
                     .put("removed", choice.removed)
@@ -311,12 +320,12 @@ class LanercSourceStore private constructor(context: PlatformContext) {
     }
 
     fun validateBackup(value: JSONArray) {
-        require(value.length() <= LANERC_SOURCE_DIRECTORY.size && value.toString().encodeToByteArray().size <= MAX_STORE_BYTES) { "来源备份过大。" }
+        require(value.length() <= STORED_SOURCE_COUNT && value.toString().encodeToByteArray().size <= MAX_STORE_BYTES) { "来源备份过大。" }
         val items = (0 until value.length()).map { index ->
             val item = value.getJSONObject(index)
             require(!item.has("options") && !item.has("optionsKey")) { "来源备份不能包含私密参数。" }
             if (item.optBoolean("builtIn", false)) {
-                require(item.getString("id") in BUNDLED_ANIME_SOURCE_IDS && !item.has("code"))
+                require(item.getString("id") in STORED_BUNDLED_ANIME_SOURCE_IDS && !item.has("code"))
                 item.getBoolean("enabled")
                 item.getBoolean("removed")
                 item.getString("id")
@@ -349,13 +358,16 @@ class LanercSourceStore private constructor(context: PlatformContext) {
 
     private fun optionsSecret(id: String, key: String): String = "anime-lanerc-options:" + animeHash(id + "\n" + key)
 
-    internal fun snapshot(id: String): LanercInstalledPackage? = packages.value[id]?.takeIf { it.enabled && id !in BUNDLED_ANIME_SOURCE_IDS }
+    internal fun snapshot(id: String): LanercInstalledPackage? = packages.value[id]?.takeIf {
+        it.enabled && id !in BUNDLED_ANIME_SOURCE_IDS && !isRetiredAnimeSource(id)
+    }
     internal fun isCurrent(value: LanercInstalledPackage): Boolean =
-        packages.value[value.id]?.let { it.enabled && it.revision == value.revision && it.digest == value.digest } == true
+        snapshot(value.id)?.let { it.revision == value.revision && it.digest == value.digest } == true
     internal fun descriptor(id: String): LanercSourceDescriptor =
         LANERC_SOURCE_DIRECTORY.firstOrNull { it.id == id } ?: error("此来源不在已知目录中。")
 
     private suspend fun edit(id: String, transform: (LanercInstalledPackage) -> LanercInstalledPackage) {
+        requireActiveSource(id)
         ready.await()
         withContext(Dispatchers.IO) { writer.withLock {
             check(!loadFailure) { "来源存储未能读取，不能覆盖原文件。" }
@@ -396,7 +408,10 @@ class LanercSourceStore private constructor(context: PlatformContext) {
 
     private fun decode(value: JSONObject, loadPrivateOptions: Boolean = true): LanercInstalledPackage {
         val id = value.getString("id")
-        require(id !in BUNDLED_ANIME_SOURCE_IDS && installable(descriptor(id)))
+        // This is storage/backup validation, not installation. Preserve the old exact script's
+        // bytes and metadata under the same validation without returning an active descriptor.
+        require(id !in STORED_BUNDLED_ANIME_SOURCE_IDS &&
+            (id == RETIRED_YZX_SCRIPT || installable(descriptor(id))))
         val code = value.getString("code")
         val digest = value.getString("digest")
         require(code.encodeToByteArray().size in 1..MAX_CODE_BYTES && animeHash(code) == digest)
@@ -466,6 +481,10 @@ class LanercSourceStore private constructor(context: PlatformContext) {
     companion object {
         private const val MAX_CODE_BYTES = 5 * 1024 * 1024
         private const val MAX_STORE_BYTES = 64 * 1024 * 1024
+        private val STORED_SOURCE_COUNT = LANERC_SOURCE_DIRECTORY.size + RETIRED_ANIME_SOURCE_IDS.size
+        private fun requireActiveSource(id: String) {
+            check(!isRetiredAnimeSource(id)) { "原动漫来源已下架，不能重新启用。" }
+        }
         private fun installable(descriptor: LanercSourceDescriptor) = descriptor.kind in
             setOf(LanercSourceKind.VIDEO, LanercSourceKind.BROWSE, LanercSourceKind.DANMAKU)
         private fun unsupported(descriptor: LanercSourceDescriptor): String? =

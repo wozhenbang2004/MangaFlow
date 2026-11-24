@@ -26,6 +26,8 @@ import dev.mangaflow.anime.sources.AnimeSourceStage
 import dev.mangaflow.anime.sources.AnimeTrackingRepository
 import dev.mangaflow.anime.sources.TvtFunPlaybackException
 import dev.mangaflow.anime.sources.animeContentIdentity
+import dev.mangaflow.anime.sources.isRetiredAnimeSource
+import dev.mangaflow.anime.sources.sourceEpisodeKind
 import dev.mangaflow.anime.sources.lanerc.LanercCapabilityException
 import dev.mangaflow.anime.sources.lanerc.LanercMediaSniffingUnsupported
 import dev.mangaflow.anime.sources.lanerc.LanercProvider
@@ -41,6 +43,7 @@ import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.randomUuid
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.platform.monotonicTimeMillis
+import dev.mangaflow.platform.normalizeNfkc
 import dev.mangaflow.enhancement.*
 import dev.mangaflow.enhancement.engine.EngineContent
 import dev.mangaflow.enhancement.engine.EngineModel
@@ -81,6 +84,11 @@ import kotlinx.datetime.toLocalDateTime
 import kotlin.time.Instant
 
 private val SOURCE_HEIGHT = Regex("""(?<!\d)([1-8]\d{2,3})\s*[pP](?!\d)""")
+private val RANGE_NUMBER_PREFIX = Regex("""^第\s*[0-9０-９]+\s*[集话話回]""")
+private val RANGE_NON_REGULAR_CAPTION = Regex(
+    """(?:^|[^a-z0-9])(?:special|ova|oad|recap|opening|ending|(?:nc)?op|(?:nc)?ed)(?![a-z])|番外|花絮|総集編""",
+    RegexOption.IGNORE_CASE,
+)
 private const val ONLINE_ANIME_SOURCE_BYTES = 24L * 1024 * 1024
 private const val ONLINE_ANIME_RESULT_BYTES = 64L * 1024 * 1024
 private const val ANIME_SOURCE_PARALLELISM = 4
@@ -671,6 +679,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     /** A video URL needs a saved binding; trusted index lookups may reuse their own subject ID. */
     fun knownDiscoverySubject(reference: AnimeSourceTitle, allowIndexIdentity: Boolean = false): AnimeSubject? {
+        if (isRetiredAnimeSource(reference.sourceId)) return null
         if (reference.sourceRevision != null && reference.sourceRevision != discoverySourceRevision(reference.sourceId)) return null
         val stored = library.state.value
         val ids = stored.bindings.filter { it.catalog.sourceId == reference.sourceId &&
@@ -681,7 +690,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 id.isNotBlank() && entry.subject.externalIds[provider] == id
             }
         }.forEach { ids += it.subject.id }
-        return ids.singleOrNull()?.let { stored.entries[it]?.subject }
+        // This is the fresh catalogue-card route, not an explicit reopen from history.
+        // A saved association must not send a current source card to a retired owner.
+        return ids.mapNotNull { stored.entries[it]?.subject }
+            .filterNot { it.externalIds["native-source"]?.let(::isRetiredAnimeSource) == true }
+            .singleOrNull()
     }
 
     fun open(subject: AnimeSubject) = openDetail(subject, resumeEpisodeId = null)
@@ -923,7 +936,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             nativeMetadataSearch = null,
             detailFromCache = visitedDetail != null, relatedSubjects = visitedRelated,
             sourceCatalogs = emptyList(), sourceResults = emptyList(), episodeOptions = emptyMap(),
-            sourceBindings = library.state.value.bindings.filter { binding -> binding.subjectId == subject.id },
+            sourceBindings = onlineBindings(library.state.value, subject.id),
             sourceCatalogErrors = emptyMap(),
             previewCatalog = null, previewLoading = false, sourceError = null, selectedEpisodeId = null,
             sourceGroups = emptyMap(), preferredSourceId = null,
@@ -939,6 +952,17 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             mutableState.update { it.copy(detailScoreChecks = it.detailScoreChecks +
                 (AnimeDiscoveryProvider.BANGUMI to AnimeScoreCheck(loading = true))) }
             loadDetailScore(subject, generation)
+        }
+        if (subject.externalIds["native-source"]?.let(::isRetiredAnimeSource) == true) {
+            val hasRetainedEpisodes = initialDetail.episodes.isNotEmpty() &&
+                initialDetail.episodes.all { it.subjectId == subject.id }
+            mutableState.update { it.copy(detailLoading = false, detailError =
+                "原来源已下架。观看记录和本地下载仍保留；当前没有可核对的原集目录。".takeUnless { hasRetainedEpisodes }) }
+            if (hasRetainedEpisodes) {
+                rebuildOptions()
+                startSourceAggregation(initialDetail)
+            }
+            return
         }
         if (candidates.isNotEmpty()) {
             stageSearchCandidates(subject.id, candidates)
@@ -1114,8 +1138,15 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     AnimeDetail(result.metadataSubject, result.metadataEpisodes), previous) else null
                 val episodes = (projected ?: if (primary.canonicalDoubanId() != null && previous?.episodes?.isNotEmpty() == true)
                     previous.episodes else result.episodes?.takeIf { it.isNotEmpty() } ?: previous?.episodes.orEmpty()).let { rows ->
-                    if (primary.canonicalDoubanId() == null || reference != null) rows
-                    else rows.map { it.copy(metadataEpisodeId = null, metadataSubjectId = null) }
+                    if (primary.canonicalDoubanId() == null) rows
+                    else rows.map { episode ->
+                        when {
+                            episode.metadataEpisodeId == null && episode.metadataSubjectId == null -> episode
+                            reference != null && episode.metadataSubjectId == reference.id &&
+                                animeBangumiReferenceId(episode.metadataEpisodeId) != null -> episode
+                            else -> episode.copy(metadataEpisodeId = null, metadataSubjectId = null)
+                        }
+                    }
                 }
                 val detail = AnimeDetail(primary, episodes, reference)
                 val failure = listOfNotNull(result.subjectError?.let { "作品资料：$it" },
@@ -1459,8 +1490,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             relatedSubjects = emptyList(), detailFromCache = false) }
     }
 
+    /** Persisted bindings keep their original IDs; only this online view drops retired matches. */
+    private fun onlineBindings(stored: AnimeLibraryState, subjectId: String): List<AnimeSourceBinding> =
+        stored.bindings.filter { it.subjectId == subjectId && !isRetiredAnimeSource(it.catalog.sourceId) }
+
     private suspend fun loadBoundCatalogs(detail: AnimeDetail, generation: Long) = coroutineScope {
-        library.state.value.bindings.filter { it.subjectId == detail.subject.id }.forEach { binding ->
+        onlineBindings(library.state.value, detail.subject.id).forEach { binding ->
             val request = ++catalogGeneration
             catalogRequests[binding.catalog.sourceId] = request
             launch { loadBoundCatalog(binding, generation, request) }
@@ -1469,7 +1504,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     private suspend fun loadBoundCatalog(binding: AnimeSourceBinding, generation: Long, request: Long) {
         val sourceId = binding.catalog.sourceId
-        if (catalogRequests[sourceId] != request || !currentDetail(generation, binding.subjectId) ||
+        if (isRetiredAnimeSource(sourceId) || catalogRequests[sourceId] != request || !currentDetail(generation, binding.subjectId) ||
             !stillBound(binding.subjectId, binding.catalog)) return
         val revision = discoverySourceRevision(sourceId)
         val epoch = library.state.value.restoreEpoch
@@ -1752,11 +1787,124 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }
     }
 
+    internal data class EpisodeRangeEndpoint(val number: Int, val caption: String)
+
+    internal data class EpisodeRangeReview(
+        val detail: AnimeDetail, val storedSubject: AnimeSubject,
+        val origin: AnimeSourceBinding, val binding: AnimeSourceBinding,
+        val originCatalog: AnimeSourceCatalog, val catalog: AnimeSourceCatalog,
+        val detailOwner: Long, val restoreEpoch: Long, val entryRevision: Long,
+        val originRequest: Long?, val catalogRequest: Long?,
+        val originRoute: DownloadRouteSnapshot, val route: DownloadRouteSnapshot,
+        val mappings: Map<String, String>, val first: EpisodeRangeEndpoint, val last: EpisodeRangeEndpoint,
+    )
+
+    private fun rangeEpisodeCaption(row: AnimeSourceEpisode): String =
+        row.title.trim().replaceFirst(RANGE_NUMBER_PREFIX, "").trimStart { it.isWhitespace() || it in ":：·-" }
+
+    /** A manual offset review for two observed, already linked catalogues. Never infers a new work identity. */
+    internal fun reviewEpisodeRange(detail: AnimeDetail, binding: AnimeSourceBinding,
+        catalog: AnimeSourceCatalog): EpisodeRangeReview? {
+        val live = mutableState.value
+        if (live.detail != detail || live.playbackTarget != null || live.resolving || resumeRequest != null) return null
+        val subject = detail.subject
+        val localSource = subject.externalIds["native-source"] ?: return null
+        val source = binding.catalog.sourceId
+        val selectedGroup = binding.selectedGroup ?: return null
+        if (source == localSource || binding.subjectId != subject.id) return null
+        val stored = library.loadedReadableSnapshot() ?: return null
+        val entry = stored.entries[subject.id] ?: return null
+        if (entry.subject.id != subject.id || source in entry.excludedSourceIds || localSource in entry.excludedSourceIds) return null
+        val bindings = stored.bindings.filter { it.subjectId == subject.id }
+        if (bindings.singleOrNull { it.catalog.sourceId == source } != binding) return null
+        val origin = bindings.singleOrNull { it.catalog.sourceId == localSource } ?: return null
+        val originGroup = origin.selectedGroup ?: return null
+        if (sourceSubject(origin.catalog).id != subject.id) return null
+
+        fun catalogFor(held: AnimeSourceBinding) = live.sourceCatalogs.singleOrNull { current ->
+            current.title.sourceId == held.catalog.sourceId && current.title.id == held.catalog.id &&
+                current.title.url == held.catalog.url && current.notice == null
+        }
+        if (catalogFor(binding) != catalog) return null
+        val originCatalog = catalogFor(origin) ?: return null
+        val originTitle = originCatalog.title
+        val sourceTitle = catalog.title
+        if (!sameObservedAnimeSeason(originTitle.title, sourceTitle.title) ||
+            originTitle.year != null && sourceTitle.year != null && originTitle.year != sourceTitle.year ||
+            conflictingAnimeIds(animeAuthoritativeIds(originTitle.externalIds), animeAuthoritativeIds(sourceTitle.externalIds)) ||
+            animeWorkTitlesConflict(listOf(originTitle.title), listOf(sourceTitle.title))) return null
+
+        fun settledRoute(observed: AnimeSourceCatalog): DownloadRouteSnapshot? {
+            val id = observed.title.sourceId
+            val revision = discoverySourceRevision(id) ?: return null
+            val route = playbackHistoryRoute(id) ?: return null
+            val signature = associationSignatures[id] ?: return null
+            if (observed.title.sourceRevision != revision || live.sourceAggregation[id]?.phase != AnimeAssociationPhase.LINKED ||
+                id in live.sourceCatalogErrors || signature.subjectId != subject.id ||
+                signature.revision != revision || signature.route != route) return null
+            return route
+        }
+        val originRoute = settledRoute(originCatalog) ?: return null
+        val route = settledRoute(catalog) ?: return null
+        val count = detail.episodes.size
+        if (count !in 3..100 || originTitle.episodeCount?.let { it != count } == true ||
+            sourceTitle.episodeCount?.let { it != count } == true) return null
+
+        fun completeRows(observed: AnimeSourceCatalog, group: String): List<AnimeSourceEpisode>? {
+            val rows = observed.episodes.asSequence().filter { it.group == group }.take(count + 1).toList()
+            if (rows.size != count || rows.any { row ->
+                    val caption = rangeEpisodeCaption(row)
+                    row.kind != AnimeEpisodeKind.MAIN || sourceEpisodeKind(caption) != AnimeEpisodeKind.MAIN ||
+                        RANGE_NON_REGULAR_CAPTION.containsMatchIn(normalizeNfkc(caption)) || row.id.isBlank() ||
+                        row.url.isBlank() || row.number?.let { it > 0 && it == it.toInt().toDouble() } != true
+                } ||
+                rows.map { it.id }.distinct().size != count || rows.map { it.edition }.distinct().size != 1) return null
+            return rows.sortedBy { it.number }
+        }
+
+        val local = completeRows(originCatalog, originGroup) ?: return null
+        val remote = completeRows(catalog, selectedGroup) ?: return null
+        val current = detail.episodes.sortedBy { it.number }
+        val start = requireNotNull(remote.first().number)
+        if (start <= count || current.indices.any { index ->
+                val canonical = current[index]
+                val localNumber = index + 1.0
+                canonical.kind != AnimeEpisodeKind.MAIN || canonical.subjectId != subject.id ||
+                    canonical.number != localNumber || local[index].number != localNumber ||
+                    canonical.id != nativeEpisodeId(subject, local[index]) || remote[index].number != start + index
+            }) return null
+        val pairs = current.indices.associate { current[it].id to remote[it].id }
+        val remoteIds = pairs.values.toSet()
+        if (binding.episodeMappings.any { (localId, remoteId) ->
+                (localId in pairs || remoteId in remoteIds) && pairs[localId] != remoteId
+            } || pairs.all { (localId, remoteId) -> binding.episodeMappings[localId] == remoteId }) return null
+
+        fun endpoint(row: AnimeSourceEpisode) = EpisodeRangeEndpoint(requireNotNull(row.number).toInt(), rangeEpisodeCaption(row))
+        return EpisodeRangeReview(detail, entry.subject, origin, binding, originCatalog, catalog, detailGeneration,
+            stored.restoreEpoch, entry.revision, catalogRequests[localSource], catalogRequests[source],
+            originRoute, route, pairs, endpoint(remote.first()), endpoint(remote.last()))
+    }
+
+    internal fun applyEpisodeRange(review: EpisodeRangeReview) {
+        mutate {
+            library.edit(review.storedSubject, expectedRevision = review.entryRevision, editBindings = { bindings ->
+                check(reviewEpisodeRange(review.detail, review.binding, review.catalog) == review) {
+                    "作品、线路或集数已变化，没有应用任何对应；请重新核对。"
+                }
+                bindings.map { bound ->
+                    if (bound != review.binding) bound
+                    else bound.copy(automatic = false, episodeMappings = bound.episodeMappings + review.mappings)
+                }
+            })
+            notice("已保存这条线路的 ${review.mappings.size} 集对应，可撤销。没有开始播放。")
+        }
+    }
+
     private fun rebuildOptions() {
         val snapshot = mutableState.value
         val baseline = snapshot.detail ?: return
         val stored = library.state.value
-        val bindings = stored.bindings.filter { it.subjectId == baseline.subject.id }
+        val bindings = onlineBindings(stored, baseline.subject.id)
         val names = bindings.mapNotNull { binding -> sources.provider(binding.catalog.sourceId)?.let {
             it.id to it.name
         } }.toMap()
@@ -1796,7 +1944,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         fun ownsProjection() = request == episodeOptionsGeneration && currentDetail(owner, baseline.subject.id) &&
             library.state.value.restoreEpoch == epoch
         fun inputsCurrent() = mutableState.value.detail == baseline && mutableState.value.sourceCatalogs == input.catalogs &&
-            library.state.value.bindings.filter { it.subjectId == baseline.subject.id } == bindings &&
+            onlineBindings(library.state.value, baseline.subject.id) == bindings &&
             sourceOwners.all { (id, ownership) -> sources.provider(id) != null &&
                 ownership == (discoverySourceRevision(id) to playbackHistoryRoute(id)) }
         val job = scope.launch(start = CoroutineStart.LAZY) {
@@ -2196,6 +2344,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (!force && !retryFailed && onlySourceId == null && mutableState.value.playbackTarget == null &&
             active?.let { it.detail.subject.id == detail.subject.id && it.sourceDiscoveryPaused && !it.recoveryHandled } == true) return
         val nativeOrigin = detail.subject.externalIds["native-source"]
+        val retiredOrigin = nativeOrigin?.let(::isRetiredAnimeSource) == true
+        if (retiredOrigin && (detail.episodes.isEmpty() || detail.episodes.any { it.subjectId != detail.subject.id })) return
         // A native work needs its exact original record before alternative bindings can be saved.
         if (nativeOrigin != null && library.state.value.bindings.none {
                 it.subjectId == detail.subject.id && it.catalog.sourceId == nativeOrigin
@@ -2209,17 +2359,20 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val owner = detailGeneration
         val generation = associationGeneration
         val epoch = library.state.value.restoreEpoch
-        val savedBindings = library.state.value.bindings.filter { it.subjectId == detail.subject.id }
+        val savedBindings = onlineBindings(library.state.value, detail.subject.id)
             .associateBy { it.catalog.sourceId }
-        val providers = sources.providers.sortedWith(compareBy<dev.mangaflow.anime.sources.AnimeProvider> { provider ->
-            when {
-                savedBindings[provider.id]?.preferred == true -> 0
-                provider.id in savedBindings -> 1
-                associationCandidates[provider.id]?.second?.any { autoPlaySubjectHasSharedId(detail.subject, it) } == true -> 2
-                associationCandidates[provider.id]?.second?.any { autoPlaySubjectCandidate(detail.subject, it) } == true -> 3
-                else -> 4
-            }
-        }.thenBy { searchSourceOrder(it.id) })
+        // A retired native catalogue is not rematched by title. Reopen only other exact
+        // associations already saved for its retained episode list.
+        val providers = sources.providers.filter { !retiredOrigin || it.id in savedBindings }
+            .sortedWith(compareBy<dev.mangaflow.anime.sources.AnimeProvider> { provider ->
+                when {
+                    savedBindings[provider.id]?.preferred == true -> 0
+                    provider.id in savedBindings -> 1
+                    associationCandidates[provider.id]?.second?.any { autoPlaySubjectHasSharedId(detail.subject, it) } == true -> 2
+                    associationCandidates[provider.id]?.second?.any { autoPlaySubjectCandidate(detail.subject, it) } == true -> 3
+                    else -> 4
+                }
+            }.thenBy { searchSourceOrder(it.id) })
         cataloguePriority = providers.map { it.id }
         val eligible = providers.map { it.id }.toSet()
         associationJobs.keys.filter { it !in eligible }.forEach { id ->
@@ -2333,6 +2486,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             val existing = library.state.value.bindings.firstOrNull {
                                 it.subjectId == detail.subject.id && it.catalog.sourceId == sourceId
                             }
+                            if (retiredOrigin && (existing == null || existing != savedBindings[sourceId]))
+                                return@aggregation false
                             if (existing != null) {
                                 // Native detail already loaded this bound catalog. Leave its playable
                                 // lines intact while the other sources are discovered in parallel.

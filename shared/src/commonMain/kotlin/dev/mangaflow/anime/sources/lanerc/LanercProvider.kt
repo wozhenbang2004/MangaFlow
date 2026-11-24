@@ -31,10 +31,10 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
     override val revision: String get() = store.snapshot(id)?.revision
         ?: throw LanercCapabilityException("该来源未安装或已停用，请先启用来源。")
     // Enable pagination only where the audited search actually sends a page or offset:
-    // ani skip, yzx path, sd pn, AppV7 pg, Cain page, 23 protobuf field 2, LMM85 page path.
+    // ani skip, sd pn, AppV7 pg, Cain page, 23 protobuf field 2, LMM85 page path.
     // LMM85's bounded client fallback explicitly ends after page one.
     override val supportsSearchPagination: Boolean get() = id in APP_V7_SOURCE_IDS || id in setOf(
-        "anime-lanerc-ani", "anime-lanerc-yzx", "anime-lanerc-sd",
+        "anime-lanerc-ani", "anime-lanerc-sd",
         "anime-lanerc-ain", "anime-lanerc-23", "anime-lanerc-lmm85",
     )
 
@@ -111,9 +111,6 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
         if (result.optBoolean("needBind")) throw LanercCapabilityException("此来源要求先完成验证绑定；当前兼容入口尚未接入该验证流程。")
         if (result.optJSONArray("images") != null || result.optString("type").lowercase() in setOf("comic", "image", "images"))
             throw LanercCapabilityException("来源返回的是漫画图片，不能交给视频播放器。")
-        // The pinned Youke script explicitly requests no Referer with this protocol sentinel.
-        if (id == "anime-lanerc-yzx" && reply.digest == "6056afbb33ffbc7bbb71e2632a31c66fe6d575389983b4f2076dcae599a14e16" &&
-            result.optString("referer") == "never") result.remove("referer")
         val primary = result.optString("url").takeIf(String::isNotBlank)
         val checkedPrimary = primary?.let { runCatching { checkedMedia(it) } }
         val primaryUrl = checkedPrimary?.getOrNull()

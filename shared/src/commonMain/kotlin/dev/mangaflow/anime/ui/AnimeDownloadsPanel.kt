@@ -41,6 +41,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.anime.downloads.*
+import dev.mangaflow.anime.sources.isRetiredAnimeSource
 import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
@@ -240,6 +241,7 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
     var versionsExpanded by rememberSaveable(entry.id) { mutableStateOf(false) }
     val colors = MaterialTheme.colorScheme
     val completed = entry.status == AnimeDownloadStatus.COMPLETED
+    val retired = isRetiredAnimeSource(entry.sourceId)
     val active = entry.status == AnimeDownloadStatus.DOWNLOADING ||
         entry.status == AnimeDownloadStatus.QUEUED || entry.status == AnimeDownloadStatus.WAITING
     val action = when {
@@ -269,7 +271,8 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
                     Text(listOfNotNull(animeEpisodeLabel(entry.episode), animeEpisodeSubtitle(entry.episode)).joinToString(" · "),
                         style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     val source = entry.sourceName.ifBlank { animeSourceName(entry.sourceId, screen) }
-                    Text(listOf(animeDownloadStatus(entry.status), source, entry.edition)
+                    val status = if (!completed && retired) "原来源已下架" else animeDownloadStatus(entry.status)
+                    Text(listOf(status, source, entry.edition)
                         .filter { it.isNotBlank() }.distinct().joinToString(" · "), style = MaterialTheme.typography.bodySmall,
                         color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
@@ -280,7 +283,7 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
                     }
                 }
             }
-            if (!completed) MotionIconButton(onClick = action, enabled = !menuPresent,
+            if (!completed && !retired) MotionIconButton(onClick = action, enabled = !menuPresent,
                 modifier = Modifier.size(44.dp), tooltip = actionLabel) {
                 Box(Modifier.size(32.dp).background(colors.surfaceContainerHigh, CircleShape),
                     contentAlignment = Alignment.Center) {

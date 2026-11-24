@@ -44,9 +44,13 @@ internal data class AnimeDiscussionState(
     val sources: List<ReviewSource> = emptyList(),
     val matching: Boolean = false,
     val checks: List<AnimeDiscussionSourceCheck> = emptyList(),
+    val workContext: AnimeWorkDiscussionContext? = null,
     /** Changes when the confirmed work or its discussion route changes. */
     val episodeContextKey: String? = null,
 )
+
+/** A Work tab may only act on the precise native selection it was actually shown. */
+internal data class AnimeWorkDiscussionContext(val subjectId: String, val referenceId: Int, val revision: Long)
 
 internal enum class AnimeDiscussionCheckStatus { WAITING, CHECKING, READY, NO_MATCH, UNAVAILABLE }
 
@@ -90,7 +94,8 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
     private val lanes = mutableMapOf<Provider, Lane>()
     private var selection: Selection? = null
     private var selectionRevision = 0L
-    private var visibleSubject: String? = null
+    private var workContext: AnimeWorkDiscussionContext? = null
+    private var visibleWork: AnimeWorkDiscussionContext? = null
     private var match: AnimeAniListMatch? = null
     private var matchRequest: Job? = null
     private var matchFinished = false
@@ -111,12 +116,15 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
         }
         if (chosen == selection) return
         if (chosen?.subjectId != selection?.subjectId) {
-            visibleSubject = null
             lanes.values.forEach { it.request?.cancel() }
             lanes.clear()
         }
         selection = chosen
         selectionRevision++
+        workContext = chosen?.let { selected ->
+            selected.metadata?.canonicalBangumiId()?.let { AnimeWorkDiscussionContext(selected.subjectId, it, selectionRevision) }
+        }
+        visibleWork = null
         matchToken++
         matchRequest?.cancel()
         matchRequest = null
@@ -128,33 +136,36 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
         updateSources()
     }
 
-    fun setVisible(subjectId: String, visible: Boolean) {
+    fun setVisible(observed: AnimeWorkDiscussionContext, visible: Boolean) {
         if (!visible) {
-            if (visibleSubject == subjectId) visibleSubject = null
+            if (visibleWork == observed) visibleWork = null
             return
         }
-        if (selection?.subjectId != subjectId) return
-        visibleSubject = subjectId
+        if (workContext != observed) return
+        visibleWork = observed
         updateSources()
     }
 
-    fun retry(subjectId: String, sourceId: String) {
-        if (selection?.subjectId != subjectId) return
+    private fun ownsVisibleWork(observed: AnimeWorkDiscussionContext) =
+        workContext == observed && visibleWork == observed
+
+    fun retry(observed: AnimeWorkDiscussionContext, sourceId: String) {
+        if (!ownsVisibleWork(observed)) return
         updateSources()
         val lane = lanes.values.firstOrNull { it.provider.id == sourceId }
         if (lane != null) load(lane, lane.failedPage ?: 0, force = true)
-        else if (sourceId == Provider.ANILIST.id || sourceId == Provider.MAL.id) retryMatch(subjectId)
+        else if (sourceId == Provider.ANILIST.id || sourceId == Provider.MAL.id) retryMatch(observed)
     }
 
-    fun loadMore(subjectId: String, sourceId: String) {
-        if (selection?.subjectId != subjectId) return
+    fun loadMore(observed: AnimeWorkDiscussionContext, sourceId: String) {
+        if (!ownsVisibleWork(observed)) return
         val lane = lanes.values.firstOrNull { it.provider.id == sourceId } ?: return
         val next = lane.source.nextPage ?: return
         if (lane.failedPage == null) load(lane, next, force = false)
     }
 
-    fun retryMatch(subjectId: String) {
-        if (selection?.subjectId != subjectId || matchRequest != null) return
+    fun retryMatch(observed: AnimeWorkDiscussionContext) {
+        if (!ownsVisibleWork(observed) || matchRequest != null) return
         matchFinished = false
         matchFailure = null
         forceMatch = true
@@ -272,7 +283,8 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
             val route = runCatching { Provider.BANGUMI.route().identity() }.getOrNull()
             "${chosen.subjectId}:$it:$selectionRevision:${route?.let(::animeHash) ?: "unavailable"}"
         }
-        mutableState.value = AnimeDiscussionState(chosen.subjectId, sources, matchRequest != null, checks, episodeContext)
+        mutableState.value = AnimeDiscussionState(chosen.subjectId, sources, matchRequest != null, checks,
+            workContext = workContext, episodeContextKey = episodeContext)
     }
 
     private fun conflictingMalIds(metadata: AnimeSubject): Boolean = listOfNotNull(
@@ -319,7 +331,7 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
                 reviewsError = failure?.message ?: "评论网络线路暂不可用。".takeIf { failure != null })
             lanes[provider] = Lane(provider, remote, snapshot, initial)
         }
-        if (visibleSubject != null && chosen?.subjectId == visibleSubject) {
+        if (visibleWork != null && workContext == visibleWork) {
             lanes.values.filter { !it.initialized && it.failedPage == null }.forEach { load(it, 0, force = false) }
             if (metadata != null && context != null && !matchFinished && matchRequest == null &&
                 (forceMatch || targets[Provider.ANILIST] == null || targets[Provider.MAL] == null)) {

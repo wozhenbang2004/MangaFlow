@@ -217,6 +217,7 @@ internal class AndroidAnimePlayer(
     private var reusablePreparedVideo: AndroidPreparedWindow? = null
     private val videoPreparationRevision = AtomicLong(0L)
     private var lastEnhancementSubmissionAt: Long? = null
+    private var liveEnhancementInvalidatedAtNanos = 0L
     private var enhancementRecoveryUsed = false
     private var nativeVideoRecoveryPending = false
     private var nativeVideoRecoveryFailed = false
@@ -803,12 +804,18 @@ internal class AndroidAnimePlayer(
         val observer = object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) { synchronize(generation, exo) }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (!isPlaying && isCurrent(generation) && engine.value === exo) visibleWatchSample = null
+                if (!isPlaying && isCurrent(generation) && engine.value === exo) {
+                    visibleWatchSample = null
+                    clearLiveEnhancement()
+                }
             }
             override fun onPositionDiscontinuity(
                 oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int,
             ) {
-                if (isCurrent(generation) && engine.value === exo) visibleWatchSample = null
+                if (isCurrent(generation) && engine.value === exo) {
+                    visibleWatchSample = null
+                    clearLiveEnhancement()
+                }
             }
             override fun onPlayerError(error: PlaybackException) {
                 if (isCurrent(generation) && engine.value === exo) visibleWatchSample = null
@@ -821,7 +828,8 @@ internal class AndroidAnimePlayer(
                 publish(generation) { it.copy(firstFrameRendered = true,
                     firstFrameAtMillis = it.firstFrameAtMillis ?: renderedAt,
                     videoEnhancement = if (nativeVideoOnly && options.videoEnhancement != AnimeVideoEnhancementMode.OFF)
-                        it.videoEnhancement.copy(phase = nativeVideoFallbackPhase, detail = nativeVideoFallbackDetail)
+                        it.videoEnhancement.copy(phase = nativeVideoFallbackPhase, detail = nativeVideoFallbackDetail,
+                            renderedOriginalFallback = true)
                     else it.videoEnhancement,
                 ) }
             }
@@ -909,6 +917,9 @@ internal class AndroidAnimePlayer(
                 if (nativeVideoRestored || nativeVideoRecoveryFailed) nativeVideoFallbackDetail
                 else "正在恢复原生画面，等待首帧"
             } else null,
+            // Audio-only recovery can settle as ready without rendering a video frame.
+            renderedOriginalFallback = nativeVideoOnly && nativeVideoRestored &&
+                it.firstFrameRendered == true && it.hasVideoTracks != false,
         )) }
         // Once a VideoGraph itself fails, an empty effect list still retains that GL graph.
         // This replacement backend deliberately never enables it again during this attempt.
@@ -970,17 +981,18 @@ internal class AndroidAnimePlayer(
                     playerScope.launch(Dispatchers.Main.immediate) {
                         if (!isCurrent(generation) || engine.value !== exo || enhancementRevision != revision ||
                             options.videoEnhancement != mode || nativeVideoOnly || !programIsCurrent()) return@launch
-                        val recent = observation.observation?.recentlySubmitting == true &&
+                        val sample = observation.observation
+                        val recent = sample?.recentlySubmitting == true &&
                             canReportLiveEnhancement(exo) &&
-                            SystemClock.elapsedRealtime() - observedAt < ANIME4K_ACTIVITY_TIMEOUT_MS
+                            SystemClock.elapsedRealtime() - observedAt < ANIME_ENHANCED_FRAME_FRESH_MS
                         val newWindow = lastEnhancementSubmissionAt == null
                         lastEnhancementSubmissionAt = observedAt.takeIf { recent }
-                        val current = when {
-                            !recent -> observation.withoutLiveSample()
-                            newWindow -> observation.copy(observation = observation.observation?.copy(
-                                sampleFrames = null, sampleDurationMillis = null))
-                            else -> observation
-                        }
+                        val current = if (!recent) observation.withoutLiveSample()
+                        else observation.copy(observation = sample?.let {
+                            it.copy(sampleFrames = it.sampleFrames.takeUnless { newWindow },
+                                sampleDurationMillis = it.sampleDurationMillis.takeUnless { newWindow },
+                                lastSubmittedAtMillis = observedAt)
+                        })
                         publish(generation) { it.copy(videoEnhancement = current) }
                     }
                 }.also { enhancementEffect = it },
@@ -1226,7 +1238,7 @@ internal class AndroidAnimePlayer(
                 var submitted = 0L
                 var slow = 0
                 var lastReport = 0L
-                baseVideoEffects = listOf(active.effect { elapsed ->
+                baseVideoEffects = listOf(active.effect { startedAt, elapsed, outputWidth, outputHeight ->
                     submitted++
                     // Treat SDK graph warm-up separately and never repeatedly stall the current media.
                     slow = if (elapsed > frameBudget) slow + 1 else 0
@@ -1246,14 +1258,21 @@ internal class AndroidAnimePlayer(
                                     AnimeVideoEnhancementMode.MODEL, AnimeVideoEnhancementPhase.UNAVAILABLE,
                                     "实际处理耗时超过帧预算，已恢复原画；可使用离线增强")) }
                             } else {
+                                // A completed frame from before a seek, pause or surface loss cannot
+                                // renew the current readout even if its Main callback arrives later.
+                                if (startedAt <= liveEnhancementInvalidatedAtNanos ||
+                                    exo.videoFormat?.width != width || exo.videoFormat?.height != height) return@launch
+                                val recent = canReportLiveEnhancement(exo) &&
+                                    SystemClock.elapsedRealtime() - now < ANIME_ENHANCED_FRAME_FRESH_MS
+                                lastEnhancementSubmissionAt = now.takeIf { recent }
                                 val observation = AnimeVideoEnhancementObservation(frames, intermediateTextureBytes =
                                     width.toLong() * height * model.nativeScale * model.nativeScale * 4,
-                                    recentlySubmitting = canReportLiveEnhancement(exo))
+                                    recentlySubmitting = recent, lastSubmittedAtMillis = lastEnhancementSubmissionAt)
                                 val millis = elapsed / 1_000_000L
                                 publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(
                                     AnimeVideoEnhancementMode.MODEL, AnimeVideoEnhancementPhase.ACTIVE,
-                                    "$backend · 本帧处理 ${millis}ms", width, height, width * model.nativeScale,
-                                    height * model.nativeScale, observation, model.title)) }
+                                    "$backend · 本帧处理 ${millis}ms", width, height, outputWidth,
+                                    outputHeight, observation, model.title)) }
                             }
                         }
                     }
@@ -1375,6 +1394,7 @@ internal class AndroidAnimePlayer(
     private fun clearLiveEnhancement() {
         enhancementEffect?.invalidateObservations()
         lastEnhancementSubmissionAt = null
+        liveEnhancementInvalidatedAtNanos = SystemClock.elapsedRealtimeNanos()
         publish(nativeGeneration) { previous ->
             previous.copy(videoEnhancement = previous.videoEnhancement.withoutLiveSample())
         }
@@ -1385,7 +1405,7 @@ internal class AndroidAnimePlayer(
         return copy(observation = active.copy(sampleFrames = null, sampleDurationMillis = null,
             submitThreadCpuNanos = null, recentlySubmitting = false, gpuSampleSequence = null,
             gpuExecutionNanos = null, gpuSubmittedAtNanos = null, gpuCompletionObservedAtNanos = null,
-            presentedAtNanos = null))
+            presentedAtNanos = null, lastSubmittedAtMillis = null))
     }
 
     /** A visible, selected video track can reach READY before a frame reaches the surface. */
@@ -1518,7 +1538,7 @@ internal class AndroidAnimePlayer(
         val position = exo.currentPosition.coerceAtLeast(0L)
         val outputFrames = outputFrameReleases.get()
         val watchDelta = if (sampleWatchTime) observeVisibleWatchTime(exo, now, position, outputFrames) else 0L
-        val enhancementActive = lastEnhancementSubmissionAt?.let { now - it < ANIME4K_ACTIVITY_TIMEOUT_MS } == true &&
+        val enhancementActive = lastEnhancementSubmissionAt?.let { now - it < ANIME_ENHANCED_FRAME_FRESH_MS } == true &&
             canReportLiveEnhancement(exo)
         if (!enhancementActive) lastEnhancementSubmissionAt = null
         val elapsed = now - lastSampleAt

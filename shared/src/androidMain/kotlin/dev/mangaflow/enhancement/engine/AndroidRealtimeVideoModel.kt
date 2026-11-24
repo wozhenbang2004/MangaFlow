@@ -36,7 +36,7 @@ internal class AndroidRealtimeVideoModel private constructor(
     private var retired = false
     private var programs = 0
 
-    fun effect(onProcessed: (elapsedNanos: Long) -> Unit): GlEffect = GlEffect { _, hdr ->
+    fun effect(onProcessed: AndroidVideoFrameSubmitted): GlEffect = GlEffect { _, hdr ->
         if (hdr) throw VideoFrameProcessingException("HDR 保持原始色彩")
         synchronized(lock) {
             check(!retired) { "实时模型会话已结束" }

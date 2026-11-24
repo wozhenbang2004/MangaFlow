@@ -201,14 +201,16 @@ internal fun AnimeFeaturedCarousel(
                 }
                 Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
                     val color = MaterialTheme.colorScheme.onSurface
-                    Canvas(Modifier.size(width = (entries.size * 16).dp, height = 4.dp)
+                    Canvas(Modifier.size(width = (entries.size * 20).dp, height = 4.dp)
                         .clearAndSetSemantics { }) {
+                        // Keep each position visible over wallpaper, even when it is not selected.
+                        val slot = size.width / entries.size
                         repeat(entries.size) { index ->
                             val visualIndex = if (rtl) entries.lastIndex - index else index
                             val weight = (1f - abs(position.value - index)).coerceIn(0f, 1f)
-                            val width = (4f + 10f * weight).dp.toPx()
-                            drawRoundRect(color.copy(alpha = .13f + .45f * weight),
-                                topLeft = Offset((visualIndex * 16 + 8).dp.toPx() - width / 2f, 0f),
+                            val width = slot * (.62f + .24f * weight)
+                            drawRoundRect(color.copy(alpha = .30f + .52f * weight),
+                                topLeft = Offset((visualIndex + .5f) * slot - width / 2f, 0f),
                                 size = Size(width, size.height), cornerRadius = CornerRadius(size.height / 2f))
                         }
                     }

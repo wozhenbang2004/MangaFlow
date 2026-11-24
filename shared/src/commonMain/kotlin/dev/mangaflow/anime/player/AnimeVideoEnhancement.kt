@@ -6,6 +6,9 @@ enum class AnimeVideoEnhancementMode { OFF, FAST, QUALITY, MODEL }
 /** Configuration acceptance alone cannot claim that a GPU has processed a frame. */
 enum class AnimeVideoEnhancementPhase { OFF, WAITING, CONFIGURED, ACTIVE, UNAVAILABLE, FAILED }
 
+/** An active readout describes a recent frame submission, not a configured target. */
+internal const val ANIME_ENHANCED_FRAME_FRESH_MS = 1_500L
+
 data class AnimeVideoEnhancementState(
     val mode: AnimeVideoEnhancementMode = AnimeVideoEnhancementMode.OFF,
     val phase: AnimeVideoEnhancementPhase = AnimeVideoEnhancementPhase.OFF,
@@ -18,6 +21,8 @@ data class AnimeVideoEnhancementState(
     val modelName: String? = null,
     /** Estimated post-filter frame rate, independent of actual display presentation. */
     val filteredFps: Double? = null,
+    /** The native-only recovery backend actually rendered its first frame. */
+    val renderedOriginalFallback: Boolean = false,
 )
 
 /** Evidence from the current enhancement pass. A submission does not prove display presentation. */
@@ -37,6 +42,8 @@ data class AnimeVideoEnhancementObservation(
     val gpuCompletionObservedAtNanos: Long? = null,
     /** Populated only by a real presentation acknowledgement, never a scheduled release timestamp. */
     val presentedAtNanos: Long? = null,
+    /** Monotonic completion of this successful frame submission, not display presentation. */
+    val lastSubmittedAtMillis: Long? = null,
 )
 
 internal data class Anime4KShader(val name: String, val source: String)

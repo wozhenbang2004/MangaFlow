@@ -166,6 +166,5 @@ internal val ANIME_BUNDLED_ALTERNATIVES = mapOf(
     "anime-lanerc-akianime" to "anime-native-akianime",
     "anime-lanerc-dmbus" to "anime-native-dmbus",
     "anime-lanerc-jinpai" to "anime-native-jinpai",
-    "anime-lanerc-yzx" to "anime-native-yzx",
     "anime-lanerc-lmm85" to NATIVE_LMM85_SOURCE,
 )

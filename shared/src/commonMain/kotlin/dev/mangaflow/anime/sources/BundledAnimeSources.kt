@@ -1,8 +1,9 @@
 package dev.mangaflow.anime.sources
 
 /** Native implementations keep distinct IDs; saved script selections are never rewritten. */
-internal val BUNDLED_API_ANIME_IDS = setOf("anime-native-jinpai", "anime-native-yzx")
+internal val BUNDLED_API_ANIME_IDS = setOf("anime-native-jinpai")
 internal val BUNDLED_ANIME_SOURCE_IDS = BUNDLED_HTML_ANIME_IDS + BUNDLED_API_ANIME_IDS + NATIVE_LMM85_SOURCE
+internal val STORED_BUNDLED_ANIME_SOURCE_IDS = BUNDLED_ANIME_SOURCE_IDS + RETIRED_YZX_NATIVE
 
 internal fun bundledAnimeSourceVersion(id: String): String =
     when {

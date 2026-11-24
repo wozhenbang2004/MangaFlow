@@ -266,12 +266,14 @@ class AnimeMetadataRepository(context: PlatformContext) {
         }
         val selected = resolved.getOrNull() ?: return AnimeMetadataDetailResult(primary, null, subjectError,
             resolved.exceptionOrNull()?.message ?: "补充资料未能匹配。")
-        val supplementary = catalogueRead {
-            withTimeoutOrNull(15_000L) { detail(selected) }
-                ?: error("Bangumi 补充剧集读取超时；豆瓣作品与本地选集保留，可稍后重试。")
-        }
-        val loaded = supplementary.getOrNull() ?: return AnimeMetadataDetailResult(primary, null, subjectError,
-            supplementary.exceptionOrNull()?.message ?: "Bangumi 剧集资料未能读取。")
+        val supplementary = catalogueRead { withTimeoutOrNull(15_000L) { detail(selected) } }
+        // An already confirmed work can own comments when the optional episode read times out.
+        // Identity/route failures are not a new confirmation, and no episode mapping is inferred.
+        val loaded = supplementary.getOrElse { failure ->
+            return AnimeMetadataDetailResult(primary, null, subjectError,
+                failure.message ?: "Bangumi 剧集资料未能读取。")
+        } ?: return AnimeMetadataDetailResult(primary, null, subjectError,
+            "Bangumi 补充剧集读取超时；豆瓣作品与本地选集保留，可稍后重试。", metadataSubject = selected)
         val metadata = loaded.subject?.let { fresh ->
             // Legacy cache rows may predate format/alias fields; the freshly resolved record owns them.
             fresh.copy(format = fresh.format ?: selected.format,

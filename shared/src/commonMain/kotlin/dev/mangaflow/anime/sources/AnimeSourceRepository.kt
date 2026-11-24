@@ -58,10 +58,9 @@ class AnimeSourceRepository(context: PlatformContext) {
         forceRefresh: Boolean = false): AnimeSourceCatalog = reads.catalog(provider, title, forceRefresh)
 
     private fun extensionProvider(listing: LanercSourceListing): AnimeProvider? {
-        if (!listing.installed || !listing.enabled || listing.kind != LanercSourceKind.VIDEO) return null
+        if (isRetiredAnimeSource(listing.id) || !listing.installed || !listing.enabled || listing.kind != LanercSourceKind.VIDEO) return null
         return when (listing.id) {
             "anime-native-jinpai" -> NativeJinpaiProvider(requireNotNull(listing.revision))
-            "anime-native-yzx" -> NativeYzxProvider(requireNotNull(listing.revision))
             "anime-native-ani" -> AniChAnimeProvider(requireNotNull(listing.revision))
             NATIVE_LMM85_SOURCE -> NativeLmm85Provider(requireNotNull(listing.revision))
             in BUNDLED_HTML_ANIME_IDS -> BundledHtmlAnimeProvider(listing.id, requireNotNull(listing.revision))

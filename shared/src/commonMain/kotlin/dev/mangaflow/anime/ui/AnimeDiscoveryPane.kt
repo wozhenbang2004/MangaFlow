@@ -24,6 +24,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -50,6 +51,7 @@ import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.glass.mangaHazeSource
+import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.*
 import dev.mangaflow.ui.platform.localToday
 
@@ -174,19 +176,26 @@ private fun AnimeDiscoveryResumeRow(entry: AnimeLibraryEntry, active: Boolean,
     onResume: (AnimeLibraryEntry) -> Unit) {
     val progress = entry.resume ?: return
     val colors = MaterialTheme.colorScheme
+    val shape = remember { RoundedCornerShape(16.dp) }
     val interaction = remember(entry.subject.id) { MutableInteractionSource() }
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+    Row(Modifier.fillMaxWidth()
         .motionPress(interaction, enabled = active, pressedScale = .99f)
+        .softSurfaceShadow(shape, light = colors.surface.luminance() > .5f, strength = .68f, radius = 14.dp)
+        .clip(shape).background(colors.surfaceContainerHigh)
         .clickable(interactionSource = interaction, indication = null, enabled = active,
             role = Role.Button, onClickLabel = "继续观看", onClick = { onResume(entry) })
-        .heightIn(min = 56.dp).padding(horizontal = 2.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        AnimePoster(entry.subject, Modifier.width(33.dp).height(46.dp).clearAndSetSemantics { })
+        .heightIn(min = 66.dp).padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        AnimePoster(entry.subject, Modifier.width(35.dp).height(50.dp).clearAndSetSemantics { })
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(entry.subject.title, style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("续看 · " + animeWatchLocation(entry, progress), color = colors.onSurfaceVariant,
-                style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (progress.belongsToWatchHistory(entry.subject.id)) animeWatchFraction(progress)?.let { fraction ->
+                AnimeWatchProgressLine(fraction, Modifier.widthIn(max = 164.dp).padding(top = 2.dp))
+            }
         }
         Icon(Icons.Outlined.PlayArrow, null, Modifier.size(21.dp), tint = colors.onSurface)
     }

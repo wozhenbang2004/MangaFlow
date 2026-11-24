@@ -359,6 +359,10 @@ private fun validateDecodedOutput(source: File, expectedTimes: LongArray, checkA
 
 private fun MediaFormat.intOrNull(key: String): Int? = if (containsKey(key)) getInteger(key) else null
 
+internal fun interface AndroidVideoFrameSubmitted {
+    fun onFrame(startedAtNanos: Long, elapsedNanos: Long, width: Int, height: Int)
+}
+
 internal class AndroidRgbVideoProgram(
     private val session: OrtSession?,
     private val width: Int,
@@ -367,7 +371,7 @@ internal class AndroidRgbVideoProgram(
     private val budget: Long,
     private val checkActive: () -> Unit,
     private val capture: ((Long, ByteBuffer, ByteBuffer) -> Unit)? = null,
-    private val onProcessed: ((Long) -> Unit)? = null,
+    private val onProcessed: AndroidVideoFrameSubmitted? = null,
     private val onReleased: (() -> Unit)? = null,
     private val cugan: AndroidCuganSession? = null,
     private val onFrame: () -> Unit,
@@ -448,7 +452,8 @@ internal class AndroidRgbVideoProgram(
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         GlUtil.checkGlError()
         onFrame()
-        if (startedAt != null) onProcessed?.invoke(SystemClock.elapsedRealtimeNanos() - startedAt)
+        if (startedAt != null) onProcessed?.onFrame(startedAt, SystemClock.elapsedRealtimeNanos() - startedAt,
+            outputWidth, outputHeight)
     }
 
     override fun release() {

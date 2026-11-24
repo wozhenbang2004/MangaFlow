@@ -70,11 +70,18 @@ internal fun animeDiscoveryColumns(width: Dp, preferred: Int?): Int {
     val desktop = platformKind == PlatformKind.DESKTOP
     val gap = animeDiscoveryGap(columns)
     val side = MangaLayout.sidePadding(width)
+    val minimum = when {
+        desktop -> 156.dp
+        // Use the ordinary manga four-column poster minimum for the explicit choice.
+        // The automatic tablet layout and the default three-column sizing stay unchanged.
+        preferred == 4 -> 68.dp
+        columns >= 4 -> 86.dp
+        else -> 90.dp
+    }
     return when {
         columns == 1 -> 1
         desktop && columns == 0 -> MangaLayout.automaticDesktopColumns(width, fontScale, gap, side)
-        else -> MangaLayout.columns(width, columns,
-            (if (desktop) 156.dp else if (columns >= 4) 86.dp else 90.dp) * fontScale, gap, side)
+        else -> MangaLayout.columns(width, columns, minimum * fontScale, gap, side)
     }
 }
 
