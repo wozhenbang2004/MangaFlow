@@ -59,7 +59,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import coil3.compose.rememberAsyncImagePainter
 import coil3.request.ImageRequest
 import coil3.request.crossfade
@@ -73,8 +76,10 @@ import dev.mangaflow.anime.AnimeEpisodeAvailability
 import dev.mangaflow.anime.AnimeEpisodeKind
 import dev.mangaflow.anime.AnimeLibraryEntry
 import dev.mangaflow.anime.AnimeNativeMetadataSearch
+import dev.mangaflow.anime.AnimeRelatedSourceRequest
 import dev.mangaflow.anime.AnimeScreenState
 import dev.mangaflow.anime.AnimeSourceScore
+import dev.mangaflow.anime.AnimeSourceTitle
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeWatchProgress
 import dev.mangaflow.anime.AnimeWatchStatus
@@ -97,6 +102,7 @@ import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.mangaFontFamily
 import dev.mangaflow.ui.motion.*
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -113,6 +119,7 @@ internal fun AnimeDetailPane(
     scroll: LazyListState,
     onPlay: (AnimeEpisode) -> Unit,
     onOpenRelated: (AnimeSubject) -> Unit,
+    onOpenSourceRelated: (AnimeRelatedSourceRequest, AnimeSourceTitle) -> Unit,
     onSources: (AnimeEpisode?) -> Unit,
     onTracking: () -> Unit,
     modifier: Modifier = Modifier,
@@ -136,6 +143,8 @@ internal fun AnimeDetailPane(
     val observedWork = currentDiscussion.workContext?.takeIf {
         it.subjectId == subject.id && it.referenceId == workReferenceId
     }
+    val canMatchCommentWork = douban && entry?.metadataAutoMatchDisabled != true && !state.libraryReadUnavailable
+    val checkingCommentWork = canMatchCommentWork && currentDiscussion.subjectId == subject.id && currentDiscussion.workReferencePending
     var detailTab by rememberSaveable(subject.id, "detail-sections") { mutableIntStateOf(0) }
     var discussionFilter by remember(subject.id) { mutableStateOf(false) }
     var discussionFilterChanged by remember(subject.id) { mutableStateOf(false) }
@@ -221,8 +230,9 @@ internal fun AnimeDetailPane(
         projection.collectAsStateWithLifecycle(initialValue = animeDetailOffline(downloads.value, subject.id, offlineProgress)).value
     } else AnimeDetailOffline.MISSING.takeIf { savedProgress?.localDownloadId != null && !savedProgress.completed &&
         (first == null || first.id == savedProgress.episodeId) }
+    val checkingSavedEpisode = savedProgress != null && state.pendingHistoryEpisodeId == savedProgress.episodeId
     val playControl = animeDetailPlayControl(first, savedProgress, firstAvailability,
-        state.detailLoading || sourceSearchInProgress, firstCanRetry, offline, resumeCheckpoint)
+        checkingSavedEpisode, firstCanRetry, offline, resumeCheckpoint)
     val pendingNativeCatalog = state.sourceCatalogs.firstOrNull {
         it.title.sourceId == nativeSource && !it.notice.isNullOrBlank() && detail.episodes.isEmpty()
     }
@@ -428,7 +438,18 @@ internal fun AnimeDetailPane(
                                             state = position, userScrollEnabled = paneActive,
                                             contentPadding = PaddingValues(start = horizontal, top = 8.dp,
                                                 end = horizontal, bottom = listEnd)) {
-                                            metadataPicker(paneActive, forComments = true)
+                                            if (checkingCommentWork && metadataSearch == null) item(key = "discussion-work-loading") {
+                                                AnimeDetailStatus("正在核对作品评论来源", Icons.Outlined.Search, loading = true)
+                                            } else {
+                                                val problem = state.detailError.takeIf { canMatchCommentWork && metadataSearch == null }
+                                                if (problem != null) item(key = "discussion-work-retry") {
+                                                    AnimeDiscoveryInlineStatus(problem, retry = if (paneActive) ({
+                                                        if (controller.state.value.detail?.subject?.id == subject.id)
+                                                            controller.retryCurrentDetail()
+                                                    }) else null)
+                                                }
+                                                metadataPicker(paneActive, forComments = true)
+                                            }
                                         }
                                         if (wide) DesktopVerticalScrollbar(position, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                                     }
@@ -451,6 +472,28 @@ internal fun AnimeDetailPane(
                                 onFilterChanged = { discussionFilterChanged = it })
                             1 -> {
                                 val position = rememberLazyListState()
+                                val routes by controller.relatedSourceRoutes.collectAsStateWithLifecycle()
+                                val related = remember(controller, subject.id, state.sourceBindings, state.sourceCatalogs,
+                                    state.sourceExtensions, state.libraryReadUnavailable, routes, controller.relatedSourceVisit) {
+                                    controller.relatedSourceRequest(state)
+                                }
+                                var relatedRetry by remember(related) { mutableIntStateOf(0) }
+                                var nativeRelated by remember(related, relatedRetry) {
+                                    mutableStateOf<Result<List<AnimeSourceTitle>>?>(null)
+                                }
+                                val lifecycle = LocalLifecycleOwner.current.lifecycle
+                                LaunchedEffect(related, relatedRetry, paneActive, lifecycle) {
+                                    if (related != null && paneActive) lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                                        if (nativeRelated == null) {
+                                            val result = try { Result.success(controller.readDetailSourceRelated(related)) }
+                                            catch (cancel: CancellationException) { throw cancel }
+                                            catch (failure: Exception) { Result.failure(failure) }
+                                            if (controller.ownsRelatedSource(related)) nativeRelated = result
+                                        }
+                                    }
+                                }
+                                val sourceResult = nativeRelated
+                                val sourceRows = sourceResult?.getOrNull().orEmpty()
                                 Box(Modifier.fillMaxSize()) {
                                     LazyColumn(Modifier.fillMaxSize().mangaHazeSource(backdrop).motionInputGate(paneActive),
                                         state = position,
@@ -467,6 +510,26 @@ internal fun AnimeDetailPane(
                                             items(state.relatedSubjects, key = { "related:" + it.id }) { related ->
                                                 AnimeSubjectRow(related, animeSubjectSummary(related), onOpen = { onOpenRelated(related) },
                                                     ratings = { AnimeSubjectRatings(related, enabled = paneActive) })
+                                            }
+                                        }
+                                        if (related != null) {
+                                            item(key = "source-related-heading") {
+                                                AnimeSectionTitle("来源推荐 · ${related.sourceName}", modifier = Modifier.semantics { heading() })
+                                            }
+                                            if (sourceResult == null) item(key = "source-related-loading") {
+                                                AnimeQuietLabel("正在读取来源推荐")
+                                            }
+                                            if (sourceResult?.isFailure == true) item(key = "source-related-error") {
+                                                AnimeDiscoveryInlineStatus("来源推荐暂未载入",
+                                                    retry = if (paneActive) ({ relatedRetry++; Unit }) else null)
+                                            }
+                                            if (sourceResult?.isSuccess == true && sourceRows.isEmpty()) item(key = "source-related-empty") {
+                                                AnimeQuietLabel("这个来源没有返回推荐")
+                                            }
+                                            items(sourceRows, key = { "source-related:${it.sourceId}:${it.id}" }) { row ->
+                                                val recommended = controller.sourceSubject(row)
+                                                AnimeSubjectRow(recommended, animeSubjectSummary(recommended),
+                                                    onOpen = { if (paneActive) onOpenSourceRelated(related, row) })
                                             }
                                         }
                                     }

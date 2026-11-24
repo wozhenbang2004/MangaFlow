@@ -383,6 +383,8 @@ data class AnimeScreenState(
     val detail: AnimeDetail? = null,
     val detailLoading: Boolean = false,
     val detailError: String? = null,
+    /** The exact historical episode currently being reopened, not general source discovery. */
+    val pendingHistoryEpisodeId: String? = null,
     /** Detail open to the first exact episode line published in this visit. */
     val detailFirstConfirmedLineMs: Long? = null,
     val detailScores: List<AnimeSourceScore> = emptyList(),

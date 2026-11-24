@@ -47,6 +47,7 @@ internal data class AnimeDiscussionState(
     val workContext: AnimeWorkDiscussionContext? = null,
     /** Changes when the confirmed work or its discussion route changes. */
     val episodeContextKey: String? = null,
+    val workReferencePending: Boolean = false,
 )
 
 /** A Work tab may only act on the precise native selection it was actually shown. */
@@ -96,6 +97,7 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
     private var selectionRevision = 0L
     private var workContext: AnimeWorkDiscussionContext? = null
     private var visibleWork: AnimeWorkDiscussionContext? = null
+    private var workReferencePending = false
     private var match: AnimeAniListMatch? = null
     private var matchRequest: Job? = null
     private var matchFinished = false
@@ -115,7 +117,9 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
             Selection(current.id, metadata?.takeIf { it.canonicalBangumiId() != null })
         }
         if (chosen == selection) return
-        if (chosen?.subjectId != selection?.subjectId) {
+        if (chosen?.subjectId != selection?.subjectId) workReferencePending = false
+        if (chosen?.subjectId != selection?.subjectId ||
+            chosen?.metadata?.canonicalBangumiId() != selection?.metadata?.canonicalBangumiId()) {
             lanes.values.forEach { it.request?.cancel() }
             lanes.clear()
         }
@@ -134,6 +138,12 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
         matchFailure = null
         forceMatch = false
         updateSources()
+    }
+
+    fun setWorkReferencePending(subjectId: String, pending: Boolean) {
+        if (selection?.subjectId != subjectId || workReferencePending == pending) return
+        workReferencePending = pending
+        publish()
     }
 
     fun setVisible(observed: AnimeWorkDiscussionContext, visible: Boolean) {
@@ -284,7 +294,7 @@ internal class AnimeDiscussionController(context: PlatformContext, private val s
             "${chosen.subjectId}:$it:$selectionRevision:${route?.let(::animeHash) ?: "unavailable"}"
         }
         mutableState.value = AnimeDiscussionState(chosen.subjectId, sources, matchRequest != null, checks,
-            workContext = workContext, episodeContextKey = episodeContext)
+            workContext = workContext, episodeContextKey = episodeContext, workReferencePending = workReferencePending)
     }
 
     private fun conflictingMalIds(metadata: AnimeSubject): Boolean = listOfNotNull(

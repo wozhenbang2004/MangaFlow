@@ -55,7 +55,8 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
         backgroundSlots.withPermit { execute(value, descriptor, "__validate", JSONArray(), false) }
     }
 
-    suspend fun call(id: String, method: String, args: JSONArray = JSONArray(), expectedRevision: String? = null): LanercInvocation {
+    suspend fun call(id: String, method: String, args: JSONArray = JSONArray(), expectedRevision: String? = null,
+        expectedRoute: DownloadRouteSnapshot? = null): LanercInvocation {
         require(method in METHODS) { "此动漫来源操作不受支持。" }
         require(args.toString().length <= 2 * 1024 * 1024) { "来源操作参数过大。" }
         store.ready.await()
@@ -64,7 +65,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
             val bundle = store.snapshot(id) ?: throw LanercCapabilityException("该来源未安装或已停用，请先启用来源。")
             if (expectedRevision != null && bundle.revision != expectedRevision)
                 throw LanercCapabilityException("来源版本或参数已改变，请刷新剧集后重新选择。")
-            execute(bundle, store.descriptor(id), method, args, true)
+            execute(bundle, store.descriptor(id), method, args, true, expectedRoute = expectedRoute)
         }
         // An operation waiting for a shared background slot must not hold this
         // source's session lock ahead of an explicit playback request.
@@ -99,7 +100,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
 
     private suspend fun execute(bundle: LanercInstalledPackage, descriptor: LanercSourceDescriptor,
         method: String, args: JSONArray, networkAllowed: Boolean,
-        playbackSelection: LanercPlaybackSelection? = null): LanercInvocation = withContext(Dispatchers.Default) {
+        playbackSelection: LanercPlaybackSelection? = null, expectedRoute: DownloadRouteSnapshot? = null): LanercInvocation = withContext(Dispatchers.Default) {
         try {
             withTimeout(60_000L) {
                 slots.withPermit {
@@ -107,6 +108,8 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                 val operationContext = currentCoroutineContext()
                 operationContext.ensureActive()
                 val route = DownloadRoutingStore.get(context).sourceSnapshot(bundle.id, DownloadCategory.ANIME)
+                if (expectedRoute != null && route != expectedRoute)
+                    throw DownloadRouteException("来源网络线路已改变，请重新读取。")
                 val cleartextEndpoints = lanercCleartextEndpoints(bundle.id, bundle.digest, method)
                 val parserGrants = if (networkAllowed && method == "play")
                     playbackParsers.forPlay(bundle, route, args.optString(0), playbackSelection) else emptyList()

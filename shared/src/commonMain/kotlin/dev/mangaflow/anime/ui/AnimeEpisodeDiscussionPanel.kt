@@ -46,8 +46,11 @@ import kotlinx.coroutines.ensureActive
 internal fun AnimeEpisodeDiscussionContent(visible: Boolean, episode: AnimeEpisode, catalogue: List<AnimeEpisode>,
     metadata: AnimeSubject?, backdrop: HazeState, controller: AnimeController, modifier: Modifier = Modifier) {
     val discussion by controller.discussion.state.collectAsStateWithLifecycle()
-    val referenceId = metadata?.takeIf { it.canonicalBangumiId() != null }?.id
-    val contextKey = discussion.takeIf { it.subjectId == episode.subjectId }?.episodeContextKey
+    val reference = metadata?.canonicalBangumiId()
+    val referenceId = metadata?.id.takeIf { reference != null }
+    val contextKey = discussion.episodeContextKey.takeIf {
+        reference != null && discussion.workContext?.let { it.subjectId == episode.subjectId && it.referenceId == reference } == true
+    }
     // Playback retains its opening snapshot. Display-only catalogue updates must not erase the same exact episode.
     val currentEpisode = catalogue.singleOrNull { it.id == episode.id && it.subjectId == episode.subjectId && it.kind == episode.kind }
     val exactReference = currentEpisode?.metadataEpisodeId?.let { id ->

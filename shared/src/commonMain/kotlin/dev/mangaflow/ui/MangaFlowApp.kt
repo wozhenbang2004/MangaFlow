@@ -230,13 +230,20 @@ private fun animeSidebarGroup(title: String, vararg destinations: AnimeWorkspace
 
 private val animeSidebarGroups = listOf(
     animeSidebarGroup("浏览", AnimeWorkspaceDestination.HOME, AnimeWorkspaceDestination.CALENDAR,
-        AnimeWorkspaceDestination.SEASON, AnimeWorkspaceDestination.RANKING,
-        AnimeWorkspaceDestination.GENRES, AnimeWorkspaceDestination.DIRECTORY),
+        AnimeWorkspaceDestination.DIRECTORY),
     animeSidebarGroup("我的番剧", AnimeWorkspaceDestination.LIBRARY, AnimeWorkspaceDestination.HISTORY,
         AnimeWorkspaceDestination.DOWNLOADS),
     animeSidebarGroup("管理", AnimeWorkspaceDestination.TRACKING),
 )
 private val animeSidebarHeadings = animeSidebarGroups.associate { it.destinations.first() to it.title }
+
+// Saved/programmatic destinations can outlive their individual sidebar entries.
+private fun AnimeWorkspaceDestination.sidebarEntry(): AnimeWorkspaceDestination? = when (this) {
+    AnimeWorkspaceDestination.SEASON -> AnimeWorkspaceDestination.CALENDAR
+    AnimeWorkspaceDestination.RANKING -> AnimeWorkspaceDestination.HOME
+    AnimeWorkspaceDestination.GENRES, AnimeWorkspaceDestination.SOURCES -> null
+    else -> this
+}
 
 @Composable
 private fun DrawerDestinationLink(
@@ -480,7 +487,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     } ?: if (animeMode) Section.ANIME else Section.DISCOVER
     var animeDestinationName by rememberSaveable { mutableStateOf(AnimeWorkspaceDestination.HOME.name) }
     val animeDestination = AnimeWorkspaceDestination.entries.firstOrNull { it.name == animeDestinationName }
-        ?: AnimeWorkspaceDestination.HOME
+        ?.sidebarEntry() ?: AnimeWorkspaceDestination.HOME
     var animeRequestedDestinationName by rememberSaveable { mutableStateOf(AnimeWorkspaceDestination.HOME.name) }
     val animeRequestedDestination = AnimeWorkspaceDestination.entries.firstOrNull { it.name == animeRequestedDestinationName }
         ?: AnimeWorkspaceDestination.HOME
@@ -604,13 +611,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         ScopedBrowseController(model.repository, scope)
     }
     val browseActions: BrowseUiActions = if (restrictedMode) scopedBrowse else ordinaryBrowse
-    val openScopedSearch: (SearchTarget) -> Unit = { target ->
-        if (restrictedMode) {
-            scopedBrowse.openSearch(target)
-            searchExpanded = true
-            desktopSearchRequest++
-        }
-    }
     val openScopedTagSearch: (String) -> Unit = { tag ->
         if (restrictedMode) {
             scopedBrowse.openSearch(SearchTarget.TAG, tags = listOf(dev.mangaflow.data.MangaTag(
@@ -833,8 +833,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         it.destination != null && (it.profile == null || it.profile == contentProfile)
     }?.let { action ->
         SidebarDestination(action.destination!!, if (action.destination == Section.ANIME)
-            action.animeDestination?.takeUnless { it == AnimeWorkspaceDestination.SOURCES }
-                ?: animeDestination
+            action.animeDestination?.sidebarEntry() ?: animeDestination
             else null)
     }
     val sidebarHeadings = if (animeMode) animeSidebarHeadings else emptyMap()
@@ -1741,7 +1740,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                         model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources,
                                                         backdrop = searchBackdrop, active = paneActive && !searchVisible,
                                                         onSearchTag = openScopedTagSearch, onPresenceChange = onPresence,
-                                                        onOpenSourceAccount = recoverProfileAccount, onOpenSearch = openScopedSearch)
+                                                        onOpenSourceAccount = recoverProfileAccount, compactHomeToolbar = true)
                                                 } } else null,
                                                 onRetrySourceFilters = retrySourceFilters,
                                                 onOpen = { model.openManga(it) },

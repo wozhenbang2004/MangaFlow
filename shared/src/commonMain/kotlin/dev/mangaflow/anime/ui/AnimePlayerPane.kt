@@ -777,9 +777,11 @@ private fun AnimeWatchingPane(
                     onSources = onSources, active = paneActive, desktopRail = rail, modifier = Modifier.fillMaxSize())
                 else if (episode != null) {
                     val focusedDetail = detail?.takeIf { it.subject.id == episode.subjectId }
-                    val reference = focusedDetail?.subject?.takeIf { it.canonicalBangumiId() != null }
-                        ?: focusedDetail?.metadataSubject
-                        ?: entry?.nativeMetadata.takeIf { entry?.subject?.id == episode.subjectId && episode.subjectId.startsWith("native:") }
+                    val reference = focusedDetail?.let { shown ->
+                        shown.subject.takeIf { it.canonicalBangumiId() != null }
+                            ?: entry?.nativeMetadata
+                            ?: shown.metadataSubject.takeUnless { entry?.metadataAutoMatchDisabled == true }
+                    }
                     AnimeEpisodeDiscussionContent(paneActive, episode, focusedDetail?.episodes.orEmpty(), reference,
                         backdrop, controller, Modifier.fillMaxSize())
                 } else Box(Modifier.fillMaxSize().padding(16.dp)) {

@@ -76,7 +76,7 @@ internal fun SourceCapabilityBrowseControls(
     onPresenceChange: (Boolean) -> Unit = {},
     inSearch: Boolean = false,
     onOpenSourceAccount: ((String) -> Unit)? = null,
-    onOpenSearch: ((SearchTarget) -> Unit)? = null,
+    compactHomeToolbar: Boolean = false,
 ) {
     val current by controller.controls.collectAsStateWithLifecycle()
     val browse by controller.state.collectAsStateWithLifecycle()
@@ -168,8 +168,7 @@ internal fun SourceCapabilityBrowseControls(
     }
     val colors = MaterialTheme.colorScheme
     val controlColors = ButtonDefaults.textButtonColors(contentColor = colors.onSurface)
-    // Tags use the shared search scope; the discovery header keeps its author shortcut.
-    val compactHome = !searching && onOpenSearch != null
+    val compactHome = !searching && compactHomeToolbar
     val status = when {
         failed.size == 1 -> failed.single().let { lane ->
             lane.sourceName + if (sourceAccountRequired(lane.error)) "需要登录" else "暂不可用"
@@ -224,12 +223,6 @@ internal fun SourceCapabilityBrowseControls(
             tooltip = "${sourceName}分类与栏目") {
             Icon(Icons.Outlined.ViewModule, "${sourceName}分类与栏目", Modifier.size(19.dp))
         }
-        if (compactHome && onOpenSearch != null) {
-            MotionIconButton(onClick = { onOpenSearch(SearchTarget.AUTHOR) }, enabled = active && !present,
-                modifier = Modifier.size(44.dp), tooltip = "作者") {
-                Icon(Icons.Outlined.PersonOutline, "作者", Modifier.size(19.dp), tint = colors.onSurfaceVariant)
-            }
-        }
         if (hasHotTags) MotionIconButton(onClick = { hotTagsOpen = true },
             enabled = active && !present, modifier = Modifier.size(44.dp), tooltip = "禁漫热门标签") {
             Icon(Icons.Outlined.Tag, "禁漫热门标签", Modifier.size(19.dp))
@@ -259,7 +252,7 @@ internal fun SourceCapabilityBrowseControls(
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         if (compactHome) BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val iconCount = 1 + (if (hasFeeds) 1 else 0) + (if (hasFilters) 1 else 0)
+            val iconCount = (if (hasFeeds) 1 else 0) + (if (hasFilters) 1 else 0)
             val toolsWidth = 46.dp * iconCount + (if (status != null) statusWidth + 6.dp else 0.dp)
             if (maxWidth >= toolsWidth + 52.dp + 56.dp * fontScale) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,

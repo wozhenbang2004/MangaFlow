@@ -3,6 +3,7 @@ package dev.mangaflow.anime.sources.lanerc
 import dev.mangaflow.anime.AnimeSourceTitle
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
+import dev.mangaflow.net.DownloadRouteSnapshot
 
 data class LanercBrowseSection(val key: String, val title: String, val items: List<AnimeSourceTitle>)
 data class LanercFilterOption(val value: String, val label: String)
@@ -50,10 +51,11 @@ internal suspend fun LanercSourceStore.readFiltered(id: String, category: String
     return lanercCards(descriptor, reply.value, reply.revision)
 }
 
-internal suspend fun LanercSourceStore.readRelated(id: String, titleId: String, expectedRevision: String? = null): List<AnimeSourceTitle> {
+internal suspend fun LanercSourceStore.readRelated(id: String, titleId: String, expectedRevision: String? = null,
+    expectedRoute: DownloadRouteSnapshot? = null): List<AnimeSourceTitle> {
     val descriptor = browseDescriptor(id)
     require(titleId.length in 1..16_384)
-    val reply = runtime.call(id, "related", JSONArray(listOf(titleId)), expectedRevision)
+    val reply = runtime.call(id, "related", JSONArray(listOf(titleId)), expectedRevision, expectedRoute)
     return lanercCards(descriptor, reply.value, reply.revision)
 }
 

@@ -70,7 +70,7 @@ private fun AnimeUnifiedSearchState.currentReferences(group: AnimeSearchGroup): 
 internal enum class AnimeWorkspaceDestination(val label: String, val icon: ImageVector) {
     HOME("发现", Icons.Outlined.Explore), LIBRARY("追番", Icons.Outlined.Bookmarks),
     HISTORY("观看历史", Icons.Outlined.History), RANKING("榜单", Icons.Outlined.Leaderboard),
-    SEASON("新番", Icons.Outlined.NewReleases), CALENDAR("番表", Icons.Outlined.CalendarMonth),
+    SEASON("新番", Icons.Outlined.NewReleases), CALENDAR("放送", Icons.Outlined.CalendarMonth),
     GENRES("标签", Icons.AutoMirrored.Outlined.Label), DIRECTORY("片源目录", Icons.Outlined.Public),
     DOWNLOADS("离线下载", Icons.Outlined.DownloadForOffline), TRACKING("追番账号", Icons.Outlined.AccountCircle),
     SOURCES("管理片源", Icons.Outlined.Tune),
@@ -81,6 +81,9 @@ private enum class AnimeWorkspacePage(val discovery: AnimeDiscoveryTab? = null) 
     LIBRARY,
 }
 private enum class AnimeWorkspacePane { DISCOVERY, DIRECTORY, LIBRARY }
+private fun AnimeDiscoveryTab.isBroadcastTab(): Boolean =
+    this == AnimeDiscoveryTab.CALENDAR || this == AnimeDiscoveryTab.SEASON
+
 private sealed interface AnimeRecentChoice {
     data class Resume(val subjectId: String) : AnimeRecentChoice
     data object FullHistory : AnimeRecentChoice
@@ -137,6 +140,7 @@ private fun AnimeWorkspaceContent(
     val sourceBrowseState by controller.sourceBrowse.state.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var directoryOpen by rememberSaveable { mutableStateOf(false) }
+    var lastBroadcastTab by rememberSaveable { mutableStateOf(AnimeDiscoveryTab.CALENDAR.name) }
     var consumedNavigationRequest by rememberSaveable { mutableIntStateOf(0) }
     val page = if (tab == 1) AnimeWorkspacePage.LIBRARY else
         AnimeWorkspacePage.entries.firstOrNull { it.discovery == state.discoveryTab } ?: AnimeWorkspacePage.HOME
@@ -154,8 +158,7 @@ private fun AnimeWorkspaceContent(
         tab == 1 -> if (libraryViewState.filter == 2) AnimeWorkspaceDestination.HISTORY else AnimeWorkspaceDestination.LIBRARY
         else -> when (page) {
             AnimeWorkspacePage.HOME -> AnimeWorkspaceDestination.HOME
-            AnimeWorkspacePage.SEASON -> AnimeWorkspaceDestination.SEASON
-            AnimeWorkspacePage.CALENDAR -> AnimeWorkspaceDestination.CALENDAR
+            AnimeWorkspacePage.SEASON, AnimeWorkspacePage.CALENDAR -> AnimeWorkspaceDestination.CALENDAR
             AnimeWorkspacePage.RANKING -> AnimeWorkspaceDestination.RANKING
             AnimeWorkspacePage.LIBRARY -> AnimeWorkspaceDestination.LIBRARY
         }
@@ -229,7 +232,6 @@ private fun AnimeWorkspaceContent(
         sourceManagerVisible -> AnimeWorkspaceDestination.SOURCES
         downloadsVisible -> AnimeWorkspaceDestination.DOWNLOADS
         trackingVisible -> AnimeWorkspaceDestination.TRACKING
-        searchExpanded && tagSearch -> AnimeWorkspaceDestination.GENRES
         else -> baseDestination
     }
     val currentDestinationChange by rememberUpdatedState(onDestinationChange)
@@ -294,7 +296,9 @@ private fun AnimeWorkspaceContent(
         }
     }
     LaunchedEffect(state.discoveryTab) {
-        if (state.discoveryTab == AnimeDiscoveryTab.SOURCES || state.discoveryTab == AnimeDiscoveryTab.GENRES)
+        val selected = state.discoveryTab
+        if (selected.isBroadcastTab()) lastBroadcastTab = selected.name
+        else if (selected == AnimeDiscoveryTab.SOURCES || selected == AnimeDiscoveryTab.GENRES)
             controller.selectDiscoveryTab(AnimeDiscoveryTab.HOME)
     }
     LaunchedEffect(searchRequest, active) {
@@ -365,6 +369,17 @@ private fun AnimeWorkspaceContent(
         if (current.subject.id == subject.id) return
         detailHistory += AnimeDetailVisit(current, latest.relatedSubjects, latest.groupSourceCandidates, latest.detailScores)
         open(subject)
+    }
+    fun openSourceRelated(request: AnimeRelatedSourceRequest, title: AnimeSourceTitle) {
+        if (!active || !controller.canOpenDetailSourceRelated(request, title)) return
+        val latest = controller.state.value
+        val current = latest.detail?.takeIf { it.subject.id == request.subjectId } ?: return
+        detailHistory += AnimeDetailVisit(current, latest.relatedSubjects, latest.groupSourceCandidates, latest.detailScores)
+        pendingAssociation = null
+        browseCandidate = null
+        beginDetailNavigation()
+        openingSubject = controller.sourceSubject(title)
+        controller.openSourceTitle(title)
     }
     fun returnFromDetail() {
         pendingAssociation = null
@@ -536,9 +551,20 @@ private fun AnimeWorkspaceContent(
     }
     fun selectDiscovery(destination: AnimeDiscoveryTab) {
         if (destination == AnimeDiscoveryTab.GENRES) { openTagSearch(); return }
+        val current = controller.state.value.discoveryTab
+        if (destination.isBroadcastTab()) lastBroadcastTab = destination.name
+        else if (current.isBroadcastTab()) lastBroadcastTab = current.name
         directoryOpen = false
         tab = 0
         controller.selectDiscoveryTab(destination)
+    }
+    fun selectBroadcast() {
+        val current = controller.state.value.discoveryTab
+        val selected = current.takeIf { it.isBroadcastTab() } ?: when (lastBroadcastTab) {
+            AnimeDiscoveryTab.SEASON.name -> AnimeDiscoveryTab.SEASON
+            else -> AnimeDiscoveryTab.CALENDAR
+        }
+        selectDiscovery(selected)
     }
     fun selectLibrary(history: Boolean = false) {
         directoryOpen = false
@@ -565,10 +591,7 @@ private fun AnimeWorkspaceContent(
             playing -> closePlayback()
             route.depth == 1 -> returnFromDetail()
             directoryOpen -> returnFromDirectory()
-            baseDestination != AnimeWorkspaceDestination.HOME -> {
-                tab = 0
-                controller.selectDiscoveryTab(AnimeDiscoveryTab.HOME)
-            }
+            baseDestination != AnimeWorkspaceDestination.HOME -> selectDiscovery(AnimeDiscoveryTab.HOME)
         }
     }
 
@@ -613,16 +636,10 @@ private fun AnimeWorkspaceContent(
                 tab = 1
                 libraryViewState.filter = if (requestedDestination == AnimeWorkspaceDestination.HISTORY) 2 else 1
             }
-            else -> {
-                directoryOpen = false
-                tab = 0
-                controller.selectDiscoveryTab(when (requestedDestination) {
-                    AnimeWorkspaceDestination.SEASON -> AnimeDiscoveryTab.SEASON
-                    AnimeWorkspaceDestination.CALENDAR -> AnimeDiscoveryTab.CALENDAR
-                    AnimeWorkspaceDestination.RANKING -> AnimeDiscoveryTab.RANKING
-                    else -> AnimeDiscoveryTab.HOME
-                })
-            }
+            AnimeWorkspaceDestination.HOME -> selectDiscovery(AnimeDiscoveryTab.HOME)
+            AnimeWorkspaceDestination.CALENDAR -> selectBroadcast()
+            AnimeWorkspaceDestination.SEASON -> selectDiscovery(AnimeDiscoveryTab.SEASON)
+            AnimeWorkspaceDestination.RANKING -> selectDiscovery(AnimeDiscoveryTab.RANKING)
         }
     }
 
@@ -674,32 +691,30 @@ private fun AnimeWorkspaceContent(
                     var heroCollapsed by remember(shown.key) { mutableStateOf(false) }
                     AnimeHeaderViewport(header = {
                         BoxWithConstraints(Modifier.fillMaxWidth()) {
-                            val workspaceTabs = shown.depth == 0 && !directoryOpen
+                            val fromBroadcast = baseDestination == AnimeWorkspaceDestination.CALENDAR
+                            val rankingPage = shown.depth == 0 && baseDestination == AnimeWorkspaceDestination.RANKING
+                            val workspaceTabs = shown.depth == 0 &&
+                                (baseDestination == AnimeWorkspaceDestination.HOME || fromBroadcast)
                             val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                             val actionsWidth = 88.dp // Recent watching and the overlaid search trigger.
                             val headerRoom = maxWidth - 16.dp - actionsWidth - if (navigationVisible) 56.dp else 6.dp
-                            val tabsWidth = headerRoom.coerceIn(150.dp * fontScale, 240.dp * fontScale)
+                            val tabsWidth = headerRoom.coerceIn(112.dp * fontScale, 184.dp * fontScale)
                             val stackDesktopTabs = workspaceTabs && !navigationVisible && headerRoom < tabsWidth
                             val controlsAlpha = {
                                 if (searchExpanded) 0f else 1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f)
                             }
                             val returnLabel = when {
                                 shown.depth == 0 && directoryDetailOpen -> "返回片源目录"
+                                rankingPage -> "返回发现"
                                 shown.relatedDepth > 0 -> "返回上一部番剧"
                                 returnToSearch -> "返回搜索结果"
                                 else -> "返回${baseDestination.label}"
                             }
-                            val selectedTab = when (page) {
-                                AnimeWorkspacePage.SEASON, AnimeWorkspacePage.CALENDAR -> 1
-                                AnimeWorkspacePage.LIBRARY -> 2
-                                else -> 0
-                            }
                             val primaryTabs: @Composable () -> Unit = {
-                                MotionTabs(selectedTab, listOf("发现", "更新", "追番"),
+                                MotionTabs(if (fromBroadcast) 1 else 0, listOf("发现", "放送"),
                                     onSelect = { if (rootActive) when (it) {
                                         0 -> selectDiscovery(AnimeDiscoveryTab.HOME)
-                                        1 -> selectDiscovery(AnimeDiscoveryTab.CALENDAR)
-                                        2 -> selectLibrary()
+                                        1 -> selectBroadcast()
                                         else -> Unit
                                     } },
                                     modifier = Modifier.motionInputGate(rootActive),
@@ -709,7 +724,7 @@ private fun AnimeWorkspaceContent(
                                     controlHeight = 44.dp)
                             }
                             Column {
-                                AnimeWorkspaceHeader(root = shown.depth == 0 && !directoryDetailOpen,
+                                AnimeWorkspaceHeader(root = shown.depth == 0 && !directoryDetailOpen && !rankingPage,
                                     title = if (shown.depth == 0) (if (directoryDetailOpen) sourceBrowseState.selectedTitle?.title.orEmpty()
                                         else "番剧 · ${baseDestination.label}") else
                                         shownDetail?.subject?.title ?: openingSubject?.title ?: "番剧详情",
@@ -718,11 +733,14 @@ private fun AnimeWorkspaceContent(
                                     showTitle = shownDetail == null || heroCollapsed,
                                     tabsWidth = tabsWidth, actionsWidth = actionsWidth, controlsAlpha = controlsAlpha,
                                     navigation = {
-                                        if (shown.depth == 0 && !directoryDetailOpen) navigation()
+                                        if (shown.depth == 0 && !directoryDetailOpen && !rankingPage) navigation()
                                         else MotionIconButton(onClick = {
-                                            if (shown.depth == 0) returnFromDirectory()
-                                            else returnFromDetail()
-                                        },
+                                            when {
+                                                rankingPage -> if (rootActive) selectDiscovery(AnimeDiscoveryTab.HOME)
+                                                shown.depth == 0 -> returnFromDirectory()
+                                                else -> returnFromDetail()
+                                            }
+                                        }, enabled = !rankingPage || rootActive,
                                             modifier = Modifier.size(44.dp), tooltip = returnLabel) {
                                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, returnLabel, Modifier.size(20.dp))
                                         }
@@ -760,6 +778,8 @@ private fun AnimeWorkspaceContent(
                                         onOpenItem = ::openDiscoveryItem,
                                         onManage = ::showWorkActions, active = paneActive,
                                         onResume = ::resume, onOpenHistory = { if (paneActive) selectLibrary(history = true) },
+                                        onOpenSchedule = { if (paneActive) selectDiscovery(AnimeDiscoveryTab.CALENDAR) },
+                                        onOpenRanking = { if (paneActive) selectDiscovery(AnimeDiscoveryTab.RANKING) },
                                         contentTopPadding = headerInset,
                                         contentBottomPadding = 32.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding())
                                     AnimeWorkspacePane.DIRECTORY -> Box(Modifier.fillMaxSize()
@@ -786,7 +806,8 @@ private fun AnimeWorkspaceContent(
                                         remember(shownDetail.subject.id) {
                                             detailScrolls.getOrPut(shownDetail.subject.id) { LazyListState() }
                                         },
-                                        onPlay = { requestPlayback(it, null) }, onOpenRelated = ::openRelated, onSources = ::showSources,
+                                        onPlay = { requestPlayback(it, null) }, onOpenRelated = ::openRelated,
+                                        onOpenSourceRelated = ::openSourceRelated, onSources = ::showSources,
                                         onTracking = { trackingVisible = true }, modifier = Modifier.fillMaxSize(),
                                         onHeroCollapsed = { heroCollapsed = it }, contentTopPadding = headerInset,
                                         active = active && shown.key == route.key && !overlayVisible && !searchPresent)
