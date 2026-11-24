@@ -65,6 +65,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.storage.ReadingActivity
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -120,11 +122,13 @@ internal fun ReadingStatsSheet(
                 .thenByDescending { it.lastReadAt })
     }
     val colors = MaterialTheme.colorScheme
+    val desktop = platformKind == PlatformKind.DESKTOP
 
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = colors.background) { dismiss ->
         Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Text("阅读统计", color = colors.onSurface, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+            Text("阅读统计",
+                color = colors.onSurface, fontSize = 15.sp, fontWeight = FontWeight.Medium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Outlined.Close, "关闭阅读统计", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
@@ -164,6 +168,7 @@ internal fun ReadingStatsSheet(
                     verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.Schedule, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
                     Text(when {
+                        activity.isEmpty() && desktop -> "当前分区暂无阅读时长记录。阅读后会自动更新。"
                         activity.isEmpty() -> "从下一次阅读开始记录"
                         period == ReadingPeriod.ALL -> "暂无阅读时长"
                         else -> "${period.label}暂无阅读记录"

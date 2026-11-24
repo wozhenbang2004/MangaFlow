@@ -44,7 +44,10 @@ import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 
-internal enum class GlassSurfaceRole { CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, SELECTION, READING_DOCK, POPOVER, DRAWER, GALLERY, DETAIL_HERO }
+internal enum class GlassSurfaceRole {
+    CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, SELECTION, READING_DOCK, POPOVER, DRAWER, GALLERY, DETAIL_HERO,
+    VIDEO_DOCK,
+}
 
 // The short side grows as a compact rail expands into a search field or a two-row dock.
 private val toolbarBlur = OpticalSizeValue.Responsive(
@@ -87,7 +90,7 @@ internal fun LiquidGlassSurface(
     val shape = remember(cornerRadius, surfaceShape) { surfaceShape ?: RoundedCornerShape(cornerRadius) }
     val liquid = role != GlassSurfaceRole.PANEL && role != GlassSurfaceRole.POPOVER && role != GlassSurfaceRole.DRAWER
     val clear = role == GlassSurfaceRole.CONTROL || role == GlassSurfaceRole.ARTWORK ||
-        role == GlassSurfaceRole.THUMB || role == GlassSurfaceRole.SELECTION
+        role == GlassSurfaceRole.THUMB || role == GlassSurfaceRole.SELECTION || role == GlassSurfaceRole.VIDEO_DOCK
     val motion = LocalMotionEnabled.current
     val accessibility = LocalGlassAccessibilitySettings.current
     // Declaring hover/press installs Haze's non-consuming, node-local pointer observer.
@@ -97,7 +100,8 @@ internal fun LiquidGlassSurface(
     // Popups/dialogs, artwork-specific samples and nested glass controls need the
     // explicitly selected source. A window backdrop cannot cross a window boundary.
     val input = remember(state, role, preferSource) {
-        val sources = HazeInput.Sources(state, retention = if (preferSource || role == GlassSurfaceRole.DRAWER)
+        val sources = HazeInput.Sources(state, retention = if (preferSource || role == GlassSurfaceRole.DRAWER ||
+            role == GlassSurfaceRole.VIDEO_DOCK)
             HazeSourceRetention.ClearWhenUnavailable else HazeSourceRetention.KeepLastFrame)
         if (!preferSource && (role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.READING_DOCK))
             HazeInput.Backdrop(sources)
@@ -175,9 +179,27 @@ internal fun LiquidGlassSurface(
                         chromaticAberrationStrength(0f)
                         contentNormalBlend(.025f)
                     }
+                    GlassSurfaceRole.VIDEO_DOCK -> {
+                        // Brighten the sampled video without covering it with a white plate.
+                        // The pale backing is visible if the capture cannot supply opaque pixels.
+                        backgroundColor(tintColor.copy(alpha = .60f))
+                        tint(tintColor.copy(alpha = .20f))
+                        whitePoint(.47f)
+                        contrast(0f)
+                        optics { copy(refractionStrength = .76f, refractionDisplacement = 11.dp,
+                            refractionProfile = RefractionProfile.Edge(8.dp), refractionHeightFraction = .24f,
+                            depth = OpticalSizeValue.Fixed(.46f), blurRadius = OpticalSizeValue.Fixed(3.5.dp),
+                            refractionDetailIntensity = 0f) }
+                        specularIntensity(.66f)
+                        ambientResponse(.14f)
+                        edgeShadow(Color.Black.copy(alpha = .12f))
+                        chromaticAberrationStrength(0f)
+                        contentNormalBlend(.05f)
+                    }
                     else -> Unit
                 }
-                if (role != GlassSurfaceRole.GALLERY) chromaMultiplier(1.05f)
+                if (role == GlassSurfaceRole.VIDEO_DOCK) chromaMultiplier(.98f)
+                else if (role != GlassSurfaceRole.GALLERY) chromaMultiplier(1.05f)
                 if (role == GlassSurfaceRole.ARTWORK) {
                     // Keep the cover visible through a shallow Clear lens, rather than
                     // whitening the action into another opaque button over the artwork.

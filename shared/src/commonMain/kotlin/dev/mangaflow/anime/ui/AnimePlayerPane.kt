@@ -84,12 +84,14 @@ private data class AnimePlaybackChrome(
     val playbackSuppressed: Boolean, val firstFrameRendered: Boolean?, val hasVideoTracks: Boolean?,
     val inPictureInPicture: Boolean, val error: String?, val notice: String?, val recoveryAttempt: Int,
     val hasTimeline: Boolean, val hourTimeline: Boolean,
+    val canSourceVideoGlass: Boolean,
 ) {
     constructor(playback: AnimePlayerState) : this(
         playback.sessionGeneration, playback.timelineGeneration, playback.assetKey, playback.episodeId,
         playback.phase, playback.playWhenReady, playback.isBuffering, playback.playbackSuppressed,
         playback.firstFrameRendered, playback.hasVideoTracks, playback.inPictureInPicture, playback.error,
         playback.notice, playback.recoveryAttempt, playback.durationMs > 0L, playback.durationMs >= 3_600_000L,
+        playback.canSourceVideoGlass,
     )
 
     val ended: Boolean get() = phase == AnimePlayerPhase.ENDED
@@ -233,6 +235,22 @@ internal fun AnimePlayerPane(
     val glassAccessibility = LocalGlassAccessibilitySettings.current
     val artwork = posterLayer?.takeIf { active && posterLoaded.value &&
         !glassAccessibility.reduceTransparency && !glassAccessibility.increaseContrast }
+    val windowsDockRenderer = LocalWindowsVideoDock.current
+    val useWindowsVideoDock = windowsDockRenderer != null
+    // Desktop has no firstFrameRendered acknowledgement. Use its current libmpv decoder
+    // observations to admit the live Canvas, not a CPU snapshot or a synthetic frame.
+    val videoDockSource = if (windowsDockRenderer == true && active && !obscured && !locked && !panelPresent &&
+        chromeReveal > 0f && !showStage && showingCurrentPlayback && canControl && playback.canSourceVideoGlass &&
+        playback.assetKey != null && playback.episodeId != null &&
+        !glassAccessibility.reduceTransparency && !glassAccessibility.increaseContrast) {
+        key(player, playback.sessionGeneration, playback.timelineGeneration, playback.assetKey, playback.episodeId) {
+            val haze = rememberHazeState()
+            remember(haze) {
+                AnimeVideoGlassSource(haze, player, playback.sessionGeneration, playback.timelineGeneration,
+                    playback.assetKey, playback.episodeId)
+            }
+        }
+    } else null
     fun interact() { controlsVisible = true; interactionEpoch++ }
     fun showSources() { interact(); onSources(episode) }
     fun showSettings() {
@@ -446,7 +464,9 @@ internal fun AnimePlayerPane(
                         },
                     )
                 }, contentAlignment = Alignment.Center) {
-                AnimePlayerSurface(player, Modifier.fillMaxSize())
+                CompositionLocalProvider(LocalAnimeVideoGlassSource provides videoDockSource) {
+                    AnimePlayerSurface(player, Modifier.fillMaxSize())
+                }
                 if (desktop && hoverEnabled && canControl && playback.hasTimeline && !showStage &&
                     target == null && !state.resolving && state.pendingPlayback == null) {
                     // A backmost hit target, not a parent of the buttons, timeline or panels.
@@ -658,7 +678,15 @@ internal fun AnimePlayerPane(
                     .then(if (fillVideo) Modifier.windowInsetsPadding(
                         safeInsets.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)) else Modifier)
                     .padding(horizontal = 8.dp, vertical = 4.dp), contentAlignment = Alignment.BottomCenter) {
-                    MaterialTheme(colorScheme = videoColors) {
+                    val dockColors = remember(useWindowsVideoDock, videoColors) {
+                        if (useWindowsVideoDock) videoColors.copy(surface = WindowsVideoDockSurface,
+                            onSurface = WindowsVideoDockInk, onSurfaceVariant = WindowsVideoDockInk,
+                            primary = WindowsVideoDockInk, onPrimary = WindowsVideoDockSurface,
+                            outline = WindowsVideoDockInk.copy(alpha = .36f),
+                            inverseSurface = WindowsVideoDockInk, inverseOnSurface = WindowsVideoDockSurface)
+                        else videoColors
+                    }
+                    MaterialTheme(colorScheme = dockColors) {
                         val hasTimeline = canControl && playback.hasTimeline
                         val hasNotice = state.notice != null || playback.notice != null
                         val canOpenLines = episode != null && !inlineWatching && (!showStage || compactStage)
@@ -668,8 +696,9 @@ internal fun AnimePlayerPane(
                             canControl -> 340.dp
                             else -> 18.dp + 44.dp * (1 + (if (canOpenLines) 1 else 0) + (if (canOpenWatching) 1 else 0))
                         }
-                        AnimePlaybackSurface(artwork, Modifier.widthIn(max = dockWidth).fillMaxWidth()
-                            .desktopChromeHitPath(desktop), cornerRadius = 23.dp) {
+                        AnimePlaybackSurface(if (useWindowsVideoDock) videoDockSource?.haze else artwork,
+                            Modifier.widthIn(max = dockWidth).fillMaxWidth().desktopChromeHitPath(desktop),
+                            cornerRadius = 23.dp, windowsVideoDock = useWindowsVideoDock) {
                             AnimePlayerControls(player, playback, observations,
                                 previous, next, onEpisode, onToggle = ::toggle,
                                 onInteraction = ::interact, onHoldControls = { controlsHeld = it },

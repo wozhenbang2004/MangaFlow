@@ -50,6 +50,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
+import org.jetbrains.skiko.GraphicsApi
 import org.jetbrains.skiko.SkiaLayer
 import org.jetbrains.skiko.SkikoRenderDelegate
 import org.jetbrains.skiko.SkikoProperties
@@ -282,12 +283,13 @@ internal class DesktopPerformance(private val context: PlatformContext) {
         }
     }
 
-    fun attach(target: ComposeWindow): () -> Unit {
+    fun attach(target: ComposeWindow, onRenderApi: (GraphicsApi) -> Unit): () -> Unit {
         check(EventQueue.isDispatchThread())
         window = target
         var layer: SkiaLayer? = null
         var original: SkikoRenderDelegate? = null
         var wrapper: SkikoRenderDelegate? = null
+        var reportRenderer: ((GraphicsApi) -> Unit)? = onRenderApi
         var attempts = 0
         fun installHook() {
             if (disposed.get() || layer != null) return
@@ -306,6 +308,14 @@ internal class DesktopPerformance(private val context: PlatformContext) {
             }
             original = delegate; wrapper = observer; layer = candidate
             candidate.renderDelegate = observer
+            reportRenderer?.invoke(candidate.renderApi)
+            // Reuse the already discovered window layer. A live GPU fallback is an event,
+            // not something the video material should poll on every frame.
+            candidate.onStateChanged(SkiaLayer.PropertyKind.Renderer) { changed ->
+                EventQueue.invokeLater {
+                    if (layer === changed) reportRenderer?.invoke(changed.renderApi)
+                }
+            }
             hookInstalled = true
         }
         // Initial composition can precede the layer's attachment. A bounded startup
@@ -348,6 +358,8 @@ internal class DesktopPerformance(private val context: PlatformContext) {
             target.removePropertyChangeListener("graphicsConfiguration", monitor)
             target.removeComponentListener(visibility)
             layer?.let { if (it.renderDelegate === wrapper) it.renderDelegate = original }
+            reportRenderer = null
+            layer = null
             hookInstalled = false
             window = null
         }

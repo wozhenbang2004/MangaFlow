@@ -9,6 +9,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -22,6 +23,17 @@ import dev.mangaflow.enhancement.ui.EnhancementPanelHost
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.MangaDarkColorScheme
+
+/** Null outside the real Windows player window; false selects a readable non-optical material. */
+internal val LocalWindowsVideoDock = compositionLocalOf<Boolean?> { null }
+
+@Composable
+fun ProvideWindowsVideoDock(supportsLiveInput: Boolean, content: @Composable () -> Unit) {
+    CompositionLocalProvider(LocalWindowsVideoDock provides supportsLiveInput, content = content)
+}
+
+internal val WindowsVideoDockSurface = Color(0xFFEFF2F4)
+internal val WindowsVideoDockInk = Color(0xFF151A20)
 
 @Composable
 internal fun AnimePlaybackPanel(
@@ -41,7 +53,7 @@ internal fun AnimePlaybackPanel(
         }, content = content)
 }
 
-/** Only a visible Compose image is eligible for optics. Native video and subtitles stay in their own surfaces. */
+/** A material can only sample a separately supplied Compose source, never an assumed native backdrop. */
 @Composable
 internal fun AnimePlaybackSurface(
     artwork: HazeState?,
@@ -49,20 +61,31 @@ internal fun AnimePlaybackSurface(
     overVideo: Boolean = true,
     panel: Boolean = false,
     cornerRadius: Dp = 26.dp,
+    windowsVideoDock: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val accessibility = LocalGlassAccessibilitySettings.current
-    val base = if (overVideo) Color(0xFF14171D) else colors.surface
-    val ink = if (overVideo) Color(0xFFFAFAFC) else colors.onSurface
+    val base = if (windowsVideoDock) WindowsVideoDockSurface else if (overVideo) Color(0xFF14171D) else colors.surface
+    val ink = if (windowsVideoDock) WindowsVideoDockInk else if (overVideo) Color(0xFFFAFAFC) else colors.onSurface
     val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
     CompositionLocalProvider(LocalContentColor provides ink) {
         Box(modifier.clip(shape), propagateMinConstraints = true) {
             if (artwork != null && !accessibility.reduceTransparency && !accessibility.increaseContrast) {
                 LiquidGlassSurface(artwork, Modifier.matchParentSize(),
-                    role = if (panel) GlassSurfaceRole.PANEL else GlassSurfaceRole.READING_DOCK,
+                    role = when {
+                        windowsVideoDock -> GlassSurfaceRole.VIDEO_DOCK
+                        panel -> GlassSurfaceRole.PANEL
+                        else -> GlassSurfaceRole.READING_DOCK
+                    },
                     cornerRadius = cornerRadius, elevation = 0.dp, surfaceColor = base, contentColor = ink,
                     preferSource = true, softCard = false) { }
+            } else if (windowsVideoDock) {
+                // No frame is captured here. Keep dark controls legible over even the darkest video.
+                val opaque = accessibility.reduceTransparency || accessibility.increaseContrast
+                Box(Modifier.matchParentSize().background(base.copy(alpha = if (opaque) 1f else .60f))
+                    .then(if (accessibility.showBorders || accessibility.increaseContrast)
+                        Modifier.border(1.dp, ink.copy(alpha = .55f), shape) else Modifier))
             } else {
                 val light = base.luminance() > .5f
                 val rim = remember(light, accessibility.increaseContrast) {

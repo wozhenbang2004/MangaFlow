@@ -402,7 +402,7 @@ fun LibraryScreen(
         onOpen = { showCollections = false; onOpenPageCollection(it) },
         onRemove = { libraryStore.removePageCollection(it.key) },
         onDismiss = { showCollections = false })
-    if (showStats) {
+    if (showStats && (!desktop || libraryReady)) {
         val readingActivity by libraryStore.readingActivity.collectAsStateWithLifecycle()
         val scopedActivity = remember(readingActivity, includedSourceIds, excludedSourceIds) {
             readingActivity.filter { sourceIncluded(it.manga.sourceId) }
@@ -805,9 +805,17 @@ fun LibraryScreen(
         }
         if (desktop) {
             val stackedTools = maxWidth < 680.dp * density.fontScale.coerceAtLeast(1f)
+            val readingStatsAction: @Composable () -> Unit = {
+                MotionIconButton(onClick = { showStats = true }, enabled = active && libraryReady,
+                    modifier = Modifier.size(36.dp), tooltip = "阅读统计") {
+                    Icon(Icons.Outlined.BarChart, "阅读统计", Modifier.size(19.dp))
+                }
+            }
             DesktopManagementToolbar(if (showHistory) historyTitle else shelfTitle, Modifier.align(Alignment.TopCenter)
                 .onSizeChanged { headerHeightPx = it.height },
                 navigation = navigation, minimumToolsWidth = 680.dp) {
+                // Keep time statistics in view before the shelf tabs fill the narrow tool row.
+                if (stackedTools) readingStatsAction()
                 if (showHistory) MotionIconButton(onClick = { showHistory = false },
                     modifier = Modifier.size(36.dp), tooltip = "返回书架") {
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回书架", Modifier.size(19.dp))
@@ -830,9 +838,7 @@ fun LibraryScreen(
                 MotionIconButton(onClick = { showCollections = true }, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Outlined.Collections, "画面收藏", Modifier.size(19.dp))
                 }
-                MotionIconButton(onClick = { showStats = true }, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Outlined.BarChart, "阅读统计", Modifier.size(19.dp))
-                }
+                if (!stackedTools) readingStatsAction()
             }
         } else Column(Modifier.align(Alignment.TopCenter).onSizeChanged { headerHeightPx = it.height }
             .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))

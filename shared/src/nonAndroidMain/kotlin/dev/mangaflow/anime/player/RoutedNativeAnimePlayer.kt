@@ -14,6 +14,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import dev.chrisbanes.haze.hazeSource
 import dev.mangaflow.anime.AnimePlaybackAsset
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.wallTimeMillis
@@ -669,11 +670,17 @@ internal fun NativeAnimeSurface(player: AnimePlayer, modifier: Modifier) {
     val preparing by native.startupSurface.collectAsState()
     val current = engine
     val standby = preparing
+    val glassSource = LocalAnimeVideoGlassSource.current?.takeIf {
+        current != null && native.engine.value === current && it.matches(player, player.state.value)
+    }?.haze
     Box(modifier.background(Color.Black)) {
         listOfNotNull(standby, current).distinct().forEach { backend ->
             key(backend) {
-                MediampPlayerSurface(backend, if (backend === current) Modifier.matchParentSize().zIndex(1f)
-                    else Modifier.size(2.dp).alpha(0f))
+                MediampPlayerSurface(backend, if (backend === current) {
+                    // The visible mpv frame is already drawn into Compose by Mediamp.
+                    Modifier.matchParentSize().zIndex(1f)
+                        .then(if (glassSource != null) Modifier.hazeSource(glassSource) else Modifier)
+                } else Modifier.size(2.dp).alpha(0f))
             }
         }
     }

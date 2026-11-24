@@ -4,6 +4,7 @@ import androidx.compose.runtime.*
 import kotlinx.coroutines.*
 import dev.mangaflow.MangaViewModel
 import dev.mangaflow.desktop.relay.registerWindowsRelayCompanion
+import dev.mangaflow.anime.ui.ProvideWindowsVideoDock
 import dev.mangaflow.platform.storage.flushLocalPreferences
 import dev.mangaflow.platform.storage.getSharedPreferences
 import dev.mangaflow.platform.storage.Preferences
@@ -30,6 +31,7 @@ import dev.mangaflow.update.DesktopUpdateExit
 import dev.mangaflow.reader.ProvideDesktopReaderKeyboard
 import dev.mangaflow.ui.MangaFlowTheme
 import androidx.compose.material3.MaterialTheme
+import org.jetbrains.skiko.GraphicsApi
 import java.io.File
 import java.awt.GraphicsEnvironment
 import java.awt.Rectangle
@@ -134,6 +136,7 @@ fun main() {
                     }
                 },
                 icon = painterResource("mangaflow.png")) {
+                var supportsLiveVideo by remember(window) { mutableStateOf(false) }
                 DisposableEffect(window) {
                     fullscreen.window = window
                     window.minimumSize = java.awt.Dimension(320, 320)
@@ -141,7 +144,9 @@ fun main() {
                         window.graphicsConfiguration?.device?.displayMode?.refreshRate
                             ?.takeIf { window.isShowing && it in 20..480 }?.toDouble()
                     }
-                    val detachPerformance = performance.attach(window)
+                    val detachPerformance = performance.attach(window) { api ->
+                        supportsLiveVideo = api == GraphicsApi.DIRECT3D
+                    }
                     onDispose {
                         fullscreen.window = null
                         detachPerformance()
@@ -156,7 +161,9 @@ fun main() {
                         DesktopWindowChrome(window, MaterialTheme.colorScheme.background,
                             MaterialTheme.colorScheme.onBackground, fullscreen.active, fullscreen.animePlaybackVisible)
                         ProvideDesktopReaderKeyboard(context) {
-                            MangaFlowHost(context, onModelReady = { model = it; lastModel = it })
+                            ProvideWindowsVideoDock(supportsLiveVideo) {
+                                MangaFlowHost(context, onModelReady = { model = it; lastModel = it })
+                            }
                         }
                         DesktopPerformanceSurface(performance)
                     }

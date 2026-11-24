@@ -458,6 +458,16 @@ fun SettingsScreen(
                 }
                 RetainedSettingsCategory(!desktop || settingsCategory == 2) {
                 SettingsSection("数据", sourceBackdrop) {
+                    val lanReadingSyncEntry: @Composable () -> Unit = {
+                        onOpenLanReadingSync?.let { open ->
+                            SettingsLinkRow("局域网阅读同步", when {
+                                lanReadingConflictCount <= 0 -> "发现并配对设备 · 收藏、页码与书签"
+                                desktop -> "$lanReadingConflictCount 处阅读差异待确认"
+                                else -> "查看双方版本，选择继续阅读的位置"
+                            }, Icons.Outlined.CloudSync, onClick = open)
+                        }
+                    }
+                    if (desktop) lanReadingSyncEntry()
                     sourceRegistry?.let { registry ->
                         val sources by registry.entries.collectAsStateWithLifecycle()
                         val added = sources.count { !it.removed }
@@ -475,16 +485,13 @@ fun SettingsScreen(
                     }
                     SettingsDisclosure("备份与同步", when {
                         backupBusy != null -> "正在处理…"
-                        lanReadingConflictCount > 0 -> "$lanReadingConflictCount 处阅读差异待确认"
+                        !desktop && lanReadingConflictCount > 0 -> "$lanReadingConflictCount 处阅读差异待确认"
+                        desktop -> "漫画账号 · 阅读备份"
                         else -> "设备 · 漫画账号 · 阅读备份"
                     },
                         Icons.Outlined.CloudSync, expandedSetting == "backup", { toggleSetting("backup") }) {
                         Column {
-                            onOpenLanReadingSync?.let { open ->
-                                SettingsLinkRow("局域网阅读同步", if (lanReadingConflictCount > 0)
-                                    "查看双方版本，选择继续阅读的位置" else "发现并配对设备 · 收藏、页码与书签",
-                                    Icons.Outlined.CloudSync, onClick = open)
-                            }
+                            if (!desktop) lanReadingSyncEntry()
                             onOpenMangaTracking?.let { open ->
                                 SettingsLinkRow("漫画账号同步", "Bangumi · AniList", Icons.Outlined.CloudSync, onClick = open)
                             }
