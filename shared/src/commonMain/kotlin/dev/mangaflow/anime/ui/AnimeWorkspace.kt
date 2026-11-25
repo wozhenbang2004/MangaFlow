@@ -52,6 +52,11 @@ private data class AnimeRoute(
 private data class AnimeDetailVisit(
     val detail: AnimeDetail, val related: List<AnimeSubject>,
     val candidates: List<AnimeSourceTitle>, val scores: List<AnimeSourceScore>,
+    val tagQuery: AnimeDiscoveryQuery? = null,
+)
+private data class AnimeDetailSearchOrigin(
+    val subjectId: String, val query: String, val tagMode: Boolean, val tagDraft: String,
+    val choosingTags: Boolean, val candidate: AnimeSourceTitle?, val tagQuery: AnimeDiscoveryQuery?,
 )
 private data class AnimeSourceAssociation(val title: AnimeSourceTitle, val subjectId: String)
 private data class AnimeSearchOpening(val group: AnimeSearchGroup, val version: AnimeSourceTitle?)
@@ -190,6 +195,8 @@ private fun AnimeWorkspaceContent(
     var storageModelsVisible by remember { mutableStateOf(false) }
     var storageDestination by remember { mutableStateOf<String?>(null) }
     var browseCandidate by remember { mutableStateOf<AnimeSourceTitle?>(null) }
+    var detailSearchOrigin by remember(controller) { mutableStateOf<AnimeDetailSearchOrigin?>(null) }
+    var pendingSearchRestore by remember(controller) { mutableStateOf<AnimeDetailSearchOrigin?>(null) }
     val tagSearch = tagSearchMode && browseCandidate == null
     val choosingTags = tagChoicesOpen || tagDraft.isNotBlank()
     var searchVersionChoice by remember { mutableStateOf<AnimeSearchGroup?>(null) }
@@ -240,6 +247,9 @@ private fun AnimeWorkspaceContent(
             AnimeRoute("detail:" + (state.detail?.subject?.id ?: openingSubject?.id.orEmpty()), 1, state, detailHistory.size)
         else -> AnimeRoute("home", 0)
     }
+    val searchingDetail = route.depth == 1 && detailSearchOrigin?.subjectId == state.detail?.subject?.id &&
+        detailSearchOrigin != null
+    val searchRouteActive = route.depth == 0 || searchingDetail
     val overlayVisible = downloadsVisible || sourcesVisible || sourceManagerVisible || trackingVisible || reviewsVisible ||
         storagePresent || storageModelsVisible || ratingUi.obscured || recentWatchingOpen || actionSubject != null ||
         searchVersionChoice != null || searchProgressVisible
@@ -283,7 +293,7 @@ private fun AnimeWorkspaceContent(
         onDispose { if (playing) reportWindowPlayback?.invoke(false) }
     }
     val discoveryVisible = rootActive && !searchExpanded && pane == AnimeWorkspacePane.DISCOVERY
-    val tagResultsVisible = active && route.depth == 0 && searchExpanded && tagSearch && !choosingTags &&
+    val tagResultsVisible = active && searchRouteActive && searchExpanded && tagSearch && !choosingTags &&
         !overlayVisible
     DisposableEffect(controller, discoveryVisible, tagResultsVisible) {
         if (discoveryVisible || tagResultsVisible) controller.setDiscoveryVisible(discoveryVisible, showTags = tagResultsVisible)
@@ -300,6 +310,8 @@ private fun AnimeWorkspaceContent(
             tab = 0
             directoryOpen = false
             searchExpanded = false
+            detailSearchOrigin = null
+            pendingSearchRestore = null
             returnToSearch = false
             detailHistory.clear()
             sourcesVisible = false
@@ -338,6 +350,8 @@ private fun AnimeWorkspaceContent(
             trackingVisible = false
             reviewsVisible = false
             directoryOpen = false
+            detailSearchOrigin = null
+            pendingSearchRestore = null
             returnToSearch = false
             detailHistory.clear()
             tagSearchMode = false
@@ -372,9 +386,59 @@ private fun AnimeWorkspaceContent(
         focusSearchInput = false
         searchExpanded = true
     }
+    fun closeSearch() {
+        searchExpanded = false
+        focusSearchInput = false
+        val origin = detailSearchOrigin
+        if (origin != null) {
+            pendingSearchRestore = origin
+            detailSearchOrigin = null
+        } else browseCandidate = null
+    }
+    // Keep the tag results intact through the shell's exit, then restore the outer search.
+    LaunchedEffect(searchPresent, searchExpanded, pendingSearchRestore) {
+        val previous = pendingSearchRestore
+        if (!searchPresent && !searchExpanded && previous != null) {
+            pendingSearchRestore = null
+            query = previous.query
+            tagSearchMode = previous.tagMode
+            tagDraft = previous.tagDraft
+            tagChoicesOpen = previous.choosingTags
+            browseCandidate = previous.candidate
+            previous.tagQuery?.let(controller::configureDiscoveryTags)
+        }
+    }
+    fun openDetailTagSearch(subjectId: String, next: AnimeDiscoveryQuery) {
+        if (!active || playing || controller.state.value.detail?.subject?.id != subjectId) return
+        val previous = controller.state.value.discoveryFeeds[animeDiscoveryFeedKey(AnimeDiscoveryTab.GENRES)]?.query
+        if (detailSearchOrigin == null) detailSearchOrigin = AnimeDetailSearchOrigin(subjectId, query,
+            tagSearchMode, tagDraft, tagChoicesOpen || tagSearchMode && previous == null, browseCandidate, previous)
+        controller.configureDiscoveryTags(next)
+        browseCandidate = null
+        tagDraft = ""
+        tagChoicesOpen = false
+        openTagSearch()
+    }
+    fun searchDetailTag(subjectId: String, owner: AnimeSubject, label: String) {
+        val nativeTag = animeDiscoveryTagInput(AnimeDiscoveryProvider.DOUBAN, label)
+            .takeIf { owner.canonicalDoubanId() != null }
+        // Unsupported catalogue types remain literal tag searches in Bangumi's free-tag catalogue.
+        // This chooses a search destination; it never links or changes the current work's identity.
+        val provider = if (nativeTag != null) AnimeDiscoveryProvider.DOUBAN else AnimeDiscoveryProvider.BANGUMI
+        val tag = nativeTag ?: animeDiscoveryTagInput(provider, label) ?: return
+        openDetailTagSearch(subjectId, AnimeDiscoveryQuery(provider = provider, tag = tag))
+    }
     fun beginDetailNavigation() {
         openingReference = null
         openingSearch = null
+        val latest = controller.state.value
+        val origin = detailSearchOrigin
+        val current = latest.detail
+        if (origin != null && current != null && current.subject.id == origin.subjectId) {
+            detailHistory += AnimeDetailVisit(current, latest.relatedSubjects, latest.groupSourceCandidates,
+                latest.detailScores, latest.discoveryFeeds[animeDiscoveryFeedKey(AnimeDiscoveryTab.GENRES)]?.query)
+            closeSearch()
+        }
         if (route.depth == 0) {
             detailHistory.clear()
             returnToSearch = searchExpanded
@@ -412,6 +476,7 @@ private fun AnimeWorkspaceContent(
             val previous = detailHistory.removeAt(detailHistory.lastIndex)
             openingSubject = previous.detail.subject
             controller.returnToVisitedDetail(previous.detail, previous.related, previous.candidates, previous.scores)
+            previous.tagQuery?.let { openDetailTagSearch(previous.detail.subject.id, it) }
             val candidates = controller.searchState.value.groups
                 .firstOrNull { returnToSearch && it.subject?.id == previous.detail.subject.id }?.sources.orEmpty()
             if (candidates.isNotEmpty()) controller.stageSearchCandidates(previous.detail.subject.id, candidates)
@@ -422,6 +487,13 @@ private fun AnimeWorkspaceContent(
             if (returnToSearch) {
                 focusSearchInput = false
                 searchExpanded = true
+                if (!tagSearchMode || browseCandidate != null) {
+                    val current = controller.searchState.value
+                    val indexOnly = browseCandidate != null
+                    val provider = if (indexOnly) AnimeDiscoveryProvider.BANGUMI else AnimeDiscoveryProvider.DOUBAN
+                    if (query.isNotBlank() && (current.query != query.trim() || current.indexOnly != indexOnly ||
+                            current.catalogProvider != provider)) submitSearch(query)
+                }
             }
             returnToSearch = false
         }
@@ -441,7 +513,7 @@ private fun AnimeWorkspaceContent(
         controller.resumeEpisode(entry.subject.id, progress.episodeId)
     }
     fun showWorkActions(subject: AnimeSubject) {
-        if (!active || route.depth != 0 || actionSubject != null) return
+        if (!active || !searchRouteActive || actionSubject != null) return
         focusSearchInput = false
         pendingWorkAction = null
         actionSubject = subject
@@ -451,7 +523,7 @@ private fun AnimeWorkspaceContent(
         val action = pendingWorkAction
         actionSubject = null
         pendingWorkAction = null
-        if (!active || route.depth != 0 || subject == null || action == null) return
+        if (!active || !searchRouteActive || subject == null || action == null) return
         when (action) {
             AnimeWorkAction.OPEN -> open(subject)
             AnimeWorkAction.FOLLOW -> controller.setFollowed(subject, true)
@@ -515,7 +587,7 @@ private fun AnimeWorkspaceContent(
         } else item.reference?.let { chooseReference(it, false) }
     }
     fun openSearchResult(visibleGroup: AnimeSearchGroup, chosenVersion: AnimeSourceTitle? = null) {
-        if (!active || !searchExpanded || route.depth != 0) return
+        if (!active || !searchExpanded || !searchRouteActive) return
         val current = controller.searchState.value
         if (current.query != query.trim() || current.indexOnly != (browseCandidate != null)) return
         val matched = when {
@@ -614,7 +686,8 @@ private fun AnimeWorkspaceContent(
             actionSubject != null -> { actionSubject = null; pendingWorkAction = null }
             searchVersionChoice != null -> searchVersionChoice = null
             searchProgressVisible -> searchProgressVisible = false
-            searchExpanded -> { searchExpanded = false; browseCandidate = null }
+            searchExpanded -> closeSearch()
+            pendingSearchRestore != null -> Unit
             playing && playerFullscreen -> setPlayerFullscreen(false)
             liveBrowse != null -> if (!liveBrowse.returnToResults()) closePlaybackBrowse(liveBrowse)
             playing -> closePlayback()
@@ -637,6 +710,8 @@ private fun AnimeWorkspaceContent(
         openingSearch = null
         recheckRequest = null
         searchExpanded = false
+        detailSearchOrigin = null
+        pendingSearchRestore = null
         returnToSearch = false
         detailHistory.clear()
         sourcesVisible = false
@@ -694,7 +769,7 @@ private fun AnimeWorkspaceContent(
     }
 
     val canGoBack = route.depth > 0 || baseDestination != AnimeWorkspaceDestination.HOME
-    MotionBackHandler(active && canGoBack && !overlayVisible && !searchPresent,
+    MotionBackHandler(active && canGoBack && !overlayVisible && !searchExpanded && !searchPresent,
         state = null, onBack = ::back)
 
     Column(modifier.fillMaxSize()) {
@@ -744,6 +819,7 @@ private fun AnimeWorkspaceContent(
                             val returnLabel = when {
                                 shown.depth == 0 && directoryDetailOpen -> "返回片源目录"
                                 rankingPage -> "返回发现"
+                                shown.relatedDepth > 0 && detailHistory.lastOrNull()?.tagQuery != null -> "返回标签结果"
                                 shown.relatedDepth > 0 -> "返回上一部番剧"
                                 returnToSearch -> "返回搜索结果"
                                 else -> "返回${baseDestination.label}"
@@ -778,7 +854,8 @@ private fun AnimeWorkspaceContent(
                                                 shown.depth == 0 -> returnFromDirectory()
                                                 else -> returnFromDetail()
                                             }
-                                        }, enabled = !rankingPage || rootActive,
+                                        }, enabled = active && shown.key == route.key && !searchExpanded && !searchPresent &&
+                                            !overlayVisible && (!rankingPage || rootActive),
                                             modifier = Modifier.size(44.dp), tooltip = returnLabel) {
                                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, returnLabel, Modifier.size(20.dp))
                                         }
@@ -845,10 +922,11 @@ private fun AnimeWorkspaceContent(
                                             detailScrolls.getOrPut(shownDetail.subject.id) { LazyListState() }
                                         },
                                         onPlay = { requestPlayback(it, null) }, onOpenRelated = ::openRelated,
+                                        onTag = { owner, label -> searchDetailTag(shownDetail.subject.id, owner, label) },
                                         onOpenSourceRelated = ::openSourceRelated, onSources = ::showSources,
                                         onTracking = { trackingVisible = true }, modifier = Modifier.fillMaxSize(),
                                         onHeroCollapsed = { heroCollapsed = it }, contentTopPadding = headerInset,
-                                        active = active && shown.key == route.key && !overlayVisible && !searchPresent)
+                                        active = active && shown.key == route.key && !overlayVisible && !searchExpanded && !searchPresent)
                                 }
                             }
                         } else Box(Modifier.fillMaxSize().padding(top = headerInset)) {
@@ -866,19 +944,21 @@ private fun AnimeWorkspaceContent(
                 }
             }
             fun applyTagQuery(next: AnimeDiscoveryQuery) {
-                if (!active || route.depth != 0 || !searchExpanded || !tagSearchMode || browseCandidate != null) return
+                if (!active || !searchRouteActive || !searchExpanded || !tagSearchMode || browseCandidate != null) return
                 controller.configureDiscoveryTags(next)
                 tagDraft = ""
                 tagChoicesOpen = false
             }
             if (!playing && (route.depth == 0 && !directoryDetailOpen || searchExpanded || searchPresent)) ExpandingSearchBar(
                 expanded = searchExpanded, query = if (tagSearch) tagDraft else query,
-                active = active && route.depth == 0 && (!directoryDetailOpen || searchExpanded || searchPresent) &&
+                active = active && searchRouteActive && (!directoryDetailOpen || searchExpanded || searchPresent) &&
                     !overlayVisible, backdrop = backdrop,
                 onExpandedChange = {
-                    focusSearchInput = true
-                    searchExpanded = it
-                    if (it) tagSearchMode = false else browseCandidate = null
+                    if (it) {
+                        focusSearchInput = true
+                        searchExpanded = true
+                        tagSearchMode = false
+                    } else closeSearch()
                 },
                 onPresenceChange = { searchPresent = it },
                 onForegroundState = { searchForeground = it },
@@ -891,9 +971,10 @@ private fun AnimeWorkspaceContent(
                     } else submitSearch(query)
                 },
                 placeholder = if (tagSearch) "筛选标签" else "搜索番剧",
-                searchTarget = if (browseCandidate != null) null else if (tagSearch) SearchTarget.TAG else SearchTarget.TITLE,
+                searchTarget = if (browseCandidate != null || searchingDetail || pendingSearchRestore != null) null
+                    else if (tagSearch) SearchTarget.TAG else SearchTarget.TITLE,
                 onSearchTarget = {
-                    if (browseCandidate == null) {
+                    if (!searchingDetail && browseCandidate == null) {
                         focusSearchInput = it == SearchTarget.TITLE
                         tagSearchMode = it == SearchTarget.TAG
                     }
@@ -1012,7 +1093,7 @@ private fun AnimeWorkspaceContent(
             onChoose = { openSearchResult(choice, it) })
     }
 
-    if (active && route.depth == 0 && searchExpanded && searchProgressVisible) {
+    if (active && searchRouteActive && searchExpanded && searchProgressVisible) {
         AnimeSearchProgressSheet(search, controller, backdrop, onDismiss = { searchProgressVisible = false })
     }
 

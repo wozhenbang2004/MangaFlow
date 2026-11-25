@@ -764,6 +764,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             else -> query.copy(provider = AnimeDiscoveryProvider.BANGUMI, tag = animeDiscoveryGenreLabels[tag] ?: tag)
         }
         val current = mutableState.value.discoveryFeeds[key]
+        // Detail tag searches can restore another query while hidden. Retain its loaded range
+        // before replacing the feed, so reopening cannot reuse a slot behind an empty feed.
+        if (tab == AnimeDiscoveryTab.GENRES && current?.query != normalized) discoveryLoads.reset(key)
         if (tab != AnimeDiscoveryTab.CALENDAR) {
             current?.query?.let { discoveryOptions[tab to it.provider] = it }
             discoveryOptions[tab to normalized.provider] = normalized

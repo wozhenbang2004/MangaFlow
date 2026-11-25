@@ -94,6 +94,7 @@ import dev.mangaflow.ui.CompactMenuAction
 import dev.mangaflow.ui.CommunityPanel
 import dev.mangaflow.ui.DesktopVerticalScrollbar
 import dev.mangaflow.ui.DetailAction
+import dev.mangaflow.ui.DetailTag
 import dev.mangaflow.ui.screenFitContentInsets
 import dev.mangaflow.data.ReviewPage
 import dev.mangaflow.ui.GlassSurfaceRole
@@ -119,6 +120,7 @@ internal fun AnimeDetailPane(
     scroll: LazyListState,
     onPlay: (AnimeEpisode) -> Unit,
     onOpenRelated: (AnimeSubject) -> Unit,
+    onTag: (AnimeSubject, String) -> Unit,
     onOpenSourceRelated: (AnimeRelatedSourceRequest, AnimeSourceTitle) -> Unit,
     onSources: (AnimeEpisode?) -> Unit,
     onTracking: () -> Unit,
@@ -137,6 +139,8 @@ internal fun AnimeDetailPane(
     val linkedMetadata = (detail.metadataSubject ?: entry?.nativeMetadata.takeIf { supportsMetadataLink })
         ?.takeIf { it.canonicalBangumiId() != null }
     val canonicalInfo = subject.takeIf { it.canonicalBangumiId() != null } ?: linkedMetadata
+    val tagOwner = subject.takeIf { it.tags.any(String::isNotBlank) }
+        ?: canonicalInfo?.takeIf { it.tags.any(String::isNotBlank) }
     val workReferenceId = subject.canonicalBangumiId() ?: (entry?.nativeMetadata
         ?: detail.metadataSubject.takeUnless { entry?.metadataAutoMatchDisabled == true })?.canonicalBangumiId()
     val currentDiscussion by controller.discussion.state.collectAsStateWithLifecycle()
@@ -508,9 +512,9 @@ internal fun AnimeDetailPane(
                                         state = position,
                                         contentPadding = PaddingValues(start = horizontal, end = horizontal, bottom = listEnd)) {
                                         item(key = "description") {
-                                            val info = subject.copy(description = subject.description.ifBlank { canonicalInfo?.description.orEmpty() },
-                                                tags = subject.tags.ifEmpty { canonicalInfo?.tags.orEmpty() })
-                                            if (info.description.isNotBlank() || info.tags.isNotEmpty()) AnimeDetailDescription(info)
+                                            val description = subject.description.ifBlank { canonicalInfo?.description.orEmpty() }
+                                            if (description.isNotBlank() || tagOwner != null) AnimeDetailDescription(
+                                                subject.id, description, tagOwner, paneActive, onTag)
                                             else AnimeMessage("暂无简介", subject.originalTitle.takeIf { it != subject.title && it.isNotBlank() })
                                         }
                                         if (supportsMetadataLink && !state.libraryReadUnavailable) metadataPicker(paneActive)
@@ -1118,16 +1122,39 @@ private fun AnimeDetailFollow(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AnimeDetailDescription(subject: AnimeSubject) {
+private fun AnimeDetailDescription(subjectId: String, description: String, tagOwner: AnimeSubject?,
+    active: Boolean, onTag: (AnimeSubject, String) -> Unit) {
+    val tags = remember(tagOwner?.tags) { tagOwner?.tags.orEmpty().map(String::trim).filter(String::isNotBlank).distinct() }
+    var allTags by rememberSaveable(subjectId, tagOwner?.id) { mutableStateOf(false) }
+    val duration = if (LocalMotionEnabled.current) MangaMotion.Content else 0
+    val tag: @Composable (Int, String, Boolean) -> Unit = { index, label, enabled ->
+        DetailTag(label, index, enabled = enabled, largeTouchTarget = true,
+            onClickLabel = "搜索${label}番剧", onClick = tagOwner?.let { owner -> ({ onTag(owner, label) }) })
+    }
     Column(Modifier.fillMaxWidth().padding(vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        if (subject.description.isNotBlank()) {
+        if (tags.isNotEmpty()) Column {
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                tags.take(8).forEachIndexed { index, label -> key(label) { tag(index, label, active) } }
+                if (tags.size > 8) DetailTag(if (allTags) "收起" else "+${tags.size - 8}", tags.size,
+                    enabled = active, largeTouchTarget = true,
+                    onClickLabel = if (allTags) "收起更多标签" else "展开全部标签", onClick = { allTags = !allTags })
+            }
+            AnimatedVisibility(allTags && tags.size > 8,
+                enter = expandVertically(tween(duration)) + fadeIn(tween(duration)),
+                exit = shrinkVertically(tween(duration)) + fadeOut(tween(duration))) {
+                FlowRow(Modifier.fillMaxWidth().motionInputGate(active && allTags),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    tags.drop(8).forEachIndexed { index, label -> key(label) { tag(index + 8, label, active && allTags) } }
+                }
+            }
+        }
+        if (description.isNotBlank()) {
             Text("剧情简介", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
-            Text(subject.description, style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 24.sp),
+            Text(description, style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 24.sp),
                 color = MaterialTheme.colorScheme.onSurface)
         }
-        if (subject.tags.isNotEmpty()) Text(subject.tags.joinToString("  ·  "),
-            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

@@ -1134,7 +1134,7 @@ private fun DetailSourceMetadata(manga: Manga, onOriginal: (MangaTag) -> Unit) {
 private val CopyOriginalPath = Regex("[A-Za-z0-9_-]{1,160}")
 
 @Composable
-private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false,
+internal fun DetailTag(label: String, index: Int, onArtwork: Boolean = false,
     enabled: Boolean = true, largeTouchTarget: Boolean = false,
     onClickLabel: String = "搜索${label}漫画", onClick: (() -> Unit)? = null) {
     val onDark = onArtwork || DetailForeground.luminance() > .5f
