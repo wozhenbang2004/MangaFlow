@@ -38,6 +38,30 @@ private val catalogueScope = Regex(
     RegexOption.IGNORE_CASE,
 )
 
+/** Native catalogues often omit format and report an update number rather than a total episode count. */
+internal fun animeNativeMetadataSubjectCandidate(primary: AnimeSubject, candidate: AnimeSubject): Boolean {
+    if (primary.externalIds["native-source"].isNullOrBlank() || candidate.canonicalBangumiId() == null) return false
+    if (primary.year != null && candidate.year != null && primary.year != candidate.year) return false
+    if (primary.format != null && candidate.format != null && primary.format != candidate.format) return false
+    if (conflictingAnimeIds(animeAuthoritativeIds(primary.externalIds), animeAuthoritativeIds(candidate.externalIds))) return false
+    val left = animeCatalogueNames(primary)
+    val right = animeCatalogueNames(candidate)
+    if (animeWorkTitlesConflict(left, right, requireMatchingEdition = true)) return false
+    // Exact complete names only: removing a part/cour suffix would confuse a sequel with its predecessor.
+    val primaryKeys = listOf(primary.title, primary.originalTitle).filter(String::isNotBlank)
+        .map(::animeWorkTitleKey).filter(String::isNotBlank).toSet()
+    if (primaryKeys.intersect(right.map(::animeWorkTitleKey).toSet()).isEmpty()) return false
+    val leftScoped = left.filter { catalogueScope.containsMatchIn(normalizeNfkc(it)) }.map(::animeWorkTitleKey).toSet()
+    val rightScoped = right.filter { catalogueScope.containsMatchIn(normalizeNfkc(it)) }.map(::animeWorkTitleKey).toSet()
+    if ((leftScoped.isNotEmpty() || rightScoped.isNotEmpty()) && leftScoped.intersect(rightScoped).isEmpty()) return false
+    return true
+}
+
+internal fun animeNativeMetadataSubjectsMatch(primary: AnimeSubject, candidate: AnimeSubject): Boolean =
+    animeNativeMetadataSubjectCandidate(primary, candidate) &&
+        (primary.year == null || primary.year == candidate.year) &&
+        (primary.format == null || primary.format == candidate.format)
+
 /** Both catalogues must describe one complete work, not merely share an abbreviated series alias. */
 internal fun animeMetadataSubjectsMatch(primary: AnimeSubject, candidate: AnimeSubject): Boolean {
     if (!animeMetadataSubjectCandidate(primary, candidate) || primary.year == null || candidate.year != primary.year ||

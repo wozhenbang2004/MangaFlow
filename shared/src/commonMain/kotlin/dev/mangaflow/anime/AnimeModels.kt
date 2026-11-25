@@ -164,7 +164,7 @@ data class AnimeLibraryEntry(
     val excludedSourceIds: Set<String> = emptySet(),
     /** A user-confirmed Bangumi reference for native or Douban works; automatic links belong to detail metadata. */
     val nativeMetadata: AnimeSubject? = null,
-    /** An explicit Douban unlink survives background metadata resolution and process restarts. */
+    /** An explicit supplementary-metadata unlink survives background resolution and process restarts. */
     val metadataAutoMatchDisabled: Boolean = false,
     /** Stable Douban episode ownership survives disposable metadata-cache cleanup. */
     val catalogDetail: AnimeDetail? = null,
@@ -394,6 +394,7 @@ data class AnimeScreenState(
     val detailScores: List<AnimeSourceScore> = emptyList(),
     val detailScoreChecks: Map<AnimeDiscoveryProvider, AnimeScoreCheck> = emptyMap(),
     val nativeMetadataSearch: AnimeNativeMetadataSearch? = null,
+    val nativeMetadataError: String? = null,
     val groupSourceCandidates: List<AnimeSourceTitle> = emptyList(),
     val associationChoices: Map<String, List<AnimeSourceTitle>> = emptyMap(),
     val library: List<AnimeLibraryEntry> = emptyList(),

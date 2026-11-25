@@ -228,6 +228,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private val detailRatingJobs = mutableMapOf<AnimeDiscoveryProvider, Job>()
     private val detailRatingRequests = mutableMapOf<AnimeDiscoveryProvider, DetailRatingRequest>()
     private var nativeMetadataJob: Job? = null
+    private data class NativeMetadataRequest(val subject: AnimeSubject, val generation: Long, val restoreEpoch: Long,
+        val sourceRevision: String?, val sourceRoute: DownloadRouteSnapshot?, val route: DownloadRouteSnapshot,
+        val cacheGeneration: Long)
+    private var nativeMetadataAutoRequest: NativeMetadataRequest? = null
+    private var nativeMetadataAutoJob: Job? = null
     private var nativeDiscussionOwner: Pair<String, AnimeSubject?>? = null
     private var sourceJob: Job? = null
     private var previewJob: Job? = null
@@ -510,6 +515,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         cancelDetailScores()
                         boundCatalogJob?.cancel()
                         nativeMetadataJob?.cancel()
+                        cancelNativeMetadataResolution()
                         relatedJob?.cancel()
                         nativeDiscussionOwner = null
                         discussion.open(null)
@@ -519,7 +525,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         reviewSnapshots.clear()
                         mutableState.update { it.copy(reviews = emptyList(), detailLoading = false,
                             detailScores = emptyList(), detailScoreChecks = emptyMap(),
-                            nativeMetadataSearch = null, relatedSubjects = emptyList(),
+                            nativeMetadataSearch = null, nativeMetadataError = null, relatedSubjects = emptyList(),
                             detailError = if (it.detail != null) "本机记录已恢复，请重新打开番剧以读取恢复后的关联。" else null) }
                     }
                     if (sourceHeightChanged) cancelEpisodeSourceMeasurements(clearProgress = true)
@@ -554,6 +560,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     if (owner != null && subject?.id == owner.first) {
                         mutableState.value.detail?.let { refreshDetailDiscussion(it, detailGeneration) }
                     }
+                    resolveNativeMetadata()
                 }
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) { notice(failure.message ?: "追番记录未能读取。") }
@@ -594,6 +601,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 }
                 unifiedSearch.reconcile()
                 mutableState.value.detail?.let { startSourceAggregation(it) }
+                resolveNativeMetadata()
                 projectRoutes()
             }
         }
@@ -601,6 +609,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             routing.state.collect {
                 cancelEpisodeSourceMeasurements(clearProgress = true)
                 projectRoutes()
+                resolveNativeMetadata()
                 mutableState.value.detail?.let { startSourceAggregation(it) }
                 unifiedSearch.reconcile()
                 invalidatePreparation()
@@ -1236,11 +1245,12 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             externalIds = subject.externalIds + catalog.title.externalIds +
                 mapOf("native-source" to catalog.title.sourceId))
 
-    private fun nativeDetail(subject: AnimeSubject, catalog: AnimeSourceCatalog, group: String): AnimeDetail =
+    private fun nativeDetail(subject: AnimeSubject, catalog: AnimeSourceCatalog, group: String,
+        metadataSubject: AnimeSubject? = null): AnimeDetail =
         AnimeDetail(nativeDetailSubject(subject, catalog), catalog.episodes.filter { it.group == group }.map { episode ->
             AnimeEpisode(nativeEpisodeId(subject, episode), subject.id, episode.title,
                 episode.number ?: 0.0, if (episode.number == null) AnimeEpisodeKind.OTHER else episode.kind)
-        })
+        }, metadataSubject)
 
     private fun openDetail(subject: AnimeSubject, resumeEpisodeId: String?, nativeReference: AnimeSourceTitle? = null,
         visitedDetail: AnimeDetail? = null, visitedRelated: List<AnimeSubject> = emptyList(),
@@ -1271,6 +1281,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         boundCatalogJob?.cancel()
         relatedJob?.cancel()
         nativeMetadataJob?.cancel()
+        cancelNativeMetadataResolution()
         nativeDiscussionOwner = null
         sourceJob?.cancel()
         sourceSearchJobs.values.forEach { it.cancel() }
@@ -1301,7 +1312,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             episodeProgress = projectEpisodeProgress(library.state.value, initialDetail),
             detailScores = scores, detailScoreChecks = ratingSnapshot?.checks.orEmpty().filterValues { !it.loading },
             groupSourceCandidates = candidates, associationChoices = emptyMap(),
-            nativeMetadataSearch = null,
+            nativeMetadataSearch = null, nativeMetadataError = null,
             detailFromCache = visitedDetail != null, relatedSubjects = visitedRelated,
             sourceCatalogs = emptyList(), sourceResults = emptyList(), episodeOptions = emptyMap(),
             sourceBindings = onlineBindings(library.state.value, subject.id),
@@ -1424,8 +1435,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                             catalog.copy(notice = catalog.notice + " 已保留原线路与续看位置，待对应剧集加载后继续。")
                         else -> catalog
                     }
-                    mutableState.update { it.copy(detail = group?.let { selected -> nativeDetail(subject, shownCatalog, selected) }
-                        ?: AnimeDetail(catalogSubject, emptyList()), detailLoading = false,
+                    val knownMetadata = initialDetail.metadataSubject?.takeIf {
+                        animeNativeMetadataSubjectsMatch(catalogSubject, it) &&
+                            library.state.value.entries[subject.id]?.metadataAutoMatchDisabled != true
+                    }
+                    mutableState.update { it.copy(detail = group?.let { selected ->
+                        nativeDetail(subject, shownCatalog, selected, knownMetadata)
+                    } ?: AnimeDetail(catalogSubject, emptyList(), knownMetadata), detailLoading = false,
                         sourceBindings = listOf(binding), sourceCatalogs = listOf(shownCatalog)) }
                     mutableState.value.detail?.takeIf { it.episodes.isNotEmpty() && resumeRequest == null }
                         ?.let(::prepareSavedResume)
@@ -1436,6 +1452,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         notice("这个来源的目录里暂时找不到上次观看的剧集，原进度已保留。")
                     }
                     mutableState.value.detail?.let { startSourceAggregation(it) }
+                    resolveNativeMetadata(forceRefresh = forceSourceRefresh)
                 } catch (cancel: CancellationException) { throw cancel }
                 catch (failure: Exception) { if (currentDetail(generation, subject.id)) mutableState.update {
                     it.copy(detailLoading = false, detailError = failure.message ?: "来源目录未能加载。")
@@ -1615,6 +1632,117 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         }, aliases = primary.aliases.filterNot { it in names })
     }
 
+    private fun cancelNativeMetadataResolution() {
+        val owner = nativeMetadataAutoRequest?.subject?.id
+        nativeMetadataAutoRequest = null
+        nativeMetadataAutoJob?.cancel()
+        nativeMetadataAutoJob = null
+        owner?.let { discussion.setWorkReferencePending(it, false) }
+    }
+
+    /** Only the currently bound, verified native catalogue can supply automatic metadata evidence. */
+    private fun currentNativeMetadataSubject(): AnimeSubject? {
+        val detail = mutableState.value.detail ?: return null
+        val sourceId = detail.subject.externalIds["native-source"] ?: return null
+        if (sources.provider(sourceId) == null || isRetiredAnimeSource(sourceId)) return null
+        val binding = onlineBindings(library.state.value, detail.subject.id)
+            .firstOrNull { it.catalog.sourceId == sourceId } ?: return null
+        val catalog = mutableState.value.sourceCatalogs.singleOrNull {
+            it.title.sourceId == sourceId && it.title.id == binding.catalog.id && it.title.url == binding.catalog.url
+        } ?: return null
+        if (sourceSubject(catalog.title).id != detail.subject.id) return null
+        // Display refreshes and a source's latest episode number are not new work-identity evidence.
+        return nativeDetailSubject(detail.subject, catalog).copy(coverUrl = "", description = "", episodeCount = null,
+            tags = emptyList(), airWeekday = null, rating = null, rank = null, ratingCount = null)
+    }
+
+    private fun resolveNativeMetadata(forceRefresh: Boolean = false) {
+        val snapshot = mutableState.value
+        val detail = snapshot.detail?.takeIf { "native-source" in it.subject.externalIds } ?: return
+        val stored = library.state.value
+        if (relatedSourceOpening != (detailGeneration to stored.restoreEpoch) || snapshot.detailLoading ||
+            stored.readUnavailable) {
+            cancelNativeMetadataResolution()
+            return
+        }
+        val saved = stored.entries[detail.subject.id]
+        val primary = currentNativeMetadataSubject()
+        val disabled = saved?.metadataAutoMatchDisabled == true
+        // A manual choice/undo is authoritative for description, tags, scores and discussion alike.
+        if (detail.metadataSubject != null && (saved?.nativeMetadata != null || disabled ||
+                primary != null && !animeNativeMetadataSubjectsMatch(primary, detail.metadataSubject))) {
+            val cleared = detail.copy(metadataSubject = null)
+            mutableState.update { it.copy(detail = cleared) }
+            refreshDetailDiscussion(cleared, detailGeneration)
+            rebuildOptions()
+        }
+        if (saved?.nativeMetadata != null || disabled || primary == null) {
+            cancelNativeMetadataResolution()
+            mutableState.update { it.copy(nativeMetadataError = null) }
+            return
+        }
+        if (snapshot.nativeMetadataSearch != null) return
+        val sourceId = primary.externalIds.getValue("native-source")
+        val route = try { DownloadRoutingStore.activeSourceSnapshot(
+            dev.mangaflow.anime.sources.BANGUMI_PROVIDER, DownloadCategory.ANIME) }
+        catch (failure: Exception) {
+            cancelNativeMetadataResolution()
+            mutableState.update { it.copy(nativeMetadataError = failure.message ?: "Bangumi 资料线路未能读取。") }
+            return
+        }
+        val request = NativeMetadataRequest(primary, detailGeneration, stored.restoreEpoch,
+            discoverySourceRevision(sourceId), playbackHistoryRoute(sourceId), route, metadata.cacheGeneration)
+        if (!forceRefresh && nativeMetadataAutoRequest == request) return
+        cancelNativeMetadataResolution()
+        nativeMetadataAutoRequest = request
+        mutableState.update { it.copy(nativeMetadataError = null) }
+        discussion.setWorkReferencePending(primary.id, true)
+        nativeMetadataAutoJob = scope.launch {
+            fun current(): Boolean {
+                val entry = library.state.value.entries[primary.id]
+                return nativeMetadataAutoRequest === request && currentDetail(request.generation, primary.id) &&
+                    library.state.value.restoreEpoch == request.restoreEpoch && !library.state.value.readUnavailable &&
+                    entry?.nativeMetadata == null && entry?.metadataAutoMatchDisabled != true &&
+                    currentNativeMetadataSubject() == primary && discoverySourceRevision(sourceId) == request.sourceRevision &&
+                    playbackHistoryRoute(sourceId) == request.sourceRoute &&
+                    playbackHistoryRoute(dev.mangaflow.anime.sources.BANGUMI_PROVIDER) == route
+            }
+            try {
+                val cached = if (forceRefresh) null else metadata.cachedNativeReference(primary, request.sourceRevision, route)
+                if (!current()) return@launch
+                val reference = cached ?: run {
+                    val result = withTimeoutOrNull(15_000L) {
+                        Result.success(withContext(Dispatchers.Default) {
+                            metadata.resolveBangumiReference(primary, route, forceRefresh)
+                        })
+                    } ?: error("Bangumi 资料匹配超时，可重试；当前选集与播放不受影响。")
+                    result.getOrThrow() ?: error("暂未确认唯一的同名 Bangumi 资料，可重试或手动选择。")
+                }
+                if (!current()) return@launch
+                check(metadata.cacheGeneration == request.cacheGeneration) { "资料缓存已清理，请重新匹配。" }
+                val ready = mutableState.value.detail?.copy(metadataSubject = reference) ?: return@launch
+                mutableState.update { it.copy(detail = ready, nativeMetadataError = null) }
+                refreshDetailDiscussion(ready, request.generation)
+                rebuildOptions()
+                if (current() && cached == null) metadata.cacheNativeReference(primary, reference,
+                    request.sourceRevision, route, request.cacheGeneration)
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) {
+                if (current()) mutableState.update { it.copy(nativeMetadataError =
+                    failure.message ?: "补充资料暂未完成，可重试或手动选择。") }
+            } finally {
+                if (nativeMetadataAutoRequest === request) {
+                    nativeMetadataAutoJob = null
+                    if (currentDetail(request.generation, primary.id)) discussion.setWorkReferencePending(primary.id, false)
+                }
+            }
+        }
+    }
+
+    internal fun retryNativeMetadata(subjectId: String) {
+        if (mutableState.value.detail?.subject?.id == subjectId) resolveNativeMetadata(forceRefresh = true)
+    }
+
     private fun supplementarySubject(detail: AnimeDetail): AnimeSubject? {
         val saved = library.state.value.entries[detail.subject.id]
         return saved?.nativeMetadata ?: detail.metadataSubject.takeUnless { saved?.metadataAutoMatchDisabled == true }
@@ -1667,6 +1795,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (query.isEmpty()) return
         val generation = detailGeneration
         val owner = AnimeNativeMetadataSearch(subject.id, query, loading = true)
+        cancelNativeMetadataResolution()
         nativeMetadataJob?.cancel()
         mutableState.update { it.copy(nativeMetadataSearch = owner) }
         nativeMetadataJob = scope.launch {
@@ -1693,6 +1822,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (search?.subjectId != subjectId || search.saving) return
         nativeMetadataJob?.cancel()
         mutableState.update { it.copy(nativeMetadataSearch = null) }
+        resolveNativeMetadata()
     }
 
     internal fun setNativeMetadata(subjectId: String, canonicalId: String?) {
@@ -1717,6 +1847,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val generation = detailGeneration
         val stored = library.state.value
         val owner = (search ?: AnimeNativeMetadataSearch(subject.id, subject.title)).copy(saving = true, error = null)
+        cancelNativeMetadataResolution()
         nativeMetadataJob?.cancel()
         mutableState.update { it.copy(nativeMetadataSearch = owner) }
         nativeMetadataJob = scope.launch {
@@ -1726,10 +1857,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     check(current()) { "作品或本地记录已变化，请重新打开资料关联。" }
                     entry.copy(nativeMetadata = reference,
                         catalogDetail = retained ?: entry.catalogDetail,
-                        metadataAutoMatchDisabled = subject.canonicalDoubanId() != null && reference == null)
+                        metadataAutoMatchDisabled = reference == null)
                 }
                 if (current()) {
                     mutableState.update { it.copy(nativeMetadataSearch = null) }
+                    resolveNativeMetadata()
                     if (subject.canonicalDoubanId() != null) {
                         openDetail(cleanSubject, resumeRequest?.takeIf { it.first == subject.id }?.second, visitedDetail = retained,
                             sourceCandidates = snapshot.groupSourceCandidates,
@@ -1866,6 +1998,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         closePlayback()
         nativeDiscussionOwner = null
         nativeMetadataJob?.cancel()
+        cancelNativeMetadataResolution()
         discussion.open(null)
         cancelPendingResume()
         ++detailGeneration
@@ -1881,7 +2014,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         sourceSearchJobs.clear()
         previewJob?.cancel()
         mutableState.update { it.copy(detail = null, detailLoading = false, detailError = null,
-            episodeProgress = refreshCatalogueLegacyOffsets(it, null), nativeMetadataSearch = null,
+            episodeProgress = refreshCatalogueLegacyOffsets(it, null), nativeMetadataSearch = null, nativeMetadataError = null,
             detailScores = emptyList(), detailScoreChecks = emptyMap(),
             groupSourceCandidates = emptyList(), associationChoices = emptyMap(),
             sourceResults = emptyList(), sourceCatalogs = emptyList(), episodeOptions = emptyMap(),
@@ -2358,7 +2491,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     val nativeBinding = bindings.firstOrNull { it.catalog.sourceId == nativeSource }
                     val nativeCatalog = input.catalogs.firstOrNull { it.title.sourceId == nativeSource }
                     val detail = if (nativeBinding?.selectedGroup != null && nativeCatalog != null)
-                        nativeDetail(baseline.subject, nativeCatalog, nativeBinding.selectedGroup) else baseline
+                        nativeDetail(baseline.subject, nativeCatalog, nativeBinding.selectedGroup, baseline.metadataSubject) else baseline
                     val matchers = bindings.mapNotNull { binding ->
                         val catalog = input.catalogs.firstOrNull { it.title.sourceId == binding.catalog.sourceId &&
                             it.title.id == binding.catalog.id && it.title.url == binding.catalog.url } ?: return@mapNotNull null
@@ -2461,6 +2594,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     episodeProgress = projectEpisodeProgress(library.state.value, detail),
                     sourceDanmakuAvailable = active?.let(::hasSourceDanmaku) == true) }
                 finishOptionsRebuild(detail)
+                resolveNativeMetadata()
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 if (request == episodeOptionsGeneration && currentDetail(owner, baseline.subject.id) &&
@@ -2483,9 +2617,13 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             before == after || before.copy(title = after.title, durationMs = after.durationMs,
                 airDate = after.airDate) == after
         }
+        val nativeWorkMetadataOnly = "native-source" in left.subject.externalIds &&
+            "native-source" in right.subject.externalIds && (left.episodes + right.episodes).none {
+                it.metadataSubjectId != null || it.metadataEpisodeId != null || it.numberInSubject != null
+            }
         return identity(left.subject) == identity(right.subject) && sameEpisodes &&
-            left.metadataSubject?.let { it.id to it.canonicalBangumiId() } ==
-                right.metadataSubject?.let { it.id to it.canonicalBangumiId() }
+            (nativeWorkMetadataOnly || left.metadataSubject?.let { it.id to it.canonicalBangumiId() } ==
+                right.metadataSubject?.let { it.id to it.canonicalBangumiId() })
     }
 
     private fun finishOptionsRebuild(detail: AnimeDetail) {
@@ -6214,6 +6352,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 ++previewGeneration
                 detailJob?.cancel(); cancelDetailScores(); boundCatalogJob?.cancel(); relatedJob?.cancel(); previewJob?.cancel()
                 nativeMetadataJob?.cancel()
+                cancelNativeMetadataResolution()
                 nativeDiscussionOwner = null
                 sourceSearchJobs.values.forEach { it.cancel() }
                 sourceSearchJobs.clear()
@@ -6234,7 +6373,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     ?: previous?.takeIf { !it.completed && it.assetId == offline.asset.id }?.positionMs ?: 0L
                 discussion.open(null)
                 mutableState.update { it.copy(detail = detail, detailLoading = false, detailError = null,
-                    episodeProgress = refreshCatalogueLegacyOffsets(it, detail), detailFirstConfirmedLineMs = null, nativeMetadataSearch = null,
+                    episodeProgress = refreshCatalogueLegacyOffsets(it, detail), detailFirstConfirmedLineMs = null,
+                    nativeMetadataSearch = null, nativeMetadataError = null,
                     detailScores = emptyList(), detailScoreChecks = emptyMap(),
                     groupSourceCandidates = emptyList(), associationChoices = emptyMap(),
                     detailFromCache = cached != null, relatedSubjects = emptyList(), sourceResults = emptyList(),

@@ -11,6 +11,8 @@ import dev.mangaflow.anime.AnimeDiscoveryFormat
 import dev.mangaflow.anime.animeCatalogueNames
 import dev.mangaflow.anime.animeMetadataSubjectCandidate
 import dev.mangaflow.anime.animeMetadataSubjectsMatch
+import dev.mangaflow.anime.animeNativeMetadataSubjectCandidate
+import dev.mangaflow.anime.animeNativeMetadataSubjectsMatch
 import dev.mangaflow.anime.canonicalBangumiId
 import dev.mangaflow.anime.canonicalDoubanId
 import dev.mangaflow.anime.enrichAnimeCatalogueSubject
@@ -49,6 +51,7 @@ class AnimeMetadataRepository(context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
     private val cache = AnimeMetadataCache.get(context)
     private val douban = DoubanAnimeRepository(context)
+    internal val cacheGeneration: Long get() = cache.generation
 
     suspend fun discover(): List<AnimeSubject> = browse().items
     suspend fun search(query: String): List<AnimeSubject> = browse(query = query).items
@@ -124,6 +127,7 @@ class AnimeMetadataRepository(context: PlatformContext) {
                 }
                 val rows = document.requiredArray("data", BANGUMI_PROVIDER, AnimeSourceStage.METADATA).objects()
                 val total = document.optLong("total", -1L)
+                check(rows.isNotEmpty() || total <= offset) { "Bangumi 资料分页尚未完整，请重新读取。" }
                 AnimeMetadataPage(rows.mapNotNull(::bangumiSubject), page,
                     rows.isNotEmpty() && if (total >= 0) offset + rows.size < total else rows.size >= PAGE_SIZE)
             }
@@ -296,6 +300,31 @@ class AnimeMetadataRepository(context: PlatformContext) {
         return AnimeMetadataDetailResult(shown, episodes, subjectError, episodeError, metadata, loaded.episodes)
     }
 
+    private fun nativeReferenceKey(primary: AnimeSubject, sourceRevision: String?, route: DownloadRouteSnapshot): String =
+        "native-reference:v1:" + animeHash(JSONObject().put("owner", primary.id)
+            .put("names", JSONArray(animeCatalogueNames(primary))).put("year", primary.year)
+            .put("format", primary.format?.name).put("sourceRevision", sourceRevision)
+            .put("ids", JSONArray(primary.externalIds.entries.sortedBy { it.key }.map { (key, value) ->
+                JSONObject().put("key", key).put("value", value)
+            })).put("route", route.identity()).toString())
+
+    internal suspend fun cachedNativeReference(primary: AnimeSubject, sourceRevision: String?,
+        route: DownloadRouteSnapshot): AnimeSubject? {
+        val document = cache.read(nativeReferenceKey(primary, sourceRevision, route))
+            ?.takeIf { cache.isFresh(it, ContentCacheKind.DETAILS) } ?: return null
+        return withContext(Dispatchers.Default) {
+            runCatching { AnimeDocumentCodec.subject(JSONObject(document.text)) }.getOrNull()
+                ?.takeIf { animeNativeMetadataSubjectsMatch(primary, it) }
+        }
+    }
+
+    internal suspend fun cacheNativeReference(primary: AnimeSubject, reference: AnimeSubject, sourceRevision: String?,
+        route: DownloadRouteSnapshot, requestedGeneration: Long) {
+        require(animeNativeMetadataSubjectsMatch(primary, reference))
+        cache.write(nativeReferenceKey(primary, sourceRevision, route),
+            AnimeDocumentCodec.subject(reference).toString(), requestedGeneration)
+    }
+
     /** Search completion, detailed evidence and uniqueness are all required before automatic linking. */
     internal suspend fun resolveBangumiReference(primary: AnimeSubject,
         route: DownloadRouteSnapshot = DownloadRoutingStore.activeSourceSnapshot(BANGUMI_PROVIDER, DownloadCategory.ANIME),
@@ -305,7 +334,8 @@ class AnimeMetadataRepository(context: PlatformContext) {
             "Bangumi 网络线路已变化，请重新核对作品。"
         } }
         checkRoute()
-        if (primary.year == null || primary.format == null) return null
+        val native = !primary.externalIds["native-source"].isNullOrBlank()
+        if (!native && (primary.year == null || primary.format == null)) return null
         val names = (listOf(primary.originalTitle) + animeCatalogueNames(primary))
             .map(String::trim).filter { it.isNotBlank() && it.length <= 500 }.distinct().take(3)
         val candidates = linkedMapOf<String, AnimeSubject>()
@@ -313,7 +343,8 @@ class AnimeMetadataRepository(context: PlatformContext) {
             for (page in 1..2) {
                 val result = browse(query = name, page = page, year = primary.year, forceRefresh = forceRefresh, route = route)
                 checkRoute()
-                result.items.filter { animeMetadataSubjectCandidate(primary, it) }.forEach { candidates[it.id] = it }
+                result.items.filter { if (native) animeNativeMetadataSubjectCandidate(primary, it)
+                    else animeMetadataSubjectCandidate(primary, it) }.forEach { candidates[it.id] = it }
                 if (!result.hasMore) break
                 if (page == 2) error("同名资料检索尚未完整，暂不自动确认 Bangumi 条目。")
             }
@@ -323,7 +354,7 @@ class AnimeMetadataRepository(context: PlatformContext) {
         for (candidate in candidates.values) {
             val full = subjectByBangumiId(requireNotNull(candidate.canonicalBangumiId()), route) ?: continue
             checkRoute()
-            if (animeMetadataSubjectsMatch(primary, full)) verified += full
+            if (if (native) animeNativeMetadataSubjectsMatch(primary, full) else animeMetadataSubjectsMatch(primary, full)) verified += full
         }
         return verified.singleOrNull()
     }
@@ -353,7 +384,7 @@ class AnimeMetadataRepository(context: PlatformContext) {
 
     private fun browseKey(mode: AnimeBrowseMode, query: String, page: Int, year: Int?, tag: String, weekday: Int?,
         route: DownloadRouteSnapshot) =
-        JSONObject().put("mode", mode.name).put("query", query.trim()).put("page", page)
+        JSONObject().put("mode", mode.name).put("query", query.trim()).put("page", page).put("pageSize", PAGE_SIZE)
             .put("year", year).put("tag", tag.trim()).put("weekday", weekday)
             .put("route", animeHash(route.identity())).toString()
     private fun encodePage(page: AnimeMetadataPage) = JSONObject().put("page", page.page)
@@ -364,7 +395,7 @@ class AnimeMetadataRepository(context: PlatformContext) {
         return AnimeMetadataPage(json.getJSONArray("items").objects().map { AnimeDocumentCodec.subject(it) },
             json.getInt("page"), json.getBoolean("hasMore"), json.optString("error", null))
     }
-    private companion object { const val PAGE_SIZE = 24 }
+    private companion object { const val PAGE_SIZE = 20 }
 }
 
 internal const val BANGUMI_PROVIDER = "anime-bangumi"

@@ -136,7 +136,8 @@ internal fun AnimeDetailPane(
     val douban = subject.canonicalDoubanId() != null
     val supportsMetadataLink = native || douban
     val entry = state.library.firstOrNull { it.subject.id == subject.id }
-    val linkedMetadata = (detail.metadataSubject ?: entry?.nativeMetadata.takeIf { supportsMetadataLink })
+    val linkedMetadata = (entry?.nativeMetadata.takeIf { supportsMetadataLink }
+        ?: detail.metadataSubject.takeUnless { entry?.metadataAutoMatchDisabled == true })
         ?.takeIf { it.canonicalBangumiId() != null }
     val canonicalInfo = subject.takeIf { it.canonicalBangumiId() != null } ?: linkedMetadata
     val tagOwner = subject.takeIf { it.tags.any(String::isNotBlank) }
@@ -147,7 +148,7 @@ internal fun AnimeDetailPane(
     val observedWork = currentDiscussion.workContext?.takeIf {
         it.subjectId == subject.id && it.referenceId == workReferenceId
     }
-    val canMatchCommentWork = douban && entry?.metadataAutoMatchDisabled != true && !state.libraryReadUnavailable
+    val canMatchCommentWork = supportsMetadataLink && entry?.metadataAutoMatchDisabled != true && !state.libraryReadUnavailable
     val checkingCommentWork = canMatchCommentWork && currentDiscussion.subjectId == subject.id && currentDiscussion.workReferencePending
     var detailTab by rememberSaveable(subject.id, "detail-sections") { mutableIntStateOf(0) }
     var discussionFilter by remember(subject.id) { mutableStateOf(false) }
@@ -189,7 +190,10 @@ internal fun AnimeDetailPane(
                 unlinkMetadata = false
                 reviewedMetadata = null
                 controller.dismissNativeMetadataSearch(subject.id)
-            }, forComments = forComments)
+            }, forComments = forComments,
+            automaticPending = native && checkingCommentWork,
+            automaticError = state.nativeMetadataError.takeIf { native },
+            onRetryAutomatic = { controller.retryNativeMetadata(subject.id) })
     }
     val completed = entry?.completedEpisodeIds.orEmpty()
     var episodeTab by rememberSaveable(subject.id) { mutableIntStateOf(0) }
@@ -454,7 +458,7 @@ internal fun AnimeDetailPane(
                                             if (checkingCommentWork && metadataSearch == null) item(key = "discussion-work-loading") {
                                                 AnimeDetailStatus("正在核对作品评论来源", Icons.Outlined.Search, loading = true)
                                             } else {
-                                                val problem = state.detailError.takeIf { canMatchCommentWork && metadataSearch == null }
+                                                val problem = state.detailError.takeIf { douban && canMatchCommentWork && metadataSearch == null }
                                                 if (problem != null) item(key = "discussion-work-retry") {
                                                     AnimeDiscoveryInlineStatus(problem, retry = if (paneActive) ({
                                                         if (controller.state.value.detail?.subject?.id == subject.id)
@@ -515,7 +519,8 @@ internal fun AnimeDetailPane(
                                             val description = subject.description.ifBlank { canonicalInfo?.description.orEmpty() }
                                             if (description.isNotBlank() || tagOwner != null) AnimeDetailDescription(
                                                 subject.id, description, tagOwner, paneActive, onTag)
-                                            else AnimeMessage("暂无简介", subject.originalTitle.takeIf { it != subject.title && it.isNotBlank() })
+                                            else if (!native || !checkingCommentWork) AnimeMessage("暂无简介",
+                                                subject.originalTitle.takeIf { it != subject.title && it.isNotBlank() })
                                         }
                                         if (supportsMetadataLink && !state.libraryReadUnavailable) metadataPicker(paneActive)
                                         if (state.relatedSubjects.isNotEmpty()) {
@@ -758,6 +763,9 @@ private fun LazyListScope.nativeMetadataPicker(
     onSave: (String?) -> Unit,
     onClose: () -> Unit,
     forComments: Boolean,
+    automaticPending: Boolean,
+    automaticError: String?,
+    onRetryAutomatic: () -> Unit,
 ) {
     item(key = "native-metadata") {
         Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -775,6 +783,11 @@ private fun LazyListScope.nativeMetadataPicker(
                         Icon(Icons.Outlined.Close, null, Modifier.size(18.dp))
                     }
                 }
+            }
+            if (search == null) {
+                if (automaticPending) AnimeDetailStatus("正在补充作品资料", Icons.Outlined.Search, loading = true)
+                else if (automaticError != null) AnimeDiscoveryInlineStatus(automaticError,
+                    retry = onRetryAutomatic.takeIf { active })
             }
             if (search != null) {
                 val editable = active && !search.saving
