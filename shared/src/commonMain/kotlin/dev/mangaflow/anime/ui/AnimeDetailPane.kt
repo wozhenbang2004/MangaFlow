@@ -159,7 +159,7 @@ internal fun AnimeDetailPane(
     var episodeMenuOwner by remember(subject.id) { mutableStateOf<String?>(null) }
     val sections = rememberSaveableStateHolder()
     val groups = rememberSaveableStateHolder()
-    val detailTabs = listOf("选集", "简介", "评论")
+    val detailTabs = listOf("选集", "简介", "评论", "相关")
     fun selectDetailTab(index: Int) {
         if (index == 2) discussionOpenRevision++
         discussionFilter = false
@@ -169,6 +169,53 @@ internal fun AnimeDetailPane(
     DisposableEffect(controller, observedWork, commentsVisible) {
         if (commentsVisible && observedWork != null) controller.discussion.setVisible(observedWork, true)
         onDispose { if (commentsVisible && observedWork != null) controller.discussion.setVisible(observedWork, false) }
+    }
+    val relatedRoutes by controller.relatedSourceRoutes.collectAsStateWithLifecycle()
+    val availableRelatedRequests = remember(controller, subject.id, state.sourceBindings, state.sourceCatalogs,
+        state.sourceExtensions, state.libraryReadUnavailable, relatedRoutes, controller.relatedSourceVisit) {
+        (controller.relatedSourceRequests(state) + controller.retainedRelatedSourceRequests(state)).distinct()
+    }
+    var leavingRelatedRequests by remember(subject.id) { mutableStateOf(emptyList<AnimeRelatedSourceRequest>()) }
+    SideEffect { if (active) leavingRelatedRequests = availableRelatedRequests }
+    val relatedRequests = if (active) availableRelatedRequests else leavingRelatedRequests
+    var selectedRelatedSource by rememberSaveable(subject.id, "related-source") { mutableStateOf<String?>(null) }
+    val relatedRequest = relatedRequests.firstOrNull { detailRelatedSourceKey(it) == selectedRelatedSource }
+        ?: relatedRequests.firstOrNull()
+    val relatedSourceResults = remember(controller, subject.id) {
+        mutableStateMapOf<AnimeRelatedSourceRequest, AnimeDetailRecommendations>()
+    }
+    val retainedRecommendations = remember(controller, relatedRequest) {
+        relatedRequest?.let(controller::cachedDetailSourceRelated)
+    }
+    val sourceRecommendations = relatedRequest?.let { request ->
+        relatedSourceResults[request] ?: AnimeDetailRecommendations(
+            result = retainedRecommendations?.let { Result.success(it) }, items = retainedRecommendations.orEmpty())
+    }
+    val ownsRecommendations = relatedRequest?.let(controller::ownsRelatedSource) == true
+    val relatedVisible = active && detailTab == 3 && !statusPresent && !discussionChecksPresent && episodeMenuOwner == null
+    SideEffect {
+        if (relatedVisible && relatedRequest != null) selectedRelatedSource = detailRelatedSourceKey(relatedRequest)
+    }
+    val relatedLifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(active, availableRelatedRequests) {
+        if (active) relatedSourceResults.keys.filterNot { it in availableRelatedRequests }.forEach { relatedSourceResults.remove(it) }
+    }
+    LaunchedEffect(relatedRequest, sourceRecommendations?.revision, ownsRecommendations, relatedVisible, relatedLifecycle) {
+        val request = relatedRequest ?: return@LaunchedEffect
+        val reading = sourceRecommendations ?: return@LaunchedEffect
+        if (!relatedVisible || !ownsRecommendations) return@LaunchedEffect
+        relatedLifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            val latest = relatedSourceResults[request] ?: reading
+            if (!latest.pending) return@repeatOnLifecycle
+            val result = try { Result.success(controller.readDetailSourceRelated(request)) }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) { Result.failure(failure) }
+            if (controller.ownsRelatedSource(request)) {
+                val current = relatedSourceResults[request] ?: reading
+                if (current.revision == latest.revision) relatedSourceResults[request] = current.copy(
+                    result = result, items = result.getOrNull() ?: current.items, completedRevision = latest.revision)
+            }
+        }
     }
     val metadataSearch = state.nativeMetadataSearch?.takeIf { it.subjectId == subject.id }
     var metadataQuery by rememberSaveable(subject.id, "metadata-query") { mutableStateOf(subject.title) }
@@ -418,7 +465,7 @@ internal fun AnimeDetailPane(
                     .motionInputGate(active && !statusPresent && !discussionChecksPresent && episodeMenuOwner == null),
                     verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.weight(1f)) {
-                        LiquidGlassSurface(backdrop, Modifier.widthIn(max = 280.dp).fillMaxWidth(),
+                        LiquidGlassSurface(backdrop, Modifier.widthIn(max = 320.dp * fontScale.coerceAtMost(1.4f)).fillMaxWidth(),
                             cornerRadius = 24.dp, role = GlassSurfaceRole.NAVIGATION, elevation = 1.dp) {
                             MotionTabs(detailTab, detailTabs, ::selectDetailTab, controlHeight = 48.dp,
                                 fontSize = 13.sp, fullWidthIndicator = true)
@@ -489,31 +536,9 @@ internal fun AnimeDetailPane(
                                 onFilterChanged = { discussionFilterChanged = it })
                             1 -> {
                                 val position = rememberLazyListState()
-                                val routes by controller.relatedSourceRoutes.collectAsStateWithLifecycle()
-                                val related = remember(controller, subject.id, state.sourceBindings, state.sourceCatalogs,
-                                    state.sourceExtensions, state.libraryReadUnavailable, routes, controller.relatedSourceVisit) {
-                                    controller.relatedSourceRequest(state)
-                                }
-                                var relatedRetry by remember(related) { mutableIntStateOf(0) }
-                                var nativeRelated by remember(related, relatedRetry) {
-                                    mutableStateOf<Result<List<AnimeSourceTitle>>?>(null)
-                                }
-                                val lifecycle = LocalLifecycleOwner.current.lifecycle
-                                LaunchedEffect(related, relatedRetry, paneActive, lifecycle) {
-                                    if (related != null && paneActive) lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                                        if (nativeRelated == null) {
-                                            val result = try { Result.success(controller.readDetailSourceRelated(related)) }
-                                            catch (cancel: CancellationException) { throw cancel }
-                                            catch (failure: Exception) { Result.failure(failure) }
-                                            if (controller.ownsRelatedSource(related)) nativeRelated = result
-                                        }
-                                    }
-                                }
-                                val sourceResult = nativeRelated
-                                val sourceRows = sourceResult?.getOrNull().orEmpty()
                                 Box(Modifier.fillMaxSize()) {
                                     LazyColumn(Modifier.fillMaxSize().mangaHazeSource(backdrop).motionInputGate(paneActive),
-                                        state = position,
+                                        state = position, userScrollEnabled = paneActive,
                                         contentPadding = PaddingValues(start = horizontal, end = horizontal, bottom = listEnd)) {
                                         item(key = "description") {
                                             val description = subject.description.ifBlank { canonicalInfo?.description.orEmpty() }
@@ -523,35 +548,155 @@ internal fun AnimeDetailPane(
                                                 subject.originalTitle.takeIf { it != subject.title && it.isNotBlank() })
                                         }
                                         if (supportsMetadataLink && !state.libraryReadUnavailable) metadataPicker(paneActive)
-                                        if (state.relatedSubjects.isNotEmpty()) {
-                                            item(key = "related-heading") { AnimeSectionTitle("相关番剧", modifier = Modifier.semantics { heading() }) }
-                                            items(state.relatedSubjects, key = { "related:" + it.id }) { related ->
-                                                AnimeSubjectRow(related, animeSubjectSummary(related), onOpen = { onOpenRelated(related) },
-                                                    ratings = { AnimeSubjectRatings(related, enabled = paneActive) })
-                                            }
-                                        }
-                                        if (related != null) {
-                                            item(key = "source-related-heading") {
-                                                AnimeSectionTitle("来源推荐 · ${related.sourceName}", modifier = Modifier.semantics { heading() })
-                                            }
-                                            if (sourceResult == null) item(key = "source-related-loading") {
-                                                AnimeQuietLabel("正在读取来源推荐")
-                                            }
-                                            if (sourceResult?.isFailure == true) item(key = "source-related-error") {
-                                                AnimeDiscoveryInlineStatus("来源推荐暂未载入",
-                                                    retry = if (paneActive) ({ relatedRetry++; Unit }) else null)
-                                            }
-                                            if (sourceResult?.isSuccess == true && sourceRows.isEmpty()) item(key = "source-related-empty") {
-                                                AnimeQuietLabel("这个来源没有返回推荐")
-                                            }
-                                            items(sourceRows, key = { "source-related:${it.sourceId}:${it.id}" }) { row ->
-                                                val recommended = controller.sourceSubject(row)
-                                                AnimeSubjectRow(recommended, animeSubjectSummary(recommended),
-                                                    onOpen = { if (paneActive) onOpenSourceRelated(related, row) })
-                                            }
-                                        }
                                     }
                                     if (wide) DesktopVerticalScrollbar(position, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                                }
+                            }
+                            3 -> {
+                                val position = rememberLazyListState()
+                                val relatedReferenceId = canonicalInfo?.id
+                                val related = state.related.takeIf { it.referenceId == relatedReferenceId }
+                                val relatedItems = related?.items.orEmpty()
+                                val canReadRelated = controller.canReadDetailRelated(subject.id)
+                                val relatedGroups = remember(relatedItems) {
+                                    val grouped = relatedItems.groupBy { detailRelatedSection(it.relation) }
+                                    listOf("前作", "后续", "本篇与番外", "其他版本", "其他关联").mapNotNull { label ->
+                                        grouped[label]?.let { label to it }
+                                    }
+                                }
+                                val sourceRows = sourceRecommendations?.items.orEmpty()
+                                val checkingSources = state.detailLoading || sourceSearchInProgress
+                                val awaitingRelations = !state.libraryReadUnavailable && relatedItems.isEmpty() &&
+                                    (relatedReferenceId == null && checkingCommentWork || related?.loading == true)
+                                val awaitingRecommendations = if (relatedRequest != null)
+                                    sourceRecommendations?.result == null && (ownsRecommendations || checkingSources)
+                                else checkingSources
+                                var listShown by remember { mutableStateOf(false) }
+                                val restoringPosition = position.firstVisibleItemIndex > 0 || position.firstVisibleItemScrollOffset > 0
+                                BoxWithConstraints(Modifier.fillMaxSize()) {
+                                    val columns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
+                                    val gap = animeDiscoveryGap(columns)
+                                    val inset = maxOf(horizontal, animeDiscoveryInset(maxWidth, state.discoveryColumns, columns))
+                                    val recommendationRows = remember(sourceRows, columns) { sourceRows.chunked(columns) }
+                                    // Status and choice slots keep their indices while refreshing either section.
+                                    val itemCount = 5 + relatedGroups.sumOf { it.second.size + 1 } + recommendationRows.size
+                                    val waitForRestore = !listShown && restoringPosition && sourceRows.isEmpty() &&
+                                        position.firstVisibleItemIndex >= itemCount && (awaitingRelations || awaitingRecommendations)
+                                    if (waitForRestore) {
+                                        Box(Modifier.fillMaxSize().padding(horizontal = inset, vertical = 8.dp)) {
+                                            AnimeDetailStatus("正在恢复相关番剧", Icons.Outlined.Info, loading = true)
+                                        }
+                                    } else {
+                                        SideEffect { listShown = true }
+                                        LazyColumn(Modifier.fillMaxSize().mangaHazeSource(backdrop).motionInputGate(paneActive),
+                                            state = position, userScrollEnabled = paneActive,
+                                            contentPadding = PaddingValues(start = inset, end = inset, bottom = listEnd)) {
+                                            item(key = "related-heading") {
+                                                AnimeSectionTitle("作品关联", subtitle = "Bangumi",
+                                                    modifier = Modifier.semantics { heading() })
+                                            }
+                                            item(key = "related-status") {
+                                                when {
+                                                    state.libraryReadUnavailable && relatedItems.isEmpty() ->
+                                                        AnimeQuietLabel("本机资料关联暂不可读取")
+                                                    !canReadRelated && relatedItems.isEmpty() ->
+                                                        AnimeQuietLabel("重新打开这部番剧后，可查看作品关联")
+                                                    relatedReferenceId == null && checkingCommentWork ->
+                                                        AnimeDetailStatus("正在核对作品关联", Icons.Outlined.Search, loading = true)
+                                                    relatedReferenceId == null -> AnimeDiscoveryInlineStatus("确认作品资料后可查看关联动画",
+                                                        retry = if (paneActive && supportsMetadataLink && !state.libraryReadUnavailable)
+                                                            ({ selectDetailTab(1) }) else null,
+                                                        retryLabel = "补充资料", showIssue = false)
+                                                    related?.loading == true ->
+                                                        AnimeDetailStatus(if (relatedItems.isEmpty()) "正在读取关联动画" else "正在更新关联动画",
+                                                        Icons.Outlined.Info, loading = true)
+                                                    related?.error != null ->
+                                                        AnimeDiscoveryInlineStatus(if (relatedItems.isEmpty()) "关联动画暂未载入" else "关联动画更新失败",
+                                                        detail = related.error,
+                                                        retry = if (paneActive) ({ controller.retryDetailRelated() }) else null)
+                                                    related?.loaded != true -> AnimeDiscoveryInlineStatus("作品关联尚未读取",
+                                                        retry = if (paneActive) ({ controller.retryDetailRelated() }) else null,
+                                                        retryLabel = "读取资料", showIssue = false)
+                                                    relatedItems.isEmpty() -> AnimeQuietLabel("Bangumi 暂未收录关联动画")
+                                                    else -> Unit
+                                                }
+                                            }
+                                            relatedGroups.forEach { (label, entries) ->
+                                                item(key = "related-group:$label") {
+                                                    AnimeSectionTitle(label, modifier = Modifier.semantics { heading() })
+                                                }
+                                                items(entries, key = { "related:${it.subject.id}:${it.relation}" }) { entry ->
+                                                    val summary = animeSubjectSummary(entry.subject)
+                                                    AnimeSubjectRow(entry.subject,
+                                                        listOf(entry.relation, summary).filter(String::isNotBlank).joinToString(" · "),
+                                                        onOpen = { if (paneActive) onOpenRelated(entry.subject) })
+                                                }
+                                            }
+                                            item(key = "source-related-heading") {
+                                                AnimeSectionTitle("你可能也喜欢",
+                                                    subtitle = relatedRequest?.sourceName?.let { "来自 $it" },
+                                                    modifier = Modifier.padding(top = 12.dp).semantics { heading() })
+                                            }
+                                            item(key = "source-related-choices") {
+                                                if (relatedRequests.size > 1) AnimeChoiceStrip(relatedRequests.map { it.sourceName },
+                                                    relatedRequests.indexOfFirst { it == relatedRequest }, active = paneActive,
+                                                    onSelect = { index ->
+                                                        if (paneActive) relatedRequests.getOrNull(index)?.let {
+                                                            selectedRelatedSource = detailRelatedSourceKey(it)
+                                                        }
+                                                    })
+                                            }
+                                            val recommendation = sourceRecommendations
+                                            item(key = "source-related-status") {
+                                                when {
+                                                    relatedRequest == null -> {
+                                                        if (state.libraryReadUnavailable) AnimeQuietLabel("本机来源关联暂不可读取")
+                                                        else if (checkingSources) AnimeDetailStatus("正在核对推荐来源", Icons.Outlined.Search, loading = true)
+                                                        else AnimeQuietLabel("当前来源暂不提供相关推荐")
+                                                    }
+                                                    !ownsRecommendations -> {
+                                                        if (checkingSources) AnimeDetailStatus("正在核对推荐来源", Icons.Outlined.Search, loading = true)
+                                                        else AnimeDiscoveryInlineStatus("推荐来源暂不可用",
+                                                        retry = if (paneActive) ({ onSources(null) }) else null,
+                                                        retryLabel = "查看来源", showIssue = false)
+                                                    }
+                                                    recommendation?.pending == true ->
+                                                        AnimeDetailStatus(if (sourceRows.isEmpty()) "正在读取来源推荐" else "正在更新来源推荐",
+                                                        Icons.Outlined.Info, loading = true)
+                                                    recommendation?.result?.isFailure == true ->
+                                                        AnimeDiscoveryInlineStatus(if (sourceRows.isEmpty()) "来源推荐暂未载入" else "来源推荐更新失败",
+                                                        detail = recommendation.result?.exceptionOrNull()?.message,
+                                                        retry = if (paneActive && relatedRequest != null) ({
+                                                            if (controller.ownsRelatedSource(relatedRequest)) {
+                                                                val current = relatedSourceResults[relatedRequest] ?: recommendation
+                                                                relatedSourceResults[relatedRequest] = current.copy(revision = current.revision + 1)
+                                                            }
+                                                        }) else null)
+                                                    recommendation?.result?.isSuccess == true && sourceRows.isEmpty() ->
+                                                        AnimeQuietLabel("这个来源暂时没有推荐")
+                                                    else -> Unit
+                                                }
+                                            }
+                                            if (relatedRequest != null) items(recommendationRows,
+                                                key = { row -> "source-related:${detailRelatedSourceKey(relatedRequest)}:${row.first().id}" }) { row ->
+                                                Row(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 8.dp),
+                                                    horizontalArrangement = Arrangement.spacedBy(gap)) {
+                                                    row.forEach { title -> key(title.sourceId, title.id) {
+                                                        AnimeSourceDiscoveryCard(title,
+                                                            modifier = Modifier.weight(1f).then(if (ownsRecommendations) Modifier
+                                                                else Modifier.semantics { disabled() }),
+                                                            list = columns == 1,
+                                                            onOpen = {
+                                                                if (paneActive && controller.canOpenDetailSourceRelated(relatedRequest, title))
+                                                                    onOpenSourceRelated(relatedRequest, title)
+                                                            })
+                                                    } }
+                                                    repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
+                                                }
+                                            }
+                                        }
+                                        if (wide) DesktopVerticalScrollbar(position, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+                                    }
                                 }
                             }
                             else -> Column(Modifier.fillMaxSize()) {
@@ -719,6 +864,27 @@ internal fun AnimeDetailPane(
             }
         }
     }
+}
+
+/** Keep a failed refresh beside the last real rows, with one read revision per selected catalogue. */
+private data class AnimeDetailRecommendations(
+    val result: Result<List<AnimeSourceTitle>>? = null,
+    val items: List<AnimeSourceTitle> = emptyList(),
+    val revision: Int = 0,
+    val completedRevision: Int = -1,
+) {
+    val pending: Boolean get() = revision != completedRevision
+}
+
+private fun detailRelatedSourceKey(request: AnimeRelatedSourceRequest): String =
+    "${request.sourceId}:${request.titleId}:${request.titleUrl}"
+
+private fun detailRelatedSection(relation: String): String = when (relation) {
+    "前传" -> "前作"
+    "续集" -> "后续"
+    "主线故事", "番外篇", "衍生" -> "本篇与番外"
+    "总集篇", "全集", "不同演绎" -> "其他版本"
+    else -> "其他关联"
 }
 
 /** Use the current same-kind continuation; do not advance a completed watch into a known future release. */

@@ -50,7 +50,7 @@ private data class AnimeRoute(
     val relatedDepth: Int = 0,
 )
 private data class AnimeDetailVisit(
-    val detail: AnimeDetail, val related: List<AnimeSubject>,
+    val detail: AnimeDetail, val related: AnimeRelatedState,
     val candidates: List<AnimeSourceTitle>, val scores: List<AnimeSourceScore>,
     val tagQuery: AnimeDiscoveryQuery? = null,
 )
@@ -435,7 +435,7 @@ private fun AnimeWorkspaceContent(
         val origin = detailSearchOrigin
         val current = latest.detail
         if (origin != null && current != null && current.subject.id == origin.subjectId) {
-            detailHistory += AnimeDetailVisit(current, latest.relatedSubjects, latest.groupSourceCandidates,
+            detailHistory += AnimeDetailVisit(current, latest.related, latest.groupSourceCandidates,
                 latest.detailScores, latest.discoveryFeeds[animeDiscoveryFeedKey(AnimeDiscoveryTab.GENRES)]?.query)
             closeSearch()
         }
@@ -456,14 +456,14 @@ private fun AnimeWorkspaceContent(
         val latest = controller.state.value
         val current = latest.detail ?: return
         if (current.subject.id == subject.id) return
-        detailHistory += AnimeDetailVisit(current, latest.relatedSubjects, latest.groupSourceCandidates, latest.detailScores)
+        detailHistory += AnimeDetailVisit(current, latest.related, latest.groupSourceCandidates, latest.detailScores)
         open(subject)
     }
     fun openSourceRelated(request: AnimeRelatedSourceRequest, title: AnimeSourceTitle) {
         if (!active || !controller.canOpenDetailSourceRelated(request, title)) return
         val latest = controller.state.value
         val current = latest.detail?.takeIf { it.subject.id == request.subjectId } ?: return
-        detailHistory += AnimeDetailVisit(current, latest.relatedSubjects, latest.groupSourceCandidates, latest.detailScores)
+        detailHistory += AnimeDetailVisit(current, latest.related, latest.groupSourceCandidates, latest.detailScores)
         pendingAssociation = null
         browseCandidate = null
         beginDetailNavigation()

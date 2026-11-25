@@ -25,6 +25,20 @@ data class AnimeSubject(
     val aliases: List<String> = emptyList(),
 )
 
+data class AnimeRelatedSubject(
+    val subject: AnimeSubject,
+    /** The provider's relation to the current work, not an inferred viewing order. */
+    val relation: String,
+)
+
+data class AnimeRelatedState(
+    val referenceId: String? = null,
+    val items: List<AnimeRelatedSubject> = emptyList(),
+    val loading: Boolean = false,
+    val loaded: Boolean = false,
+    val error: String? = null,
+)
+
 enum class AnimeEpisodeKind { MAIN, SPECIAL, OPENING, ENDING, TRAILER, OTHER }
 
 data class AnimeEpisode(
@@ -438,7 +452,7 @@ data class AnimeScreenState(
     val catalogTag: String = "",
     val calendarDay: Int? = null,
     val detailFromCache: Boolean = false,
-    val relatedSubjects: List<AnimeSubject> = emptyList(),
+    val related: AnimeRelatedState = AnimeRelatedState(),
     val settings: AnimePlaybackSettings = AnimePlaybackSettings(),
     val resumeEntry: AnimeLibraryEntry? = null,
     val searchHistory: List<String> = emptyList(),

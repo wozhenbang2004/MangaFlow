@@ -4,6 +4,7 @@ import com.fleeksoft.ksoup.Ksoup
 import dev.mangaflow.anime.AnimeDetail
 import dev.mangaflow.anime.AnimeEpisode
 import dev.mangaflow.anime.AnimeEpisodeKind
+import dev.mangaflow.anime.AnimeRelatedSubject
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.AnimeBrowseMode
 import dev.mangaflow.anime.AnimeDocumentCodec
@@ -371,15 +372,50 @@ class AnimeMetadataRepository(context: PlatformContext) {
     catch (failure: AnimeMetadataIdentityException) { throw failure }
     catch (failure: Exception) { Result.failure(failure) }
 
-    suspend fun related(subject: AnimeSubject): List<AnimeSubject> = withContext(Dispatchers.Default) {
+    suspend fun related(subject: AnimeSubject, route: DownloadRouteSnapshot,
+        forceRefresh: Boolean = false): List<AnimeRelatedSubject> = withContext(Dispatchers.Default) {
         require(subject.id.startsWith("bangumi:")) { "请选择有效的番剧条目。" }
         val id = animeNumericId(subject.id.removePrefix("bangumi:"))
-        val http = AnimeHttp(BANGUMI_PROVIDER)
+        fun checkRoute() { check(DownloadRoutingStore.activeSourceSnapshot(BANGUMI_PROVIDER, DownloadCategory.ANIME) == route) {
+            "Bangumi 网络线路已变化，请重新读取相关番剧。"
+        } }
+        checkRoute()
+        val key = "related:v1:${subject.id}:${animeHash(route.identity())}"
+        if (!forceRefresh) cache.read(key)?.takeIf { cache.isFresh(it, ContentCacheKind.DETAILS) }?.let {
+            runCatching { decodeRelated(it.text, subject.id) }.getOrNull()?.let { cached ->
+                checkRoute()
+                return@withContext cached
+            }
+        }
+        val cacheGeneration = cache.generation
+        val http = AnimeHttp(BANGUMI_PROVIDER, route)
         try {
-            JSONArray(http.request(BANGUMI_API.newBuilder().addPathSegment("subjects").addPathSegment(id.toString())
+            val related = JSONArray(http.request(BANGUMI_API.newBuilder().addPathSegment("subjects").addPathSegment(id.toString())
                 .addPathSegment("subjects").build(), AnimeSourceStage.METADATA).text).objects()
-                .mapNotNull(::bangumiSubject).filterNot { it.id == subject.id }.distinctBy { it.id }
+                .mapNotNull { row -> bangumiSubject(row)?.let { AnimeRelatedSubject(it, row.getString("relation")) } }
+                .filterNot { it.subject.id == subject.id }.distinctBy { it.subject.id to it.relation }
+            checkRoute()
+            cache.write(key, encodeRelated(subject.id, related), cacheGeneration)
+            checkRoute()
+            related
         } finally { http.close() }
+    }
+
+    private fun encodeRelated(referenceId: String, items: List<AnimeRelatedSubject>) =
+        JSONObject().put("referenceId", referenceId).put("items", JSONArray(items.map {
+            JSONObject().put("subject", AnimeDocumentCodec.subject(it.subject)).put("relation", it.relation)
+        })).toString()
+
+    private fun decodeRelated(text: String, referenceId: String): List<AnimeRelatedSubject> {
+        val document = JSONObject(text)
+        require(document.getString("referenceId") == referenceId)
+        val rows = document.getJSONArray("items")
+        return (0 until rows.length()).map { index ->
+            val row = rows.getJSONObject(index)
+            val subject = AnimeDocumentCodec.subject(row.getJSONObject("subject"))
+            require(subject.canonicalBangumiId() != null && subject.id != referenceId)
+            AnimeRelatedSubject(subject, row.getString("relation"))
+        }.distinctBy { it.subject.id to it.relation }
     }
 
     private fun browseKey(mode: AnimeBrowseMode, query: String, page: Int, year: Int?, tag: String, weekday: Int?,

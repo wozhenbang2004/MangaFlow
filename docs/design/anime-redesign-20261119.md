@@ -1,5 +1,33 @@
 # 番剧全流程重做 · 2026-11-19
 
+<a id="anime-related-browse-20261125"></a>
+
+## 相关番剧完整浏览 · 2026-11-25
+
+用户原话：“而且我们要的相关番剧功能怎么没做请你好好设计”。本轮 2026-11-25 固化；精确消息时间／ID、安装版本未知。当前基线 main `e7ad156a889f34b67239305bf2e7f28924183c9b` 已包含前批自动补资料。源码确认：只有选集／简介／评论三页，相关作品与来源推荐均藏在简介全文和资料选择器之后；Bangumi 关系字符串被丢弃，加载与失败没有独立状态。既有 Workspace 已有逐层详情返回栈，不重造路由。先前设计中的“简介全文与相关番剧移入专属页”仅实现共同的简介页，本节明确替代其相关入口安排。
+
+| 要求与质量下限 | 当前采用的设计、落点与可观察验收 |
+| --- | --- |
+| ANIME-RELATED-01 明确入口 | 既有详情胶囊增加第四页“相关”，评论保持 index 2，相关 index 3；沿 MotionTabs、MotionTabContent 与分区 SaveableStateProvider。简介不再堆关联条目；从详情一次点到相关，不必滚完长文。 |
+| ANIME-RELATED-02 真实作品关系 | 保存 Bangumi 原始 relation，与作品一起传至展示及返回快照。前作、后续、本篇与番外、其他版本按明确关系分组，角色出演／联动／未知关系单独放“其他关联”；同一目标的不同关系保留。使用既有 AnimeSubjectRow，真实封面＋标题＋关系说明；仅展示已取得的字段，不猜年份、集数、评分或剧场版，不把直接关系冒充完整观看顺序。 |
+| ANIME-RELATED-03 独立推荐 | “你可能也喜欢”用现有 AnimeSourceDiscoveryCard 海报栅格，次级显示实际来源。复用 animeDiscoveryColumns／Gap／Inset 和 2:3 海报、两行标题、轻按缩放；多个已确认推荐目录可切换，默认现有优先目录。Bangumi 主身份也可使用已确认播放目录的推荐；不增加猜测关联或全站扫描。 |
+| ANIME-RELATED-04 完整状态 | 作品关系和站内推荐分别有加载、无结果、失败与原区重试；未确认资料、当前来源不提供推荐有明确说明。刷新失败保留已有内容；原生自动补资料期间保持核对状态，不提前逼用户手工关联。关系缓存复用现有 DETAILS 策略及 route／cache generation，错误不写成空列表成功。 |
+| ANIME-RELATED-05 连续返回 | 沿现有详情历史与方向过渡，A→B→C 返回 C→B→A，再回原查询／筛选／列表位置。保存带关系的快照，各页保留自己的位置；只有当前详情、资料引用、来源版本／目录、路由、restore epoch 有效的结果可回写或打开。不得把同系列作品关联当成当前作品的播放线路。进程重建恢复不在本批承诺内。 |
+
+### 实施前的界面决定与复用依据
+
+- **任务／层级／空间（UIX-01–03）**：相关页专注找下一部；上部是有确定关系的作品，下部是来源建议。分组标题与内容靠近，不套重复卡框，不加大型主推 Hero。详情既有图片、主播放 dock 和四页入口仍是原层级。
+- **排版／材质／图像（UIX-04–05、07–08）**：沿现有标题、辅助文字和主题色，不新增字型／装饰徽章；封面用真实资源与原失败占位。关系说明只作次级文字，外层继续原 Haze 纸面与导航玻璃，底部给 dock 留原安全间距。
+- **组件与动效（UIX-06）**：直接组合已采用的 MotionTabs、MotionTabContent、AnimeSubjectRow、AnimeSourceDiscoveryCard、AnimeDiscoveryInlineStatus 与现有选择控件。审美库 `component-tabs-fluid.md` 的原版／果冻源码已核对，沿现有实现保留稳定标签、单一选中底片、短回弹及一次选择触觉，不额外叠振。实际查看 Material Multi-browse 用户原图 `1000120109.jpg`，借鉴作品图与标题的对象联系；本页采用现有栅格，不宣称移植其未验证的遮罩轮播。
+- **适配／输入与恢复（UIX-09–10）**：现有响应式列数、字号边界、桌面滚动条、点击／键盘语义、减少动态效果和退场输入门禁继续生效。初读失败只占本区；关闭或切换作品撤销过期结果，正常选集和播放不等待相关推荐。
+- 组件精确入口：`anime/ui/AnimeComponents.kt` 的 AnimeSubjectRow／AnimePoster，`anime/ui/AnimeDiscoveryCards.kt` 的 AnimeSourceDiscoveryCard／AnimeCompactCoverCard，`ui/motion/MotionTabs.kt`、`ui/motion/MangaMotion.kt`；均以本批基线为准。没有新控件库、默认原生控件换皮或共享组件重写。
+- 来源契约：[Bangumi v0 schema 固定版本](https://github.com/bangumi/api/blob/65d29cff2331e08c0110d30d515f7f1b6488f845/open-api/v0.yaml)、[相关接口实现](https://github.com/bangumi/server/blob/522cc1dedb6ff4f683b17856c3ba970e820ab6b4/web/handler/subject/related_subjects.go)、[关系名称回退](https://github.com/bangumi/server/blob/522cc1dedb6ff4f683b17856c3ba970e820ab6b4/web/handler/subject/get.go)、[关系语义](https://github.com/bangumi/server/blob/522cc1dedb6ff4f683b17856c3ba970e820ab6b4/pkg/vars/relations.go.json)。关联响应不含完整年份／话数／评分；“角色出演”可仅共享角色，“动画”可能是类型回退，均不推断为前后季。
+
+上述模型／资料仓库／Controller／DetailPane／Workspace 已完成集成。作品关联使用带原关系的缓存和访问快照；来源推荐保留最多24个已读目录的访问快照，身份含作品／目录／版本／路由／restore epoch，展示可跨详情 generation 恢复，但点击必须重新取得当前目录资格。实际显示的默认来源与手动选择一同保存，状态与选择条保持固定 lazy item 槽；仅保存位置超出当前真实内容且缺失部分仍在读取时延迟挂载，已可见关系不等待无关来源。离线或恢复后撤销读取资格的冻结详情不展示无效重试。未新增磁盘推荐缓存或递归系列扫描。
+
+独立只读审阅与根线程差异核对已完成；发现的默认来源跳换、空列表夹断返回位置、完整 referenceId 与评论数字 ID 混用风险均在本批收束。保留自动补资料、作品／季／集／线路身份、手工解除、原查询与单一播放器。root 唯一集成和发布；有限源码证据不能代表设备验收，所有新界面观感、触觉、网络结果和设备返回均待新包体验。没有运行测试、本地编译／构建、业务探针或 UI 自动化；同一完整批次读取最新 main，保留并发变更，以 expected SHA 守卫一次提交并仅确认普通 CI 启动。
+
+
 <a id="anime-native-metadata-20261125"></a>
 
 ## 播放来源自动补充资料 · 2026-11-25
