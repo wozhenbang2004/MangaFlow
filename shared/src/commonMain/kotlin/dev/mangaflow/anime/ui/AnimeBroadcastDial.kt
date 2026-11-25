@@ -1,5 +1,6 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
@@ -19,6 +20,8 @@ import androidx.compose.foundation.gestures.snapping.SnapPosition
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.Interaction
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PageSize
@@ -68,13 +71,19 @@ import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.*
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
 
 internal data class AnimeDialMark(val caption: String, val title: String, val description: String)
 
-/** The same keyed Foundation pager and Motion spring as AnimeFeaturedCarousel, with a fixed reading line. */
+private const val DialTicksPerPage = 5
+
+/** Existing keyed pager, with the saved Jelly Tabs' material-only grip and a fixed reading line. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun AnimeBroadcastDial(label: String, previous: String, next: String, noSelection: String,
@@ -91,6 +100,9 @@ internal fun AnimeBroadcastDial(label: String, previous: String, next: String, n
     val input = remember(owner, anchor, selectionVisible, active, motion, touchExploration, rtl) { DialInput(active && aligned()) }
     val currentInput = rememberUpdatedState(input)
     val drive = remember(pager, input) { PagerDialDrag(pager) }
+    val pressInteraction = remember(input) { MutableInteractionSource() }
+    val pressed by pressInteraction.collectIsPressedAsState()
+    val dragging by drive.events.collectIsDraggedAsState()
     var keyboardFocus by remember { mutableStateOf(false) }
 
     LaunchedEffect(pager, input) {
@@ -100,23 +112,35 @@ internal fun AnimeBroadcastDial(label: String, previous: String, next: String, n
         if (!aligned()) {
             pager.scroll(MutatePriority.PreventUserInput) { with(pager) { updateCurrentPage(anchor) } }
         }
-        var lastDetent = anchor
+        var lastDetent = anchor * DialTicksPerPage
+        fun tick() {
+            if (motion && !touchExploration && platformKind == PlatformKind.ANDROID) feedback.perform(FeelEvent.Selection)
+        }
         input.ready = true
         snapshotFlow {
-            Triple(pager.currentPage, input.drag != null || input.request != null || input.landing != null, input.landing)
-        }.collectLatest { (detent, movingByUser, landed) ->
+            Triple((pager.currentPage + pager.currentPageOffsetFraction) * DialTicksPerPage,
+                input.drag != null || input.request != null || input.landing != null, input.landing)
+        }.collectLatest { (position, movingByUser, landed) ->
             if (currentInput.value !== input) return@collectLatest
-            if (detent != lastDetent) {
+            // Tick when a drawn mark crosses the index, not when Pager changes its nearest
+            // page halfway between values. A fast move emits one throttled tick, never a backlog.
+            if (!movingByUser) lastDetent = position.roundToInt()
+            val detent = when {
+                position >= lastDetent + 1f -> floor(position).toInt()
+                position <= lastDetent - 1f -> ceil(position).toInt()
+                else -> lastDetent
+            }
+            if (movingByUser && detent != lastDetent) {
                 lastDetent = detent
-                if (movingByUser && motion && !touchExploration && platformKind == PlatformKind.ANDROID) {
-                    feedback.perform(FeelEvent.Selection)
-                }
+                tick()
             }
             if (landed == null) return@collectLatest
             // Let a new press/drag retire the previous release before committing a query.
             withFrameNanos { }
             if (currentInput.value === input && input.landing === landed && !pager.isScrollInProgress &&
                 centered() && pager.settledPage == landed.page) {
+                if (lastDetent != landed.page * DialTicksPerPage || (!selectionVisible && landed.page == anchor)) tick()
+                lastDetent = landed.page * DialTicksPerPage
                 input.landing = null
                 onSelect(landed.page)
             }
@@ -144,6 +168,12 @@ internal fun AnimeBroadcastDial(label: String, previous: String, next: String, n
         }
     }
     val interactive = active && input.ready
+    // Like the saved Jelly material, only the lens takes pressure; text and hit bounds
+    // keep their size. The pager still follows input directly, without a second position spring.
+    val gripping = interactive && (pressed || dragging)
+    val pressure = animateFloatAsState(if (motion && gripping) .045f else 0f,
+        animationSpec = if (!motion) snap() else if (gripping) spring(1f, MangaMotion.PressAttackStiffness)
+        else spring(MangaMotion.PressDamping, MangaMotion.PressStiffness), label = "dial-pressure")
     fun pick(page: Int): Boolean {
         if (!interactive || currentInput.value !== input || page !in 0 until pageCount || page == input.request?.page ||
             drive.events.started != null) return false
@@ -233,6 +263,13 @@ internal fun AnimeBroadcastDial(label: String, previous: String, next: String, n
                 val inset = ((maxWidth - pageWidth) / 2).coerceAtLeast(0.dp)
                 val lens = RoundedCornerShape(11.dp)
                 Box(Modifier.width(pageWidth).fillMaxHeight().padding(vertical = 3.dp, horizontal = 2.dp)
+                    .graphicsLayer {
+                        if (motion) {
+                            val stretch = 1f + pressure.value * .35f + .12f * abs(pager.currentPageOffsetFraction)
+                            scaleX = stretch
+                            scaleY = (stretch.pow(-.65f) * (1f - pressure.value)).coerceIn(.88f, 1.025f)
+                        }
+                    }
                     .background(ink.copy(alpha = if (contrast) .16f else .065f), lens)
                     .then(if (keyboardFocus) Modifier.border(1.dp, ink.copy(alpha = if (contrast) 1f else .50f), lens) else Modifier))
                 HorizontalPager(state = pager, modifier = Modifier.fillMaxSize().then(drag),
@@ -240,13 +277,11 @@ internal fun AnimeBroadcastDial(label: String, previous: String, next: String, n
                     key = pageKey, snapPosition = SnapPosition.Center, overscrollEffect = null,
                     flingBehavior = fling, userScrollEnabled = false) { page ->
                     val info = mark(page)
-                    val interaction = remember { MutableInteractionSource() }
                     Box(Modifier.fillMaxSize().focusProperties { canFocus = false }
                         .semantics { contentDescription = info.description }
-                        .selectable(selectionVisible && page == anchor, interaction, indication = null,
-                            enabled = interactive, role = Role.RadioButton, onClick = { pick(page) })
-                        .motionPress(interaction, interactive), contentAlignment = Alignment.Center) {
-                        Column(Modifier.clearAndSetSemantics { }.graphicsLayer {
+                        .selectable(selectionVisible && page == anchor, pressInteraction, indication = null,
+                            enabled = interactive, role = Role.RadioButton, onClick = { pick(page) }), contentAlignment = Alignment.Center) {
+                        Column(Modifier.fillMaxWidth().padding(bottom = 10.dp).clearAndSetSemantics { }.graphicsLayer {
                             val offset = (page - pager.currentPage - pager.currentPageOffsetFraction).coerceIn(-1f, 1f)
                             val front = 1f - abs(offset)
                             if (motion) {
@@ -259,19 +294,25 @@ internal fun AnimeBroadcastDial(label: String, previous: String, next: String, n
                                 overflow = TextOverflow.Ellipsis)
                             Text(info.title, style = value, color = ink, fontWeight = FontWeight.SemiBold,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Canvas(Modifier.width(42.dp).height(8.dp)) {
-                                for (i in -2..2) {
-                                    val x = size.width * (.5f + i * .19f)
-                                    drawLine(ink.copy(alpha = if (i == 0) .76f else .34f), Offset(x, 2.dp.toPx()),
-                                        Offset(x, (if (i == 0) 7.dp else 4.dp).toPx()), 1.dp.toPx(), StrokeCap.Round)
-                                }
+                        }
+                        Canvas(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 5.dp)
+                            .height(8.dp).clearAndSetSemantics { }) {
+                            for (i in -2..2) {
+                                val x = size.width * (.5f + i.toFloat() / DialTicksPerPage)
+                                val distance = abs(page - pager.currentPage - pager.currentPageOffsetFraction +
+                                    (if (rtl) -i else i).toFloat() / DialTicksPerPage)
+                                val contact = (1f - distance * DialTicksPerPage).coerceIn(0f, 1f)
+                                drawLine(ink.copy(alpha = if (contrast) 1f else .24f + .52f * contact),
+                                    Offset(x, 1.dp.toPx()), Offset(x, (if (i == 0) 7.dp else 4.dp).toPx()),
+                                    (if (i == 0) 1.5.dp else 1.dp).toPx(), StrokeCap.Round)
                             }
                         }
                     }
                 }
                 Canvas(Modifier.align(Alignment.TopCenter).width(2.dp).height(5.dp).clearAndSetSemantics { }) {
                     // Clock-style fixed index. Marks travel under it; the index catches each detent visually.
-                    val contact = (1f - 2f * abs(pager.currentPageOffsetFraction)).coerceIn(0f, 1f)
+                    val tickOffset = pager.currentPageOffsetFraction * DialTicksPerPage
+                    val contact = (1f - 2f * abs(tickOffset - tickOffset.roundToInt())).coerceIn(0f, 1f)
                     drawLine(ink.copy(alpha = if (contrast) 1f else .38f + .45f * contact), Offset(size.width / 2, 1.dp.toPx()),
                         Offset(size.width / 2, size.height), size.width, StrokeCap.Round)
                 }

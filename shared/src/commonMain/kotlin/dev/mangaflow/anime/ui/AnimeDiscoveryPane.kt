@@ -1,8 +1,14 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -882,6 +888,7 @@ private fun AnimeBroadcastControls(activeTab: AnimeDiscoveryTab, today: LocalDat
     val inWeek = activeTab == AnimeDiscoveryTab.CALENDAR
     val selected = if (inWeek) current else season.animeQuarterIndex()
     val enabled = active && !filtersOpen
+    val motion = LocalMotionEnabled.current
     val filterFocus = remember { FocusRequester() }
     var filterFocused by remember { mutableStateOf(false) }
     var returnFilterFocus by remember { mutableStateOf(false) }
@@ -901,6 +908,9 @@ private fun AnimeBroadcastControls(activeTab: AnimeDiscoveryTab, today: LocalDat
     fun openQuarter(quarter: Int) {
         if (enabled) onConfigure(AnimeDiscoveryTab.SEASON, season.withAnimeQuarter(quarter))
     }
+    fun selectQuarter(quarter: Int) {
+        if (quarter == current) openWeek(calendar.weekday) else openQuarter(quarter)
+    }
 
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         val center = selected ?: season.year?.let { it * 4 + current % 4 } ?: current
@@ -908,20 +918,20 @@ private fun AnimeBroadcastControls(activeTab: AnimeDiscoveryTab, today: LocalDat
             AnimeBroadcastDial("季度", "上一个季度", "下一个季度",
                 noSelection = if (inWeek) "当前显示周表" else animeDiscoverySeasonTitle(season),
                 pageCount = AnimeQuarterCount, anchor = (center - FirstAnimeQuarter).coerceIn(0, AnimeQuarterCount - 1),
-                selectionVisible = !inWeek && selected != null, owner = Triple(activeTab, calendarQuery, seasonQuery),
+                selectionVisible = selected != null, owner = Triple(activeTab, calendarQuery, seasonQuery),
                 active = enabled, pageKey = { it + FirstAnimeQuarter }, mark = { page ->
                     val quarter = page + FirstAnimeQuarter
                     val year = quarter / 4
                     val name = animeSeasonLabel(AnimeSeason.entries[quarter % 4])
                     AnimeDialMark("$year", name, "$year 年$name" + if (quarter == current) "，本季" else "")
-                }, onSelect = { openQuarter(it + FirstAnimeQuarter) })
+                }, onSelect = { selectQuarter(it + FirstAnimeQuarter) })
         } else {
             val quarters = remember(center) { (center - 1..center + 1).filter { it / 4 in 1..9998 } }
             val quarterLabels = remember(quarters) { quarters.map { animeDiscoverySeasonTitle(season.withAnimeQuarter(it)) } }
             BoxWithConstraints(Modifier.fillMaxWidth().semantics { contentDescription = "季度" }) {
                 AnimeBroadcastRail(quarterLabels, quarters.indexOf(center), selected != null, maxWidth,
                     owner = Triple(activeTab, if (inWeek) calendar else season, current), enabled = enabled,
-                    onSelect = { index -> openQuarter(quarters[index]) })
+                    onSelect = { index -> selectQuarter(quarters[index]) })
             }
         }
 
@@ -954,12 +964,21 @@ private fun AnimeBroadcastControls(activeTab: AnimeDiscoveryTab, today: LocalDat
             } else if (selected == current) {
                 AnimeBroadcastAction("查看本周番表", enabled) { openWeek(calendar.weekday) }
             } else {
-                AnimeBroadcastAction("回到本季", enabled) { openQuarter(current) }
+                AnimeBroadcastAction("回到本季", enabled) { openWeek(calendar.weekday) }
             }
         }
-        if (inWeek) {
-            if (useAnimeBroadcastDial) AnimeWeeklyDial(today, calendar, enabled, ::openWeek)
-            else AnimeWeeklyDays(today, calendar.weekday, enabled, ::openWeek)
+        // Retain the dated controls through exit and reverse the same height on return.
+        // Only the live weekly feed can receive input, including during a partial exit.
+        AnimatedVisibility(visible = inWeek,
+            modifier = Modifier.fillMaxWidth().motionInputGate(enabled && inWeek),
+            enter = fadeIn(if (motion) tween(MangaMotion.Content) else snap()) + expandVertically(
+                animationSpec = if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap(),
+                expandFrom = Alignment.Top),
+            exit = fadeOut(if (motion) tween(MangaMotion.Quick) else snap()) + shrinkVertically(
+                animationSpec = if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap(),
+                shrinkTowards = Alignment.Top), label = "broadcast-week") {
+            if (useAnimeBroadcastDial) AnimeWeeklyDial(today, calendar, enabled && inWeek, ::openWeek)
+            else AnimeWeeklyDays(today, calendar.weekday, enabled && inWeek, ::openWeek)
         }
     }
 }
