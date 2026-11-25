@@ -1,5 +1,29 @@
 # 番剧全流程重做 · 2026-11-19
 
+<a id="anime-tag-picker-20261125"></a>
+
+## 番剧标签目录与漫画选择器统一 · 2026-11-25
+
+用户继续纠正：“这个标签点选也不全啊也不像人家漫画那样啊得像人家漫画那样才行”。截图 `1000122517.jpg` 显示 Bangumi 筛选面板仍只有九个写死的快捷词、单选和独立“输入站内标签”。精确消息时间／ID与安装版本未提供。上一批 `099eafcbb7aec58bfc5ca566184fb7716589528f` 统一的是详情 `DetailTag`，没有完成整个选择器；本批补齐这项遗漏，并替代下节 ANIME-TAGS-03 的单标签实现边界，其他详情来源和返回要求继续有效。
+
+| 要求 | 采用、实现与可观察验收 |
+| --- | --- |
+| ANIME-TAG-PICKER-01 共用实际漫画选择器 | 番剧搜索入口及筛选面板直接调用现有 `SearchScopeBar`，沿其已选标签横条、计数、逐项移除、＋追加、搜索、44dp 命中、按压和 `MotionTabContent` 收放。只增加默认关闭的受控展开参数及目录尾部插槽，普通漫画默认行为保持。选择器实际是中性色块；不把详情四组颜色冒充原选择器样式。删除番剧单独的九词快捷表和私有选择控件，不新增标签侧栏页面。 |
+| ANIME-TAG-PICKER-02 目录完整可达 | Bangumi 读取真实频道标签目录，首批100，继续按原 offset/total 分页并跨页按原词去重；显示已载入范围、继续载入和失败重试，已有页不因续页失败消失。查找筛已载入目录；未载入的原词可直接添加，不把前100项冒充完整目录。AniList 一次读取 GenreCollection 与 MediaTagCollection，保留原 key、已知中文显示名及英文别名；不纳入与当前非成人查询冲突的标签。豆瓣沿现有支持的14题材全部提供，不伪造更大全站目录。 |
+| ANIME-TAG-PICKER-03 多标签真实查询 | 查询同时保存所有选中项，旧 scalar tag 入口由统一 selectedTags 兼容。Bangumi filter.tag 传完整数组且服务端为 AND；AniList genre_in/tag_in 分别传题材与原标签，响应再核对每个所选标签，只有全匹配条目显示，远端页号/hasNextPage 不因本地过滤为空丢失；豆瓣沿已采用 tags 参数组合所有已选题材。页面允许继续查找空的远端页。查询缓存按排序后的完整标签集合和真实路由区分；跨来源聚合只有每个标签都有既有明确映射时才启用。 |
+| ANIME-TAG-PICKER-04 保留选择与返回 | 详情→标签结果→追加/移除→打开作品→返回保持全部已选标签和原查询范围；搜索文字仅查目录，不直接改作品查询。筛选面板按来源保留独立草稿，清除与应用操作覆盖整个列表；原输入、退场、来源、查询与缓存 generation 守卫继续生效。目录游标与作品结果游标独立，读取取消不写成失败。 |
+
+具体质量参照是本批直接读取的 `shared/.../ui/SearchScopeBar.kt`、普通漫画动态标签目录与 TAG 查询行为，不另造视觉候选；当前漫画选中条和收放为组件下限。搜索面板固定保留已选行，作品结果占剩余空间；筛选面板目录最多240dp内部滚动，其余条件仍在原面板中按需访问。长标签、中文／英文别名、大字号、软键盘、明暗主题及退出中重进需要目标设备观察，源码复用不等于视觉验收。
+
+来源与边界：
+
+- [Bangumi 频道目录 handler](https://github.com/bangumi/server-private/blob/318fdd498c97b7f8a4b957f4bcf2433dbb99908b/routes/private/routes/channel.ts)与官方前端 `9925577` 的 client、vite config、use-channel 已直接阅读；使用 `https://next.bgm.tv/p1/channels/2/tags`，匿名路径有源码依据。SQL先分页、再页内去重，所以 nextOffset 按请求100推进，不能按返回长度或累计去重数量判断结束。该网站接口没有关键词参数，也没有公共 v0 的稳定兼容保证；失败保留目录、给重试，不降回九词伪目录。没有执行线上可用性探测。
+- [Bangumi 搜索实现](https://github.com/bangumi/server/blob/522cc1dedb6ff4f683b17856c3ba970e820ab6b4/internal/search/subject/handle.go)明确 Tag 为 AND，HTTP每页最多20。原实现按24推进会跳过被服务端裁掉的4项，本批同时修正其分页步长并隔离旧缓存；AniList保留自身分页。
+- [AniList 集合与查询定义](https://github.com/AniList/docs/blob/03281c0a4bbf0c7f2097e0c935cddaed1096aa65/docs/reference/query.md)及[官方多选示例](https://github.com/AniList/docs/blob/03281c0a4bbf0c7f2097e0c935cddaed1096aa65/docs/guide/graphql/queries/media.md)确认字段。原文未证明数组内部 AND/OR；本批响应全选核对是应用的明确展示条件，不宣称上游 AND 已实测。目录覆盖媒体全局，结果继续限定 ANIME、isAdult:false。
+- 豆瓣只复用当前 `DoubanAnimeRepository` 的既有推荐参数及支持列表；没有找到或虚构新的完整 taxonomy 接口，线上组合语义未探测。外部代码只用于合同研究，没有复制服务端实现。
+
+本批基线 main `099eafcbb7aec58bfc5ca566184fb7716589528f`。开发核心2.7.10全文重载，2026-11-25 11:36（Asia/Shanghai）回读固定Space最新HEAD仍为 `20261123T210913Z-4f4fbca2`，manifest原字节身份与前批核验一致；未修改通用Skill。按项目要求只做有限源码／调用点／差异完整性检查和独立只读审阅，root集成一批 expected-SHA main更新并确认普通CI启动，不运行测试、本地构建／编译、业务探针或UI自动化，不轮询构建完成。实际目录网络、布局、选择手感和装机返回仍待真实反馈。
+
 <a id="anime-detail-tags-20261125"></a>
 
 ## 番剧标签与漫画共用交互 · 2026-11-25

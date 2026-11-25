@@ -16,13 +16,14 @@ internal fun animeDiscoveryPeerQuery(query: AnimeDiscoveryQuery): AnimeDiscovery
         AnimeDiscoveryProvider.ANILIST -> AnimeDiscoveryProvider.BANGUMI
         AnimeDiscoveryProvider.DOUBAN -> return null
     }
-    val tag = query.tag.trim()
-    val peerTag = if (tag.isBlank()) "" else when (provider) {
-        AnimeDiscoveryProvider.BANGUMI -> animeDiscoveryGenreLabels[tag]
-        AnimeDiscoveryProvider.ANILIST -> animeDiscoveryGenreLabels.entries.singleOrNull { it.value == tag }?.key
-        AnimeDiscoveryProvider.DOUBAN -> return null
-    } ?: return null
-    return query.copy(provider = provider, tag = peerTag, combined = false)
+    val peerTags = query.selectedTags.map { tag ->
+        when (provider) {
+            AnimeDiscoveryProvider.BANGUMI -> animeDiscoveryGenreLabels[tag]
+            AnimeDiscoveryProvider.ANILIST -> animeDiscoveryGenreLabels.entries.singleOrNull { it.value == tag }?.key
+            AnimeDiscoveryProvider.DOUBAN -> return null
+        } ?: return null
+    }
+    return query.copy(provider = provider, combined = false).withTags(peerTags)
 }
 
 internal val AnimeDiscoveryItem.discoveryProvider: AnimeDiscoveryProvider?

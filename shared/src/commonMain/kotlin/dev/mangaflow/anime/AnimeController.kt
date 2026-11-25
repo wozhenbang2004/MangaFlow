@@ -18,6 +18,7 @@ import dev.mangaflow.anime.sources.DOUBAN_PROVIDER
 import dev.mangaflow.anime.sources.AnimeMetadataIdentityException
 import dev.mangaflow.anime.sources.AnimeProvider
 import dev.mangaflow.anime.sources.AnimeDiscoveryRepository
+import dev.mangaflow.anime.sources.AnimeTagDirectoryRepository
 import dev.mangaflow.anime.sources.AnimeDiscussionController
 import dev.mangaflow.anime.sources.AnimeSourceBrowseController
 import dev.mangaflow.anime.sources.AnimeSourceException
@@ -133,6 +134,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     private val unifiedSearch = AnimeUnifiedSearch(scope, metadata, sources, douban, ::searchSourceOrder)
     internal val searchState = unifiedSearch.state
     private val discovery = AnimeDiscoveryRepository(context)
+    private val discoveryTags = AnimeTagDirectoryRepository(context)
     val sourceBrowse = AnimeSourceBrowseController(context, scope, sources)
     internal val discussion by lazy { AnimeDiscussionController(context, scope, discovery, metadata) }
     private val tracking = AnimeTrackingRepository(context)
@@ -742,26 +744,31 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     internal fun configureDiscoveryTags(query: AnimeDiscoveryQuery) =
         configureDiscovery(AnimeDiscoveryTab.GENRES, query, selectTab = false)
 
+    internal suspend fun readDiscoveryTagDirectory(provider: AnimeDiscoveryProvider, offset: Int = 0,
+        forceRefresh: Boolean = false): AnimeTagDirectoryPage = discoveryTags.read(provider, offset, forceRefresh)
+
     private fun configureDiscovery(tab: AnimeDiscoveryTab, query: AnimeDiscoveryQuery, selectTab: Boolean) {
         if (tab == AnimeDiscoveryTab.SOURCES) return
         ensureDiscovery(loadHome = false)
         val key = animeDiscoveryFeedKey(tab)
-        val tag = query.tag.trim()
+        val tags = query.selectedTags
+        val selected = query.withTags(tags)
         val normalized = when {
-            tab == AnimeDiscoveryTab.HOME -> query.copy(provider = AnimeDiscoveryProvider.DOUBAN,
-                tag = tag, combined = false, season = null, calendar = false, weekday = null,
+            tab == AnimeDiscoveryTab.HOME -> selected.copy(provider = AnimeDiscoveryProvider.DOUBAN,
+                combined = false, season = null, calendar = false, weekday = null,
                 order = query.order.takeIf { it in listOf(AnimeDiscoveryOrder.POPULARITY,
                     AnimeDiscoveryOrder.NEWEST, AnimeDiscoveryOrder.SCORE) } ?: AnimeDiscoveryOrder.POPULARITY,
                 // Douban's default and SERIES both use tv; keep one identity for range/scroll restoration.
                 format = query.format?.takeIf { it == AnimeDiscoveryFormat.MOVIE })
-            tab == AnimeDiscoveryTab.RANKING -> query.copy(tag = tag, combined = false, calendar = false, weekday = null,
+            tab == AnimeDiscoveryTab.RANKING -> selected.copy(combined = false, calendar = false, weekday = null,
                 order = query.order.takeIf { it in animeDiscoveryOrders(query.provider) }
                     ?: defaultAnimeRankingQuery(query.provider).order)
-            query.provider == AnimeDiscoveryProvider.DOUBAN -> query.copy(tag = tag, combined = false)
-            !query.combined -> query.copy(tag = tag)
-            query.order == AnimeDiscoveryOrder.TRENDING -> query.copy(provider = AnimeDiscoveryProvider.ANILIST,
-                tag = animeDiscoveryGenreLabels.entries.firstOrNull { it.value == tag }?.key ?: tag)
-            else -> query.copy(provider = AnimeDiscoveryProvider.BANGUMI, tag = animeDiscoveryGenreLabels[tag] ?: tag)
+            query.provider == AnimeDiscoveryProvider.DOUBAN -> selected.copy(combined = false)
+            !query.combined -> selected
+            query.order == AnimeDiscoveryOrder.TRENDING -> selected.copy(provider = AnimeDiscoveryProvider.ANILIST)
+                .withTags(tags.map { tag -> animeDiscoveryGenreLabels.entries.firstOrNull { it.value == tag }?.key ?: tag })
+            else -> selected.copy(provider = AnimeDiscoveryProvider.BANGUMI)
+                .withTags(tags.map { animeDiscoveryGenreLabels[it] ?: it })
         }
         val current = mutableState.value.discoveryFeeds[key]
         // Detail tag searches can restore another query while hidden. Retain its loaded range

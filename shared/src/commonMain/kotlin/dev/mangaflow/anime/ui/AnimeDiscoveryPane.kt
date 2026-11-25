@@ -37,8 +37,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.clip
@@ -190,7 +188,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                             }
                         },
                         onMore = { if (ownsCurrentFeed()) controller.loadMoreDiscovery(key) },
-                        onClearTag = { feed?.let { configure(it.query.copy(tag = "")) } },
+                        onClearTag = { feed?.let { configure(it.query.withTags(emptyList())) } },
                         onShowFullWeek = { feed?.let { configure(it.query.copy(weekday = null)) } },
                         catalogueHeader = catalogueHeader, contentTopPadding = topInset, calendarDate = calendarDate)
                 }
@@ -207,7 +205,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
                 // A restored query can scroll off the lazy header as soon as Apply
                 // runs. The editor must stay mounted long enough to actually close.
                 if (tabActive && showFilters && feed != null) androidx.compose.runtime.key(feed.query.provider.takeIf { ranking }) {
-                    AnimeDiscoveryFilterPanel(tab, feed.query, backdrop,
+                    AnimeDiscoveryFilterPanel(tab, feed.query, controller, backdrop,
                         rememberedOptions = { controller.rememberedDiscoveryOptions(tab, it) },
                         onDismiss = { showFilters = false }, onConfigure = ::configure)
                 }
@@ -229,7 +227,7 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
     LaunchedEffect(active) { if (!active) showFilters = false }
     val contentActive = active && !showFilters
     val overview = query.order == AnimeDiscoveryOrder.POPULARITY && query.region.isBlank() &&
-        query.tag.isBlank() && query.year == null && query.format != AnimeDiscoveryFormat.MOVIE
+        query.selectedTags.isEmpty() && query.year == null && query.format != AnimeDiscoveryFormat.MOVIE
     val featured = remember(feed?.items, overview) {
         val items = feed?.items.orEmpty()
         // Leave works in the catalogue even when a source returned only a short first page.
@@ -256,7 +254,7 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
         onOpen = onOpen, onScores = onScores, onManage = onManage,
         onRefresh = controller::refreshDiscovery, onRetry = { controller.retryDiscovery(key) },
         onMore = { controller.loadMoreDiscovery(key) },
-        onClearTag = { controller.configureDiscovery(AnimeDiscoveryTab.HOME, query.copy(tag = "")) },
+        onClearTag = { controller.configureDiscovery(AnimeDiscoveryTab.HOME, query.withTags(emptyList())) },
         featured = featured, contentTopPadding = contentTopPadding,
         watchShelf = if (recent.isEmpty()) null else {
             { AnimeDiscoveryWatchShelf(recent, scrolls.watchHistory, contentActive, onOpenHistory,
@@ -277,7 +275,7 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
                     })
             }
         })
-    if (active && showFilters) AnimeDiscoveryFilterPanel(AnimeDiscoveryTab.HOME, query, backdrop,
+    if (active && showFilters) AnimeDiscoveryFilterPanel(AnimeDiscoveryTab.HOME, query, controller, backdrop,
         rememberedOptions = { controller.rememberedDiscoveryOptions(AnimeDiscoveryTab.HOME, it) },
         onDismiss = { showFilters = false },
         onConfigure = { controller.configureDiscovery(AnimeDiscoveryTab.HOME, it) })
@@ -399,17 +397,17 @@ private fun AnimeHomeCatalogueHeader(query: AnimeDiscoveryQuery, backdrop: HazeS
 }
 
 /** Label search uses the same provider filters, retained result ranges and exact catalogue cards as browse. */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun AnimeTagSearch(state: AnimeScreenState, controller: AnimeController, backdrop: HazeState,
     scrolls: AnimeDiscoveryScrolls, draft: String, choosing: Boolean, active: Boolean, maxHeight: Dp,
-    onChooseTags: () -> Unit, onPrepareFilters: () -> Unit, onConfigure: (AnimeDiscoveryQuery) -> Unit,
+    onChoosingChange: (Boolean) -> Unit, onPrepareFilters: () -> Unit, onConfigure: (AnimeDiscoveryQuery) -> Unit,
     onOpen: (AnimeDiscoveryItem) -> Unit, onManage: (AnimeSubject) -> Unit) {
     val tab = AnimeDiscoveryTab.GENRES
     val key = animeDiscoveryFeedKey(tab)
     val feed = state.discoveryFeeds[key]
     val query = feed?.query ?: AnimeDiscoveryQuery(provider = AnimeDiscoveryProvider.DOUBAN)
-    val term = draft.trim()
+    val selectedTags = query.selectedTags
+    val showChoices = choosing || feed == null
     var filtersOpen by remember { mutableStateOf(false) }
     LaunchedEffect(active) { if (!active) filtersOpen = false }
     if (maxHeight <= 0.dp) return
@@ -417,19 +415,19 @@ internal fun AnimeTagSearch(state: AnimeScreenState, controller: AnimeController
     fun apply(next: AnimeDiscoveryQuery) {
         if (active && controller.state.value.discoveryFeeds[key]?.query == feed?.query) onConfigure(next)
     }
-    val header: @Composable () -> Unit = {
-        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.fillMaxWidth().heightIn(max = maxHeight).motionInputGate(contentActive)) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(if (choosing || feed == null) "选择标签" else animeDiscoveryTagLabel(query.provider, query.tag),
+                Text(if (selectedTags.size > 1) "同时匹配所选标签" else "标签筛选",
                     Modifier.semantics { heading() }, style = MaterialTheme.typography.titleSmall,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
-                AnimeQuietLabel(animeDiscoveryConditions(query.copy(tag = ""), includeTime = true))
+                AnimeQuietLabel(animeDiscoveryConditions(query.withTags(emptyList()), includeTime = true))
             }
-            if (feed != null) {
-                val action = if (choosing) "返回标签结果" else "更换标签"
-                MotionIconButton(onClick = onChooseTags, enabled = contentActive,
+            if (feed != null && selectedTags.isEmpty()) {
+                val action = if (showChoices) "返回标签结果" else "选择标签"
+                MotionIconButton(onClick = { onChoosingChange(!showChoices) }, enabled = contentActive,
                     modifier = Modifier.size(44.dp), tooltip = action) {
-                    Icon(if (choosing) Icons.Outlined.Close else Icons.Outlined.Search, action, Modifier.size(18.dp))
+                    Icon(if (showChoices) Icons.Outlined.Close else Icons.Outlined.Search, action, Modifier.size(18.dp))
                 }
             }
             MotionIconButton(onClick = { onPrepareFilters(); filtersOpen = true }, enabled = contentActive,
@@ -437,97 +435,39 @@ internal fun AnimeTagSearch(state: AnimeScreenState, controller: AnimeController
                 Icon(Icons.Outlined.Tune, "标签来源与筛选", Modifier.size(18.dp))
             }
         }
-    }
-    if (choosing || feed == null) {
-        val options = animeDiscoveryTags(query.provider)
-        val matching = options.entries.withIndex().filter { (_, option) ->
-            option.key.contains(term, ignoreCase = true) || option.value.contains(term, ignoreCase = true)
-        }
-        val custom = animeDiscoveryTagInput(query.provider, term)?.takeIf { it !in options }
-        val selectedTag = query.tag.takeIf { feed != null }
-        Column(Modifier.fillMaxWidth().heightIn(max = maxHeight).motionInputGate(contentActive)
-            .verticalScroll(rememberScrollState(), enabled = contentActive).padding(horizontal = 12.dp)) {
-            header()
-            if (term.isEmpty() || matching.isNotEmpty()) {
-                FlowRow(Modifier.fillMaxWidth().selectableGroup(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (term.isEmpty()) {
-                        AnimeSearchTagChoice("浏览全部", null, selectedTag == "", contentActive) {
-                            apply(query.copy(tag = ""))
-                        }
-                    }
-                    matching.forEach { (index, option) ->
-                        key(query.provider, option.key) {
-                            AnimeSearchTagChoice(option.value, index, selectedTag == option.key, contentActive) {
-                                apply(query.copy(tag = option.key))
-                            }
-                        }
-                    }
-                }
-            }
-            if (custom != null) MotionTextButton(onClick = { apply(query.copy(tag = custom)) },
-                enabled = contentActive, modifier = Modifier.heightIn(min = 44.dp)) {
-                Text("查找 Bangumi 标签「$custom」", maxLines = 2, overflow = TextOverflow.Ellipsis)
-            } else if (term.isNotEmpty() && matching.isEmpty()) {
-                AnimeQuietLabel("当前资料目录没有这个标签，试试其他标签或换一个目录。", Modifier.padding(vertical = 6.dp))
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+            AnimeTagPicker(controller, query.provider, selectedTags, draft, contentActive,
+                maxChoicesHeight = (maxHeight - 112.dp).coerceAtLeast(0.dp),
+                choosing = showChoices, onChoosing = onChoosingChange,
+                onToggle = { tag ->
+                    apply(query.withTags(if (tag in selectedTags) selectedTags - tag else selectedTags + tag))
+                })
+            if (showChoices && selectedTags.isEmpty()) MotionTextButton(
+                onClick = { apply(query.withTags(emptyList())) }, enabled = contentActive,
+                modifier = Modifier.heightIn(min = 44.dp)) {
+                Text("浏览全部")
             }
         }
-    } else {
-        val ratings = LocalAnimeRatings.current
-        fun currentFeed() = controller.state.value.discoveryFeeds[key]?.takeIf { contentActive && it.query == query }
-        fun currentItem(item: AnimeDiscoveryItem) = currentFeed()?.items?.firstOrNull { it.key == item.key }
-        AnimeDiscoveryFeedGrid(key, feed, 1, scrolls, 8.dp,
-            modifier = Modifier.fillMaxWidth().heightIn(max = maxHeight).motionInputGate(contentActive), active = contentActive,
-            onOpen = { item -> currentItem(item)?.let(onOpen) },
-            onScores = { item -> currentItem(item)?.let { ratings.open(it.ratingRequest()) } },
-            onManage = { subject -> currentFeed()?.items?.firstNotNullOfOrNull {
-                it.subject?.takeIf { current -> current.id == subject.id }
-            }?.let(onManage) },
-            onRefresh = { if (currentFeed() != null) controller.refreshDiscoveryTags() },
-            onRetry = { if (currentFeed() != null) controller.retryDiscovery(key) },
-            onMore = { if (currentFeed() != null) controller.loadMoreDiscovery(key) },
-            onClearTag = { apply(query.copy(tag = "")) }, catalogueHeader = { _ -> header() })
+        if (!showChoices && feed != null) {
+            val ratings = LocalAnimeRatings.current
+            fun currentFeed() = controller.state.value.discoveryFeeds[key]?.takeIf { contentActive && it.query == query }
+            fun currentItem(item: AnimeDiscoveryItem) = currentFeed()?.items?.firstOrNull { it.key == item.key }
+            AnimeDiscoveryFeedGrid(key, feed, 1, scrolls, 8.dp,
+                modifier = Modifier.fillMaxWidth().weight(1f), active = contentActive,
+                onOpen = { item -> currentItem(item)?.let(onOpen) },
+                onScores = { item -> currentItem(item)?.let { ratings.open(it.ratingRequest()) } },
+                onManage = { subject -> currentFeed()?.items?.firstNotNullOfOrNull {
+                    it.subject?.takeIf { current -> current.id == subject.id }
+                }?.let(onManage) },
+                onRefresh = { if (currentFeed() != null) controller.refreshDiscoveryTags() },
+                onRetry = { if (currentFeed() != null) controller.retryDiscovery(key) },
+                onMore = { if (currentFeed() != null) controller.loadMoreDiscovery(key) },
+                onClearTag = { apply(query.withTags(emptyList())) })
+        }
     }
-    if (active && filtersOpen) AnimeDiscoveryFilterPanel(tab, query, backdrop,
+    if (active && filtersOpen) AnimeDiscoveryFilterPanel(tab, query, controller, backdrop,
         rememberedOptions = { controller.rememberedDiscoveryOptions(tab, it) },
         onDismiss = { filtersOpen = false }, onConfigure = ::apply)
-}
-
-@Composable
-private fun AnimeSearchTagChoice(label: String, tone: Int?, selected: Boolean, enabled: Boolean,
-    onSelect: () -> Unit) {
-    val colors = MaterialTheme.colorScheme
-    val onDark = colors.onSurface.luminance() > .5f
-    // The manga detail tag palette stays attached to the provider's order, not the filtered row.
-    val accent = when (tone?.rem(4)) {
-        0 -> if (onDark) Color(0xFFD9B49E) else Color(0xFF805C43)
-        1 -> if (onDark) Color(0xFFAFC4E2) else Color(0xFF486481)
-        2 -> if (onDark) Color(0xFFC7B0DC) else Color(0xFF75588A)
-        3 -> if (onDark) Color(0xFFD5AFBB) else Color(0xFF865B6B)
-        else -> colors.onSurface
-    }
-    val fill = when {
-        selected -> .20f
-        tone == null -> .055f
-        onDark -> .15f
-        else -> .11f
-    }
-    val ink = lerp(accent, colors.onSurface, .32f)
-    val interaction = remember { MutableInteractionSource() }
-    Box(Modifier.sizeIn(minWidth = 44.dp, minHeight = 44.dp)
-        .selectable(selected, interactionSource = interaction, indication = null, enabled = enabled,
-            role = Role.RadioButton, onClick = onSelect)
-        .motionPress(interaction, enabled = enabled, pressedScale = .97f),
-        contentAlignment = Alignment.Center) {
-        Row(Modifier.clip(RoundedCornerShape(8.dp)).background(lerp(colors.surface, accent, fill))
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (selected) Icon(Icons.Outlined.Check, null, Modifier.size(12.dp), tint = ink)
-            Text(label, style = MaterialTheme.typography.labelMedium, color = ink,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
-        }
-    }
 }
 
 @Composable
@@ -714,7 +654,7 @@ private fun AnimeDiscoveryFeedGrid(key: String, feed: AnimeDiscoveryFeed?, prefe
                         val reset = when {
                             !active -> null
                             narrowCalendar -> onShowFullWeek
-                            feed.query.tag.isNotBlank() -> onClearTag
+                            feed.query.selectedTags.isNotEmpty() -> onClearTag
                             else -> null
                         }
                         AnimeDiscoveryInlineStatus(when {
@@ -834,7 +774,7 @@ private fun animeHomeScope(query: AnimeDiscoveryQuery): String = listOfNotNull(
     query.region.takeIf(String::isNotBlank)?.let { if (it == "大陆") "国产" else it },
     "电影".takeIf { query.format == AnimeDiscoveryFormat.MOVIE },
     query.year?.toString(),
-    query.tag.takeIf(String::isNotBlank),
+    query.selectedTags.takeIf { it.isNotEmpty() }?.joinToString(" · "),
 ).joinToString(" · ")
 
 @Composable
@@ -857,7 +797,7 @@ private fun animeDiscoveryConditions(query: AnimeDiscoveryQuery, includeTime: Bo
     caption: String = animeDiscoveryCaption(query)): String =
     listOfNotNull(caption,
         animeDiscoverySeasonTitle(query).takeIf { includeTime && query.year != null },
-        query.tag.takeIf(String::isNotBlank)?.let { animeDiscoveryGenreLabels[it] ?: it },
+        query.selectedTags.takeIf { it.isNotEmpty() }?.joinToString(" · ") { animeDiscoveryTagLabel(query.provider, it) },
         query.region.takeIf(String::isNotBlank), query.format?.let(::animeDiscoveryFormatLabel)).joinToString(" · ")
 
 private fun AnimeDiscoveryTab.broadcastDestination(): AnimeDiscoveryTab =
@@ -1221,25 +1161,19 @@ private fun AnimeDiscoveryChoice(label: String, selected: Boolean, enabled: Bool
     }
 }
 
-private val doubanGenreLabels = listOf("热血", "校园", "恋爱", "搞笑", "治愈", "科幻", "奇幻",
-    "冒险", "悬疑", "推理", "日常", "运动", "机战", "催泪")
-private val bangumiGenreShortcuts = linkedMapOf("剧场版" to "剧场版", "国产" to "国产",
-    "热血" to "热血", "奇幻" to "奇幻", "恋爱" to "恋爱", "科幻" to "科幻", "日常" to "日常",
-    "悬疑" to "悬疑", "运动" to "运动")
-private fun animeDiscoveryTags(provider: AnimeDiscoveryProvider): Map<String, String> = when (provider) {
-    AnimeDiscoveryProvider.BANGUMI -> bangumiGenreShortcuts
-    AnimeDiscoveryProvider.DOUBAN -> doubanGenreLabels.associateWith { it }
-    AnimeDiscoveryProvider.ANILIST -> animeDiscoveryGenreLabels
-}
-
 internal fun animeDiscoveryTagInput(provider: AnimeDiscoveryProvider, draft: String): String? {
     val term = draft.trim().takeIf { it.isNotEmpty() && it.length <= 80 && it.none { char -> char.isISOControl() } } ?: return null
-    return animeDiscoveryTags(provider).entries.firstOrNull { it.key.equals(term, true) || it.value.equals(term, true) }?.key
-        ?: term.takeIf { provider == AnimeDiscoveryProvider.BANGUMI }
+    return when (provider) {
+        AnimeDiscoveryProvider.BANGUMI -> term
+        AnimeDiscoveryProvider.DOUBAN -> animeDoubanGenreLabels.firstOrNull { it == term }
+        AnimeDiscoveryProvider.ANILIST -> animeDiscoveryGenreLabels.entries.firstOrNull {
+            it.key.equals(term, true) || it.value.equals(term, true)
+        }?.key
+    }
 }
 
-private fun animeDiscoveryTagLabel(provider: AnimeDiscoveryProvider, tag: String): String =
-    animeDiscoveryTags(provider)[tag] ?: tag.ifBlank { "全部标签" }
+internal fun animeDiscoveryTagLabel(provider: AnimeDiscoveryProvider, tag: String): String =
+    if (provider == AnimeDiscoveryProvider.ANILIST) animeDiscoveryGenreLabels[tag] ?: tag.removePrefix("tag:") else tag
 
 private fun animeDiscoveryFormatLabel(format: AnimeDiscoveryFormat): String = when (format) {
     AnimeDiscoveryFormat.SERIES -> "剧集"
@@ -1284,7 +1218,7 @@ private fun AnimeFilterDisclosure(label: String, expanded: Boolean, onClick: () 
 
 @Composable
 private fun AnimeDiscoveryFilterPanel(tab: AnimeDiscoveryTab, query: AnimeDiscoveryQuery,
-    backdrop: HazeState, rememberedOptions: (AnimeDiscoveryProvider) -> AnimeDiscoveryQuery?,
+    controller: AnimeController, backdrop: HazeState, rememberedOptions: (AnimeDiscoveryProvider) -> AnimeDiscoveryQuery?,
     onDismiss: () -> Unit, onConfigure: (AnimeDiscoveryQuery) -> Unit) {
     val seasonal = tab == AnimeDiscoveryTab.SEASON
     val ranking = tab == AnimeDiscoveryTab.RANKING
@@ -1292,7 +1226,8 @@ private fun AnimeDiscoveryFilterPanel(tab: AnimeDiscoveryTab, query: AnimeDiscov
     var sourceOptionsVisible by remember { mutableStateOf(false) }
     var year by remember { mutableStateOf(query.year?.toString().orEmpty()) }
     var season by remember { mutableStateOf(query.season) }
-    var tag by remember { mutableStateOf(query.tag) }
+    var tags by remember { mutableStateOf(query.selectedTags) }
+    var tagQuery by remember(provider) { mutableStateOf("") }
     var order by remember { mutableStateOf(query.order) }
     var region by remember { mutableStateOf(query.region) }
     var format by remember { mutableStateOf(query.format) }
@@ -1304,19 +1239,18 @@ private fun AnimeDiscoveryFilterPanel(tab: AnimeDiscoveryTab, query: AnimeDiscov
     val currentYear = localToday().year
     val quickYears = listOf("", currentYear.toString(), (currentYear - 1).toString())
     var otherYearVisible by remember { mutableStateOf(false) }
-    var allGenres by remember(provider) { mutableStateOf(false) }
 
     fun selectProvider(next: AnimeDiscoveryProvider) {
         if (next == provider) return
-        draftOptions[provider] = query.copy(provider = provider, year = year.toIntOrNull(), season = season,
-            tag = tag, order = order, region = region, format = format, combined = false)
+        draftOptions[provider] = query.withTags(tags).copy(provider = provider, year = year.toIntOrNull(), season = season,
+            order = order, region = region, format = format, combined = false)
         val previous = draftOptions[next] ?: rememberedOptions(next)
         val nextOrders = animeDiscoveryOrders(next)
         order = previous?.order?.takeIf { it in nextOrders } ?: nextOrders.first()
         year = previous?.year?.toString().orEmpty()
         otherYearVisible = false
         season = previous?.season?.takeUnless { next == AnimeDiscoveryProvider.DOUBAN }
-        tag = previous?.tag.orEmpty()
+        tags = previous?.selectedTags.orEmpty()
         region = previous?.region?.takeIf { next == AnimeDiscoveryProvider.DOUBAN }.orEmpty()
         format = previous?.format?.takeIf { next == AnimeDiscoveryProvider.DOUBAN }
         provider = next
@@ -1325,7 +1259,7 @@ private fun AnimeDiscoveryFilterPanel(tab: AnimeDiscoveryTab, query: AnimeDiscov
 
     val scope = listOfNotNull(animeDiscoveryProviderLabel(provider), year.takeIf(String::isNotBlank)?.let { "${it} 年" },
         season?.takeUnless { provider == AnimeDiscoveryProvider.DOUBAN }?.let(::animeSeasonLabel)).joinToString(" · ")
-    val clearAvailable = year.isNotEmpty() || season != null || tag.isNotBlank() || region.isNotEmpty() || format != null ||
+    val clearAvailable = year.isNotEmpty() || season != null || tags.isNotEmpty() || region.isNotEmpty() || format != null ||
         (tab != AnimeDiscoveryTab.HOME && order != defaultOrder)
 
     MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop, containerColor = colors.surface) { dismiss ->
@@ -1383,23 +1317,10 @@ private fun AnimeDiscoveryFilterPanel(tab: AnimeDiscoveryTab, query: AnimeDiscov
                         error = null
                     }
                 }
-                AnimeFilterGroup("标签") {
-                    val genres = animeDiscoveryTags(provider).toList()
-                    val selectedTag = tag.trim()
-                    val shown = if (allGenres) genres else genres.filterIndexed { index, option ->
-                        index < 5 || option.first == selectedTag
-                    }
-                    val customTagEditing = allGenres && provider == AnimeDiscoveryProvider.BANGUMI
-                    val otherSelected = selectedTag.takeIf { value ->
-                        !customTagEditing && value.isNotEmpty() && genres.none { it.first == value }
-                    }
-                    val labels = (listOf("" to "全部标签") + shown + listOfNotNull(otherSelected?.let {
-                        it to (animeDiscoveryGenreLabels[it] ?: it)
-                    })).toMap()
-                    AnimeFilterChoices(labels.keys.toList(), selectedTag, { labels.getValue(it) }) { tag = it }
-                    AnimeFilterDisclosure(if (allGenres) "收起标签" else "更多标签", allGenres) { allGenres = !allGenres }
-                    if (customTagEditing)
-                        AnimeTextField(tag, { tag = it }, "输入站内标签", emptyHint = "例如 音乐")
+                AnimeFilterGroup(if (tags.size > 1) "标签 · 同时匹配" else "标签") {
+                    AnimeTagPicker(controller, provider, tags, tagQuery, active = true,
+                        maxChoicesHeight = 240.dp, onQuery = { tagQuery = it.take(80) },
+                        onToggle = { tag -> tags = if (tag in tags) tags - tag else tags + tag })
                 }
                 if (!seasonal && !ranking && tab != AnimeDiscoveryTab.HOME) AnimeFilterGroup("资料目录") {
                     AnimeFilterDisclosure(animeDiscoveryProviderLabel(provider), sourceOptionsVisible) {
@@ -1414,7 +1335,7 @@ private fun AnimeDiscoveryFilterPanel(tab: AnimeDiscoveryTab, query: AnimeDiscov
 
             val clearFilters: @Composable () -> Unit = {
                 MotionTextButton(enabled = clearAvailable, onClick = {
-                    year = ""; season = null; tag = ""; region = ""; format = null
+                    year = ""; season = null; tags = emptyList(); tagQuery = ""; region = ""; format = null
                     if (tab != AnimeDiscoveryTab.HOME) order = defaultOrder
                     otherYearVisible = false
                     error = null
@@ -1430,9 +1351,9 @@ private fun AnimeDiscoveryFilterPanel(tab: AnimeDiscoveryTab, query: AnimeDiscov
                         otherYearVisible = true
                         error = "请输入 1 到 9998 之间的年份"
                     } else {
-                        onConfigure(query.copy(provider = provider, year = parsed,
+                        onConfigure(query.withTags(tags).copy(provider = provider, year = parsed,
                             season = season.takeUnless { provider == AnimeDiscoveryProvider.DOUBAN },
-                            tag = tag.trim(), order = order,
+                            order = order,
                             region = region.takeIf { provider == AnimeDiscoveryProvider.DOUBAN }.orEmpty(),
                             format = format.takeIf { provider == AnimeDiscoveryProvider.DOUBAN }, combined = false))
                         dismiss()

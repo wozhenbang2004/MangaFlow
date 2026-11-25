@@ -99,6 +99,9 @@ internal fun SearchScopeBar(
     maxChoicesHeight: Dp = 200.dp,
     showScope: Boolean = true,
     translationGroupAvailable: Boolean = true,
+    choicesExpanded: Boolean? = null,
+    onChoicesExpandedChange: ((Boolean) -> Unit)? = null,
+    choicesFooter: (@Composable () -> Unit)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val focus = LocalFocusManager.current
@@ -122,10 +125,14 @@ internal fun SearchScopeBar(
     var choseTabForQuery by remember(target, tagsOnly, query) { mutableStateOf(false) }
     val themeScroll = rememberScrollState()
     val eventScroll = rememberScrollState()
-    val showChoices = target == SearchTarget.TAG && (tagsExpanded || selectedTags.isEmpty())
+    val showChoices = target == SearchTarget.TAG && (choicesExpanded ?: (tagsExpanded || selectedTags.isEmpty()))
+    fun expandChoices(expanded: Boolean) {
+        tagsExpanded = expanded
+        onChoicesExpandedChange?.invoke(expanded)
+    }
     val releaseInput = { keyboard?.hide(); focus.clearFocus(force = true) }
     val chooseTag: (MangaTag) -> Unit = { tag ->
-        tagsExpanded = false
+        expandChoices(false)
         releaseInput()
         onTag(tag)
     }
@@ -175,7 +182,7 @@ internal fun SearchScopeBar(
                             onClickLabel = if (showChoices) "收起标签选择" else "添加筛选标签",
                             onClick = {
                                 releaseInput()
-                                tagsExpanded = !showChoices
+                                expandChoices(!showChoices)
                             })
                         .motionPress(action, pressedScale = .97f)
                         .semantics { contentDescription = if (showChoices) "收起标签选择" else "添加筛选标签" },
@@ -281,6 +288,7 @@ internal fun SearchScopeBar(
                             Icon(Icons.Outlined.Refresh, "重试加载标签", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
                         }
                     }
+                    choicesFooter?.invoke()
                 }
             } else Spacer(Modifier.height(0.dp))
         }

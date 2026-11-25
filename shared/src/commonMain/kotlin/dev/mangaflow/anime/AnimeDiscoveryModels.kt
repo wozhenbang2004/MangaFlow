@@ -24,6 +24,31 @@ data class AnimeDiscoveryQuery(
     val combined: Boolean = false,
     val region: String = "",
     val format: AnimeDiscoveryFormat? = null,
+    val tags: List<String> = emptyList(),
+)
+
+internal val AnimeDiscoveryQuery.selectedTags: List<String>
+    get() = (listOf(tag) + tags).map(String::trim).filter(String::isNotEmpty).distinct()
+
+internal fun AnimeDiscoveryQuery.withTags(values: List<String>): AnimeDiscoveryQuery =
+    copy(tag = "", tags = values.map(String::trim).filter(String::isNotEmpty).distinct())
+
+internal data class AnimeDiscoveryTag(
+    val key: String,
+    val name: String,
+    val count: Int? = null,
+    val aliases: List<String> = emptyList(),
+)
+
+internal data class AnimeTagDirectoryPage(
+    val tags: List<AnimeDiscoveryTag>,
+    val nextOffset: Int?,
+    val total: Int,
+)
+
+internal val animeDoubanGenreLabels = listOf(
+    "热血", "校园", "恋爱", "搞笑", "治愈", "科幻", "奇幻",
+    "冒险", "悬疑", "推理", "日常", "运动", "机战", "催泪",
 )
 
 internal fun defaultAnimeRankingQuery(provider: AnimeDiscoveryProvider): AnimeDiscoveryQuery =

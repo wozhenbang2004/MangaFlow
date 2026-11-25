@@ -7,7 +7,9 @@ import dev.mangaflow.anime.AnimeDiscoveryProvider
 import dev.mangaflow.anime.AnimeDiscoveryQuery
 import dev.mangaflow.anime.AnimeDocumentCodec
 import dev.mangaflow.anime.AnimeSubject
+import dev.mangaflow.anime.animeDoubanGenreLabels
 import dev.mangaflow.anime.canonicalDoubanId
+import dev.mangaflow.anime.selectedTags
 import dev.mangaflow.experience.ContentCacheKind
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
@@ -169,7 +171,7 @@ class DoubanAnimeRepository(context: PlatformContext) {
                 return@withContext it
             }
         val kind = if (query.format == AnimeDiscoveryFormat.MOVIE) "movie" else "tv"
-        val tags = listOf("动画", regionTag(query.region), query.tag.trim(), query.year?.toString().orEmpty())
+        val tags = (listOf("动画", regionTag(query.region)) + query.selectedTags + listOfNotNull(query.year?.toString()))
             .filter(String::isNotBlank).distinct()
         val sort = when (query.order) {
             AnimeDiscoveryOrder.POPULARITY -> "U"
@@ -203,7 +205,7 @@ class DoubanAnimeRepository(context: PlatformContext) {
             "豆瓣动画目录暂不支持这个作品形式筛选。"
         }
         require(query.region.trim() in setOf("", "日本", "大陆", "中国大陆")) { "请选择豆瓣动画目录支持的地区。" }
-        require(query.tag.isBlank() || query.tag.trim() in DOUBAN_GENRES) { "请选择豆瓣动画目录支持的题材。" }
+        require(query.selectedTags.all { it in animeDoubanGenreLabels }) { "请选择豆瓣动画目录支持的题材。" }
         require(query.order in setOf(AnimeDiscoveryOrder.POPULARITY, AnimeDiscoveryOrder.NEWEST, AnimeDiscoveryOrder.SCORE)) {
             "豆瓣动画目录支持热度、最新和评分排序。"
         }
@@ -320,16 +322,13 @@ class DoubanAnimeRepository(context: PlatformContext) {
         "douban-search:v1:${animeHash(query)}:$page:${animeHash(route.identity())}"
     private fun detailKey(id: String, route: DownloadRouteSnapshot): String = "douban-detail:v1:$id:${animeHash(route.identity())}"
     private fun browseKey(query: AnimeDiscoveryQuery, page: Int, route: DownloadRouteSnapshot): String =
-        "douban-browse:v1:${JSONObject().put("order", query.order.name).put("year", query.year)
-            .put("region", regionTag(query.region)).put("format", query.format?.name).put("tag", query.tag.trim())}:$page:${animeHash(route.identity())}"
+        "douban-browse:v2:${JSONObject().put("order", query.order.name).put("year", query.year)
+            .put("region", regionTag(query.region)).put("format", query.format?.name)
+            .put("tags", JSONArray(query.selectedTags.sorted()))}:$page:${animeHash(route.identity())}"
     private fun browseKind(query: AnimeDiscoveryQuery): ContentCacheKind =
         if (query.year != null) ContentCacheKind.DISCOVERY else ContentCacheKind.RANKING
     private fun regionTag(region: String): String = if (region.trim() == "中国大陆") "大陆" else region.trim()
 
     private data class SearchRecord(val value: AnimeMetadataPage, val requestUrl: String, val nextUrl: String?)
     private data class SearchCursor(val nextUrl: String?, val generation: Long)
-
-    private companion object {
-        val DOUBAN_GENRES = setOf("热血", "校园", "恋爱", "搞笑", "治愈", "科幻", "奇幻", "冒险", "悬疑", "推理", "日常", "运动", "机战", "催泪")
-    }
 }

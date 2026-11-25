@@ -10,6 +10,7 @@ import dev.mangaflow.anime.AnimeSourceScore
 import dev.mangaflow.anime.AnimeSourceTitle
 import dev.mangaflow.anime.AnimeSubject
 import dev.mangaflow.anime.combineAnimeDiscoveryItems
+import dev.mangaflow.anime.selectedTags
 import dev.mangaflow.experience.ContentCacheKind
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
@@ -149,8 +150,7 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
     ): AnimeDiscoveryPage? {
         validate(query, page)
         if (query.provider == AnimeDiscoveryProvider.DOUBAN) return douban.cachedBrowse(query, page, route)
-        // Earlier versions did not record the route. Keep their displayable snapshots,
-        // but revalidate them before treating a query as fresh on the current route.
+        // Route-aware and route-less snapshots must use the current query schema.
         return route?.let { readCache(query, page, cacheKey(query, page, it), freshOnly = false) }
             ?: readCache(query, page, cacheKey(query, page, null), freshOnly = false)
     }
@@ -240,7 +240,7 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
 
     private suspend fun bangumi(http: AnimeHttp, query: AnimeDiscoveryQuery, page: Int): JSONObject {
         val filter = JSONObject().put("type", JSONArray(listOf(2))).put("nsfw", false)
-        query.tag.trim().takeIf { it.isNotEmpty() }?.let { filter.put("tag", JSONArray(listOf(it))) }
+        query.selectedTags.takeIf { it.isNotEmpty() }?.let { filter.put("tag", JSONArray(it)) }
         query.year?.let { year ->
             val startMonth = query.season?.startMonth ?: 1
             val endMonth = if (query.season == null || startMonth == 10) 1 else startMonth + 3
@@ -256,8 +256,8 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
             AnimeDiscoveryOrder.NEWEST -> throw IllegalArgumentException("Bangumi 此目录暂不提供最新排序。")
         }
         return http.json(BANGUMI_API.newBuilder().addPathSegments("search/subjects")
-            .addQueryParameter("limit", PAGE_SIZE.toString())
-            .addQueryParameter("offset", ((page - 1L) * PAGE_SIZE).toString()).build(),
+            .addQueryParameter("limit", BANGUMI_PAGE_SIZE.toString())
+            .addQueryParameter("offset", ((page - 1L) * BANGUMI_PAGE_SIZE).toString()).build(),
             AnimeSourceStage.METADATA, "POST", JSONObject().put("keyword", "").put("sort", sort).put("filter", filter))
     }
 
@@ -269,11 +269,13 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
             AnimeDiscoveryOrder.RANK -> throw IllegalArgumentException("AniList 暂不提供 Bangumi 综合名次排序。")
             AnimeDiscoveryOrder.NEWEST -> throw IllegalArgumentException("AniList 此目录暂不提供最新排序。")
         }
-        val variables = JSONObject().put("page", page).put("perPage", PAGE_SIZE)
+        val variables = JSONObject().put("page", page).put("perPage", ANILIST_PAGE_SIZE)
             .put("sort", JSONArray(listOf(sort)))
         if (query.season != null) variables.put("year", query.year).put("season", query.season.name)
         else query.year?.let { variables.putAniListReleaseYear(it) }
-        query.tag.trim().takeIf { it.isNotEmpty() }?.let { variables.put("genre", it) }
+        val (tags, genres) = query.selectedTags.partition { it.startsWith("tag:") }
+        if (genres.isNotEmpty()) variables.put("genres", JSONArray(genres))
+        if (tags.isNotEmpty()) variables.put("tags", JSONArray(tags.map { it.removePrefix("tag:") }))
         return http.json(ANILIST_API, AnimeSourceStage.METADATA, "POST",
             JSONObject().put("query", ANILIST_QUERY).put("variables", variables))
     }
@@ -298,8 +300,9 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
             AnimeDiscoveryProvider.BANGUMI -> {
                 val total = payload.optLong("total", -1L)
                 require(total >= 0) { "Bangumi 没有返回分页总数。" }
-                val offset = (page - 1L) * PAGE_SIZE
+                val offset = (page - 1L) * BANGUMI_PAGE_SIZE
                 if (payload.has("offset")) require(payload.getLong("offset") == offset) { "Bangumi 返回了不同的分页位置。" }
+                if (payload.has("limit")) require(payload.getInt("limit") == BANGUMI_PAGE_SIZE) { "Bangumi 返回了不同的分页大小。" }
                 val rows = if (total == 0L && payload.isNull("data")) JSONArray() else
                     payload.requiredArray("data", BANGUMI_PROVIDER, AnimeSourceStage.METADATA)
                 require(rows.length() > 0 || offset >= total) { "Bangumi 返回了不完整的分页。" }
@@ -314,10 +317,34 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
                     .requiredObject("Page", ANILIST_PROVIDER, AnimeSourceStage.METADATA)
                 val pageInfo = result.requiredObject("pageInfo", ANILIST_PROVIDER, AnimeSourceStage.METADATA)
                 require(pageInfo.getInt("currentPage") == page) { "AniList 返回了不同的分页位置。" }
+                val selectedTags = query.selectedTags
                 // AniList documents total/lastPage as unreliable; only hasNextPage decides continuation.
                 AnimeDiscoveryPage(result.requiredArray("media", ANILIST_PROVIDER, AnimeSourceStage.METADATA)
-                    .objects().map(::anilistItem), page, pageInfo.getBoolean("hasNextPage"), fetchedAt)
+                    .objects().filter { anilistMatchesTags(it, selectedTags) }.map(::anilistItem),
+                    page, pageInfo.getBoolean("hasNextPage"), fetchedAt)
             }
+        }
+    }
+
+    private fun anilistMatchesTags(row: JSONObject, selectedTags: List<String>): Boolean {
+        if (selectedTags.isEmpty()) return true
+        val needsGenres = selectedTags.any { !it.startsWith("tag:") }
+        val needsTags = selectedTags.any { it.startsWith("tag:") }
+        require(!needsGenres || row.has("genres")) { "AniList 没有返回所选题材的核对资料。" }
+        require(!needsTags || row.has("tags")) { "AniList 没有返回所选标签的核对资料。" }
+        val genres = if (!needsGenres || row.isNull("genres")) emptySet() else
+            row.requiredArray("genres", ANILIST_PROVIDER, AnimeSourceStage.METADATA).let { values ->
+                (0 until values.length()).map { index ->
+                    requireNotNull(values.opt(index) as? String) { "AniList 题材资料不完整。" }
+                }.toSet()
+            }
+        val tags = if (!needsTags || row.isNull("tags")) emptySet() else
+            row.requiredArray("tags", ANILIST_PROVIDER, AnimeSourceStage.METADATA).objects().map {
+                requireNotNull(it.opt("name") as? String) { "AniList 标签资料不完整。" }
+            }.toSet()
+        // Preserve an AND selection even if the upstream array filters return a broader page.
+        return selectedTags.all { tag ->
+            if (tag.startsWith("tag:")) tag.removePrefix("tag:") in tags else tag in genres
         }
     }
 
@@ -391,7 +418,7 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
         require(query.weekday == null || query.weekday in 1..7) { "请选择有效的放送日。" }
         if (query.calendar) {
             require(query.provider == AnimeDiscoveryProvider.BANGUMI && page == 1) { "每日番表仅支持 Bangumi 的完整周表。" }
-            require(query.order == AnimeDiscoveryOrder.POPULARITY && query.year == null && query.season == null && query.tag.isBlank()) {
+            require(query.order == AnimeDiscoveryOrder.POPULARITY && query.year == null && query.season == null && query.selectedTags.isEmpty()) {
                 "每日番表只支持放送日筛选，排行、年份和分类请在对应页面选择。"
             }
         } else {
@@ -399,14 +426,16 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
             when (query.provider) {
                 AnimeDiscoveryProvider.DOUBAN -> error("豆瓣目录已经完成筛选校验。")
                 AnimeDiscoveryProvider.BANGUMI -> {
-                    require((page - 1L) * PAGE_SIZE <= Int.MAX_VALUE) { "分页位置无效。" }
+                    require((page - 1L) * BANGUMI_PAGE_SIZE <= Int.MAX_VALUE) { "分页位置无效。" }
                     require(query.order != AnimeDiscoveryOrder.TRENDING) { "Bangumi 暂不提供近期趋势排序。" }
                     require(query.order != AnimeDiscoveryOrder.NEWEST) { "Bangumi 此目录暂不提供最新排序。" }
                 }
                 AnimeDiscoveryProvider.ANILIST -> {
                     require(query.order != AnimeDiscoveryOrder.RANK) { "AniList 暂不提供 Bangumi 综合名次排序。" }
                     require(query.order != AnimeDiscoveryOrder.NEWEST) { "AniList 此目录暂不提供最新排序。" }
-                    require(query.tag.isBlank() || query.tag.trim() in ANILIST_GENRES) { "请选择 AniList 支持的分类。" }
+                    require(query.selectedTags.all { tag ->
+                        tag.none(Char::isISOControl) && (!tag.startsWith("tag:") || tag.removePrefix("tag:").isNotBlank())
+                    }) { "请选择 AniList 目录中的有效标签。" }
                 }
             }
         }
@@ -418,10 +447,11 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
     private fun cacheKey(query: AnimeDiscoveryQuery, page: Int, route: DownloadRouteSnapshot?): String {
         val identity = if (query.calendar) "bangumi:calendar" else
             JSONObject().put("provider", query.provider.name).put("order", query.order.name)
-                .put("year", query.year).put("season", query.season?.name).put("tag", query.tag.trim()).put("page", page)
+                .put("year", query.year).put("season", query.season?.name)
+                .put("tags", JSONArray(query.selectedTags.sorted())).put("page", page)
                 .put("releaseYear", query.year.takeIf { query.provider == AnimeDiscoveryProvider.ANILIST && query.season == null })
                 .toString()
-        return if (route == null) "discovery:v1:$identity" else "discovery:v2:$identity:${animeHash(route.identity())}"
+        return if (route == null) "discovery:v3:$identity" else "discovery:v3:$identity:${animeHash(route.identity())}"
     }
 
     private fun checkRoute(query: AnimeDiscoveryQuery, requested: DownloadRouteSnapshot) {
@@ -453,22 +483,21 @@ class AnimeDiscoveryRepository(context: PlatformContext) {
         put("from", (year - 1) * 10_000 + 1_231).put("until", (year + 1) * 10_000)
 
     private companion object {
-        const val PAGE_SIZE = 24
+        const val BANGUMI_PAGE_SIZE = 20
+        const val ANILIST_PAGE_SIZE = 24
         const val READ_TIMEOUT_MILLIS = 8_000L
         const val INLINE_RETRY_BUDGET_MILLIS = 4_000L
         const val ANILIST_SCORE_LIMIT = 20
         const val ANILIST_SCORE_TIMEOUT_MILLIS = 4_000L
-        val ANILIST_GENRES = setOf("Action", "Adventure", "Comedy", "Drama", "Ecchi", "Fantasy", "Hentai", "Horror",
-            "Mahou Shoujo", "Mecha", "Music", "Mystery", "Psychological", "Romance", "Sci-Fi", "Slice of Life",
-            "Sports", "Supernatural", "Thriller")
         val ANILIST_QUERY = """
             query Discovery(${'$'}page: Int!, ${'$'}perPage: Int!, ${'$'}sort: [MediaSort], ${'$'}year: Int,
-              ${'$'}season: MediaSeason, ${'$'}genre: String, ${'$'}from: FuzzyDateInt, ${'$'}until: FuzzyDateInt) {
+              ${'$'}season: MediaSeason, ${'$'}genres: [String], ${'$'}tags: [String], ${'$'}from: FuzzyDateInt, ${'$'}until: FuzzyDateInt) {
               Page(page: ${'$'}page, perPage: ${'$'}perPage) {
                 pageInfo { currentPage hasNextPage }
                 media(type: ANIME, isAdult: false, sort: ${'$'}sort, seasonYear: ${'$'}year, season: ${'$'}season,
-                  genre: ${'$'}genre, startDate_greater: ${'$'}from, startDate_lesser: ${'$'}until) {
+                  genre_in: ${'$'}genres, tag_in: ${'$'}tags, startDate_greater: ${'$'}from, startDate_lesser: ${'$'}until) {
                   id idMal type format title { native romaji english } coverImage { extraLarge large }
+                  genres tags { name }
                   seasonYear startDate { year } episodes averageScore popularity trending
                   nextAiringEpisode { episode airingAt }
                 }

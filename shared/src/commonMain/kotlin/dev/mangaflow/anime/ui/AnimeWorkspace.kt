@@ -967,7 +967,7 @@ private fun AnimeWorkspaceContent(
                     if (tagSearch) {
                         val current = controller.state.value.discoveryFeeds[animeDiscoveryFeedKey(AnimeDiscoveryTab.GENRES)]?.query
                             ?: AnimeDiscoveryQuery(provider = AnimeDiscoveryProvider.DOUBAN)
-                        animeDiscoveryTagInput(current.provider, tagDraft)?.let { applyTagQuery(current.copy(tag = it)) }
+                        animeDiscoveryTagInput(current.provider, tagDraft)?.let { applyTagQuery(current.withTags(current.selectedTags + it)) }
                     } else submitSearch(query)
                 },
                 placeholder = if (tagSearch) "筛选标签" else "搜索番剧",
@@ -994,10 +994,10 @@ private fun AnimeWorkspaceContent(
                 if (tagSearch) {
                     AnimeTagSearch(state, controller, backdrop, discoveryScrolls, tagDraft, choosingTags,
                         active = inputActive, maxHeight = height,
-                        onChooseTags = {
+                        onChoosingChange = { choosing ->
                             if (inputActive) {
                                 tagDraft = ""
-                                tagChoicesOpen = !choosingTags
+                                tagChoicesOpen = choosing
                             }
                         }, onPrepareFilters = ::releaseSearchInput, onConfigure = {
                             if (inputActive) { releaseSearchInput(); applyTagQuery(it) }
