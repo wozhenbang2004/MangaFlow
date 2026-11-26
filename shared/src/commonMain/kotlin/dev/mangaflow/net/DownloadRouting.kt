@@ -42,7 +42,8 @@ data class DownloadRoutingSettings(
     val proxy: DownloadProxyEndpoint? = null,
     val sourceOverrides: Map<String, SourceNetworkSettings> = emptyMap(),
     val proxyProvider: DownloadProxyProvider =
-        if (!relayLinkAvailable || proxy != null || sourceOverrides.values.any { it.proxy != null }) DownloadProxyProvider.CUSTOM
+        if (!relayLinkAvailable || platformKind == PlatformKind.DESKTOP ||
+            proxy != null || sourceOverrides.values.any { it.proxy != null }) DownloadProxyProvider.CUSTOM
         else DownloadProxyProvider.RELAY,
 )
 
@@ -310,7 +311,10 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
             proxy = proxy,
             sourceOverrides = sources,
             proxyProvider = disk.getString("proxy_provider")?.let { saved -> DownloadProxyProvider.entries.firstOrNull { it.name == saved } }
-                ?: if (!relayLinkAvailable || proxy != null || sources.values.any { it.proxy != null }) DownloadProxyProvider.CUSTOM
+                // Windows stored direct routes before Relay was available. Keep those routes
+                // on the original transport until the user explicitly selects Relay.
+                ?: if (!relayLinkAvailable || platformKind == PlatformKind.DESKTOP ||
+                    proxy != null || sources.values.any { it.proxy != null }) DownloadProxyProvider.CUSTOM
                 else DownloadProxyProvider.RELAY,
         )
     }
