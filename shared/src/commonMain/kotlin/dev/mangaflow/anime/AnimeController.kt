@@ -40,7 +40,6 @@ import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.net.DownloadRoutingStore
-import dev.mangaflow.net.RelayLinkController
 import dev.mangaflow.net.SourceNetworkSettings
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.PlatformKind
@@ -634,18 +633,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                         startDetailRating(provider, reference, owner, detailGeneration)
                     } }
                 }
-            }
-        }
-        val relayCatalogue = RelayLinkController.get(context).state
-        if (relayCatalogue.value.desktopCompanion) scope.launch {
-            relayCatalogue.map { state ->
-                state.desktopCatalogueMode to state.desktopCatalogueEpoch
-                    .takeIf { state.desktopCatalogueMode != DownloadRouteMode.SYSTEM }
-            }.distinctUntilChanged().drop(1).collect {
-                // A private desktop catalogue lease is not a change to video, search, accounts or downloads.
-                visibleDiscoveryKeys().filter { key ->
-                    mutableState.value.discoveryFeeds[key]?.query?.provider == AnimeDiscoveryProvider.DOUBAN
-                }.forEach(discoveryLoads::ensure)
             }
         }
         scope.launch {

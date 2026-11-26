@@ -4,7 +4,7 @@ import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.net.DownloadRouteSnapshot
-import dev.mangaflow.net.javaProxy
+import dev.mangaflow.net.openDownloadConnection
 import dev.mangaflow.platform.storage.cacheDirectory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -20,7 +20,6 @@ import java.io.FilterInputStream
 import java.io.StringReader
 import java.net.HttpURLConnection
 import java.net.URI
-import java.net.Proxy
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -65,7 +64,7 @@ internal actual suspend fun planNativeIncrementalUpdate(
     require(hashPattern.matches(digest)) { "增量清单缺少发布摘要" }
     val bytes = asset.optLong("size")
     require(bytes in 1..(2L * 1024 * 1024)) { "增量清单大小无效" }
-    val data = readOfficial(asset.optString("browser_download_url"), bytes, route.javaProxy())
+    val data = readOfficial(asset.optString("browser_download_url"), bytes, route)
     require(hash(data) == digest) { "增量清单校验失败" }
     val manifest = JSONObject(data.toString(Charsets.UTF_8))
     val protocol = manifest.optInt("protocol")
@@ -117,7 +116,6 @@ internal actual suspend fun downloadNativeIncrementalUpdate(
     context: PlatformContext, plan: NativeIncrementalPlan, route: DownloadRouteSnapshot, onProgress: (Long, Long) -> Unit,
 ) = withContext(Dispatchers.IO) {
     val state = plans[plan.token] ?: error("增量计划已失效，请重新检查更新")
-    val proxy = route.javaProxy()
     val cancellation = currentCoroutineContext()
     val payload = File(state.work, "payload")
     check(payload.isDirectory || payload.mkdirs()) { "无法创建增量暂存目录" }
@@ -147,7 +145,7 @@ internal actual suspend fun downloadNativeIncrementalUpdate(
         val result = config.update(UpdateOptions.archive(archive.toPath()).updateHandler(object : UpdateHandler {
             override fun openDownloadStream(file: FileMetadata): InputStream {
                 cancellation.ensureActive()
-                val connection = officialConnection(file.uri.toString(), proxy)
+                val connection = officialConnection(file.uri.toString(), route)
                 val input = try { connection.inputStream }
                     catch (failure: Exception) { connection.disconnect(); throw failure }
                 return object : FilterInputStream(input) {
@@ -286,7 +284,7 @@ private fun hash(path: Path): String = Files.newInputStream(path).use { input ->
 private fun hash(bytes: ByteArray): String = hex(MessageDigest.getInstance("SHA-256").digest(bytes))
 private fun hex(bytes: ByteArray): String = HexFormat.of().formatHex(bytes)
 private fun escapeXml(value: String): String = value.replace("&", "&amp;").replace("\"", "&quot;").replace("<", "&lt;").replace(">", "&gt;")
-private fun readOfficial(url: String, expectedBytes: Long, proxy: Proxy?): ByteArray = officialConnection(url, proxy).let { connection ->
+private fun readOfficial(url: String, expectedBytes: Long, route: DownloadRouteSnapshot): ByteArray = officialConnection(url, route).let { connection ->
     try {
         connection.inputStream.use { input ->
             val bytes = input.readNBytes((expectedBytes + 1).toInt())
@@ -295,12 +293,12 @@ private fun readOfficial(url: String, expectedBytes: Long, proxy: Proxy?): ByteA
         }
     } finally { connection.disconnect() }
 }
-private fun officialConnection(initial: String, proxy: Proxy?): HttpURLConnection {
+private fun officialConnection(initial: String, route: DownloadRouteSnapshot): HttpURLConnection {
     var url = URI(initial)
     repeat(6) {
         require(url.scheme == "https" && url.host in setOf("github.com", "release-assets.githubusercontent.com",
             "objects.githubusercontent.com", "github-releases.githubusercontent.com")) { "增量下载地址无效" }
-        val connection = (if (proxy == null) url.toURL().openConnection() else url.toURL().openConnection(proxy)) as HttpURLConnection
+        val connection = route.openDownloadConnection(url.toURL())
         connection.instanceFollowRedirects = false
         connection.connectTimeout = 20_000
         connection.readTimeout = 30_000

@@ -18,6 +18,8 @@ private object UnavailableRelayLink : RelayPlatformLink {
     val controller = RelayLinkController(this)
 }
 
+internal actual val relayLinkAvailable = false
+
 internal actual fun platformRelayLinkController(context: PlatformContext): RelayLinkController =
     UnavailableRelayLink.controller
 

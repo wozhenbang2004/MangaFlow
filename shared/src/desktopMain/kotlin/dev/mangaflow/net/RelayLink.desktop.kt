@@ -15,157 +15,208 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-private val desktopRelayWindows = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
-private val companionId = Regex("[A-Za-z0-9_-]{1,128}")
-private const val cataloguePreference = "catalogue-mode"
+internal actual val relayLinkAvailable = System.getProperty("os.name", "").startsWith("Windows", ignoreCase = true)
+private val grantIdentity = Regex("[a-f0-9]{32}")
+private data class WindowsGrant(val id: String, val enabled: Boolean)
+private data class WindowsLease(val grantId: String, val generation: String)
 
-private class DesktopRelayLink(context: PlatformContext) : RelayPlatformLink, DesktopRelayTunnelProvider {
-    private val disk = preferences(context, "desktop-relay-companion")
-    private val updates = Mutex()
+private class DesktopRelayLink(context: PlatformContext) : RelayPlatformLink {
+    private val disk = preferences(context, "desktop-relay-link")
+    private val gate = Mutex()
     private val mutableState = MutableStateFlow(RelayLinkState(
-        desktopCompanion = desktopRelayWindows,
-        desktopCatalogueMode = if (desktopRelayWindows) savedMode() else DownloadRouteMode.SYSTEM,
+        phase = if (relayLinkAvailable) RelayLinkPhase.NOT_INSTALLED else RelayLinkPhase.NOT_AVAILABLE,
     ))
     override val state = mutableState.asStateFlow()
-    @Volatile private var lease: Pair<String, String>? = null
-    @Volatile private var scope: CoroutineScope? = null
+    @Volatile private var grant = disk.getString("grant")?.takeIf(grantIdentity::matches)?.let {
+        WindowsGrant(it, disk.getBoolean("enabled"))
+    }
+    @Volatile private var lease: WindowsLease? = null
+    @Volatile private var operations: CoroutineScope? = null
     private var observer: Job? = null
-
-    private fun savedMode() = disk.getString(cataloguePreference)?.let { name ->
-        DownloadRouteMode.entries.firstOrNull { it.name == name }
-    } ?: DownloadRouteMode.SYSTEM
+    private val endpoints = mutableMapOf<DownloadRouteMode, RelayManagedEndpoint>()
 
     @Synchronized
     override fun start(scope: CoroutineScope) {
-        if (!desktopRelayWindows || observer?.isActive == true) return
-        this.scope = scope
-        DesktopRelayTransport.install(this)
+        if (!relayLinkAvailable || observer?.isActive == true) return
+        operations = scope
         observer = scope.launch(Dispatchers.IO) {
             while (true) {
-                updates.withLock { updateStatus() }
-                delay(12_000L)
+                gate.withLock { refreshLocked() }
+                delay(if (grant?.enabled == true && lease == null) 1500 else 6500)
             }
         }
     }
 
-    override fun refresh() {
-        scope?.launch(Dispatchers.IO) { updates.withLock { updateStatus() } }
+    override fun refresh() = launch { refreshLocked() }
+
+    override fun requestAuthorization() = launch {
+        mutableState.update { it.copy(phase = RelayLinkPhase.AUTHORIZING, error = null) }
+        applyReply(call { it.authorize() })
     }
 
-    override fun setDesktopCatalogueMode(mode: DownloadRouteMode) {
-        if (!desktopRelayWindows) return
-        scope?.launch(Dispatchers.IO) {
-            updates.withLock {
-                if (mode != DownloadRouteMode.SYSTEM) {
-                    updateStatus()
-                    if (lease == null) {
-                        mutableState.update { it.copy(error = "Relay 尚未确认目录授权，未更改线路。") }
-                        return@withLock
-                    }
-                }
-                if (!disk.edit().putString(cataloguePreference, mode.name).commit()) {
-                    mutableState.update { it.copy(error = "未能保存桌面 Relay 目录线路。") }
-                    return@withLock
-                }
-                mutableState.update { it.copy(desktopCatalogueMode = mode,
-                    enabled = mode != DownloadRouteMode.SYSTEM && lease != null,
-                    realRequestVerified = false, verifiedAtMillis = null, verifiedMode = null, error = null) }
+    override fun enable() = launch {
+        val known = grant ?: return@launch
+        applyReply(call { it.setEnabled(known.id, true) })
+    }
+
+    override fun disable() = stop("pause")
+    override fun revoke() = stop("revoke")
+
+    private fun stop(action: String) = launch {
+        val known = grant ?: return@launch
+        val editor = disk.edit().putString("pending", action).putString("pending-grant", known.id)
+        if (!editor.commit()) {
+            mutableState.update { it.copy(error = "未能保存联动操作，请重试。") }
+            return@launch
+        }
+        lease = null
+        endpoints.clear()
+        refreshLocked()
+    }
+
+    override fun openProvider() {
+        operations?.launch(Dispatchers.IO) {
+            val exe = windowsRelayExecutable() ?: return@launch
+            try { ProcessBuilder(exe.absolutePath).directory(exe.parentFile).start() }
+            catch (_: Exception) { mutableState.update { it.copy(error = "无法打开 Relay，请从桌面打开它。") } }
+        }
+    }
+
+    override fun updateSources(sources: Map<String, String>) = Unit
+
+    private fun launch(block: suspend () -> Unit) {
+        operations?.launch(Dispatchers.IO) { gate.withLock { block() } }
+    }
+
+    private suspend fun refreshLocked() {
+        val action = disk.getString("pending")
+        val id = disk.getString("pending-grant")
+        if (id != null && action in setOf("pause", "revoke")) {
+            val result = call { if (action == "pause") it.setEnabled(id, false) else it.revoke(id) }
+            if (result?.status !in setOf(WindowsRelayCompanionStatus.AUTHORIZATION_REQUIRED,
+                    WindowsRelayCompanionStatus.DISABLED, WindowsRelayCompanionStatus.STALE)) {
+                applyReply(result)
+                lease = null
+                endpoints.clear()
+                mutableState.update { it.copy(phase = RelayLinkPhase.ERROR, error = "还未收到 Relay 的停用或撤销回执，将自动重试。") }
+                return
             }
+            disk.edit().remove("pending").remove("pending-grant").commit()
         }
+        applyReply(call { it.status() })
     }
 
-    override fun desktopCatalogueRoute(): DownloadRouteSnapshot? {
-        val mode = mutableState.value.desktopCatalogueMode
-        if (!desktopRelayWindows || mode == DownloadRouteMode.SYSTEM) return null
-        val current = lease ?: throw DownloadRouteException("桌面 Relay 目录线路当前不可用；尚未请求原站。")
-        return DownloadRouteSnapshot(mode, desktopRelayBinding = DesktopRelayRouteBinding(current.first, current.second, mode))
-    }
+    private suspend fun call(block: suspend (WindowsRelayCompanionClient) -> WindowsRelayCompanionResult):
+        WindowsRelayCompanionResult? = try { windowsRelayCompanionClient()?.let { block(it) } }
+        catch (failure: CancellationException) { throw failure }
+        catch (_: Exception) { null }
 
-    override fun isCurrent(binding: DesktopRelayRouteBinding): Boolean {
-        val current = lease ?: return false
-        return mutableState.value.desktopCatalogueMode == binding.mode &&
-            binding.mode != DownloadRouteMode.SYSTEM && binding.bindingId == current.first && binding.generation == current.second
-    }
-
-    override fun open(binding: DesktopRelayRouteBinding): DesktopRelayEndpoint {
-        if (!isCurrent(binding)) throw DownloadRouteException("桌面 Relay 目录线路已失效。")
-        // Only the socket factory calls this on the OkHttp connection worker. No UI thread IPC.
-        val response = runBlocking {
-            windowsRelayCompanionClient()?.acquire(if (binding.mode == DownloadRouteMode.DIRECT)
-                WindowsRelayCompanionMode.DIRECT else WindowsRelayCompanionMode.PROXY)
+    private fun applyReply(result: WindowsRelayCompanionResult?) {
+        val status = result?.status
+        val replyGrant = result?.bindingId?.takeIf(grantIdentity::matches)
+        val newGrant = when {
+            status == WindowsRelayCompanionStatus.AUTHORIZATION_REQUIRED -> null
+            replyGrant != null -> WindowsGrant(replyGrant, status != WindowsRelayCompanionStatus.DISABLED)
+            else -> grant // A service restart must not change an already selected route.
         }
-        val entry = response?.endpoint
-        if (response?.status != WindowsRelayCompanionStatus.READY || entry == null ||
-            response.bindingId != binding.bindingId || response.generation != binding.generation ||
-            entry.epoch != binding.generation || !isCurrent(binding)) {
-            refresh()
-            throw DownloadRouteException("桌面 Relay 未确认原目录线路；未改走其他线路。")
+        if (newGrant != grant) {
+            val editor = disk.edit().putBoolean("enabled", newGrant?.enabled == true)
+            if (newGrant == null) editor.remove("grant") else editor.putString("grant", newGrant.id)
+            if (!editor.commit()) {
+                lease = null
+                endpoints.clear()
+                mutableState.update { it.copy(phase = RelayLinkPhase.ERROR, error = "未能保存 Relay 授权，请重试。") }
+                return
+            }
+            grant = newGrant
         }
-        return DesktopRelayEndpoint(binding.bindingId, binding.generation, binding.mode,
-            "127.0.0.1", entry.port, entry.username, entry.password, entry.ownerPid, entry.ownerStartTicks)
-    }
-
-    private suspend fun updateStatus() {
-        val response = companionCall { windowsRelayCompanionClient()?.status() }
-        val oldLease = lease
-        val found = response?.status
-        val id = response?.bindingId
-        val generation = response?.generation
-        val live = if (found == WindowsRelayCompanionStatus.READY && id != null && generation != null &&
-            companionId.matches(id) && companionId.matches(generation)) id to generation else null
-        lease = live
-        val phase = when {
-            live != null -> RelayLinkPhase.APPLIED
-            found == WindowsRelayCompanionStatus.UNAUTHORIZED -> RelayLinkPhase.AUTHORIZATION_REQUIRED
-            found == WindowsRelayCompanionStatus.REJECTED || found == WindowsRelayCompanionStatus.STALE -> RelayLinkPhase.ERROR
-            else -> RelayLinkPhase.NOT_AVAILABLE
+        val current = if (status == WindowsRelayCompanionStatus.READY && replyGrant != null)
+            result?.generation?.let { WindowsLease(replyGrant, it) } else null
+        val keepEvidence = current != null && lease == current
+        if (!keepEvidence) endpoints.clear()
+        lease = current
+        val installed = windowsRelayExecutable() != null || status != null && status != WindowsRelayCompanionStatus.UNAVAILABLE
+        val phase = when (status) {
+            WindowsRelayCompanionStatus.READY -> if (current != null) RelayLinkPhase.APPLIED else RelayLinkPhase.ERROR
+            WindowsRelayCompanionStatus.WAITING -> RelayLinkPhase.WAITING_FOR_VPN
+            WindowsRelayCompanionStatus.AUTHORIZATION_REQUIRED -> RelayLinkPhase.AUTHORIZATION_REQUIRED
+            WindowsRelayCompanionStatus.DISABLED -> RelayLinkPhase.DISABLED
+            WindowsRelayCompanionStatus.UNTRUSTED -> RelayLinkPhase.INCOMPATIBLE
+            WindowsRelayCompanionStatus.STALE, WindowsRelayCompanionStatus.REJECTED -> RelayLinkPhase.ERROR
+            else -> if (newGrant?.enabled == true) RelayLinkPhase.WAITING_FOR_VPN
+                else if (installed) RelayLinkPhase.INCOMPATIBLE else RelayLinkPhase.NOT_INSTALLED
         }
         mutableState.update {
-            val keepEvidence = live != null && oldLease == live
-            val recognized = live != null || found == WindowsRelayCompanionStatus.UNAUTHORIZED ||
-                found == WindowsRelayCompanionStatus.STALE
-            it.copy(installed = recognized, supported = recognized,
-                authorized = live != null, enabled = live != null && it.desktopCatalogueMode != DownloadRouteMode.SYSTEM,
-                phase = phase,
-                desktopCatalogueEpoch = live?.let { (id, generation) -> "$id:$generation" },
+            it.copy(installed = installed, supported = installed && status !in setOf(null,
+                WindowsRelayCompanionStatus.UNAVAILABLE, WindowsRelayCompanionStatus.UNTRUSTED),
+                authorized = newGrant != null, enabled = newGrant?.enabled == true,
+                providerPackage = WINDOWS_RELAY_PROVIDER.takeIf { installed },
+                providerCertificate = WINDOWS_RELAY_AUTHORITY.takeIf { installed },
+                grantId = newGrant?.id, phase = phase, vpnConnected = current != null,
                 realRequestVerified = keepEvidence && it.realRequestVerified,
                 verifiedAtMillis = it.verifiedAtMillis.takeIf { keepEvidence },
-                verifiedMode = it.verifiedMode.takeIf { keepEvidence })
+                verifiedMode = it.verifiedMode.takeIf { keepEvidence },
+                error = when {
+                    status == WindowsRelayCompanionStatus.UNTRUSTED -> "请从桌面的漫流更新脚本启动支持联动的安装。"
+                    phase == RelayLinkPhase.INCOMPATIBLE -> "请使用桌面的 Relay 更新脚本更新后台。"
+                    phase == RelayLinkPhase.ERROR -> "Relay 联动状态已变化，请重新检测。"
+                    else -> null
+                })
         }
     }
 
-    // The client may ask Relay to revoke a previous grant but cannot create its own authorization.
-    override fun revoke() {
-        scope?.launch(Dispatchers.IO) {
-            updates.withLock {
-                lease = null
-                companionCall { windowsRelayCompanionClient()?.revoke() }
-                updateStatus()
+    fun binding(mode: DownloadRouteMode): RelayRouteBinding? =
+        grant?.takeIf { relayLinkAvailable && it.enabled && mode != DownloadRouteMode.SYSTEM }?.let {
+            RelayRouteBinding(WINDOWS_RELAY_PROVIDER, WINDOWS_RELAY_AUTHORITY, it.id)
+        }
+
+    fun endpoint(binding: RelayRouteBinding, mode: DownloadRouteMode): RelayManagedEndpoint =
+        runBlocking(Dispatchers.IO) {
+            gate.withLock {
+                if (this@DesktopRelayLink.binding(mode) != binding) throw DownloadRouteException("此任务的桌面 Relay 授权已失效。")
+                val current = lease ?: throw DownloadRouteException("桌面 Relay 线路暂不可用，请连接 Relay 后重试。")
+                if (current.grantId != binding.grantId) throw DownloadRouteException("Relay 授权已变化，请重试原任务。")
+                endpoints[mode]?.let { return@withLock it }
+
+                val reply = call { it.acquire(binding.grantId, mode) }
+                val endpoint = reply?.endpoint
+                if (reply?.status != WindowsRelayCompanionStatus.READY || endpoint == null ||
+                    reply.bindingId != current.grantId || reply.generation != current.generation) {
+                    refreshLocked()
+                    throw DownloadRouteException("Relay 尚未确认原任务的线路，请重试。")
+                }
+                RelayManagedEndpoint("127.0.0.1", endpoint.port, endpoint.username, endpoint.password,
+                    current.generation, endpoint.ownerPid, endpoint.ownerStartTicks).also { endpoints[mode] = it }
             }
         }
+
+    fun observe(binding: RelayRouteBinding, mode: DownloadRouteMode, generation: String) {
+        if (lease?.generation != generation ||
+            state.value.realRequestVerified && state.value.verifiedMode == mode) return
+        launch {
+            if (this@DesktopRelayLink.binding(mode) != binding || lease?.generation != generation ||
+                state.value.realRequestVerified && state.value.verifiedMode == mode) return@launch
+            refreshLocked()
+            if (this@DesktopRelayLink.binding(mode) == binding && lease?.generation == generation)
+                mutableState.update { it.copy(realRequestVerified = true, verifiedMode = mode,
+                    verifiedAtMillis = System.currentTimeMillis()) }
+        }
     }
 
-    private suspend fun companionCall(block: suspend () -> WindowsRelayCompanionResult?): WindowsRelayCompanionResult? =
-        try { block() } catch (failure: CancellationException) { throw failure } catch (_: Exception) { null }
-
-    override fun requestAuthorization() = refresh()
-    override fun enable() = refresh()
-    override fun disable() = setDesktopCatalogueMode(DownloadRouteMode.SYSTEM)
-    override fun openProvider() = Unit
-    override fun updateSources(sources: Map<String, String>) = Unit
+    val controller = RelayLinkController(this)
 }
 
-@Volatile private var desktopRelayController: RelayLinkController? = null
+@Volatile private var desktopLink: DesktopRelayLink? = null
 
 internal actual fun platformRelayLinkController(context: PlatformContext): RelayLinkController =
-    desktopRelayController ?: synchronized(DesktopRelayLink::class.java) {
-        desktopRelayController ?: RelayLinkController(DesktopRelayLink(context)).also { desktopRelayController = it }
+    desktopLink?.controller ?: synchronized(DesktopRelayLink::class.java) {
+        desktopLink?.controller ?: DesktopRelayLink(context).also { desktopLink = it }.controller
     }
 
-// Desktop's restricted catalogue link is deliberately not a general Android managed route.
-actual fun currentRelayBinding(mode: DownloadRouteMode): RelayRouteBinding? = null
-
+actual fun currentRelayBinding(mode: DownloadRouteMode): RelayRouteBinding? = desktopLink?.binding(mode)
 actual fun resolveRelayEndpoint(binding: RelayRouteBinding, mode: DownloadRouteMode): RelayManagedEndpoint =
-    throw DownloadRouteException("桌面端不能使用旧版 Android Relay 联动线路。")
+    desktopLink?.endpoint(binding, mode) ?: throw DownloadRouteException("桌面 Relay 线路尚未启动。")
 
-actual fun recordRelayRequest(binding: RelayRouteBinding, mode: DownloadRouteMode, observationEpoch: String) = Unit
+actual fun recordRelayRequest(binding: RelayRouteBinding, mode: DownloadRouteMode, observationEpoch: String) {
+    desktopLink?.observe(binding, mode, observationEpoch)
+}

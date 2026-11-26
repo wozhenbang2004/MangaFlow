@@ -6,6 +6,8 @@ import java.nio.charset.CodingErrorAction
 import java.security.SecureRandom
 import java.util.HexFormat
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -15,8 +17,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
-enum class WindowsRelayCompanionStatus { UNAVAILABLE, UNAUTHORIZED, READY, STALE, REJECTED }
-enum class WindowsRelayCompanionMode { DIRECT, PROXY }
+enum class WindowsRelayCompanionStatus { UNAVAILABLE, UNTRUSTED, AUTHORIZATION_REQUIRED, WAITING, DISABLED, READY, STALE, REJECTED }
 
 /** A live CONNECT endpoint, not serializable settings or a diagnostic value. Host is always loopback. */
 class WindowsRelayCompanionEndpoint(
@@ -35,8 +36,10 @@ class WindowsRelayCompanionResult(
 
 interface WindowsRelayCompanionClient {
     suspend fun status(): WindowsRelayCompanionResult
-    suspend fun acquire(mode: WindowsRelayCompanionMode): WindowsRelayCompanionResult
-    suspend fun revoke(): WindowsRelayCompanionResult
+    suspend fun authorize(): WindowsRelayCompanionResult
+    suspend fun acquire(bindingId: String, mode: DownloadRouteMode): WindowsRelayCompanionResult
+    suspend fun setEnabled(bindingId: String, enabled: Boolean): WindowsRelayCompanionResult
+    suspend fun revoke(bindingId: String): WindowsRelayCompanionResult
 }
 
 private val windowsCompanion = AtomicReference<WindowsRelayCompanionClient?>()
@@ -48,27 +51,29 @@ fun installWindowsRelayCompanion(client: WindowsRelayCompanionClient) {
 
 fun windowsRelayCompanionClient(): WindowsRelayCompanionClient? = windowsCompanion.get()
 
-private val windowsSocketPeer = AtomicReference<((Socket, Int, Long) -> Boolean)?>()
+private var relayProvider: (() -> java.io.File?)? = null
+
+fun installWindowsRelayActivation(path: () -> java.io.File?) {
+    relayProvider = path
+}
+
+internal fun windowsRelayExecutable() = relayProvider?.invoke()
 
 /** Windows startup only; the native verifier receives raw 100ns Windows FILETIME ticks. */
 fun installWindowsRelaySocketPeerVerifier(verify: (Socket, Int, Long) -> Boolean) {
-    check(windowsSocketPeer.compareAndSet(null, verify))
+    installRelaySocketPeerVerifier { socket, pid, dotNetTicks ->
+        val expected = fileTimeFor(dotNetTicks)
+        pid > 0 && expected != null && verify(socket, pid, expected)
+    }
 }
 
-/** Verify the physically connected loopback socket before sending any CONNECT bytes. */
-fun verifyWindowsRelaySocketPeer(socket: Socket, ownerPid: Int, ownerStartTicks: Long): Boolean {
-    val expectedFileTime = fileTimeFor(ownerStartTicks) ?: return false
-    return ownerPid > 0 && windowsSocketPeer.get()?.invoke(socket, ownerPid, expectedFileTime) == true
-}
-
-// DateTime.Ticks starts 0001-01-01; FILETIME starts 1601-01-01. Both use 100ns UTC units.
 private const val WINDOWS_FILETIME_OFFSET = 504_911_232_000_000_000L
 private const val DOTNET_MAX_TICKS = 3_155_378_975_999_999_999L
 private fun fileTimeFor(dotNetTicks: Long): Long? = dotNetTicks
     .takeIf { it > WINDOWS_FILETIME_OFFSET && it <= DOTNET_MAX_TICKS }?.minus(WINDOWS_FILETIME_OFFSET)
 
-private const val VERSION = 1
-private const val SCOPE = "anime-douban-catalogue"
+private const val VERSION = 2
+private const val SCOPE = "mangaflow-network"
 private const val FRAME_LIMIT = 4096
 private val wireToken = Regex("[A-Za-z0-9_-]{1,128}")
 
@@ -94,24 +99,31 @@ fun framedWindowsRelayCompanionClient(
 ): WindowsRelayCompanionClient = object : WindowsRelayCompanionClient {
     private val random by lazy { SecureRandom() }
 
-    override suspend fun status() = call("status")
-    override suspend fun acquire(mode: WindowsRelayCompanionMode) = call("acquire", when (mode) {
-        WindowsRelayCompanionMode.DIRECT -> "direct"
-        WindowsRelayCompanionMode.PROXY -> "proxy"
-    })
-    override suspend fun revoke() = call("revoke")
+    private val requests = Mutex()
 
-    private suspend fun call(operation: String, mode: String? = null): WindowsRelayCompanionResult =
-        withContext(Dispatchers.IO) {
+    override suspend fun status() = call("status")
+    override suspend fun authorize() = call("authorize")
+    override suspend fun acquire(bindingId: String, mode: DownloadRouteMode) =
+        call("acquire", bindingId, when (mode) {
+            DownloadRouteMode.DIRECT -> "direct"
+            DownloadRouteMode.PROXY -> "proxy"
+            DownloadRouteMode.SYSTEM -> error("System routing uses no Relay endpoint")
+        })
+    override suspend fun setEnabled(bindingId: String, enabled: Boolean) = call(if (enabled) "resume" else "pause", bindingId)
+    override suspend fun revoke(bindingId: String) = call("revoke", bindingId)
+
+    private suspend fun call(operation: String, bindingId: String? = null, mode: String? = null): WindowsRelayCompanionResult =
+        withContext(Dispatchers.IO) { requests.withLock {
             val id = HexFormat.of().formatHex(ByteArray(16).also(random::nextBytes))
             val sent = buildJsonObject {
                 put("protocolVersion", VERSION)
                 put("requestId", id)
                 put("operation", operation)
                 put("scope", SCOPE)
+                if (bindingId != null) put("bindingId", bindingId)
                 if (mode != null) put("mode", mode)
             }.toString().encodeToByteArray()
-            val bytes = exchange(sent) ?: return@withContext reply(WindowsRelayCompanionStatus.UNAVAILABLE)
+            val bytes = exchange(sent) ?: return@withLock reply(WindowsRelayCompanionStatus.UNAVAILABLE)
             try {
                 if (bytes.size !in 1..FRAME_LIMIT) return@withContext reply(WindowsRelayCompanionStatus.REJECTED)
                 val text = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
@@ -125,7 +137,7 @@ fun framedWindowsRelayCompanionClient(
             } finally {
                 bytes.fill(0)
             }
-        }
+        } }
 }
 
 private val replyFields = setOf("protocolVersion", "requestId", "status", "bindingId", "generation", "endpoint")
@@ -165,7 +177,7 @@ private fun JsonObject.wireInt(key: String): Int? {
     return raw.toIntOrNull()?.takeIf { it.toString() == raw }
 }
 
-// Version 1 has only ASCII unescaped field names/values and two possible object levels. Check
+// The protocol has only ASCII unescaped field names/values and two possible object levels. Check
 // before JsonObject, whose last-wins map would otherwise lose duplicate-key evidence.
 private fun hasUniqueWireFields(text: String): Boolean {
     val objects = ArrayList<MutableSet<String>>(2)
@@ -201,11 +213,19 @@ private fun hasUniqueWireFields(text: String): Boolean {
 private fun verifyResponse(operation: String, response: WindowsRelayWireReply): WindowsRelayCompanionResult {
     val status = when (response.status) {
         "unavailable" -> WindowsRelayCompanionStatus.UNAVAILABLE
-        "unauthorized" -> WindowsRelayCompanionStatus.UNAUTHORIZED
+        "untrusted" -> WindowsRelayCompanionStatus.UNTRUSTED
+        "authorization_required" -> WindowsRelayCompanionStatus.AUTHORIZATION_REQUIRED
+        "waiting" -> WindowsRelayCompanionStatus.WAITING
+        "disabled" -> WindowsRelayCompanionStatus.DISABLED
         "stale" -> WindowsRelayCompanionStatus.STALE
         "rejected" -> WindowsRelayCompanionStatus.REJECTED
         "ready" -> WindowsRelayCompanionStatus.READY
         else -> return reply(WindowsRelayCompanionStatus.REJECTED)
+    }
+    if (status == WindowsRelayCompanionStatus.WAITING || status == WindowsRelayCompanionStatus.DISABLED) {
+        val id = response.bindingId?.takeIf(wireToken::matches)
+        return if (id != null && response.generation == null && response.endpoint == null)
+            WindowsRelayCompanionResult(status, bindingId = id) else reply(WindowsRelayCompanionStatus.REJECTED)
     }
     if (status != WindowsRelayCompanionStatus.READY) {
         return if (response.endpoint == null && response.bindingId == null && response.generation == null) reply(status)
@@ -214,8 +234,8 @@ private fun verifyResponse(operation: String, response: WindowsRelayWireReply): 
     val binding = response.bindingId?.takeIf(wireToken::matches) ?: return reply(WindowsRelayCompanionStatus.REJECTED)
     val generation = response.generation?.takeIf(wireToken::matches) ?: return reply(WindowsRelayCompanionStatus.REJECTED)
     val endpoint = response.endpoint
-    if (operation == "status" && endpoint == null) return WindowsRelayCompanionResult(status, null, binding, generation)
-    if (operation != "acquire" || endpoint == null || endpoint.port !in 1..65535 ||
+    if (operation != "acquire" && endpoint == null) return WindowsRelayCompanionResult(status, null, binding, generation)
+    if (operation != "acquire" || endpoint == null || endpoint.port !in 1024..65535 ||
         endpoint.epoch != generation || !wireToken.matches(endpoint.username) || !wireToken.matches(endpoint.password))
         return reply(WindowsRelayCompanionStatus.REJECTED)
     return WindowsRelayCompanionResult(status,

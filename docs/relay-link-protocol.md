@@ -1,6 +1,6 @@
 # Relay Link v1
 
-MangaFlow controls only its own network exceptions. Relay owns VPN execution, subscriptions, nodes, user rules and core reloads. Android is the supported integration platform; Windows and iOS retain their existing networking.
+MangaFlow controls only its own network routes. Relay owns VPN execution, subscriptions, nodes, user rules and core reloads. Android uses the Binder protocol below and Windows uses the local companion protocol at the end of this document.
 
 ## Identity and consent
 
@@ -41,6 +41,14 @@ Existing installations with any saved custom endpoint initially select custom; o
 A frozen task is never rewritten to another provider. Shared HTTP request entry, JVM OkHttp request entry/URL transport and Relay endpoint resolution reject a frozen route incompatible with the active provider, asking for an explicit restart under current settings. Already in-flight responses may finish; this is not an instant system-wide network cutover. Manual network checks now apply verified recommendations when autoApply is enabled, just like scheduled checks. Source locks are serialized with final batch publication; configuration/source/network/Relay freshness fences and two real successful samples remain required. Unsupported/partial targets stay visible and cannot fabricate an automatic recommendation.
 
 Source review only; no local builds, automated tests, simulated network requests or observed device cutover claims.
+
+## Windows companion v2 · 2026-11-27
+
+The user asked for the same in-app route selection on Windows and a desktop updater that also upgrades the background service. The Windows installation uses the current classic installers. The updater stages the complete MangaFlow application under an administrator-owned Program Files directory and keeps the installation identity across application updates.
+
+MangaFlow verifies the local pipe against the running LocalSystem Relay service in Program Files. Relay verifies the pipe client's Windows user/session and installation before it records explicit approval. The companion only handles status, grant, pause, resume, revoke and endpoint acquisition. It supplies separate authenticated loopback entries for public direct and proxy requests using the active Relay configuration. Route credentials stay in memory. Relay link shutdown retires its companion worker and sockets.
+
+Windows uses the same task, source, category and default route rules as Android. A frozen task stores only its provider and grant identity. Loss of an endpoint fails a managed request explicitly. Website logins that use the system browser continue to use system networking. Request verification comes from a real response through the current session.
 
 ### Network configuration surface
 

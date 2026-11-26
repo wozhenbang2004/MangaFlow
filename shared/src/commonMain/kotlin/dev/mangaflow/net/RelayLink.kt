@@ -1,12 +1,13 @@
 package dev.mangaflow.net
 
 import dev.mangaflow.platform.PlatformContext
-import dev.mangaflow.platform.PlatformKind
-import dev.mangaflow.platform.platformKind
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
 
-internal val relayLinkAvailable: Boolean get() = platformKind == PlatformKind.ANDROID
+internal expect val relayLinkAvailable: Boolean
+internal const val WINDOWS_RELAY_PROVIDER = "dev.relay.windows"
+// The protected Windows service is the authority. Its grant identifies this installation.
+internal const val WINDOWS_RELAY_AUTHORITY = "83d7d45b71a8cb954ce094ec3f1a510e2804895bb1f590dc0ba41940263b1a5f"
 
 enum class RelayLinkPhase {
     NOT_AVAILABLE, NOT_INSTALLED, INCOMPATIBLE, AUTHORIZATION_REQUIRED, AUTHORIZING,
@@ -32,15 +33,11 @@ data class RelayLinkState(
     val realRequestVerified: Boolean = false,
     val verifiedAtMillis: Long? = null,
     val verifiedMode: DownloadRouteMode? = null,
-    val desktopCompanion: Boolean = false,
-    val desktopCatalogueMode: DownloadRouteMode = DownloadRouteMode.SYSTEM,
-    val desktopCompanionProtected: Boolean = false,
-    val desktopCatalogueEpoch: String? = null,
 )
 
 /** Short-lived authenticated loopback entry; never log, serialize or put it in a route snapshot. */
 class RelayManagedEndpoint(val host: String, val port: Int, val username: String, val password: String,
-    val observationEpoch: String) {
+    val observationEpoch: String, val ownerPid: Int = 0, val ownerStartTicks: Long = 0) {
     override fun toString(): String = "RelayManagedEndpoint(redacted)"
 }
 
@@ -54,8 +51,6 @@ class RelayLinkController internal constructor(private val platform: RelayPlatfo
     fun retry() = platform.refresh()
     fun revoke() = platform.revoke()
     fun openProvider() = platform.openProvider()
-    fun setDesktopCatalogueMode(mode: DownloadRouteMode) = platform.setDesktopCatalogueMode(mode)
-    internal fun desktopCatalogueRoute(): DownloadRouteSnapshot? = platform.desktopCatalogueRoute()
     /** Only installed source metadata is supplied; CDN domains are never inferred from a title. */
     fun updateSources(sources: Map<String, String>) = platform.updateSources(sources)
 
@@ -74,8 +69,6 @@ internal interface RelayPlatformLink {
     fun revoke()
     fun openProvider()
     fun updateSources(sources: Map<String, String>)
-    fun setDesktopCatalogueMode(mode: DownloadRouteMode) = Unit
-    fun desktopCatalogueRoute(): DownloadRouteSnapshot? = null
 }
 
 internal expect fun platformRelayLinkController(context: PlatformContext): RelayLinkController

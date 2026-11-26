@@ -24,17 +24,13 @@ enum class DownloadProxyProvider { RELAY, CUSTOM }
 enum class DownloadProxyType { HTTP, SOCKS }
 
 data class DownloadProxyEndpoint(val host: String, val port: Int, val type: DownloadProxyType)
-/** A frozen authorization identity. Credentials are obtained over Binder and never persisted here. */
+/** A frozen authorization identity. Credentials are obtained over authenticated, platform-local IPC and never persisted here. */
 data class RelayRouteBinding(val providerPackage: String, val certificate: String, val grantId: String)
-
-/** A desktop catalogue operation freezes a consent and service generation, never its credentials. */
-data class DesktopRelayRouteBinding(val bindingId: String, val generation: String, val mode: DownloadRouteMode)
 
 data class DownloadRouteSnapshot(
     val mode: DownloadRouteMode,
     val proxy: DownloadProxyEndpoint? = null,
     val relayBinding: RelayRouteBinding? = null,
-    val desktopRelayBinding: DesktopRelayRouteBinding? = null,
 )
 
 /** A source owns its endpoint; edits to another source or the download proxy cannot change it. */
@@ -53,24 +49,16 @@ data class DownloadRoutingSettings(
 /** Invalid or unsupported routes must fail before a request, without falling back to direct. */
 class DownloadRouteException(message: String) : IllegalStateException(message)
 
-private val desktopRelayIdentity = Regex("[A-Za-z0-9_-]{1,128}")
-
-internal fun DownloadRouteSnapshot.checked(): DownloadRouteSnapshot = checked(allowDesktopCatalogue = false)
-
-private fun DownloadRouteSnapshot.checked(allowDesktopCatalogue: Boolean): DownloadRouteSnapshot {
-    desktopRelayBinding?.let { binding ->
-        if (!allowDesktopCatalogue) throw DownloadRouteException("此入口不支持 Relay 桌面目录线路，不会改走其他线路。")
-        if (platformKind != PlatformKind.DESKTOP || mode == DownloadRouteMode.SYSTEM || mode != binding.mode ||
-            proxy != null || relayBinding != null || !desktopRelayIdentity.matches(binding.bindingId) ||
-            !desktopRelayIdentity.matches(binding.generation)) {
-            throw DownloadRouteException("当前 Relay 桌面目录线路无效，请重新核对联动。")
-        }
-        return this
-    }
+internal fun DownloadRouteSnapshot.checked(): DownloadRouteSnapshot {
     relayBinding?.let { binding ->
+        val validProvider = if (binding.providerPackage == WINDOWS_RELAY_PROVIDER) {
+            binding.certificate == WINDOWS_RELAY_AUTHORITY
+        } else {
+            binding.providerPackage in setOf("dev.relay.android.network", "dev.relay.android") &&
+                binding.certificate.matches(Regex("[a-fA-F0-9]{64}"))
+        }
         if (mode == DownloadRouteMode.SYSTEM || proxy != null ||
-            binding.providerPackage !in setOf("dev.relay.android.network", "dev.relay.android") ||
-            !binding.certificate.matches(Regex("[a-fA-F0-9]{64}")) ||
+            !validProvider ||
             !binding.grantId.matches(Regex("[A-Za-z0-9_-]{1,128}"))) {
             throw DownloadRouteException("已保存的 Relay 联动身份无效，请重新授权后重试。")
         }
@@ -87,31 +75,29 @@ internal fun configuredRoute(mode: DownloadRouteMode, proxy: DownloadProxyEndpoi
     provider: DownloadProxyProvider): DownloadRouteSnapshot {
     val endpoint = proxy.takeIf { mode == DownloadRouteMode.PROXY && provider == DownloadProxyProvider.CUSTOM }
     val binding = if (provider == DownloadProxyProvider.RELAY && mode != DownloadRouteMode.SYSTEM) currentRelayBinding(mode) else null
+    if (platformKind == PlatformKind.DESKTOP && relayLinkAvailable &&
+        provider == DownloadProxyProvider.RELAY && mode != DownloadRouteMode.SYSTEM && binding == null) {
+        throw DownloadRouteException("请先在网络设置中授权并启用 Relay，或选择跟随系统。")
+    }
     return DownloadRouteSnapshot(mode, endpoint, binding).checked()
 }
 
 /** Frozen work never silently changes provider after a user switches the application setting. */
-internal fun DownloadRouteSnapshot.checkedActive(): DownloadRouteSnapshot = checkedActive(allowDesktopCatalogue = false)
-
-internal fun DownloadRouteSnapshot.checkedActiveForHttp(): DownloadRouteSnapshot = checkedActive(allowDesktopCatalogue = true)
-
-private fun DownloadRouteSnapshot.checkedActive(allowDesktopCatalogue: Boolean): DownloadRouteSnapshot {
+internal fun DownloadRouteSnapshot.checkedActive(): DownloadRouteSnapshot {
     val provider = DownloadRoutingStore.activeProxyProvider()
     if (relayBinding != null && provider == DownloadProxyProvider.CUSTOM ||
         proxy != null && provider == DownloadProxyProvider.RELAY) {
         throw DownloadRouteException("代理提供方已切换，原任务线路已停用；请按当前设置重新开始。")
     }
-    return checked(allowDesktopCatalogue)
+    return checked()
 }
 
 /** Stable route identity includes the grant, never an ephemeral port or secret. */
 internal fun DownloadRouteSnapshot.identity(): String = mode.name + "|" + proxy?.type?.name.orEmpty() + "|" +
     proxy?.host.orEmpty() + "|" + proxy?.port?.toString().orEmpty() + "|" +
-    relayBinding?.let { it.providerPackage + "|" + it.certificate + "|" + it.grantId }.orEmpty() +
-    desktopRelayBinding?.let { "|relay-desktop-catalogue|${it.bindingId}|${it.generation}" }.orEmpty()
+    relayBinding?.let { it.providerPackage + "|" + it.certificate + "|" + it.grantId }.orEmpty()
 
 internal fun DownloadRouteSnapshot.writeRelayBinding(json: JSONObject): JSONObject = json.apply {
-    if (desktopRelayBinding != null) throw DownloadRouteException("Relay 桌面目录线路不能保存为下载任务。")
     relayBinding?.let { put("relay", JSONObject().put("package", it.providerPackage)
         .put("certificate", it.certificate).put("grantId", it.grantId)) }
 }

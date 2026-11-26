@@ -5,22 +5,23 @@ import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.WString
 import com.sun.jna.platform.win32.Advapi32
+import com.sun.jna.platform.win32.Advapi32Util
 import com.sun.jna.platform.win32.Kernel32
 import com.sun.jna.platform.win32.KnownFolders
 import com.sun.jna.platform.win32.Shell32Util
 import com.sun.jna.platform.win32.WinBase
 import com.sun.jna.platform.win32.WinNT.HANDLE
+import com.sun.jna.platform.win32.WinReg
 import com.sun.jna.platform.win32.Winsvc
 import com.sun.jna.ptr.IntByReference
-import com.sun.jna.ptr.LongByReference
 import com.sun.jna.win32.StdCallLibrary
 import dev.mangaflow.net.framedWindowsRelayCompanionClient
 import dev.mangaflow.net.installWindowsRelayCompanion
+import dev.mangaflow.net.installWindowsRelayActivation
 import dev.mangaflow.net.installWindowsRelaySocketPeerVerifier
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.security.MessageDigest
-import java.util.HexFormat
+import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
@@ -28,22 +29,19 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
 private const val SERVICE = "RelayCenterAgent"
-private const val PIPE = "\\\\.\\pipe\\RelayCenter.MangaFlow.Companion.v1"
+private const val PIPE = "\\\\.\\pipe\\RelayCenter.MangaFlow.Companion.v2"
 private const val SERVICE_IMAGE = "RelayCenter.Agent.exe"
 private const val FRAME_LIMIT = 4096
-private const val MAX_SIGNATURE = 128 * 1024
 private const val OPERATION_MS = 2500L
 
-// Exact deployed package full name -> SHA-256 of the approved signed package's AppxSignature.p7x.
-// Only a verified full MSIX install with package integrity enforcement belongs here. The current
-// classic installer has no such identity. No registry, environment, preferences, or wire trust-on-first-use.
-private val trustedRelayPackages = emptyMap<String, String>()
+private fun relayInstallRoot(): File =
+    File(Shell32Util.getKnownFolderPath(KnownFolders.FOLDERID_ProgramFiles), "Relay Center")
 
-/** Startup only; creates no connection. No compiled release pin means no native pipe open at all. */
+/** Startup registers Windows transport; the live service is authenticated at each exchange. */
 internal fun registerWindowsRelayCompanion() {
     installWindowsRelaySocketPeerVerifier(::matchesWindowsRelaySocketPeer)
+    installWindowsRelayActivation { runCatching { File(relayInstallRoot(), "RelayCenter.exe").takeIf { it.isFile } }.getOrNull() }
     installWindowsRelayCompanion(framedWindowsRelayCompanionClient { request ->
-        if (trustedRelayPackages.isEmpty()) return@framedWindowsRelayCompanionClient null
         val context = currentCoroutineContext()
         val deadline = Deadline(context)
         try {
@@ -73,13 +71,11 @@ private class Deadline(private val context: CoroutineContext) {
 private interface PipeKernel : StdCallLibrary {
     fun CreateFileW(path: WString, access: Int, share: Int, security: Pointer?, disposition: Int,
         flags: Int, template: HANDLE?): HANDLE?
+    fun WaitNamedPipeW(name: WString, timeout: Int): Boolean
     fun GetNamedPipeServerProcessId(pipe: HANDLE, pid: IntByReference): Boolean
     fun QueryFullProcessImageNameW(process: HANDLE, flags: Int, path: CharArray, length: IntByReference): Boolean
-    fun GetStagedPackagePathByFullName(fullName: WString, length: IntByReference, path: CharArray): Int
-    fun GetPackageFullName(process: HANDLE, length: IntByReference, fullName: CharArray): Int
     fun GetDriveTypeW(root: WString): Int
     fun GetFinalPathNameByHandleW(file: HANDLE, path: CharArray, capacity: Int, flags: Int): Int
-    fun GetFileSizeEx(file: HANDLE, size: LongByReference): Boolean
     fun ReadFile(handle: HANDLE, buffer: Pointer, length: Int, transferred: IntByReference,
         overlapped: Pointer?): Boolean
     fun WriteFile(handle: HANDLE, buffer: Pointer, length: Int, transferred: IntByReference,
@@ -110,10 +106,17 @@ private class WindowsPipe {
     }
 
     private fun exchangeWithService(service: Winsvc.SC_HANDLE, request: ByteArray, deadline: Deadline): ByteArray? {
+        val account = Advapi32Util.registryGetStringValue(WinReg.HKEY_LOCAL_MACHINE,
+            "SYSTEM\\CurrentControlSet\\Services\\RelayCenterAgent", "ObjectName")
+        if (!account.equals("LocalSystem", ignoreCase = true)) return null
         val servicePid = runningPid(service) ?: return null
         // No GENERIC_WRITE: FILE_APPEND_DATA aliases FILE_CREATE_PIPE_INSTANCE for pipes.
-        val pipe = open(PIPE, FILE_READ_DATA or FILE_WRITE_DATA or FILE_READ_ATTRIBUTES or SYNCHRONIZE,
-            flags = FILE_FLAG_OVERLAPPED or SECURITY_SQOS_PRESENT or SECURITY_IDENTIFICATION) ?: return null
+        val access = FILE_READ_DATA or FILE_WRITE_DATA or FILE_READ_ATTRIBUTES or SYNCHRONIZE
+        val flags = FILE_FLAG_OVERLAPPED or SECURITY_SQOS_PRESENT or SECURITY_IDENTIFICATION
+        val pipe = open(PIPE, access, flags = flags) ?: run {
+            if (!pipeApi.WaitNamedPipeW(WString(PIPE), minOf(400, deadline.remainingMillis()))) return null
+            open(PIPE, access, flags = flags)
+        } ?: return null
         try {
             if (serverPid(pipe) != servicePid) return null
             val process = kernel.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION or SYNCHRONIZE, false, servicePid)
@@ -163,51 +166,18 @@ private class WindowsPipe {
     }
 
     private fun trustedServiceImage(process: HANDLE): HANDLE? {
-        val name = wideString(256) { length, text -> pipeApi.GetPackageFullName(process, length, text) == 0 }
-            ?.takeIf { PACKAGE_NAME.matches(it) } ?: return null
-        val pinnedSignature = trustedRelayPackages[name] ?: return null
-        val programFiles = Shell32Util.getKnownFolderPath(KnownFolders.FOLDERID_ProgramFiles)
-        if (programFiles.length < 3 || programFiles[1] != ':' || programFiles[2] != '\\' ||
-            pipeApi.GetDriveTypeW(WString(programFiles.take(3))) != WinBase.DRIVE_FIXED) return null
-        val expectedRoot = "$programFiles\\WindowsApps\\$name"
-        val installedRoot = wideString(1024) { length, text ->
-            pipeApi.GetStagedPackagePathByFullName(WString(name), length, text) == 0
-        }
-        if (installedRoot != expectedRoot) return null
-        val imageName = "$expectedRoot\\$SERVICE_IMAGE"
-        val processPath = CharArray(1024)
+        val root = relayInstallRoot()
+        if (pipeApi.GetDriveTypeW(WString(root.toPath().root.toString())) != WinBase.DRIVE_FIXED) return null
+        val imageName = File(root, SERVICE_IMAGE).absolutePath
+        val processPath = CharArray(32768)
         val processLength = IntByReference(processPath.size)
         if (!pipeApi.QueryFullProcessImageNameW(process, 0, processPath, processLength) ||
             processLength.value !in 1 until processPath.size ||
-            String(processPath, 0, processLength.value) != imageName) return null
+            !String(processPath, 0, processLength.value).equals(imageName, ignoreCase = true)) return null
         val image = open(imageName, FILE_READ_ATTRIBUTES, share = FILE_SHARE_READ) ?: return null
-        var keep = false
-        try {
-            if (!atNativePath(image, imageName) ||
-                !matchesPackageSignature("$expectedRoot\\AppxSignature.p7x", pinnedSignature)) return null
-            keep = true
-            return image
-        } finally {
-            if (!keep) kernel.CloseHandle(image)
-        }
-    }
-
-    private fun matchesPackageSignature(path: String, pin: String): Boolean {
-        val signature = open(path, FILE_READ_DATA or FILE_READ_ATTRIBUTES, share = FILE_SHARE_READ) ?: return false
-        try {
-            if (!atNativePath(signature, path)) return false
-            val size = LongByReference()
-            if (!pipeApi.GetFileSizeEx(signature, size) || size.value !in 1..MAX_SIGNATURE.toLong()) return false
-            val count = size.value.toInt()
-            return Memory(size.value).use { bytes ->
-                val read = IntByReference()
-                if (!pipeApi.ReadFile(signature, bytes, count, read, null) || read.value != count) false
-                else HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(bytes.getByteArray(0, count))) == pin
-            }
-        } finally {
-            kernel.CloseHandle(signature)
-        }
+        if (atNativePath(image, imageName)) return image
+        kernel.CloseHandle(image)
+        return null
     }
 
     private fun atNativePath(handle: HANDLE, expected: String): Boolean {
@@ -299,7 +269,6 @@ private fun wideString(capacity: Int, read: (IntByReference, CharArray) -> Boole
     return String(chars, 0, length.value - 1).takeUnless { '\u0000' in it }
 }
 
-private val PACKAGE_NAME = Regex("[A-Za-z0-9._-]{1,255}")
 private const val OPEN_EXISTING = 3
 private const val FILE_READ_DATA = 0x1
 private const val FILE_WRITE_DATA = 0x2

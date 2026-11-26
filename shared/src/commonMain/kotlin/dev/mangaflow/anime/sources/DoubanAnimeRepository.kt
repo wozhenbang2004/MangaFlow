@@ -14,7 +14,6 @@ import dev.mangaflow.experience.ContentCacheKind
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadCategory
-import dev.mangaflow.net.RelayLinkController
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
@@ -43,7 +42,6 @@ internal const val DOUBAN_BROWSE_PAGE_SIZE = 20
 class DoubanAnimeRepository(context: PlatformContext) {
     init { DownloadRoutingStore.get(context) }
     private val cache = AnimeMetadataCache.get(context)
-    private val relay = RelayLinkController.get(context)
     private val cursorMutex = Mutex()
     // Pagination state remains available when the user disables the disposable metadata cache.
     private val cursors = LinkedHashMap<String, SearchCursor>()
@@ -51,7 +49,7 @@ class DoubanAnimeRepository(context: PlatformContext) {
     internal fun route(): DownloadRouteSnapshot =
         DownloadRoutingStore.activeSourceSnapshot(DOUBAN_PROVIDER, DownloadCategory.ANIME)
 
-    internal fun browseRoute(): DownloadRouteSnapshot = relay.desktopCatalogueRoute() ?: route()
+    internal fun browseRoute(): DownloadRouteSnapshot = route()
 
     suspend fun cachedSearch(query: String, page: Int): AnimeMetadataPage? = withContext(Dispatchers.Default) {
         val keyword = validateSearch(query, page)

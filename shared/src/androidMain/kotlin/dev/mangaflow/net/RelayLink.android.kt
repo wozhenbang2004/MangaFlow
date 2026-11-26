@@ -42,6 +42,8 @@ private const val CONSENT_CLASS = "dev.relay.android.RelayLinkConsentActivity"
 private val PROVIDERS = listOf("dev.relay.android.network", "dev.relay.android")
 
 @Volatile private var activeRelayLink: AndroidRelayLink? = null
+internal actual val relayLinkAvailable = true
+
 internal actual fun platformRelayLinkController(context: PlatformContext): RelayLinkController =
     synchronized(AndroidRelayLink::class.java) {
         (activeRelayLink ?: AndroidRelayLink(context.applicationContext).also { activeRelayLink = it }).controller
