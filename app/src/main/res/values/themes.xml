@@ -1,9 +1,21 @@
 <resources>
-    <style name="Theme.MangaFlow" parent="android:style/Theme.Material.Light.NoActionBar">
+    <color name="mangaflow_window_background">#F7F8F6</color>
+    <color name="mangaflow_window_accent">#303031</color>
+    <bool name="mangaflow_light_system_bars">true</bool>
+    <style name="MangaFlowPlatform" parent="@android:style/Theme.Material.Light.NoActionBar" />
+
+    <style name="MangaFlowWindow" parent="@style/MangaFlowPlatform">
         <item name="android:fontFamily">sans</item>
-        <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowActionModeOverlay">true</item>
-        <item name="android:windowBackground">#F8F8F6</item>
-        <item name="android:colorAccent">#303031</item>
+        <item name="android:windowBackground">@color/mangaflow_window_background</item>
+        <item name="android:statusBarColor">@color/mangaflow_window_background</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+        <item name="android:windowLightStatusBar">@bool/mangaflow_light_system_bars</item>
+        <item name="android:colorAccent">@color/mangaflow_window_accent</item>
+    </style>
+    <style name="Theme.MangaFlow" parent="@style/MangaFlowWindow" />
+
+    <style name="Theme.MangaFlow.Starting" parent="@style/Theme.MangaFlow">
+        <item name="android:windowBackground">@drawable/mangaflow_starting_window</item>
     </style>
 </resources>

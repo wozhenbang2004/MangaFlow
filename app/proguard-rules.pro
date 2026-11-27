@@ -20,6 +20,14 @@
     public static void ReaderScreen(...);
 }
 
+# In 0.1.517 (R8 map b08d18fed9b081418b5fc57207f88096ce6756fc02b6bb003a1e06aa02da7f3c),
+# AnimeWorkspaceContent kept a remembered callback and a boolean in v8 on different paths
+# to if-eqz at DEX PC 0x9c2. Keep the effect's register allocation separate from its caller.
+-keep,allowobfuscation class dev.mangaflow.anime.ui.AnimeWorkspaceKt {
+    private static void AnimeWorkspaceContent(...);
+    private static void PlaybackBrowseVisitEffect(...);
+}
+
 # JNI exports bind to this exact class and method names after an explicit component load.
 -keep class dev.mangaflow.storage.SteamNative { *; }
 -keep class dev.mangaflow.enhancement.engine.AndroidCuganVulkanJni { *; }

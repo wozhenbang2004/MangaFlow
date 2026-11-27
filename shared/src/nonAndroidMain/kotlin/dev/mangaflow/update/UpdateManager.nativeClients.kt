@@ -30,6 +30,7 @@ actual class UpdateManager private constructor(private val context: PlatformCont
     private val prefs = preferences(context, "app_updates")
     private val root = StorageFile(cacheDirectory(context), "updates")
     private val previousInstallMessage = previousNativeUpdateResult(context)
+    val hasPreviousInstallResult: Boolean get() = previousInstallMessage != null
     private val _state = MutableStateFlow(UpdateState(lastChecked = prefs.getLong("last_check", 0),
         message = previousInstallMessage ?: "检查漫流的新版本"))
     actual val state: StateFlow<UpdateState> = _state.asStateFlow()

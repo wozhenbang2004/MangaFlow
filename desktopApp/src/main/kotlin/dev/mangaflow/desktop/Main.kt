@@ -28,23 +28,38 @@ import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.LocalWindowFullscreen
 import dev.mangaflow.platform.WindowFullscreen
 import dev.mangaflow.update.DesktopUpdateExit
+import dev.mangaflow.update.UpdateManager
 import dev.mangaflow.reader.ProvideDesktopReaderKeyboard
 import dev.mangaflow.ui.MangaFlowTheme
 import androidx.compose.material3.MaterialTheme
+import com.sun.jna.Native
+import com.sun.jna.platform.win32.Kernel32
+import com.sun.jna.platform.win32.WinError
+import com.sun.jna.platform.win32.WinNT.HANDLE
+import com.sun.jna.ptr.IntByReference
+import com.sun.jna.win32.StdCallLibrary
 import org.jetbrains.skiko.GraphicsApi
 import java.io.File
 import java.awt.GraphicsEnvironment
+import java.awt.Image
 import java.awt.Rectangle
 import java.awt.Toolkit
+import java.awt.Window as AwtWindow
+import java.awt.image.BaseMultiResolutionImage
+import java.awt.image.MultiResolutionImage
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.atomic.AtomicBoolean
+import javax.imageio.ImageIO
 import kotlin.math.roundToInt
 
-fun main() {
+fun main(args: Array<String>) {
     System.setProperty("compose.interop.blending", "true")
     System.setProperty("java.net.useSystemProxies", "true")
     val userDirectory = System.getProperty("user.home")
     check(System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
         "此桌面发行版支持 Windows。"
     }
+    val startup = DesktopStartup(args)
     val localData = System.getenv("LOCALAPPDATA")?.takeIf { it.isNotBlank() }
         ?: File(userDirectory, "AppData/Local").absolutePath
     val data = File(localData, "MangaFlow")
@@ -54,6 +69,7 @@ fun main() {
     val context = object : PlatformContext(data.absolutePath, cache.absolutePath) {}
     registerWindowsRelayCompanion()
     initializeMangaFlow(context)
+    val afterInstall = UpdateManager.get(context).hasPreviousInstallResult
     val performance = DesktopPerformance(context)
     val windowPreferences = DesktopWindowPreferences(context)
     var lastModel: MangaViewModel? = null
@@ -118,6 +134,7 @@ fun main() {
                 DesktopUpdateExit.requestExit = requestClose
                 onDispose { DesktopUpdateExit.requestExit = null }
             }
+            val appIcon = painterResource("mangaflow.png")
             Window(onCloseRequest = requestClose, title = title,
                 state = windowState,
                 onPreviewKeyEvent = { event ->
@@ -139,7 +156,8 @@ fun main() {
                         else -> false
                     }
                 },
-                icon = painterResource("mangaflow.png")) {
+                icon = appIcon) {
+                LaunchedEffect(window, appIcon) { installSmallWindowIcon(window) }
                 var supportsLiveVideo by remember(window) { mutableStateOf(false) }
                 DisposableEffect(window) {
                     fullscreen.window = window
@@ -167,7 +185,15 @@ fun main() {
                             MaterialTheme.colorScheme.onBackground, fullscreen.active, fullscreen.animePlaybackVisible)
                         ProvideDesktopReaderKeyboard(context) {
                             ProvideWindowsVideoDock(supportsLiveVideo) {
-                                MangaFlowHost(context, onModelReady = { model = it; lastModel = it })
+                                val initialWindow = remember(window) { startup.claimWindow() }
+                                MangaFlowHost(context,
+                                    openUpdatesRequest = if (initialWindow && startup.target == DesktopStartTarget.Updates) 1 else 0,
+                                    openDownloadsRequest = if (initialWindow && startup.target == DesktopStartTarget.Downloads) 1 else 0,
+                                    animateLaunch = remember(window) {
+                                        initialWindow && !afterInstall && !windowState.isMinimized && startup.showLaunchBrand()
+                                    },
+                                    launchIcon = appIcon,
+                                    onModelReady = { model = it; lastModel = it })
                             }
                         }
                         DesktopPerformanceSurface(performance)
@@ -176,6 +202,7 @@ fun main() {
             }
         }
     } finally {
+        startup.close()
         runBlocking(Dispatchers.IO) { performance.close() }
         // Reader disposal can publish its final position after the window-close preflight.
         val saved = runBlocking(Dispatchers.IO) { lastModel?.library?.flushPendingWrites() ?: flushLocalPreferences() }
@@ -185,6 +212,74 @@ fun main() {
         kotlin.system.exitProcess(if (saved) 0 else 1)
     }
 }
+
+private val smallWindowIcon by lazy {
+    runCatching {
+        DesktopStartup::class.java.getResourceAsStream("/mangaflow-32.png")?.use { ImageIO.read(it) }
+    }.getOrNull()
+}
+
+private suspend fun installSmallWindowIcon(window: AwtWindow) {
+    val small = withContext(Dispatchers.IO) { smallWindowIcon } ?: return
+    val normal = window.iconImages.firstOrNull() ?: return
+    // Compose exposes one scalable Painter. An exact-size render of it would otherwise win over
+    // the optical small image when AWT asks for a 16, 20 or 24 pixel caption at this monitor's DPI.
+    val icon = object : BaseMultiResolutionImage(1, small, normal) {
+        override fun getResolutionVariant(width: Double, height: Double): Image {
+            val chosen = super.getResolutionVariant(width, height)
+            return if (chosen is MultiResolutionImage) chosen.getResolutionVariant(width, height) else chosen
+        }
+    }
+    window.iconImages = listOf(icon)
+}
+
+private enum class DesktopStartTarget { Launcher, Downloads, Updates, Resume }
+
+internal interface WindowsAnimationSettings : StdCallLibrary {
+    fun SystemParametersInfoW(action: Int, unused: Int, value: IntByReference, flags: Int): Int
+}
+
+private class DesktopStartup(args: Array<String>) {
+    val target = when {
+        args.isEmpty() -> DesktopStartTarget.Launcher
+        "--after-update" in args -> DesktopStartTarget.Resume
+        else -> args.firstNotNullOfOrNull { argument ->
+            when (argument.lowercase().removeSuffix("/")) {
+                "--open-downloads", "mangaflow://downloads" -> DesktopStartTarget.Downloads
+                "--open-updates", "mangaflow://updates" -> DesktopStartTarget.Updates
+                else -> null
+            }
+        } ?: DesktopStartTarget.Resume
+    }
+    private val firstWindow = AtomicBoolean(true)
+    private val ordinary = target == DesktopStartTarget.Launcher && System.getenv("MANGAFLOW_PROFILE_START") != "1"
+    private data class Presentation(val instance: HANDLE, val animate: Boolean)
+    private val presentation = CompletableFuture.supplyAsync {
+        runCatching {
+            // Keep a session-local handle until exit. Other instances still open normally.
+            val kernel = Kernel32.INSTANCE
+            val instance = kernel.CreateMutex(null, false, "Local\\MangaFlow.Desktop.Presentation") ?: return@runCatching null
+            val firstProcess = Native.getLastError() != WinError.ERROR_ALREADY_EXISTS
+            Presentation(instance, ordinary && firstProcess && windowsClientAnimationsEnabled())
+        }.getOrNull()
+    }
+
+    fun claimWindow(): Boolean = firstWindow.getAndSet(false)
+
+    // Decoration gets one chance on the first frame. Never wait for a native preference read.
+    fun showLaunchBrand(): Boolean = presentation.getNow(null)?.animate == true
+
+    fun close() {
+        presentation.thenAccept { it?.let { result -> Kernel32.INSTANCE.CloseHandle(result.instance) } }
+    }
+}
+
+private fun windowsClientAnimationsEnabled(): Boolean = runCatching {
+    val value = IntByReference()
+    val settings = Native.load("user32", WindowsAnimationSettings::class.java)
+    val success = settings.SystemParametersInfoW(0x1042 /* SPI_GETCLIENTAREAANIMATION */, 0, value, 0)
+    success == 0 || value.value != 0 // Shared motion preferences still apply if the OS query is unavailable.
+}.getOrDefault(true)
 
 private data class DesktopWindowBounds(val x: Int, val y: Int, val width: Int, val height: Int) {
     fun rectangle() = Rectangle(x, y, width, height)

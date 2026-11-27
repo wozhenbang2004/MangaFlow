@@ -1,0 +1,6 @@
+<resources>
+    <color name="mangaflow_window_background">#15191B</color>
+    <color name="mangaflow_window_accent">#ACCBDA</color>
+    <bool name="mangaflow_light_system_bars">false</bool>
+    <style name="MangaFlowPlatform" parent="@android:style/Theme.Material.NoActionBar" />
+</resources>

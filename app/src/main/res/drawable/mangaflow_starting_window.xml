@@ -1,0 +1,5 @@
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/mangaflow_window_background" />
+    <item android:width="192dp" android:height="192dp"
+        android:gravity="center" android:drawable="@mipmap/ic_launcher" />
+</layer-list>

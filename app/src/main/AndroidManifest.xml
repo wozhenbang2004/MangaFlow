@@ -36,6 +36,7 @@
         android:networkSecurityConfig="@xml/anime_source_network_security"
         android:theme="@style/Theme.MangaFlow">
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop"
+            android:theme="@style/Theme.MangaFlow.Starting"
             android:supportsPictureInPicture="true"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout"
             android:resizeableActivity="true" android:windowSoftInputMode="adjustResize">

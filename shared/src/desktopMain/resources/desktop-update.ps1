@@ -84,7 +84,7 @@ function Verify-File([string]$path, $entry) {
 function Start-OldOrNew {
     if ($null -ne $running -and -not $running.HasExited) { return }
     if (Test-Path -LiteralPath $launcher -PathType Leaf) {
-        Start-Process -FilePath $launcher -WorkingDirectory $root | Out-Null
+        Start-Process -FilePath $launcher -ArgumentList '--after-update' -WorkingDirectory $root | Out-Null
     }
 }
 try {

@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.MangaFlow" parent="@style/MangaFlowWindow">
+        <item name="android:navigationBarColor">@color/mangaflow_window_background</item>
+        <item name="android:windowLightNavigationBar">@bool/mangaflow_light_system_bars</item>
+    </style>
+</resources>

@@ -82,6 +82,7 @@ internal fun AnimeDiscoveryWatchShelf(entries: List<AnimeLibraryEntry>, scroll: 
         }
         val paged = platformKind == PlatformKind.DESKTOP && groups > (if (besideGallery) 1 else across)
         val separateControls = paged && maxWidth < 200.dp * scale
+        val useHistoryIcon = maxWidth < 160.dp * scale || paged && maxWidth < 250.dp * scale
         val pageControls: @Composable () -> Unit = {
             MotionIconButton({ turn(-1) }, Modifier.size(40.dp), enabled = active && rail.canScrollBackward,
                 tooltip = "较新的观看记录") {
@@ -97,7 +98,7 @@ internal fun AnimeDiscoveryWatchShelf(entries: List<AnimeLibraryEntry>, scroll: 
                 Text("最近观看", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (paged && !separateControls) pageControls()
-                if (maxWidth < 160.dp * scale || paged && maxWidth < 250.dp * scale) {
+                if (useHistoryIcon) {
                     MotionIconButton(onOpenHistory, Modifier.size(44.dp), enabled = active, tooltip = "全部观看历史") {
                         Icon(Icons.Outlined.History, "全部观看历史", Modifier.size(20.dp))
                     }

@@ -1,4 +1,4 @@
 <bitmap xmlns:android="http://schemas.android.com/apk/res/android"
-    android:src="@drawable/mangaflow_icon_b"
+    android:src="@drawable/kayoko_launcher_portrait"
     android:gravity="fill"
     android:filter="true" />

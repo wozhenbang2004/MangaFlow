@@ -1,6 +1,7 @@
 package dev.mangaflow
 
 import android.Manifest
+import android.animation.ValueAnimator
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -24,6 +25,10 @@ import android.os.Handler
 import android.os.Looper
 import android.view.FrameMetrics
 import android.view.Window
+import android.view.accessibility.AccessibilityManager
+import android.view.animation.PathInterpolator
+import androidx.annotation.RequiresApi
+import androidx.core.animation.doOnEnd
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -40,10 +45,16 @@ class MainActivity : ComponentActivity() {
     }
     private var openUpdatesRequest by mutableIntStateOf(0)
     private var openDownloadsRequest by mutableIntStateOf(0)
+    private var launchExitAllowed = false
+    private var launchExit: ValueAnimator? = null
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // The starting window owns the portrait. The Activity and its first Compose frame own the same plain background.
+        setTheme(R.style.Theme_MangaFlow)
         super.onCreate(savedInstanceState)
+        val firstMainWindow = !mainWindowCreated
+        mainWindowCreated = true
         LaunchFailure.recoveryReport?.let { report ->
             setContent {
                 CompositionLocalProvider(LocalMangaContext provides this@MainActivity) {
@@ -61,8 +72,10 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         // Keep the real app visible behind three-button navigation as well as gestures.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.isNavigationBarContrastEnforced = false
-        val animateLaunch = savedInstanceState == null &&
-            !intent.getBooleanExtra("open_updates", false) && !intent.getBooleanExtra("open_downloads", false)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && firstMainWindow &&
+            savedInstanceState == null && intent.isOrdinaryLauncherOpen()) {
+            installLaunchExit()
+        }
         consumeNavigationIntent(intent)
         initializeMangaFlow(this)
         experience = ExperiencePolicyStore.get(this)
@@ -73,8 +86,52 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             MangaFlowHost(this@MainActivity, openUpdatesRequest, openDownloadsRequest,
-                ::requestNotificationPermission, animateLaunch)
+                ::requestNotificationPermission, animateLaunch = false)
         }
+    }
+
+    private fun Intent.isOrdinaryLauncherOpen(): Boolean {
+        // Both download notifications use CLEAR_TOP. The anime one has no navigation extra.
+        val returning = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY
+        return action == Intent.ACTION_MAIN && hasCategory(Intent.CATEGORY_LAUNCHER) && data == null &&
+            (flags and returning) == 0 && !getBooleanExtra("open_updates", false) && !getBooleanExtra("open_downloads", false)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun installLaunchExit() {
+        launchExitAllowed = true
+        splashScreen.setOnExitAnimationListener { splash ->
+            val portrait = splash.iconView
+            val accessibility = getSystemService(AccessibilityManager::class.java)
+            if (!launchExitAllowed || isFinishing || isDestroyed || portrait == null || portrait.width == 0 ||
+                portrait.height == 0 || !ValueAnimator.areAnimatorsEnabled() || accessibility?.isTouchExplorationEnabled == true) {
+                splash.remove()
+                return@setOnExitAnimationListener
+            }
+            // The platform calls this with content already drawn. Only its existing portrait and surface are animated.
+            val exit = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 176L
+                interpolator = PathInterpolator(.2f, 0f, .2f, 1f)
+                addUpdateListener { animation ->
+                    val fraction = animation.animatedFraction
+                    val scale = 1f - .06f * fraction
+                    portrait.scaleX = scale
+                    portrait.scaleY = scale
+                    splash.alpha = 1f - fraction
+                }
+                doOnEnd {
+                    launchExit = null
+                    splash.remove()
+                }
+            }
+            launchExit = exit
+            exit.start()
+        }
+    }
+
+    private fun finishLaunchExit() {
+        launchExitAllowed = false
+        launchExit?.end()
     }
 
     override fun onResume() {
@@ -88,6 +145,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
+        finishLaunchExit()
         displayPreferenceActive = false
         if (frameObserverActive) {
             window.removeOnFrameMetricsAvailableListener(frameObserver)
@@ -137,6 +195,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        finishLaunchExit()
         setIntent(intent)
         consumeNavigationIntent(intent)
     }
@@ -152,5 +211,9 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+    }
+
+    private companion object {
+        var mainWindowCreated = false
     }
 }

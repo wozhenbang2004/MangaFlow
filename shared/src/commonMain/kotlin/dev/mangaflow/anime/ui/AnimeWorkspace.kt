@@ -233,21 +233,19 @@ private fun AnimeWorkspaceContent(
     var recheckRequest by remember { mutableStateOf<AnimeTrackingReview?>(null) }
     val playing = state.playbackTarget != null || state.resolving ||
         playbackPhase != AnimePlayerPhase.IDLE && playbackPhase != AnimePlayerPhase.RELEASED
-    var playbackBrowseVisit by remember(controller) { mutableStateOf<AnimePlayerBrowseVisit?>(null) }
-    var playbackBrowseRequest by remember(controller) { mutableIntStateOf(0) }
-    val browseVisit = playbackBrowseVisit?.takeIf { active && playing && it.subjectId == state.detail?.subject?.id }
+    val browseVisitState = remember(controller) { mutableStateOf<AnimePlayerBrowseVisit?>(null) }
+    val browseRequestState = remember(controller) { mutableIntStateOf(0) }
+    var playbackBrowseVisit by browseVisitState
+    var playbackBrowseRequest by browseRequestState
+    val playbackSubjectId = state.detail?.subject?.id
+    val browseVisit = playbackBrowseVisit?.takeIf { active && playing && it.subjectId == playbackSubjectId }
     fun closePlaybackBrowse(visit: AnimePlayerBrowseVisit) {
         if (playbackBrowseVisit === visit) {
             playbackBrowseVisit = null
             playbackBrowseRequest = 0
         }
     }
-    LaunchedEffect(active, playing, state.detail?.subject?.id) {
-        if (!active || !playing || playbackBrowseVisit != null && browseVisit == null) {
-            playbackBrowseVisit = null
-            playbackBrowseRequest = 0
-        }
-    }
+    PlaybackBrowseVisitEffect(active, playing, playbackSubjectId, browseVisit, browseVisitState, browseRequestState)
     val route = when {
         playing -> AnimeRoute("player", 2, relatedDepth = detailHistory.size)
         state.detail != null || state.detailLoading || state.detailError != null ->
@@ -1214,6 +1212,23 @@ private fun AnimeWorkspaceContent(
         })
     AnimeResumePanel(state.pendingPlayback, backdrop, onChoose = controller::confirmPlayback,
         onDismiss = controller::dismissPlaybackChoice)
+}
+
+@Composable
+private fun PlaybackBrowseVisitEffect(
+    active: Boolean,
+    playing: Boolean,
+    subjectId: String?,
+    browseVisit: AnimePlayerBrowseVisit?,
+    visitState: MutableState<AnimePlayerBrowseVisit?>,
+    requestState: MutableIntState,
+) {
+    LaunchedEffect(active, playing, subjectId) {
+        if (!active || !playing || visitState.value != null && browseVisit == null) {
+            visitState.value = null
+            requestState.intValue = 0
+        }
+    }
 }
 
 /** Measures the floating chrome without reducing the page viewport. */

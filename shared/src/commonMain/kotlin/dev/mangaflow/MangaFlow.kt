@@ -5,6 +5,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelStore
@@ -45,6 +46,7 @@ fun MangaFlowHost(
     openDownloadsRequest: Int = 0,
     onRequestNotifications: () -> Unit = {},
     animateLaunch: Boolean = true,
+    launchIcon: Painter? = null,
     onModelReady: (MangaViewModel) -> Unit = {},
 ) {
     CompositionLocalProvider(LocalMangaContext provides context) {
@@ -76,7 +78,7 @@ fun MangaFlowHost(
                 HazeProviders {
                     MangaAdaptiveLayout {
                         ScreenFitProvider {
-                            AppLaunchReveal(play = animateLaunch) {
+                            AppLaunchReveal(play = animateLaunch, icon = launchIcon) {
                                 MangaFlowApp(openUpdatesRequest, openDownloadsRequest, onRequestNotifications, model)
                             }
                         }
