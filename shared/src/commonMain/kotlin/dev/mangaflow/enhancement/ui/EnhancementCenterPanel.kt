@@ -22,6 +22,8 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.player.AnimePlayerState
 import dev.mangaflow.anime.player.AnimeVideoEnhancementPhase
 import dev.mangaflow.anime.ui.AnimeTextField
+import dev.mangaflow.anime.ui.currentEnhancementProtection
+import dev.mangaflow.anime.ui.currentPictureSubmission
 import dev.mangaflow.enhancement.*
 import dev.mangaflow.enhancement.engine.*
 import dev.mangaflow.platform.LocalMangaContext
@@ -29,7 +31,6 @@ import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.formatDecimal
 import dev.mangaflow.platform.formatInstantMillis
-import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.DesktopVerticalScrollbar
 import dev.mangaflow.ui.LocalMangaWindow
@@ -272,19 +273,19 @@ internal fun EnhancementSettingsContent(
                     val currentPolicy = sessions[sessionKey]?.takeIf { it.content == content }?.policy
                         ?: saved.getValue(content)
                     val effect = animePlayback.videoEnhancement
-                    val usingPrepared = animePlayback.isPlaying && !animePlayback.playbackSuppressed &&
-                        animePlayback.preparedVideoWindow?.let { it.framesUsed > 0L &&
-                            monotonicTimeMillis() - it.lastUsedAt in 0L..1_000L } == true
+                    val submission = animePlayback.currentPictureSubmission()
+                    val protection = animePlayback.currentEnhancementProtection()?.takeIf { it.picture }
                     val actualReason = when {
-                        animePlayback.preEnhanced || usingPrepared -> null
+                        animePlayback.preEnhanced || submission != null -> null
                         effect.phase in setOf(AnimeVideoEnhancementPhase.UNAVAILABLE, AnimeVideoEnhancementPhase.FAILED) -> effect.detail
                         currentPolicy.tier == QualityTier.ORIGINAL -> null
                         effect.phase == AnimeVideoEnhancementPhase.OFF -> when {
                             !currentPolicy.realtimeEnhancementEnabled -> "播放时画质增强已关闭，所选档位与已备结果保留。"
-                            usage.resources.memoryPressure == true || (usage.resources.thermalPressure ?: 0) >= 2 ->
-                                "设备保护暂缓了增强，所选档位保留。"
+                            protection != null -> protection.description
                             else -> observed?.reason ?: "所选增强尚未运行，正在等待播放器应用。"
                         }
+                        platformKind == PlatformKind.ANDROID && animePlayback.isPlaying &&
+                            effect.phase == AnimeVideoEnhancementPhase.ACTIVE -> "等待当前位置的增强帧。"
                         else -> null
                     }
                     if (actualReason != null) EnhancementQuiet("当前播放：$actualReason",
@@ -405,11 +406,7 @@ internal fun EnhancementSettingsContent(
                     }
                     if (motion?.inputWidth != null && motion.inputHeight != null) {
                         EnhancementValue("补帧输入", "${motion.inputWidth} × ${motion.inputHeight}")
-                        val enhanced = current.videoEnhancement
-                        if (enhanced.phase == AnimeVideoEnhancementPhase.ACTIVE &&
-                            (enhanced.observation?.submittedFrames ?: 0L) > 0L &&
-                            enhanced.outputWidth != null && enhanced.outputHeight != null)
-                            EnhancementValue("画质提交尺寸", "${enhanced.outputWidth} × ${enhanced.outputHeight}")
+                        current.currentPictureSubmission()?.dimensions?.let { EnhancementValue("画质提交尺寸", it) }
                         if (platformKind == PlatformKind.ANDROID) EnhancementQuiet(
                             "同时开启时，先按原分辨率补帧，再做画质增强。1080p 是补帧输入范围；增强需要处理补帧后的更多画面，实际速度取决于设备与组合负载。")
                     }

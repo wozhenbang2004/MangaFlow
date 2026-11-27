@@ -65,20 +65,24 @@ import dev.mangaflow.ui.motion.MotionIconButton
 private fun videoDimensions(width: Int?, height: Int?): String? =
     if (width != null && width > 0 && height != null && height > 0) "$width×$height" else null
 
-/** The player publishes these receipts only for its current asset/timeline. Configuration and viewport do not count. */
-private fun observedEnhancedDimensions(playback: AnimePlayerState, now: Long): String? {
-    if (playback.preEnhanced || !playback.isPlaying || playback.playbackSuppressed ||
-        playback.firstFrameRendered == false || playback.hasVideoTracks == false) return null
-    val effect = playback.videoEnhancement
-    if (effect.renderedOriginalFallback) return null
-    val observation = effect.observation
-    val submitted = observation?.lastSubmittedAtMillis
-    // A prepared window may retain its sampled use across a brief pause or surface detach.
-    // The quiet badge needs a new live submission, not that retained diagnostic.
-    if (effect.phase != AnimeVideoEnhancementPhase.ACTIVE || observation?.recentlySubmitting != true ||
-        observation.submittedFrames <= 0L || submitted == null ||
-        now - submitted !in 0L until ANIME_ENHANCED_FRAME_FRESH_MS) return null
-    return videoDimensions(effect.outputWidth, effect.outputHeight)
+internal data class AnimePictureSubmission(val dimensions: String?, val prepared: Boolean)
+
+/** Only current use of a prepared frame or a fresh live submission counts as an enhanced picture. */
+internal fun AnimePlayerState.currentPictureSubmission(now: Long = monotonicTimeMillis()): AnimePictureSubmission? {
+    if (preEnhanced || !isPlaying || playbackSuppressed || firstFrameRendered == false ||
+        hasVideoTracks == false || videoEnhancement.renderedOriginalFallback) return null
+    val effect = videoEnhancement
+    val submitted = effect.observation?.takeIf {
+        effect.phase == AnimeVideoEnhancementPhase.ACTIVE && it.recentlySubmitting && it.submittedFrames > 0L
+    }?.lastSubmittedAtMillis?.takeIf { now - it in 0L until ANIME_ENHANCED_FRAME_FRESH_MS }
+    val window = preparedVideoWindow
+    if (window != null && window.frames > 0 && window.framesUsed > 0L && positionMs in window.startMs until window.endMs &&
+        window.lastUsedAt > 0L && now - window.lastUsedAt in 0L..1_000L &&
+        (submitted == null || window.lastUsedAt > submitted)) {
+        return AnimePictureSubmission(videoDimensions(window.outputWidth, window.outputHeight), prepared = true)
+    }
+    return if (submitted != null) AnimePictureSubmission(videoDimensions(effect.outputWidth, effect.outputHeight),
+        prepared = false) else null
 }
 
 /** The quiet reading uses only native values; a source rate is not a measured output rate. */
@@ -92,22 +96,26 @@ internal fun AnimeInlineVideoQuality(playback: AnimePlayerState, modifier: Modif
         ?: defaults.getValue(EnhancementContent.ANIME)
     val requested = policy.realtimeEnhancementEnabled && policy.tier != QualityTier.ORIGINAL
     val input = videoDimensions(playback.videoWidth, playback.videoHeight)
-    val enhanced = if (requested) observedEnhancedDimensions(playback, monotonicTimeMillis()) else null
+    val submission = if (requested) playback.currentPictureSubmission() else null
+    val enhanced = submission?.dimensions
     val dimensions = when {
-        enhanced != null -> "增强帧 $enhanced"
+        submission != null -> listOfNotNull(if (submission.prepared) "预处理帧" else "增强帧", enhanced).joinToString(" ")
         input == null -> null
         playback.preEnhanced -> "增强文件 $input"
         else -> "片源 $input"
     }
     val effect = playback.videoEnhancement
     val protection = playback.currentEnhancementProtection()
-    val status = if (protection != null) protection.actionLabel + "，" + protection.reasonLabel
-    else if (!requested || enhanced != null || playback.preEnhanced || platformKind != PlatformKind.ANDROID) null
-    else if (effect.renderedOriginalFallback) "增强已回落" else when (effect.phase) {
-        AnimeVideoEnhancementPhase.OFF, AnimeVideoEnhancementPhase.UNAVAILABLE -> "增强未应用"
-        AnimeVideoEnhancementPhase.WAITING, AnimeVideoEnhancementPhase.CONFIGURED -> "增强待输出"
-        AnimeVideoEnhancementPhase.ACTIVE -> "增强待确认"
-        AnimeVideoEnhancementPhase.FAILED -> "增强异常"
+    val status = when {
+        !requested || submission != null || playback.preEnhanced || platformKind != PlatformKind.ANDROID -> null
+        protection?.picture == true && protection.cause != AnimeEnhancementProtectionCause.GPU_BUDGET -> null
+        effect.renderedOriginalFallback -> "已回到原画"
+        else -> when (effect.phase) {
+            AnimeVideoEnhancementPhase.OFF -> "增强未运行"
+            AnimeVideoEnhancementPhase.UNAVAILABLE -> "增强不可用"
+            AnimeVideoEnhancementPhase.FAILED -> "增强异常"
+            else -> "等待增强帧"
+        }
     }
     val presented = playback.presentedFps?.takeIf { it.isFinite() && it >= 0.0 }
     val output = playback.frameMetrics?.outputFps?.takeIf { it.isFinite() && it >= 0.0 }
@@ -118,15 +126,17 @@ internal fun AnimeInlineVideoQuality(playback: AnimePlayerState, modifier: Modif
         source != null -> "源 ${formatDecimal(source, 0)} fps"
         else -> null
     }
-    if (dimensions == null && rate == null && protection == null) return
-    val caption = listOfNotNull(protection?.reasonLabel, dimensions, rate).joinToString(" · ")
+    if (dimensions == null && rate == null && status == null && protection == null) return
+    val caption = listOfNotNull(protection?.reasonLabel, status, dimensions, rate).joinToString(" · ")
     val dimensionDescription = when {
         enhanced != null -> "已观测增强帧尺寸 ${enhanced.replace("×", " 乘 ")}，不是屏幕分辨率或呈现回执"
+        submission != null -> "播放器已提交当前位置的增强帧"
         input == null -> null
         playback.preEnhanced -> "增强文件的解码尺寸 ${input.replace("×", " 乘 ")}"
         else -> "片源输入分辨率 ${input.replace("×", " 乘 ")}"
     }
-    val description = listOfNotNull(dimensionDescription, status, when {
+    val description = listOfNotNull(protection?.let { it.reasonLabel + "，" + it.actionLabel },
+        status, dimensionDescription, when {
         presented != null -> "播放器实际呈现 ${formatDecimal(presented, 0)} 帧每秒"
         output != null -> "视频输出 ${formatDecimal(output, 0)} 帧每秒，不是屏幕刷新率"
         source != null -> "片源标称 ${formatDecimal(source, 1)} 帧每秒，未测得当前输出"
@@ -300,8 +310,8 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
     val protection = playback?.currentEnhancementProtection()
     val activeMotion = motion?.takeIf { flowing && it.phase == AnimeVideoEnhancementPhase.ACTIVE }
     val window = playback?.preparedVideoWindow?.takeIf { it.frames > 0 }
-    val usingPrepared = flowing && window != null && window.framesUsed > 0L &&
-        monotonicTimeMillis() - window.lastUsedAt in 0L..1_000L
+    val submission = playback?.currentPictureSubmission()
+    val usingPrepared = submission?.prepared == true
     val desktop = platformKind == PlatformKind.DESKTOP
     val native = playback?.nativeVideoStatistics
     if (EnhancementMetric.QUALITY in metrics) {
@@ -311,8 +321,8 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
             usingPrepared -> "预处理帧复用"
             protection?.picture == true && protection.cause != AnimeEnhancementProtectionCause.GPU_BUDGET ->
                 "原画 · " + protection.reasonLabel
-            protection?.cause == AnimeEnhancementProtectionCause.GPU_BUDGET &&
-                effect?.phase == AnimeVideoEnhancementPhase.ACTIVE -> "轻量增强 · " + protection.reasonLabel
+            protection?.cause == AnimeEnhancementProtectionCause.GPU_BUDGET && submission != null ->
+                "轻量增强 · " + protection.reasonLabel
             else -> when (effect?.phase) {
                 AnimeVideoEnhancementPhase.OFF -> when {
                     policy.tier == QualityTier.ORIGINAL -> "原画"
@@ -323,8 +333,10 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
                 AnimeVideoEnhancementPhase.CONFIGURED -> if (desktop)
                     "增强已加载" else "增强 · 等待输出"
                 AnimeVideoEnhancementPhase.ACTIVE -> when {
-                    flowing && observation?.recentlySubmitting == true -> "增强处理中"
+                    submission != null -> "增强处理中"
                     flowing && desktop -> "增强运行中"
+                    playback.isBuffering -> "缓冲中 · 等待增强帧"
+                    flowing -> "等待当前位置的增强帧"
                     else -> "增强已配置"
                 }
                 AnimeVideoEnhancementPhase.UNAVAILABLE -> "增强不可用"
@@ -332,16 +344,18 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
                 null -> "画质 —"
             }
         }
-        add(EnhancementReadout(EnhancementMetric.QUALITY, quality,
-            listOfNotNull(quality, effect?.detail ?: reason).joinToString("，")))
+        val detail = when {
+            protection?.picture == true -> protection.description
+            !desktop && effect?.phase == AnimeVideoEnhancementPhase.ACTIVE && submission == null -> null
+            else -> effect?.detail ?: reason
+        }
+        add(EnhancementReadout(EnhancementMetric.QUALITY, quality, listOfNotNull(quality, detail).joinToString("，")))
     }
     if (EnhancementMetric.DIMENSIONS in metrics) {
         fun dimensions(width: Int?, height: Int?) = if (width != null && width > 0 && height != null && height > 0)
             "$width×$height" else null
         val input = dimensions(playback?.videoWidth, playback?.videoHeight)
-        val submitted = if (usingPrepared) dimensions(window?.outputWidth, window?.outputHeight)
-            else if (effect?.phase == AnimeVideoEnhancementPhase.ACTIVE && (observation?.submittedFrames ?: 0L) > 0L)
-                dimensions(effect?.outputWidth, effect?.outputHeight) else null
+        val submitted = submission?.dimensions
         val filtered = native?.filterOutputSize?.let { dimensions(it.width, it.height) }
         val viewport = playback?.playbackViewportSize?.let { dimensions(it.width, it.height) }
         val source = if (playback?.preEnhanced == true) "增强文件" else "输入"

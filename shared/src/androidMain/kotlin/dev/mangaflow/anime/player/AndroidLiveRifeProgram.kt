@@ -20,8 +20,10 @@ internal class AndroidLiveRifeProgram(
     private val model: AndroidLiveRifeVulkan,
     private val targetFps: Double?,
     private val automatic: Boolean = false,
-    private val onSynthesizedFrame: (Long) -> Unit = {},
-    private val onReset: () -> Unit = {},
+    private val seekGeneration: () -> Long,
+    private val onSynthesizedFrame: (generation: Long, pts: Long) -> Unit,
+    private val onReset: (generation: Long) -> Unit,
+    private val onRelease: () -> Unit,
     private val report: (RifeSample) -> Unit,
 ) : GlShaderProgram {
     private var inputListener: GlShaderProgram.InputListener = object : GlShaderProgram.InputListener {}
@@ -37,6 +39,8 @@ internal class AndroidLiveRifeProgram(
     private var previous = IntArray(0)
     private var current = IntArray(0)
     private var generated = IntArray(0)
+    private var inputGeneration = NONE
+    private var previousTimelinePts = NONE
     private var previousPts = NONE
     private var currentPts = NONE
     private var lastPts = NONE
@@ -105,6 +109,21 @@ internal class AndroidLiveRifeProgram(
             previousPts = NONE
             resetCadence()
         }
+        val generation = seekGeneration()
+        if (inputGeneration != generation) {
+            // A retained shader is not guaranteed a flush before frames from the new position.
+            previousTimelinePts = maxOf(previousTimelinePts, currentPts, lastPts)
+            resetHistory(generation)
+        }
+        // A GL input already queued before the seek can follow the generation handoff.
+        // More than one seek may also be coalesced by the decoder. A later backward
+        // jump beyond one supported frame interval starts another distinct source run.
+        val reachedRewind = previousTimelinePts != NONE && presentationTimeUs < previousTimelinePts
+        if (currentPts != NONE && presentationTimeUs < currentPts &&
+            (reachedRewind || currentPts - presentationTimeUs > MAX_INTERVAL_US)) {
+            resetHistory(generation)
+        }
+        if (reachedRewind) previousTimelinePts = NONE
         if (lastPts != NONE && presentationTimeUs <= lastPts) {
             inputListener.onInputFrameProcessed(input)
             inputListener.onReadyToAcceptInputFrame()
@@ -156,6 +175,7 @@ internal class AndroidLiveRifeProgram(
     override fun releaseOutputFrame(outputTexture: GlTextureInfo) = guard {
         if (outputTexture !== output || !inFlight) return@guard
         inFlight = false
+        if (inputGeneration != seekGeneration()) pairPending = false
         drain()
     }
 
@@ -167,35 +187,46 @@ internal class AndroidLiveRifeProgram(
 
     override fun flush() {
         if (failed) return
+        inFlight = false
+        endRequested = false
+        ended = false
+        previousTimelinePts = NONE
+        resetHistory(seekGeneration())
+        inputListener.onFlush()
+        inputListener.onReadyToAcceptInputFrame()
+    }
+
+    /** Drop frame-pair and rate history on GL. Only a native flush can reclaim a renderer-owned output. */
+    private fun resetHistory(generation: Long) {
+        inputGeneration = generation
         previousPts = NONE
         currentPts = NONE
         lastPts = NONE
         originPts = NONE
         gridIndex = 0L
         pairPending = false
-        inFlight = false
-        endRequested = false
-        ended = false
         sampleStart = NONE
         sampleFrames = 0
         synthesized = 0
         sampledSynthesized = 0
         sampleWallTime = 0
         slowPairs = 0
+        // The player owns confirmed failures for this viewing choice. A stale GL
+        // decision that never reached it cannot disable the next timeline.
+        sourceOnly = false
+        detachReason = null
         pairWorkNanos = 0L
         pairBudgetNanos = 0L
         emptyIntervals = 0
         lastInferenceNanos = null
         resetCadence()
-        onReset()
-        inputListener.onFlush()
-        inputListener.onReadyToAcceptInputFrame()
+        onReset(generation)
     }
 
     override fun release() {
         try { output?.release() }
         finally {
-            onReset()
+            onRelease()
             GLES20.glDeleteFramebuffers(1, readFbo, 0)
         }
     }
@@ -256,7 +287,8 @@ internal class AndroidLiveRifeProgram(
         }
         if (endRequested) {
             // Media3 marks the stream ended once the last original PTS has reached its renderer.
-            if (previousPts != NONE && lastPts < previousPts) emit(previousPts, previous, false)
+            if (inputGeneration == seekGeneration() && previousPts != NONE && lastPts < previousPts)
+                emit(previousPts, previous, false)
             else {
                 ended = true
                 outputListener.onCurrentOutputStreamEnded()
@@ -305,13 +337,13 @@ internal class AndroidLiveRifeProgram(
         }
         if (interpolated) {
             synthesized++
-            onSynthesizedFrame(pts)
+            onSynthesizedFrame(inputGeneration, pts)
         }
         sampleFrames++
         val span = pts - sampleStart
         if (detachReason != null || span >= 600_000) {
             val wall = now - sampleWallTime
-            report(RifeSample(synthesized, if (span > 0 && sampleFrames >= 2) (sampleFrames - 1) * 1_000_000.0 / span else null,
+            report(RifeSample(inputGeneration, synthesized, if (span > 0 && sampleFrames >= 2) (sampleFrames - 1) * 1_000_000.0 / span else null,
                 if (wall > 0L) (synthesized - sampledSynthesized) * 1_000_000_000.0 / wall else null,
                 lastInferenceNanos, detachReason, width, height,
                 if (automatic) resolvedTargetFps else targetFps ?: observedInputFps?.times(2.0), observedInputFps))
@@ -410,7 +442,7 @@ internal class AndroidLiveRifeProgram(
         }
     }
 
-    data class RifeSample(val synthesized: Long, val graphFps: Double?, val generationFps: Double?,
+    data class RifeSample(val generation: Long, val synthesized: Long, val graphFps: Double?, val generationFps: Double?,
         val inferenceNanos: Long?, val failure: String?, val inputWidth: Int, val inputHeight: Int,
         val targetFps: Double?, val inputFps: Double?)
 

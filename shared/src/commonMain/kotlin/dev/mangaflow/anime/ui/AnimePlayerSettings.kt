@@ -487,11 +487,9 @@ internal fun AnimePlayerSettings(
                                         "$width × $height" else "尚未报告"
                                     val decoded = if (currentMedia.preEnhanced == true) "增强文件解码" else "当前视频解码"
                                     AnimeQuietLabel("$decoded · $dimensions")
-                                    val enhanced = currentMedia.videoEnhancement?.takeIf {
-                                        (it.observation?.submittedFrames ?: 0L) > 0L &&
-                                            (it.outputWidth ?: 0) > 0 && (it.outputHeight ?: 0) > 0
+                                    currentMedia.currentPictureSubmission()?.dimensions?.let {
+                                        AnimeQuietLabel("当前增强提交 · $it")
                                     }
-                                    if (enhanced != null) AnimeQuietLabel("最近增强提交 · ${enhanced.outputWidth} × ${enhanced.outputHeight}")
                                 }
                             }
                         }

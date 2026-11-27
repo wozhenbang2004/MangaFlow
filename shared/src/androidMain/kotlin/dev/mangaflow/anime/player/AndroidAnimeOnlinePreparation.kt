@@ -230,6 +230,7 @@ private suspend fun exportWindow(context: Context, window: AnimePreparedVideoReq
 internal class AndroidPreparedFrameProgram(
     private val scale: Int,
     prepared: () -> AndroidPreparedWindow?,
+    private val observationEpoch: () -> Long,
     private val onUsed: (AndroidPreparedWindow, () -> Boolean) -> Unit,
 ) : BaseGlShaderProgram(false, 1) {
     private var program: GlProgram? = null
@@ -252,9 +253,10 @@ internal class AndroidPreparedFrameProgram(
 
     override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) {
         val current = revision.get()
+        val epoch = observationEpoch()
         val window = frames.draw(inputTexId, presentationTimeUs, ::copyTexture)
         if (window == null) copyTexture(inputTexId)
-        else onUsed(window) { revision.get() == current }
+        else onUsed(window) { revision.get() == current && observationEpoch() == epoch }
     }
 
     private fun copyTexture(texture: Int) {

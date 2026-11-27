@@ -19,6 +19,9 @@ import dev.mangaflow.anime.player.AnimePlayerPhase
 import dev.mangaflow.anime.player.AnimePlayerState
 import dev.mangaflow.anime.player.AnimeVideoEnhancementMode
 import dev.mangaflow.anime.player.AnimeVideoEnhancementPhase
+import dev.mangaflow.anime.player.AnimeEnhancementProtectionCause
+import dev.mangaflow.anime.ui.currentEnhancementProtection
+import dev.mangaflow.anime.ui.currentPictureSubmission
 import dev.mangaflow.enhancement.EnhancementContent
 import dev.mangaflow.enhancement.EnhancementPolicy
 import dev.mangaflow.enhancement.EnhancementSessionMetrics
@@ -163,9 +166,9 @@ private fun AnimeEnhancementStatus(
     val native = playback?.nativeVideoStatistics.takeIf { hasSession }
     val playing = hasSession && playback?.isPlaying == true && !playback.isBuffering && !playback.playbackSuppressed &&
         playback.hasVideoTracks != false && playback.firstFrameRendered != false
-    val recentlySubmitting = playing && observation?.recentlySubmitting == true
-    val usingPrepared = playing && prepared != null && prepared.framesUsed > 0 &&
-        monotonicTimeMillis() - prepared.lastUsedAt in 0L..1_000L
+    val submission = playback?.takeIf { hasSession }?.currentPictureSubmission()
+    val recentlySubmitting = submission?.prepared == false
+    val protection = playback?.currentEnhancementProtection()
     val stateLabel = when {
         playback?.phase == AnimePlayerPhase.ERROR -> "播放未成功"
         playback?.phase == AnimePlayerPhase.OPENING -> "正在打开视频"
@@ -182,14 +185,14 @@ private fun AnimeEnhancementStatus(
     val processingLabel = when {
         !hasSession -> "打开视频后显示本集数据，设备读数仍可查看。"
         playback?.preEnhanced == true -> "已选择离线增强版本"
-        usingPrepared -> "正在复用预处理帧"
-        prepared != null -> "当前集前方帧已缓存"
+        submission?.prepared == true -> "正在复用预处理帧"
+        protection?.picture == true && protection.cause != AnimeEnhancementProtectionCause.GPU_BUDGET -> protection.description
         effect?.phase == AnimeVideoEnhancementPhase.FAILED -> "增强未成功 · 原因见处理页"
         effect?.phase == AnimeVideoEnhancementPhase.UNAVAILABLE -> "当前增强不可用 · 原因见处理页"
-        effect?.mode == AnimeVideoEnhancementMode.OFF -> "当前使用原画设置"
+        effect?.mode == AnimeVideoEnhancementMode.OFF -> if (prepared != null) "增强帧已备，等待复用" else "当前使用原画"
         recentlySubmitting -> "正在提交增强帧"
         desktop && effect?.phase == AnimeVideoEnhancementPhase.ACTIVE -> "已观测到增强运行"
-        effect?.phase == AnimeVideoEnhancementPhase.ACTIVE -> "已收到增强提交样本"
+        effect?.phase == AnimeVideoEnhancementPhase.ACTIVE -> if (playing) "等待当前位置的增强帧" else "增强已配置，正等待播放"
         desktop && effect?.phase == AnimeVideoEnhancementPhase.CONFIGURED -> "增强已加载 · 执行待观测"
         effect?.phase == AnimeVideoEnhancementPhase.CONFIGURED -> "增强已配置 · 等待处理样本"
         else -> "等待增强处理样本"
@@ -201,9 +204,7 @@ private fun AnimeEnhancementStatus(
     val recentWindow = frameMetrics?.windowDurationMs?.takeIf { it < 4_500L }
         ?.let { "近 ${formatDecimal(it / 1000.0, 1)} 秒" } ?: "近 5 秒"
     val inputSize = dimensions(playback?.videoWidth, playback?.videoHeight).takeIf { hasSession }
-    val submittedSize = if (usingPrepared) dimensions(prepared?.outputWidth, prepared?.outputHeight)
-        else if (effect?.phase == AnimeVideoEnhancementPhase.ACTIVE && (observation?.submittedFrames ?: 0) > 0)
-            dimensions(effect?.outputWidth, effect?.outputHeight) else null
+    val submittedSize = submission?.dimensions
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (showHeading) Text("运行状态", style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.semantics { heading() })

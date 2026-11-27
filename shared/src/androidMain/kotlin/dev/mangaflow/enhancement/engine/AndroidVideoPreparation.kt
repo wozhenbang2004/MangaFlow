@@ -359,26 +359,28 @@ private fun validateDecodedOutput(source: File, expectedTimes: LongArray, checkA
 
 private fun MediaFormat.intOrNull(key: String): Int? = if (containsKey(key)) getInteger(key) else null
 
-internal fun interface AndroidVideoFrameSubmitted {
-    fun onFrame(startedAtNanos: Long, elapsedNanos: Long, width: Int, height: Int)
-}
-
 internal class AndroidRgbVideoProgram(
     private val session: OrtSession?,
-    private val width: Int,
-    private val height: Int,
+    private val expectedWidth: Int,
+    private val expectedHeight: Int,
     private val scale: Int,
     private val budget: Long,
     private val checkActive: () -> Unit,
     private val capture: ((Long, ByteBuffer, ByteBuffer) -> Unit)? = null,
-    private val onProcessed: AndroidVideoFrameSubmitted? = null,
+    private val liveFrames: AndroidRealtimeFrameStream? = null,
     private val onReleased: (() -> Unit)? = null,
     private val cugan: AndroidCuganSession? = null,
     private val onFrame: () -> Unit,
 ) : BaseGlShaderProgram(false, 1) {
     private var renderer: ((AndroidRgbRegion, AndroidRgbRow) -> Unit)? = null
-    private val outputWidth = Math.multiplyExact(width, scale)
-    private val outputHeight = Math.multiplyExact(height, scale)
+    private var width = 0
+    private var height = 0
+    private var outputWidth = 0
+    private var outputHeight = 0
+    private var passthrough: Size? = null
+    private var pixelCapacity = 0
+    private var allocatedPixelBytes = 0L
+    private var outputLimit: Size? = null
     private var inputPixels: ByteBuffer? = null
     private var outputPixels: ByteBuffer? = null
     private var texture = 0
@@ -387,29 +389,99 @@ internal class AndroidRgbVideoProgram(
     private var copyProgram: GlProgram? = null
 
     override fun configure(inputWidth: Int, inputHeight: Int): Size = videoFrame {
-        require(inputWidth == width && inputHeight == height) { "当前片源解码尺寸发生变化" }
-        if (cugan != null) {
-            require(session == null && scale == 2)
-            val tiles = cugan.tiles(width, height, budget)
-            renderer = { read, row -> tiles.render(checkActive, read, row) }
-        } else {
-            val tiles = AndroidOnnxTiles(checkNotNull(session), width, height, scale, 128, 24, budget, requireRgb = true)
-            renderer = { read, row -> tiles.render(checkActive, read, row) }
-        }
-        texture = GlUtil.createTexture(outputWidth, outputHeight, false)
-        GLES20.glGenFramebuffers(1, inputFramebuffer, 0)
-        GlUtil.checkGlError()
-        inputPixels = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.LITTLE_ENDIAN)
-        outputPixels = ByteBuffer.allocateDirect(outputWidth * outputHeight * 4).order(ByteOrder.LITTLE_ENDIAN)
-        copyProgram = GlProgram(VIDEO_VERTEX, VIDEO_FRAGMENT).also {
+        require(inputWidth > 0 && inputHeight > 0)
+        val live = liveFrames
+        live?.invalidate()
+        if (live == null) require(inputWidth == expectedWidth && inputHeight == expectedHeight) { "当前片源解码尺寸发生变化" }
+        if (copyProgram == null) copyProgram = GlProgram(VIDEO_VERTEX, VIDEO_FRAGMENT).also {
             it.setBufferAttribute("aFramePosition", GlUtil.getNormalizedCoordinateBounds(), 4)
         }
+
+        val pixels = inputWidth.toLong() * inputHeight
+        if (live != null) {
+            val limit = outputLimit ?: run {
+                val textureSize = IntArray(1)
+                val viewport = IntArray(2)
+                GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, textureSize, 0)
+                GLES20.glGetIntegerv(GLES20.GL_MAX_VIEWPORT_DIMS, viewport, 0)
+                GlUtil.checkGlError()
+                Size(minOf(textureSize[0], viewport[0]), minOf(textureSize[0], viewport[1])).also { outputLimit = it }
+            }
+            if (pixels > live.maximumInputPixels || inputWidth.toLong() * scale > limit.width ||
+                inputHeight.toLong() * scale > limit.height) {
+                val original = Size(inputWidth, inputHeight)
+                passthrough = original
+                return@videoFrame original
+            }
+        }
+        passthrough = null
+        if (inputWidth == width && inputHeight == height) return@videoFrame Size(outputWidth, outputHeight)
+
+        val needed = Math.toIntExact(pixels)
+        val ceiling = live?.maximumInputPixels ?: needed
+        val nextCapacity = when {
+            needed <= pixelCapacity -> pixelCapacity
+            pixelCapacity == 0 && needed.toLong() * 2 < ceiling -> needed
+            else -> ceiling
+        }
+        val sourceBytes = Math.multiplyExact(nextCapacity, 4)
+        val resultBytes = Math.multiplyExact(sourceBytes, scale * scale)
+        val nextAllocated = if (nextCapacity > pixelCapacity) allocatedPixelBytes + sourceBytes + resultBytes
+            else allocatedPixelBytes
+        // Offline callers already provide their separate tile allowance. A real upshift
+        // may grow live planes once; account for the old direct allocation until its GC.
+        val tileBudget = if (live != null) budget - nextAllocated else budget
+        renderer = null
+        val newRenderer: (AndroidRgbRegion, AndroidRgbRow) -> Unit = try {
+            if (cugan != null) {
+                require(session == null && scale == 2)
+                val tiles = cugan.tiles(inputWidth, inputHeight, tileBudget)
+                val render: (AndroidRgbRegion, AndroidRgbRow) -> Unit = { read, row -> tiles.render(checkActive, read, row) }
+                render
+            } else {
+                val tiles = AndroidOnnxTiles(checkNotNull(session), inputWidth, inputHeight, scale, 128, 24, tileBudget, requireRgb = true)
+                val render: (AndroidRgbRegion, AndroidRgbRow) -> Unit = { read, row -> tiles.render(checkActive, read, row) }
+                render
+            }
+        } catch (limit: IllegalArgumentException) {
+            if (live == null) throw limit
+            // A fixed tile shape or a wide output band may exceed the remaining working budget.
+            width = 0
+            height = 0
+            val original = Size(inputWidth, inputHeight)
+            passthrough = original
+            return@videoFrame original
+        }
+        if (nextCapacity > pixelCapacity) {
+            inputPixels = ByteBuffer.allocateDirect(sourceBytes).order(ByteOrder.LITTLE_ENDIAN)
+            outputPixels = ByteBuffer.allocateDirect(resultBytes).order(ByteOrder.LITTLE_ENDIAN)
+            allocatedPixelBytes = nextAllocated
+            pixelCapacity = nextCapacity
+        }
+        width = inputWidth
+        height = inputHeight
+        outputWidth = Math.multiplyExact(width, scale)
+        outputHeight = Math.multiplyExact(height, scale)
+        renderer = newRenderer
+        if (texture != 0) {
+            GlUtil.deleteTexture(texture)
+            texture = 0
+        }
+        texture = GlUtil.createTexture(outputWidth, outputHeight, false)
+        if (inputFramebuffer[0] == 0) GLES20.glGenFramebuffers(1, inputFramebuffer, 0)
+        GlUtil.checkGlError()
         Size(outputWidth, outputHeight)
     }
 
     override fun drawFrame(inputTexId: Int, presentationTimeUs: Long) = videoFrame {
         checkActive()
-        val startedAt = onProcessed?.let { SystemClock.elapsedRealtimeNanos() }
+        val window = liveFrames?.window
+        passthrough?.let { original ->
+            drawTexture(inputTexId)
+            if (window != null) liveFrames?.copied(window, original.width, original.height)
+            return@videoFrame
+        }
+        val startedAt = if (window != null) SystemClock.elapsedRealtimeNanos() else 0L
         val render = checkNotNull(renderer)
         val input = checkNotNull(inputPixels)
         val output = checkNotNull(outputPixels)
@@ -445,18 +517,27 @@ internal class AndroidRgbVideoProgram(
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
         GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, outputWidth, outputHeight, GLES20.GL_RGBA,
             GLES20.GL_UNSIGNED_BYTE, output)
+        drawTexture(texture)
+        onFrame()
+        if (window != null) liveFrames?.submitted(window, startedAt, width, height, outputWidth, outputHeight)
+    }
+
+    private fun drawTexture(id: Int) {
         val program = checkNotNull(copyProgram)
         program.use()
-        program.setSamplerTexIdUniform("uTexture", texture, 0)
+        program.setSamplerTexIdUniform("uTexture", id, 0)
         program.bindAttributesAndUniforms()
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         GlUtil.checkGlError()
-        onFrame()
-        if (startedAt != null) onProcessed?.onFrame(startedAt, SystemClock.elapsedRealtimeNanos() - startedAt,
-            outputWidth, outputHeight)
+    }
+
+    override fun flush() {
+        liveFrames?.invalidate()
+        super.flush()
     }
 
     override fun release() {
+        liveFrames?.invalidate()
         val releaseOutput = runCatching { super.release() }
         val releaseProgram = runCatching { copyProgram?.delete() }
         val releaseTexture = runCatching { if (texture != 0) GlUtil.deleteTexture(texture) }

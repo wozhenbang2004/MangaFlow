@@ -12,7 +12,9 @@ import dev.mangaflow.anime.player.AnimePlayerOptions
 import dev.mangaflow.anime.player.AnimePreparedVideoRequest
 import dev.mangaflow.anime.player.AnimeStartupCacheRequest
 import dev.mangaflow.anime.player.AnimeStartupCacheResult
+import dev.mangaflow.anime.player.ANIME_ENHANCED_FRAME_FRESH_MS
 import dev.mangaflow.anime.player.AnimeVideoEnhancementMode
+import dev.mangaflow.anime.player.AnimeVideoEnhancementPhase
 import dev.mangaflow.anime.player.AnimeLocalMedia
 import dev.mangaflow.anime.player.createAnimePlayer
 import dev.mangaflow.anime.sources.AnimeMetadataRepository
@@ -6833,9 +6835,17 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val windowTarget = preparationBudget().onlineWindowMs
         val resultBudget = onlineResultBudget()
         val timeline = snapshot.sessionGeneration to snapshot.timelineGeneration
+        val budgets = enhancementCenter.resources
+        val resources = budgets.usage.value.resources
+        val canUseWindow = foreground && resources.memoryPressure != true && (resources.thermalPressure ?: 0) < 2 &&
+            snapshot.phase != AnimePlayerPhase.ERROR && !snapshot.ended && owner.localMedia == null
         if (onlineVideoTimeline != timeline || onlineVideoModel != model || onlineVideoWindowTarget != windowTarget ||
             onlineVideoResultBudget != resultBudget) {
-            val canRetain = onlineVideoTimeline == timeline && resultBudget > 0L && resultBudget >= onlineVideoResultBudget
+            val sameAndroidSession = platformKind == PlatformKind.ANDROID && canUseWindow && !mutableState.value.resolving &&
+                onlineVideoTimeline?.first == timeline.first && onlineVideoModel == model && model != null &&
+                onlineVideoWindowTarget == windowTarget && onlineVideoResultBudget == resultBudget
+            val canRetain = (onlineVideoTimeline == timeline || sameAndroidSession) &&
+                resultBudget > 0L && resultBudget >= onlineVideoResultBudget
             onlineVideoTimeline = timeline
             onlineVideoModel = model
             onlineVideoNotBefore = 0L
@@ -6844,19 +6854,42 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             onlineVideoResultBudget = resultBudget
             cancelOnlineVideo(clear = true, retainReusable = canRetain)
         }
-        val resources = enhancementCenter.resources.usage.value.resources
-        if (!foreground || playbackBusy(snapshot) || resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2 ||
-            snapshot.phase == AnimePlayerPhase.ERROR || snapshot.ended || owner.localMedia != null) {
-            cancelOnlineVideo(clear = true)
+        val busy = playbackBusy(snapshot)
+        if (!canUseWindow || busy) {
+            // Loading the new position retires the producer. A finished, budgeted window can
+            // wait for the original to resume without running another reader or inference job.
+            val retain = platformKind == PlatformKind.ANDROID && canUseWindow && model != null &&
+                snapshot.phase == AnimePlayerPhase.READY && snapshot.isBuffering && !mutableState.value.resolving &&
+                (snapshot.preparedVideoWindow?.bytes ?: snapshot.preparedVideoRetainedBytes) in 1L..resultBudget
+            if (onlineVideoJob?.isActive == true || snapshot.preparedVideoWindow != null ||
+                !retain && snapshot.preparedVideoRetainedBytes > 0L) {
+                cancelOnlineVideo(clear = true, retainReusable = retain)
+            }
             engine.noteVideoPreparationIssue(when {
                 model == null || owner.localMedia != null || !foreground || snapshot.ended ||
                     snapshot.phase == AnimePlayerPhase.ERROR -> null
                 (resources.thermalPressure ?: 0) >= 2 -> "设备温度较高，暂缓在线增强准备。"
                 resources.memoryPressure == true -> "内存压力较高，暂缓在线增强准备。"
-                playbackBusy(snapshot) -> "优先恢复当前播放，稍后再准备增强片段。"
+                busy -> "优先恢复当前播放，稍后再准备增强片段。"
                 else -> null
             })
             return
+        }
+        val sourceBudget = minOf(ONLINE_ANIME_SOURCE_BYTES, budgets.state.value.prefetchBytes)
+        val width = snapshot.videoWidth
+        val height = snapshot.videoHeight
+        val position = snapshot.positionMs
+        if (platformKind == PlatformKind.ANDROID && model != null && !snapshot.playbackSuppressed &&
+            snapshot.preparedVideoWindow == null && snapshot.preparedVideoRetainedBytes in 1L..resultBudget &&
+            width != null && width > 0 && height != null && height > 0 && sourceBudget > 0L &&
+            windowTarget > 0L && position in 0L until snapshot.durationMs) {
+            val end = position + minOf(windowTarget, snapshot.durationMs - position)
+            val cached = AnimePreparedVideoRequest(owner.asset, timeline.first, timeline.second,
+                position, end, width, height, model, sourceBudget, resultBudget, targetWindowMs = windowTarget)
+            if (engine.restorePreparedVideoAt(cached, position)) {
+                if (onlineVideoJob?.isActive == true) cancelOnlineVideo(clear = false)
+                return
+            }
         }
         if (!snapshot.isPlaying || snapshot.playbackSuppressed) {
             cancelOnlineVideo(clear = false)
@@ -6892,8 +6925,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             engine.noteVideoPreparationIssue("当前片源格式未接通在线预处理，原视频继续播放。")
             return
         }
-        val width = snapshot.videoWidth ?: return
-        val height = snapshot.videoHeight ?: return
+        if (width == null || height == null) return
         val pixels = width.toLong() * height * model.nativeScale * model.nativeScale
         val pixelLimit = if (platformKind == PlatformKind.ANDROID) 2_200_000L else 8_847_360L
         val durationRange = if (platformKind == PlatformKind.ANDROID) 5_000L..15_000L else 1_000L..30_000L
@@ -6906,22 +6938,24 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             return
         }
         val now = monotonicTimeMillis()
-        if (snapshot.preparedVideoWindow?.let { snapshot.positionMs >= it.endMs } == true) engine.discardPreparedVideo()
-        if (now < onlineVideoNotBefore ||
-            snapshot.preparedVideoWindow?.let { it.endMs > snapshot.positionMs + 2_000L } == true) return
+        val existing = snapshot.preparedVideoWindow
+        if (existing != null && position >= existing.endMs) {
+            engine.discardPreparedVideo(retainReusable = platformKind == PlatformKind.ANDROID)
+        }
+        // Android has one completed frame window. Keep its final frames available until played.
+        val replaceAheadMs = if (platformKind == PlatformKind.ANDROID) 0L else 2_000L
+        if (now < onlineVideoNotBefore || existing != null && existing.endMs - position > replaceAheadMs) return
         val lead = (onlineVideoCost * snapshot.speed.toDouble() + 5_000).toLong().coerceAtLeast(5_000L)
         val duration = windowTarget
         val start = snapshot.positionMs + lead
         val end = minOf(start + duration, snapshot.durationMs)
         if (end - start < durationRange.first) return
-        val budgets = enhancementCenter.resources
-        val sourceBudget = minOf(ONLINE_ANIME_SOURCE_BYTES, budgets.state.value.prefetchBytes)
         if (sourceBudget < 1024L * 1024) {
             engine.noteVideoPreparationIssue("共享原片预读预算不足，暂缓增强窗口准备。")
             return
         }
         val request = AnimePreparedVideoRequest(owner.asset, timeline.first, timeline.second, start, end, width, height, model,
-            sourceBudget, resultBudget)
+            sourceBudget, resultBudget, targetWindowMs = windowTarget)
         val release = budgets.tryAcquireEnhancement(priority = 1, estimatedBytes = 160L * 1024 * 1024,
             sharedRealtimeOwner = "anime-player") ?: run {
             engine.noteVideoPreparationIssue("等待增强处理资源，当前原视频继续播放。")
@@ -6985,8 +7019,15 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val effect = snapshot.videoEnhancement
         val observation = effect.observation
         val preparedWindow = snapshot.preparedVideoWindow
-        val usingPrepared = snapshot.isPlaying && preparedWindow != null && preparedWindow.framesUsed > 0 &&
-            monotonicTimeMillis() - preparedWindow.lastUsedAt in 0L..1_000L
+        val flowing = snapshot.isPlaying && !snapshot.playbackSuppressed &&
+            snapshot.hasVideoTracks != false && snapshot.firstFrameRendered != false
+        val now = monotonicTimeMillis()
+        val usingPrepared = flowing && preparedWindow != null && preparedWindow.framesUsed > 0 &&
+            now - preparedWindow.lastUsedAt in 0L..1_000L
+        val processingPicture = flowing && effect.phase == AnimeVideoEnhancementPhase.ACTIVE &&
+            observation?.recentlySubmitting == true && observation.lastSubmittedAtMillis?.let {
+                now - it in 0L until ANIME_ENHANCED_FRAME_FRESH_MS
+            } == true
         val model = if (usingPrepared) preparedWindow?.modelName else if (snapshot.preEnhanced) "离线增强版本"
         else effect.modelName ?: when (effect.mode) {
             dev.mangaflow.anime.player.AnimeVideoEnhancementMode.OFF -> null
@@ -7005,10 +7046,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             reason = when {
                 usingPrepared -> "正在复用同一原始帧的预处理结果"
                 snapshot.preEnhanced -> "正在使用已完成并校验的增强版本"
+                effect.phase == AnimeVideoEnhancementPhase.FAILED || effect.phase == AnimeVideoEnhancementPhase.UNAVAILABLE ->
+                    effect.detail ?: adjustment
                 snapshot.enhancementProtection != null -> snapshot.enhancementProtection.description
+                processingPicture -> effect.detail ?: "实时增强正在处理当前画面"
+                effect.detail != null -> effect.detail
                 preparedWindow != null -> "预处理帧已缓存，按原视频时间与画面匹配"
                 snapshot.preparedVideoIssue != null -> "本次在线预处理未完成 · ${snapshot.preparedVideoIssue}"
-                else -> effect.detail ?: adjustment
+                else -> adjustment
             },
             gpuSampleSequence = observation?.gpuSampleSequence, gpuExecutionNanos = observation?.gpuExecutionNanos,
             gpuSubmittedAtNanos = observation?.gpuSubmittedAtNanos,

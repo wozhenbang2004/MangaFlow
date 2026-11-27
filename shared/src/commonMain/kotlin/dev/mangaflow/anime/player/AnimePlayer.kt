@@ -63,6 +63,8 @@ data class AnimePreparedVideoRequest(
     val model: EngineModel,
     val maximumSourceBytes: Long,
     val maximumResultBytes: Long,
+    /** The configured window before clipping the final interval to the episode duration. */
+    val targetWindowMs: Long = endMs - startMs,
 )
 
 data class AnimePreparedVideoWindow(
@@ -79,17 +81,27 @@ data class AnimePreparedVideoWindow(
     val usageIsSampled: Boolean = false,
 )
 
-/** Reuse only a still-useful window from this exact media/model/timeline and preparation budget. */
+private fun AnimePreparedVideoRequest.sameWindowInputs(previous: AnimePreparedVideoRequest): Boolean =
+    asset == previous.asset && sessionGeneration == previous.sessionGeneration && model == previous.model &&
+        width == previous.width && height == previous.height && targetWindowMs == previous.targetWindowMs &&
+        maximumSourceBytes == previous.maximumSourceBytes && maximumResultBytes == previous.maximumResultBytes
+
+/** In-flight work and speculative forward reuse belong to one timeline. */
 internal fun AnimePreparedVideoRequest.canReuse(
     previous: AnimePreparedVideoRequest,
     window: AnimePreparedVideoWindow,
     positionMs: Long,
-): Boolean = asset == previous.asset && sessionGeneration == previous.sessionGeneration &&
-    timelineGeneration == previous.timelineGeneration && model == previous.model &&
-    width == previous.width && height == previous.height &&
-    endMs - startMs == previous.endMs - previous.startMs &&
-    maximumSourceBytes == previous.maximumSourceBytes && maximumResultBytes == previous.maximumResultBytes &&
-    window.bytes in 1L..maximumResultBytes && window.endMs > maxOf(positionMs, startMs) && window.startMs < endMs
+): Boolean = sameWindowInputs(previous) && timelineGeneration == previous.timelineGeneration &&
+    endMs - startMs == previous.endMs - previous.startMs && window.bytes in 1L..maximumResultBytes &&
+    window.endMs > maxOf(positionMs, startMs) && window.startMs < endMs
+
+/** Only completed frames covering this playhead can be rebound after a seek. */
+internal fun AnimePreparedVideoRequest.canRestoreAt(
+    previous: AnimePreparedVideoRequest,
+    window: AnimePreparedVideoWindow,
+    positionMs: Long,
+): Boolean = sameWindowInputs(previous) && timelineGeneration >= previous.timelineGeneration &&
+    window.frames > 0 && window.bytes in 1L..maximumResultBytes && positionMs in window.startMs until window.endMs
 
 enum class AnimePlayerPhase { IDLE, OPENING, READY, ENDED, ERROR, RELEASED }
 
@@ -125,6 +137,11 @@ data class AnimeRealtimeMotionState(
     val targetFps: Double? = null,
     /** Interpolated PTS matched by the final video-output release callback; not physical Present. */
     val outputInterpolatedFrames: Long? = null,
+)
+
+internal fun AnimeRealtimeMotionState.withoutTimelineSamples(): AnimeRealtimeMotionState = copy(
+    synthesizedFrames = 0L, graphFps = null, generationFps = null, inferenceNanos = null,
+    inputWidth = null, inputHeight = null, targetFps = null, outputInterpolatedFrames = null,
 )
 
 /** mpv property observations; filter throughput and delayed-frame estimates are not display presentation. */
@@ -284,6 +301,8 @@ interface AnimePlayer {
         false
     fun discardStartup(asset: AnimePlaybackAsset? = null) {}
     suspend fun prepareVideoWindow(request: AnimePreparedVideoRequest): Boolean = false
+    /** Player-thread, cache-only handoff. A hit installs a consumer and starts its frame-use count at zero. */
+    fun restorePreparedVideoAt(request: AnimePreparedVideoRequest, positionMs: Long): Boolean = false
     fun noteVideoPreparationIssue(detail: String?) {}
     fun discardPreparedVideo(retainReusable: Boolean = false) {}
     fun open(request: AnimePlayerRequest)
@@ -417,12 +436,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         if (current.phase == AnimePlayerPhase.ERROR) {
             request?.let { openNow(it.copy(positionMs = current.positionMs, playWhenReady = true), sameSession = true) }
         } else if (current.phase == AnimePlayerPhase.ENDED) {
-            mutableState.value = current.copy(phase = AnimePlayerPhase.READY, positionMs = 0L, playWhenReady = true,
-                timelineGeneration = current.timelineGeneration + 1,
-                bufferedMs = -1L, bufferMetrics = null, nativeVideoStatistics = null,
-                sourceFps = null, decoderOutputFrames = null, droppedFrames = null,
-                presentedFps = null, presentedFrames = null, frameMetrics = null,
-                videoEnhancement = current.videoEnhancement.copy(observation = null))
+            beginPlaybackSeek(0L, playWhenReady = true)
             seekNative(0L)
             setPlayingNative(true)
         } else if (request != null) {
@@ -438,19 +452,26 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
 
     final override fun seekTo(positionMs: Long) = command {
         if (request == null) return@command
-        val current = mutableState.value
-        val target = if (current.durationMs > 0) positionMs.coerceIn(0L, current.durationMs)
-            else positionMs.coerceAtLeast(0L)
+        val duration = state.value.durationMs
+        val target = if (duration > 0L) positionMs.coerceIn(0L, duration) else positionMs.coerceAtLeast(0L)
+        beginPlaybackSeek(target)
+        seekNative(target)
+    }
+
+    /** Application and native media controls start the same timeline before consuming its frames. */
+    protected fun beginPlaybackSeek(positionMs: Long, playWhenReady: Boolean = state.value.playWhenReady) {
+        val current = state.value
         mutableState.value = current.copy(
-            positionMs = target,
+            positionMs = positionMs, playWhenReady = playWhenReady,
             timelineGeneration = current.timelineGeneration + 1,
             bufferedMs = -1L, bufferMetrics = null, nativeVideoStatistics = null,
             sourceFps = null, decoderOutputFrames = null, droppedFrames = null,
             presentedFps = null, presentedFrames = null, frameMetrics = null,
+            preparedVideoWindow = null, preparedVideoIssue = null,
             videoEnhancement = current.videoEnhancement.copy(observation = null),
+            realtimeMotion = current.realtimeMotion?.withoutTimelineSamples(),
             phase = if (current.ended) AnimePlayerPhase.READY else current.phase,
         )
-        seekNative(target)
     }
 
     final override fun setSpeed(speed: Float) = command(fatal = false) {
