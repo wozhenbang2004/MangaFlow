@@ -109,11 +109,13 @@ internal suspend fun prepareAndroidAnimeWindow(
     try {
         suspend fun captureWindow(session: OrtSession?, cuganSession: AndroidCuganSession?) {
             val upstream = OkHttpDataSource.Factory(client)
-            val cache = animeCacheDataSource(asset, owner, upstream)
+            // A speculative export may fill a bounded range, but its open-ended MP4 reads
+            // must not lock the remainder of the file and send playback around the cache.
+            val cache = owner.playbackDataSource(asset, upstream, speculative = true)
             val read = AtomicLong(0L)
             val data = DataSource.Factory {
                 // HLS playlists/keys stay on their live network path; only progressive MP4 uses the media cache here.
-                val delegate = if (mimeType == MimeTypes.VIDEO_MP4 && owner.targetBytes > 0)
+                val delegate = if (mimeType == MimeTypes.VIDEO_MP4)
                     cache.createDataSource() else upstream.createDataSource()
                 object : DataSource by delegate {
                     override fun open(dataSpec: DataSpec): Long {

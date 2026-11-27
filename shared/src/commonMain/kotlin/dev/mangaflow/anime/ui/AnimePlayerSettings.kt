@@ -148,6 +148,7 @@ internal fun AnimePlayerSettings(
     var showVideoInfo by remember(currentMedia?.assetKey) { mutableStateOf(false) }
     val episode = target?.episode ?: state.detail?.episodes?.firstOrNull { it.id == state.selectedEpisodeId }
     val enhancementSessionKey = currentMedia?.let(::animeEnhancementSessionKey)
+    val protection = currentMedia?.currentEnhancementProtection()
     val enhancementSavedState = rememberSaveableStateHolder()
     val enhancementStateKey = "anime-enhancement:${enhancementSessionKey ?: "defaults"}"
     DisposableEffect(enhancementStateKey) {
@@ -308,6 +309,12 @@ internal fun AnimePlayerSettings(
                                     onDismiss()
                                 }
                             }
+                            if (protection != null) item(key = "active-enhancement-protection") {
+                                AnimePlayerSettingLink(protection.symbol, protection.actionLabel, protection.reasonLabel) {
+                                    show(AnimePlayerPanel.VIDEO)
+                                    if (!protection.picture) navigateEnhancement(EnhancementPage.FRAME)
+                                }
+                            }
                             if (split) item {
                                 SettingsToggle("本次显示播放读数", readingsVisible, Icons.Outlined.QueryStats,
                                     onCheckedChange = onReadingsVisible)
@@ -381,7 +388,7 @@ internal fun AnimePlayerSettings(
                                     })
                             }
                             item { AnimePlayerSettingsSection("画质与读数") }
-                            item { AnimePlayerSettingLink(Icons.Outlined.AutoAwesome, "画质增强与补帧", "") {
+                            item { AnimePlayerSettingLink(Icons.Outlined.AutoAwesome, "画质增强与补帧", protection?.reasonLabel.orEmpty()) {
                                 show(AnimePlayerPanel.VIDEO)
                             } }
                             item { SettingsToggle("本次显示播放读数", readingsVisible, Icons.Outlined.QueryStats,
@@ -400,6 +407,19 @@ internal fun AnimePlayerSettings(
                             } }
                         }
                         AnimePlayerPanel.VIDEO -> {
+                            if (protection != null && (enhancementPage == EnhancementPage.STATUS ||
+                                    enhancementPage == EnhancementPage.QUALITY && protection.picture ||
+                                    enhancementPage == EnhancementPage.FRAME && protection.motion)) {
+                                item(key = "enhancement-protection-reason") {
+                                    Row(Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                        Icon(protection.symbol, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.primary)
+                                        Text(protection.reasonLabel + " · " + protection.actionLabel,
+                                            style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+                            }
                             item(key = "enhancement-center") {
                                 enhancementSavedState.SaveableStateProvider(enhancementStateKey) {
                                     EnhancementSettingsContent(EnhancementContent.ANIME,
@@ -685,7 +705,9 @@ internal fun AnimePlayerSettings(
                                     emptyHint = "自动 · ${preparationBudget.forwardBytes / (1024L * 1024L)}") }
                                 item { AnimeTextField(backDraft, { backDraft = it; error = null }, "回看缓冲容量（MiB）",
                                     emptyHint = "自动 · ${preparationBudget.backBytes / (1024L * 1024L)}") }
-                                item { AnimeQuietLabel("容量清空使用自动值。支持的参数会直接更新当前播放；内核限制显示在本集诊断中。") }
+                                item { AnimeQuietLabel(if (platformKind == PlatformKind.ANDROID)
+                                    "回看容量会换算为保留时长，下次打开视频时生效。容量留空使用自动值。"
+                                else "容量留空使用自动值。支持的参数会直接更新当前播放，内核限制见本集诊断。") }
                             } else item { AnimeQuietLabel("当前内核自行管理缓冲，可调整单线路重试次数。") }
                             item { AnimeTextField(retryDraft, { retryDraft = it; error = null }, "单线路重试次数，0 关闭自动恢复") }
                             item { MotionButton(onClick = {

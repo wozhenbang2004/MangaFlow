@@ -134,7 +134,8 @@ internal class AndroidAnimePlayer(
     private var lastPlaybackError: PlaybackException? = null
     private var preparedMedia: MediaSource? = null
     private data class RemoteMediaPlan(
-        val type: Int, val cacheWasEnabled: Boolean, val createSource: (Int, Boolean) -> MediaSource,
+        val type: Int, val cacheReadable: Boolean, val canRetryCorrectedFile: Boolean = false,
+        val createSource: (Int, Boolean) -> MediaSource,
     )
     private class RemoteMediaResources(
         val plan: RemoteMediaPlan,
@@ -240,6 +241,8 @@ internal class AndroidAnimePlayer(
     private var bufferingEnd = 0L
     private val rebufferProgress = AnimeRebufferProgress()
     private var playedTimeline: Long? = null
+    // A seek that Media3 acknowledged on this previously rendered item may still be waiting for its first new sample.
+    private var rewindAwaitingOutput: Long? = null
     private var bufferingTimedOut = false
     private var nativeFrameWaitSince: Long? = null
     private val videoHosts = mutableSetOf<Any>()
@@ -470,7 +473,8 @@ internal class AndroidAnimePlayer(
                 val timeLeft = (validUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
                 val result = withTimeoutOrNull(timeLeft) { ready.await() } == true
                 if (!result || startup !== owner || exo.playerError != null ||
-                    state.value.isBuffering || !foreground || !sameStartupConfiguration(options, preparedOptions))
+                    state.value.isBuffering || !foreground || !sameStartupConfiguration(options, preparedOptions) ||
+                    loadControls[exo]?.hasCompatibleBackBuffer(options) != true)
                     return@withContext false
                 retained = true
                 startupExpiry = playerScope.launch(Dispatchers.Main.immediate) {
@@ -516,19 +520,22 @@ internal class AndroidAnimePlayer(
     private fun isSameStartupAsset(left: AnimePlaybackAsset, right: AnimePlaybackAsset): Boolean =
         left.copy(title = "", resolutions = emptyList()) == right.copy(title = "", resolutions = emptyList())
 
-    // The parked decoder uses no interpolation effect. Its eventual active session
-    // gets a new intent token even when the actual viewing options are unchanged.
+    // A parked decoder receives fresh session/reporting fields on promotion. Its
+    // fixed Media3 rewind window is compared separately against the actual engine.
     private fun sameStartupConfiguration(left: AnimePlayerOptions, right: AnimePlayerOptions): Boolean =
         left.copy(bufferMinMs = right.bufferMinMs, bufferMaxMs = right.bufferMaxMs,
             bufferStartMs = right.bufferStartMs, bufferRebufferMs = right.bufferRebufferMs,
             bufferForwardBytes = right.bufferForwardBytes, bufferBackBytes = right.bufferBackBytes,
             bufferRefillNearTarget = right.bufferRefillNearTarget,
-            realtimeMotionIntent = right.realtimeMotionIntent) == right
+            realtimeMotionIntent = right.realtimeMotionIntent,
+            enhancementSessionGeneration = right.enhancementSessionGeneration,
+            enhancementProtection = right.enhancementProtection) == right
 
     private fun takeStartup(request: AnimePlayerRequest): Startup? {
         val owner = startup
         if (owner == null || !owner.firstFrame || owner.positionMs != request.positionMs ||
             request.bypassMediaCache || request.localMedia != null || !sameStartupConfiguration(options, owner.options) ||
+            loadControls[owner.player]?.hasCompatibleBackBuffer(options) != true ||
             !isSameStartupAsset(owner.asset, request.asset) || owner.player.playerError != null ||
             owner.player.playbackState != Player.STATE_READY || owner.player.currentPosition != request.positionMs ||
             owner.validUntil <= SystemClock.elapsedRealtime() ||
@@ -651,10 +658,8 @@ internal class AndroidAnimePlayer(
             fun gated(source: DataSource): DataSource = gate?.wrap(source) ?: source
             val upstream = DataSource.Factory { gated(nativeUpstream.createDataSource()) }
             val cacheFactory = cacheOwner?.let { owner ->
-                val cached = animeCacheDataSource(asset, owner, nativeUpstream)
-                DataSource.Factory {
-                    gated(if (owner.targetBytes > 0L) cached.createDataSource() else nativeUpstream.createDataSource())
-                }
+                val cached = owner.playbackDataSource(asset, nativeUpstream)
+                DataSource.Factory { gated(cached.createDataSource()) }
             } ?: upstream
             val subtitleParser = DefaultSubtitleParserFactory()
             val subtitles = mutableListOf<() -> MediaSource>()
@@ -678,7 +683,7 @@ internal class AndroidAnimePlayer(
                 }
             }
             val contentType = inferAnimeMediaContentType(Uri.parse(asset.url), asset.mimeType)
-            val plan = RemoteMediaPlan(contentType, (cacheOwner?.targetBytes ?: 0L) > 0L) { type, bypassProgressiveCache ->
+            val plan = RemoteMediaPlan(contentType, cacheOwner != null) { type, bypassProgressiveCache ->
                 val mime = when (type) {
                     C.CONTENT_TYPE_HLS -> MimeTypes.APPLICATION_M3U8
                     C.CONTENT_TYPE_DASH -> MimeTypes.APPLICATION_MPD
@@ -798,6 +803,7 @@ internal class AndroidAnimePlayer(
         val releases = AtomicLong(0L)
         val lastPresentationTimeUs = AtomicLong(C.TIME_UNSET)
         outputFrameReleases = releases
+        rewindAwaitingOutput = null
         frameWindow.reset()
         visibleWatchSample = null
         resetBufferingObservation()
@@ -829,8 +835,18 @@ internal class AndroidAnimePlayer(
             ) {
                 if (isCurrent(generation) && engine.value === exo) {
                     visibleWatchSample = null
-                    playedTimeline = null
-                    rebufferProgress.reset()
+                    val sameItem = oldPosition.mediaItem != null && oldPosition.mediaItem == newPosition.mediaItem &&
+                        oldPosition.mediaItemIndex == newPosition.mediaItemIndex
+                    rewindAwaitingOutput = when {
+                        !sameItem || localLease != null || oldPosition.adGroupIndex != C.INDEX_UNSET ||
+                            newPosition.adGroupIndex != C.INDEX_UNSET -> null
+                        reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT -> rewindAwaitingOutput
+                        reason == Player.DISCONTINUITY_REASON_SEEK && newPosition.positionMs in 0L until oldPosition.positionMs &&
+                            exo.isCurrentMediaItemSeekable && !exo.isCurrentMediaItemLive && state.value.firstFrameRendered == true ->
+                            state.value.timelineGeneration
+                        else -> null
+                    }
+                    resetBufferingObservation()
                     clearLiveEnhancement()
                 }
             }
@@ -889,6 +905,7 @@ internal class AndroidAnimePlayer(
     private fun prepareOnEngine(generation: Long, exo: ExoPlayer, media: MediaSource) {
         // A new or retried source emits synchronous callbacks before its playback intent is applied.
         reportingEngine = null
+        rewindAwaitingOutput = null
         applyVideoEnhancement(generation, exo)
         exo.setMediaSource(media, state.value.positionMs)
         configureActiveMedia(exo)
@@ -1494,20 +1511,23 @@ internal class AndroidAnimePlayer(
         val bytes = receivedBytes.get()
         val position = exo.currentPosition
         val end = exo.bufferedPosition
+        val timeline = state.value.timelineGeneration
+        val seekingBack = rewindAwaitingOutput == timeline
         val since = bufferingSince
         if (since == null) {
             bufferingSince = now
             bufferingProgressAt = now
-        } else if (bytes > bufferingBytes || end > bufferingEnd || position != bufferingPosition) {
+        } else if (end > bufferingEnd || position > bufferingPosition ||
+            !seekingBack && (position != bufferingPosition || bytes > bufferingBytes)) {
             bufferingProgressAt = now
         }
         bufferingBytes = bytes
-        bufferingPosition = position
-        bufferingEnd = end
+        // A trickling HTTP response or a jittering buffer boundary cannot revive a stalled rewind.
+        bufferingPosition = if (seekingBack && since != null) maxOf(bufferingPosition, position) else position
+        bufferingEnd = if (seekingBack && since != null) maxOf(bufferingEnd, end) else end
         val startup = state.value.firstFrameRendered == false && state.value.hasVideoTracks != false && !nativeVideoOnly
         val noProgressLimit = if (startup) 12_000L else 30_000L
-        val timeline = state.value.timelineGeneration
-        val playableStalled = !startup && playedTimeline == timeline &&
+        val playableStalled = !startup && (playedTimeline == timeline || seekingBack) &&
             rebufferProgress.stalled(now, timeline, position, end, 12_000L)
         if (since == null) return
         val stalledStartup = startup && now - since >= 10_000L && hasStartupAlternative()
@@ -1517,6 +1537,8 @@ internal class AndroidAnimePlayer(
         stopStalledPlayback(generation, exo, when {
             stalledStartup -> "这条线路起播缓冲超过 10 秒，正在尝试本集备用线路"
             stalledPlayback -> "当前线路的播放和缓冲已停滞，可切换本集备用线路"
+            seekingBack && now - bufferingProgressAt >= noProgressLimit ->
+                "回看位置已 ${noProgressLimit / 1_000L} 秒没有可播进展，请重试本集或切换线路"
             now - bufferingProgressAt >= noProgressLimit ->
                 "这条线路已 ${(noProgressLimit / 1_000L)} 秒没有收到新数据或缓冲进展，请重试或换个来源"
             else -> "这条线路持续缓冲超过 2 分钟，暂未达到起播条件，请重试或换个来源"
@@ -1589,7 +1611,10 @@ internal class AndroidAnimePlayer(
         if (sampleWatchTime && localLease == null && exo.isPlaying && (foreground || snapshot.inPictureInPicture)) {
             // A retained first-frame flag can predate a seek. Arm only on output from this timeline.
             val audioAdvanced = snapshot.hasVideoTracks == false && exo.audioFormat != null && position > snapshot.positionMs
-            if (watchDelta > 0L || audioAdvanced) playedTimeline = snapshot.timelineGeneration
+            if (watchDelta > 0L || audioAdvanced) {
+                playedTimeline = snapshot.timelineGeneration
+                rewindAwaitingOutput = null
+            }
         }
         val enhancementActive = lastEnhancementSubmissionAt?.let { now - it < ANIME_ENHANCED_FRAME_FRESH_MS } == true &&
             canReportLiveEnhancement(exo)
@@ -1791,26 +1816,31 @@ internal class AndroidAnimePlayer(
     }
 
     private fun inspectAfterParserFailure(generation: Long, exo: ExoPlayer, error: PlaybackException): Boolean {
-        if (inspectedAfterParserError || state.value.firstFrameRendered == true ||
-            !isStartupFormatError(error)) return false
+        if (state.value.firstFrameRendered == true || !isStartupFormatError(error)) return false
         val plan = remoteMediaPlan ?: return false
+        val retryCorrectedFile = inspectedAfterParserError && plan.canRetryCorrectedFile
+        if (inspectedAfterParserError && !retryCorrectedFile) return false
         val client = http ?: return false
         val url = request?.asset?.url ?: return false
         inspectedAfterParserError = true
+        if (retryCorrectedFile) remoteMediaPlan = plan.copy(canRetryCorrectedFile = false)
         recovery?.cancel()
-        recoveryNotice = "正在确认线路实际返回的媒体格式"
+        recoveryNotice = if (retryCorrectedFile) "正在重新读取视频文件" else "正在确认线路实际返回的媒体格式"
         publish(generation) { it.copy(phase = AnimePlayerPhase.OPENING, isBuffering = true, error = null, notice = recoveryNotice) }
         recovery = playerScope.launch(Dispatchers.Main) {
             try {
-                val result = inspectAnimeRemoteMedia(client, url)
+                // A wrong HLS/DASH label alone says nothing about a cached video file. Try the
+                // corrected source with replay first. If that parser also fails, bypass once.
+                val result = if (retryCorrectedFile) null else inspectAnimeRemoteMedia(client, url)
                 if (!isCurrent(generation) || engine.value !== exo) return@launch
-                val detected = result?.mediaType
-                val retryUncachedFile = detected == C.CONTENT_TYPE_OTHER && plan.cacheWasEnabled
+                val detected = if (retryCorrectedFile) C.CONTENT_TYPE_OTHER else result?.mediaType
+                val retryUncachedFile = detected == C.CONTENT_TYPE_OTHER && detected == plan.type && plan.cacheReadable
                 publish(generation) { state -> state.copy(notice = state.notice.takeUnless { it == recoveryNotice }) }
                 recoveryNotice = null
                 if (detected != null && (detected != plan.type || retryUncachedFile)) {
                     val media = plan.createSource(detected, retryUncachedFile)
-                    remoteMediaPlan = plan.copy(type = detected)
+                    remoteMediaPlan = plan.copy(type = detected, canRetryCorrectedFile =
+                        detected == C.CONTENT_TYPE_OTHER && detected != plan.type && plan.cacheReadable)
                     preparedMedia = media
                     resetBufferingObservation()
                     nativeFrameWaitSince = null
@@ -1908,8 +1938,9 @@ internal class AndroidAnimePlayer(
     override fun configureNative(previous: AnimePlayerOptions, next: AnimePlayerOptions) {
         if (next.bufferForwardBytes in 1L until Runtime.getRuntime().maxMemory())
             lastAcceptedForwardBytes = next.bufferForwardBytes
-        startup?.takeIf { sameStartupConfiguration(it.options, next) }?.player?.let { warm ->
-            loadControls[warm]?.update(next)
+        startup?.takeIf { sameStartupConfiguration(it.options, next) }?.let { warm ->
+            val control = loadControls[warm.player]
+            if (control?.hasCompatibleBackBuffer(next) == true) control.update(next)
         }
         engine.value?.let { exo ->
             loadControls[exo]?.let { control ->
@@ -1935,9 +1966,12 @@ internal class AndroidAnimePlayer(
     override fun setForegroundNative(foreground: Boolean, backgroundAudio: Boolean) {
         if (!foreground) visibleWatchSample = null
         if (!foreground && !state.value.inPictureInPicture) frameWindow.reset()
-        resetBufferingObservation()
-        nativeFrameWaitSince = null
-        if (!foreground) clearLiveEnhancement()
+        // Configuring buffer or enhancement options also reapplies foreground policy. Keep the live wait in that case.
+        if (!foreground) {
+            resetBufferingObservation()
+            nativeFrameWaitSince = null
+            clearLiveEnhancement()
+        }
         val exo = engine.value ?: return
         if (!foreground && !state.value.inPictureInPicture && (motionLoading != null || motionModel != null)) {
             clearRealtimeMotion()

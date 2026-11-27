@@ -178,6 +178,9 @@ data class AnimePlayerOptions(
     val realtimeMotionIntent: Long = 0L,
     /** A manual 2× choice may run a desktop shader even at the source's display size. */
     val enhanceAtNativeSize: Boolean = false,
+    /** Display evidence belongs to this media session. A next-episode configure can precede open. */
+    val enhancementSessionGeneration: Long? = null,
+    val enhancementProtection: AnimeEnhancementProtection? = null,
 ) {
     /** A small refill band preserves the saved low/high watermarks and bounds request churn. */
     val effectiveBufferRefillMs: Int get() = if (!bufferRefillNearTarget) bufferMinMs else
@@ -261,6 +264,9 @@ data class AnimePlayerState(
     val visibleWatchMillis: Long? = null,
     /** Cumulative upstream bytes for this online media session. Local cache hits are excluded. */
     val receivedNetworkBytes: Long? = null,
+    /** Policy actually sent to this session, independent of optional diagnostics and render receipts. */
+    val enhancementProtection: AnimeEnhancementProtection? = null,
+    val enhancementIntent: Long = 0L,
 ) {
     val ended: Boolean get() = phase == AnimePlayerPhase.ENDED
     val isPlaying: Boolean get() = phase == AnimePlayerPhase.READY && playWhenReady && !isBuffering
@@ -344,6 +350,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
                     mutableState.value = mutableState.value.copy(
                         sessionGeneration = mutableState.value.sessionGeneration + 1,
                         phase = AnimePlayerPhase.RELEASED, playWhenReady = false, isBuffering = false,
+                        enhancementProtection = null, enhancementIntent = 0L,
                         videoEnhancement = AnimeVideoEnhancementState(options.videoEnhancement),
                     )
                 }
@@ -366,8 +373,10 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         onPlaybackEnding(next)
         releaseNative()
         request = next
+        val session = previous.sessionGeneration + if (sameSession) 0 else 1
+        val viewing = options.takeIf { it.enhancementSessionGeneration == session }
         mutableState.value = AnimePlayerState(
-            sessionGeneration = previous.sessionGeneration + if (sameSession) 0 else 1,
+            sessionGeneration = session,
             timelineGeneration = previous.timelineGeneration + 1,
             assetKey = next.asset.id,
             episodeId = next.asset.episodeId, phase = AnimePlayerPhase.OPENING,
@@ -379,6 +388,8 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
             videoScale = previous.videoScale, volume = previous.volume,
             inPictureInPicture = previous.inPictureInPicture,
             preEnhanced = next.localMedia?.enhancedVersion == true,
+            enhancementProtection = viewing?.enhancementProtection.takeUnless { next.localMedia?.enhancedVersion == true },
+            enhancementIntent = viewing?.realtimeMotionIntent ?: 0L,
             videoEnhancement = AnimeVideoEnhancementState(options.videoEnhancement,
                 if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF) AnimeVideoEnhancementPhase.OFF
                 else AnimeVideoEnhancementPhase.WAITING),
@@ -453,6 +464,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         options.requireValid()
         command(fatal = false) {
             val previous = this.options
+            val protection = applicableProtection(previous, options, mutableState.value)
             this.options = options
             if (previous.videoEnhancement != options.videoEnhancement || previous.enhancementScale != options.enhancementScale ||
                 previous.enhancementModel != options.enhancementModel || previous.realtimeFrames != options.realtimeFrames ||
@@ -468,7 +480,35 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
                 ))
             }
             configureNative(previous, options)
+            val live = mutableState.value
+            if (request != null && options.enhancementSessionGeneration == live.sessionGeneration &&
+                live.phase != AnimePlayerPhase.ERROR && live.phase != AnimePlayerPhase.RELEASED) {
+                if (live.enhancementProtection != protection || live.enhancementIntent != options.realtimeMotionIntent)
+                    mutableState.value = live.copy(enhancementProtection = protection, enhancementIntent = options.realtimeMotionIntent)
+            }
             applyForegroundPolicy()
+        }
+    }
+
+    /** Keep an existing renderer failure distinct from a resource gate, including later samples
+     * taken after the gate has detached that renderer and cleared its native status. */
+    private fun applicableProtection(previous: AnimePlayerOptions, next: AnimePlayerOptions,
+        live: AnimePlayerState): AnimeEnhancementProtection? {
+        val wanted = next.enhancementProtection ?: return null
+        if (live.preEnhanced || live.hasVideoTracks == false || live.videoEnhancement.renderedOriginalFallback) return null
+        if (previous.enhancementSessionGeneration != live.sessionGeneration ||
+            previous.realtimeMotionIntent != next.realtimeMotionIntent) return wanted
+        val previousGate = previous.enhancementProtection?.takeUnless { it.cause == AnimeEnhancementProtectionCause.GPU_BUDGET }
+        fun eligible(phase: AnimeVideoEnhancementPhase?) =
+            phase != AnimeVideoEnhancementPhase.UNAVAILABLE && phase != AnimeVideoEnhancementPhase.FAILED
+        val picture = wanted.picture && if (previousGate?.picture == true) live.enhancementProtection?.picture == true
+            else eligible(live.videoEnhancement.phase)
+        val motion = wanted.motion && if (previousGate?.motion == true) live.enhancementProtection?.motion == true
+            else eligible(live.realtimeMotion?.phase)
+        return when {
+            picture == wanted.picture && motion == wanted.motion -> wanted
+            picture || motion -> wanted.copy(picture = picture, motion = motion)
+            else -> null
         }
     }
 
@@ -554,6 +594,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
             mutableState.value = mutableState.value.copy(
                 sessionGeneration = mutableState.value.sessionGeneration + 1,
                 phase = AnimePlayerPhase.RELEASED, playWhenReady = false, isBuffering = false,
+                enhancementProtection = null, enhancementIntent = 0L,
                 videoEnhancement = AnimeVideoEnhancementState(options.videoEnhancement),
             )
             playerScope.cancel()
@@ -571,6 +612,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         refreshSourceOnStartupFailure: Boolean = false) {
         publish(generation) {
             it.copy(phase = AnimePlayerPhase.ERROR, isBuffering = false, error = readablePlayerError(failure),
+                enhancementProtection = null,
                 sourceRecoveryAllowed = sourceRecoveryAllowed, refreshSourceOnStartupFailure = refreshSourceOnStartupFailure)
         }
     }

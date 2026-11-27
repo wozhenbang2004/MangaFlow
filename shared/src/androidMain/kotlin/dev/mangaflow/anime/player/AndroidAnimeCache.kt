@@ -3,9 +3,15 @@
 package dev.mangaflow.anime.player
 
 import android.content.Context
+import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.TransferListener
 import androidx.media3.datasource.cache.Cache
+import androidx.media3.datasource.cache.CacheDataSink
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheEvictor
 import androidx.media3.datasource.cache.CacheSpan
 import androidx.media3.datasource.cache.ContentMetadataMutations
@@ -34,10 +40,11 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
     private val keyRevisions = mutableMapOf<String, Long>()
     private val metadata = mutableMapOf<String, AssetMetadata>()
     private val store = StorageCacheStore.get(context)
-    private val evictor = AdjustableAnimeEvictor(canTrim = { key -> !protected(key) }) { key ->
+    private val evictor = AdjustableAnimeEvictor(canTrim = { key -> !protected(key) }) { key, sizeChanged ->
         keyRevisions[key] = revision.incrementAndGet()
         accessed.set(wallTimeMillis())
-        store.cacheWorkFinished()
+        // A replay touch updates LRU and the cleanup token without scheduling a size sweep.
+        if (sizeChanged) store.cacheWorkFinished()
     }
     val cache = SimpleCache(
         File(context.cacheDir, "anime-stream-v1"), evictor, StandaloneDatabaseProvider(context),
@@ -67,6 +74,27 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
             }
         }
     }
+
+    /** Keep cached ranges readable when writes pause. Speculative readers may write short, exact ranges only. */
+    fun playbackDataSource(asset: AnimePlaybackAsset, upstream: DataSource.Factory,
+        speculative: Boolean = false): DataSource.Factory {
+        val writer = animeCacheDataSource(asset, this, upstream)
+            .setCacheWriteDataSinkFactory(CacheDataSink.Factory().setCache(cache)
+                .setFragmentSize(REPLAY_FRAGMENT_BYTES))
+        val reader = readOnlyDataSource(asset, upstream)
+        return DataSource.Factory {
+            ReplayingAnimeDataSource(writer.createDataSource(), reader.createDataSource()) { spec ->
+                targetBytes > 0L && (!speculative || spec.length in 1L..REPLAY_FRAGMENT_BYTES)
+            }
+        }
+    }
+
+    /** Optional processing can consume originals without holding the player's future write range. */
+    private fun readOnlyDataSource(asset: AnimePlaybackAsset, upstream: DataSource.Factory): CacheDataSource.Factory =
+        CacheDataSource.Factory().setCache(cache).setUpstreamDataSourceFactory(upstream)
+            .setCacheKeyFactory { spec -> animeCacheKey(asset, spec.uri) }
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+            .setCacheWriteDataSinkFactory(null)
 
     /** The key stays opaque. Native metadata stores object labels, never URLs or headers. */
     fun register(asset: AnimePlaybackAsset, key: String): String = synchronized(cache) {
@@ -161,6 +189,7 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
         val sourceId: String, val subjectTitle: String, val episodeTitle: String)
 
     companion object {
+        private const val REPLAY_FRAGMENT_BYTES = 2L * 1024 * 1024
         private const val META_ASSET = "custom_mangaflow_asset"
         private const val META_SUBJECT = "custom_mangaflow_subject"
         private const val META_EPISODE = "custom_mangaflow_episode"
@@ -173,8 +202,46 @@ internal class AndroidAnimeCache private constructor(context: Context) : AnimeDi
     }
 }
 
+/** One Media3 source may be reopened for many seeks. Choose admission at each open. */
+private class ReplayingAnimeDataSource(
+    private val writer: DataSource,
+    private val reader: DataSource,
+    private val canWrite: (DataSpec) -> Boolean,
+) : DataSource {
+    private var active: DataSource? = null
+
+    override fun open(dataSpec: DataSpec): Long {
+        check(active == null)
+        val source = if (canWrite(dataSpec)) writer else reader
+        active = source // Media3 also calls close() after a failed open.
+        // HLS chunks do not opt into early span publication by default. Commit large
+        // chunks incrementally so a second reader can reuse the downloaded prefix.
+        val spec = if (source === writer && !dataSpec.isFlagSet(DataSpec.FLAG_ALLOW_CACHE_FRAGMENTATION))
+            dataSpec.buildUpon().setFlags(dataSpec.flags or DataSpec.FLAG_ALLOW_CACHE_FRAGMENTATION).build()
+        else dataSpec
+        return source.open(spec)
+    }
+
+    override fun addTransferListener(transferListener: TransferListener) {
+        writer.addTransferListener(transferListener)
+        reader.addTransferListener(transferListener)
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+        checkNotNull(active).read(buffer, offset, length)
+    override fun getUri(): Uri? = active?.uri
+    override fun getResponseHeaders(): Map<String, List<String>> = active?.responseHeaders.orEmpty()
+
+    override fun close() {
+        val source = active
+        active = null
+        source?.close()
+    }
+}
+
 /** Callbacks and eviction are serialized by SimpleCache's own monitor. */
-private class AdjustableAnimeEvictor(private val canTrim: (String) -> Boolean, private val changed: (String) -> Unit) : CacheEvictor {
+private class AdjustableAnimeEvictor(private val canTrim: (String) -> Boolean,
+    private val changed: (key: String, sizeChanged: Boolean) -> Unit) : CacheEvictor {
     // Reopening a cache must not delete a user's larger cache before the storage
     // controller restores its configured budget.
     @Volatile var targetBytes: Long = Long.MAX_VALUE
@@ -192,17 +259,17 @@ private class AdjustableAnimeEvictor(private val canTrim: (String) -> Boolean, p
     }
     override fun onSpanAdded(cache: Cache, span: CacheSpan) {
         if (spans.add(span)) bytes += span.length
-        changed(span.key)
+        changed(span.key, true)
         evict(cache, 0L)
     }
     override fun onSpanRemoved(cache: Cache, span: CacheSpan) {
         if (spans.remove(span)) bytes = (bytes - span.length).coerceAtLeast(0L)
-        changed(span.key)
+        changed(span.key, true)
     }
     override fun onSpanTouched(cache: Cache, oldSpan: CacheSpan, newSpan: CacheSpan) {
         spans.remove(oldSpan)
         spans.add(newSpan)
-        changed(newSpan.key)
+        changed(newSpan.key, false)
     }
     fun resize(cache: Cache, requested: Long, canResize: () -> Boolean, commitResize: (() -> Unit) -> Boolean): Boolean {
         // Do not publish a provisional quota: a stale sweep must not leave its old

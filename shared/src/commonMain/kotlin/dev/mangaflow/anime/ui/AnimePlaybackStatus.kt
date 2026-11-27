@@ -40,6 +40,7 @@ import dev.mangaflow.anime.player.AnimePlayerPhase
 import dev.mangaflow.anime.AnimeNextEpisodePreparation
 import dev.mangaflow.anime.player.ANIME_ENHANCED_FRAME_FRESH_MS
 import dev.mangaflow.anime.player.AnimePlayerState
+import dev.mangaflow.anime.player.AnimeEnhancementProtectionCause
 import dev.mangaflow.anime.player.AnimeVideoEnhancementPhase
 import dev.mangaflow.enhancement.EnhancementCenter
 import dev.mangaflow.enhancement.EnhancementContent
@@ -49,7 +50,6 @@ import dev.mangaflow.enhancement.QualityTier
 import dev.mangaflow.enhancement.animeEnhancementSessionKey
 import dev.mangaflow.enhancement.engine.EnhancementEngineIds
 import dev.mangaflow.enhancement.engine.EngineReadiness
-import dev.mangaflow.experience.ExperienceResources
 import dev.mangaflow.enhancement.ui.EnhancementReadout
 import dev.mangaflow.enhancement.ui.EnhancementReadouts
 import dev.mangaflow.enhancement.ui.enhancementResourceReadouts
@@ -100,7 +100,9 @@ internal fun AnimeInlineVideoQuality(playback: AnimePlayerState, modifier: Modif
         else -> "片源 $input"
     }
     val effect = playback.videoEnhancement
-    val status = if (!requested || enhanced != null || playback.preEnhanced || platformKind != PlatformKind.ANDROID) null
+    val protection = playback.currentEnhancementProtection()
+    val status = if (protection != null) protection.actionLabel + "，" + protection.reasonLabel
+    else if (!requested || enhanced != null || playback.preEnhanced || platformKind != PlatformKind.ANDROID) null
     else if (effect.renderedOriginalFallback) "增强已回落" else when (effect.phase) {
         AnimeVideoEnhancementPhase.OFF, AnimeVideoEnhancementPhase.UNAVAILABLE -> "增强未应用"
         AnimeVideoEnhancementPhase.WAITING, AnimeVideoEnhancementPhase.CONFIGURED -> "增强待输出"
@@ -116,8 +118,8 @@ internal fun AnimeInlineVideoQuality(playback: AnimePlayerState, modifier: Modif
         source != null -> "源 ${formatDecimal(source, 0)} fps"
         else -> null
     }
-    if (dimensions == null && rate == null) return
-    val caption = listOfNotNull(dimensions, rate).joinToString(" · ")
+    if (dimensions == null && rate == null && protection == null) return
+    val caption = listOfNotNull(protection?.reasonLabel, dimensions, rate).joinToString(" · ")
     val dimensionDescription = when {
         enhanced != null -> "已观测增强帧尺寸 ${enhanced.replace("×", " 乘 ")}，不是屏幕分辨率或呈现回执"
         input == null -> null
@@ -195,7 +197,6 @@ internal fun AnimePlaybackStatus(
     val defaults by center.settings.state.collectAsStateWithLifecycle()
     val sessions by center.settings.sessions.collectAsStateWithLifecycle()
     val telemetry by center.telemetry.state.collectAsStateWithLifecycle()
-    val usage by center.resources.usage.collectAsStateWithLifecycle()
     val inventory by center.inventory.collectAsStateWithLifecycle()
     val metrics = preferences.getValue(EnhancementContent.ANIME)
     val current = playback?.takeIf { it.assetKey != null &&
@@ -207,7 +208,7 @@ internal fun AnimePlaybackStatus(
     val liveMotionReadiness = if (platformKind == PlatformKind.DESKTOP) inventory.engines.firstOrNull {
         it.id == EnhancementEngineIds.DESKTOP_REALTIME_RIFE
     }?.readiness else null
-    val readouts = animeEnhancementReadouts(current, metrics, policy, usage.resources, reason, nextPreparation,
+    val readouts = animeEnhancementReadouts(current, metrics, policy, reason, nextPreparation,
         nextPreparationEnabled, liveMotionReadiness) +
         enhancementResourceReadouts(metrics, center.resources, observing)
     if (readouts.isEmpty()) return
@@ -288,7 +289,7 @@ private fun DesktopPlaybackReadings(readouts: List<EnhancementReadout>, modifier
 }
 
 private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<EnhancementMetric>,
-    policy: EnhancementPolicy, resources: ExperienceResources, reason: String?,
+    policy: EnhancementPolicy, reason: String?,
     nextPreparation: AnimeNextEpisodePreparation?, nextPreparationEnabled: Boolean,
     liveMotionReadiness: EngineReadiness?): List<EnhancementReadout> = buildList {
     val flowing = playback?.let { it.isPlaying && !it.isBuffering && !it.playbackSuppressed &&
@@ -296,6 +297,7 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
     val effect = playback?.videoEnhancement
     val observation = effect?.observation
     val motion = playback?.realtimeMotion
+    val protection = playback?.currentEnhancementProtection()
     val activeMotion = motion?.takeIf { flowing && it.phase == AnimeVideoEnhancementPhase.ACTIVE }
     val window = playback?.preparedVideoWindow?.takeIf { it.frames > 0 }
     val usingPrepared = flowing && window != null && window.framesUsed > 0L &&
@@ -307,11 +309,14 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
             playback == null -> "画质 —"
             playback.preEnhanced -> "预增强片源"
             usingPrepared -> "预处理帧复用"
+            protection?.picture == true && protection.cause != AnimeEnhancementProtectionCause.GPU_BUDGET ->
+                "原画 · " + protection.reasonLabel
+            protection?.cause == AnimeEnhancementProtectionCause.GPU_BUDGET &&
+                effect?.phase == AnimeVideoEnhancementPhase.ACTIVE -> "轻量增强 · " + protection.reasonLabel
             else -> when (effect?.phase) {
                 AnimeVideoEnhancementPhase.OFF -> when {
                     policy.tier == QualityTier.ORIGINAL -> "原画"
                     !policy.realtimeEnhancementEnabled -> "原画 · 增强关闭"
-                    resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2 -> "原画 · 设备保护"
                     else -> "原画 · 增强未运行"
                 }
                 AnimeVideoEnhancementPhase.WAITING -> "增强 · 等待画面"
@@ -400,8 +405,8 @@ private fun animeEnhancementReadouts(playback: AnimePlayerState?, metrics: Set<E
             playback == null -> "补帧 —"
             !policy.realtimeInterpolationEnabled -> "补帧已关闭"
             policy.frameMode == dev.mangaflow.enhancement.FrameMode.ORIGINAL -> "原始帧率"
+            protection?.motion == true -> "补帧暂缓 · " + protection.reasonLabel
             motion == null && liveMotionReadiness == EngineReadiness.NOT_INSTALLED -> "补帧 · 需装实时组件"
-            motion == null && resources.memoryPressure == true -> "补帧 · 内存保护"
             motion?.phase == AnimeVideoEnhancementPhase.FAILED || motion?.phase == AnimeVideoEnhancementPhase.UNAVAILABLE ->
                 motionProblemLabel(motion?.detail)
             motion?.phase == AnimeVideoEnhancementPhase.ACTIVE && flowing && platformKind == PlatformKind.DESKTOP ->

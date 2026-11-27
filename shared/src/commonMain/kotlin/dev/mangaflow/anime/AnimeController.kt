@@ -1,6 +1,9 @@
 package dev.mangaflow.anime
 
 import dev.mangaflow.anime.player.AnimePlayer
+import dev.mangaflow.anime.player.AnimeEnhancementProtection
+import dev.mangaflow.anime.player.AnimeEnhancementProtectionCause
+import dev.mangaflow.anime.player.AnimePlayerCapability
 import dev.mangaflow.anime.player.AnimePlayerPhase
 import dev.mangaflow.anime.player.AnimePlayerRequest
 import dev.mangaflow.anime.player.AnimePlayerState
@@ -6499,25 +6502,34 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         // A resource projection may temporarily remove the live request. Only a real
         // viewing choice or session change permits a failed interpolation attempt again.
         val previousIntent = motionIntentPolicy
-        if (motionIntentSession != key || previousIntent == null || !sameViewingEffects(previousIntent, policy)) {
+        val fixedAutoChanged = policy.tier == QualityTier.AUTO && policy.modelId == null &&
+            policy.realtimeEnhancementEnabled && previousIntent?.locked != policy.locked
+        if (motionIntentSession != key || previousIntent == null || fixedAutoChanged || !sameViewingEffects(previousIntent, policy)) {
             realtimeMotionIntent++
             motionIntentSession = key
             motionIntentPolicy = policy
         }
         val p95 = key?.let { enhancementCenter.telemetry.state.value.sessions[it]?.gpuP95Millis }
-        val selected = selectRealtimeEnhancement(policy, enhancementCenter.resources.usage.value.resources,
-            snapshot?.sourceFps, if (key != null && reducedAutoEnhancementSession == key) Double.MAX_VALUE else p95,
-            preferredRealtimeModel(policy, snapshot))
-        if (policy.tier == QualityTier.AUTO && policy.modelId == null &&
-            selected.mode == dev.mangaflow.anime.player.AnimeVideoEnhancementMode.FAST &&
-            p95 != null) reducedAutoEnhancementSession = key
-        val realtimeFrames = preferredRealtimeFrames(policy).takeIf { active?.localMedia?.enhancedVersion != true }
+        val resources = enhancementCenter.resources.usage.value.resources
+        val selected = selectRealtimeEnhancement(policy, resources, snapshot?.sourceFps, p95,
+            preferredRealtimeModel(policy, snapshot), retainLightMode = key != null && reducedAutoEnhancementSession == key)
+        if (selected.protection == AnimeEnhancementProtectionCause.GPU_BUDGET) reducedAutoEnhancementSession = key
+        val realtimeEnabled = active?.localMedia?.enhancedVersion != true
+        val frames = if (realtimeEnabled) preferredRealtimeFrames(policy) else null
+        val resourceProtection = realtimeResourceProtection(resources)
+        val realtimeFrames = frames.takeIf { resourceProtection == null }
+        // Record only the runnable effects actually withheld by this session's projection.
+        val capabilities = snapshot?.capabilities ?: playerInstance?.state?.value?.capabilities.orEmpty()
+        val pictureCause = selected.protection.takeIf { realtimeEnabled && AnimePlayerCapability.VIDEO_ENHANCEMENT in capabilities }
+        val motionCause = resourceProtection.takeIf { frames != null }
+        val protection = (pictureCause ?: motionCause)?.takeIf { snapshot?.hasVideoTracks != false }?.let { cause ->
+            AnimeEnhancementProtection(cause, picture = pictureCause != null, motion = motionCause != null)
+        }
         val prepared = preferredOnlineModel(policy, selected.mode)
             ?.takeIf { active?.localMedia == null && realtimeFrames == null &&
                 selected.mode != AnimeVideoEnhancementMode.MODEL }
         // A candidate model is not a prepared frame. The Android shader chooses a matching
         // cached frame before its CNN; all other frames retain the selected realtime path.
-        val realtimeEnabled = active?.localMedia?.enhancedVersion != true
         val preparation = preparationBudget(settings)
         return AnimePlayerOptions(
         backgroundAudio = settings.backgroundAudio,
@@ -6536,6 +6548,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         preparedVideoModel = prepared,
         realtimeFrames = realtimeFrames,
         realtimeMotionIntent = realtimeMotionIntent,
+        enhancementSessionGeneration = active?.playerGeneration,
+        enhancementProtection = protection,
         bufferForwardBytes = preparation.forwardBytes,
         bufferBackBytes = preparation.backBytes,
         )
@@ -6583,8 +6597,6 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             PlatformKind.ANDROID -> EnhancementEngineIds.ANDROID_RIFE_VULKAN
             else -> return null
         }
-        val resources = enhancementCenter.resources.usage.value.resources
-        if (resources.memoryPressure == true || (resources.thermalPressure ?: 0) >= 2) return null
         val model = enhancementCenter.inventory.value.readyRealtimeFrameModel(engineId) ?: return null
         val target = when (policy.frameMode) {
             dev.mangaflow.enhancement.FrameMode.FPS60 -> 60.0
@@ -6654,8 +6666,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             snapshot.phase == AnimePlayerPhase.ERROR || snapshot.ended || owner.localMedia != null) {
             cancelOnlineVideo(clear = true)
             engine.noteVideoPreparationIssue(when {
-                resources.memoryPressure == true -> "内存压力较高，暂缓在线增强准备。"
+                model == null || owner.localMedia != null || !foreground || snapshot.ended ||
+                    snapshot.phase == AnimePlayerPhase.ERROR -> null
                 (resources.thermalPressure ?: 0) >= 2 -> "设备温度较高，暂缓在线增强准备。"
+                resources.memoryPressure == true -> "内存压力较高，暂缓在线增强准备。"
                 playbackBusy(snapshot) -> "优先恢复当前播放，稍后再准备增强片段。"
                 else -> null
             })
@@ -6780,7 +6794,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         if (key == null) return
         val policy = center.settings.policy(EnhancementContent.ANIME, key)
         val selection = selectRealtimeEnhancement(policy, center.resources.usage.value.resources, snapshot.sourceFps,
-            center.telemetry.state.value.sessions[key]?.gpuP95Millis, preferredRealtimeModel(policy, snapshot))
+            center.telemetry.state.value.sessions[key]?.gpuP95Millis, preferredRealtimeModel(policy, snapshot),
+            retainLightMode = reducedAutoEnhancementSession == key)
+        val adjustment = snapshot.enhancementProtection?.description ?: selection.reason?.takeIf {
+            selection.protection == null && !snapshot.preEnhanced
+        }
         val effect = snapshot.videoEnhancement
         val observation = effect.observation
         val preparedWindow = snapshot.preparedVideoWindow
@@ -6804,15 +6822,16 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             reason = when {
                 usingPrepared -> "正在复用同一原始帧的预处理结果"
                 snapshot.preEnhanced -> "正在使用已完成并校验的增强版本"
+                snapshot.enhancementProtection != null -> snapshot.enhancementProtection.description
                 preparedWindow != null -> "预处理帧已缓存，按原视频时间与画面匹配"
                 snapshot.preparedVideoIssue != null -> "本次在线预处理未完成 · ${snapshot.preparedVideoIssue}"
-                else -> effect.detail ?: selection.reason
+                else -> effect.detail ?: adjustment
             },
             gpuSampleSequence = observation?.gpuSampleSequence, gpuExecutionNanos = observation?.gpuExecutionNanos,
             gpuSubmittedAtNanos = observation?.gpuSubmittedAtNanos,
             gpuCompletionObservedAtNanos = observation?.gpuCompletionObservedAtNanos,
             presentedAtNanos = observation?.presentedAtNanos)
-        selection.reason?.let { center.telemetry.noteAdjustment(key, EnhancementContent.ANIME, it) }
+        adjustment?.let { center.telemetry.noteAdjustment(key, EnhancementContent.ANIME, it) }
     }
 
     fun setSleepTimer(minutes: Int?, atEpisodeEnd: Boolean = false) {

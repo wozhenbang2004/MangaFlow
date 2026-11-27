@@ -831,7 +831,22 @@ internal fun AnimePlayerPane(
                 // smaller desktop players rather than letting the passive right label cover it.
                 val resolutionTop = maxOf(statusTop, topInset) + 8.dp +
                     if (showVideoReadings && videoWidth < 630.dp * quietFontScale) readingsHeight + 4.dp else 0.dp
-                if (desktop && active && !locked && !obscured && !panelPresent && !holdingFast &&
+                val protectionTop = maxOf(statusTop, if (headerOverVideo) topInset else 0.dp) + 8.dp +
+                    if (showVideoReadings && videoWidth < 690.dp * quietFontScale) readingsHeight + 4.dp else 0.dp
+                val scrubbing by remember(seekPreview) { derivedStateOf { seekPreview.value != null } }
+                val canShowProtection = active && showingCurrentPlayback && !showStage && !obscured && !panelPresent &&
+                    !playback.inPictureInPicture && !holdingFast && !scrubbing && !playback.ended &&
+                    playback.hasVideoTracks != false && videoHeight - protectionTop - statusBottom >= 44.dp * quietFontScale
+                val protectionNotice by rememberAnimeEnhancementNotice(observations, playback.sessionGeneration,
+                    playback.assetKey, playback.episodeId, canShowProtection)
+                if (canShowProtection) {
+                    val noticeAlignment = if (showVideoReadings && videoWidth >= 690.dp * quietFontScale)
+                        Alignment.TopEnd else Alignment.TopStart
+                    AnimeEnhancementNoticeChip(protectionNotice, Modifier.align(noticeAlignment)
+                        .windowInsetsPadding(safeInsets.only(WindowInsetsSides.Horizontal))
+                        .padding(start = 12.dp, end = 12.dp, top = protectionTop).widthIn(max = 360.dp))
+                }
+                if (desktop && protectionNotice == null && active && !locked && !obscured && !panelPresent && !holdingFast &&
                     !playback.inPictureInPicture && !showStage && showingCurrentPlayback &&
                     playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && !playback.playbackSuppressed &&
                     playback.hasVideoTracks != false && videoWidth >= 200.dp * quietFontScale &&
@@ -842,7 +857,7 @@ internal fun AnimePlayerPane(
                                 .windowInsetsPadding(safeInsets.only(WindowInsetsSides.Horizontal))
                                 .padding(top = resolutionTop, end = 12.dp).widthIn(max = videoWidth * .82f))
                     }
-                } else if (!desktop && active && !chromeMounted && !locked && !obscured && !panelPresent &&
+                } else if (!desktop && protectionNotice == null && active && !chromeMounted && !locked && !obscured && !panelPresent &&
                     !readingsVisible && !holdingFast && !playback.inPictureInPicture && !showStage &&
                     showingCurrentPlayback && playback.isPlaying && !playback.playbackSuppressed &&
                     playback.hasVideoTracks != false && videoWidth >= 220.dp * quietFontScale &&
@@ -892,7 +907,6 @@ internal fun AnimePlayerPane(
                         }
                     }
                 }
-                val scrubbing by remember(seekPreview) { derivedStateOf { seekPreview.value != null } }
                 AnimePlayerFeedback(feedbackNotice, active && !obscured && !locked && !panelPresent && !scrubbing &&
                     !playback.inPictureInPicture && showingCurrentPlayback && failure == null, desktop, observations)
             }

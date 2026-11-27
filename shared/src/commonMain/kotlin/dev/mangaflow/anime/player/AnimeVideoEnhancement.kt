@@ -3,6 +3,28 @@ package dev.mangaflow.anime.player
 /** These are MangaFlow's small/medium CNN combinations, not upstream Mode A/B/C. */
 enum class AnimeVideoEnhancementMode { OFF, FAST, QUALITY, MODEL }
 
+/** Why the active viewing policy withdrew an otherwise eligible effect, or chose the lighter shader. */
+enum class AnimeEnhancementProtectionCause { THERMAL, MEMORY, GPU_BUDGET }
+
+data class AnimeEnhancementProtection(
+    val cause: AnimeEnhancementProtectionCause,
+    val picture: Boolean,
+    val motion: Boolean,
+) {
+    val description: String get() {
+        val effects = when {
+            picture && motion -> "实时画质增强和补帧"
+            motion -> "实时补帧"
+            else -> "实时画质增强"
+        }
+        return when (cause) {
+            AnimeEnhancementProtectionCause.THERMAL -> "设备温度较高，暂缓$effects"
+            AnimeEnhancementProtectionCause.MEMORY -> "设备内存压力较高，暂缓$effects"
+            AnimeEnhancementProtectionCause.GPU_BUDGET -> "单帧 GPU 处理接近时限，自动档选用轻量画质"
+        }
+    }
+}
+
 /** Configuration acceptance alone cannot claim that a GPU has processed a frame. */
 enum class AnimeVideoEnhancementPhase { OFF, WAITING, CONFIGURED, ACTIVE, UNAVAILABLE, FAILED }
 
