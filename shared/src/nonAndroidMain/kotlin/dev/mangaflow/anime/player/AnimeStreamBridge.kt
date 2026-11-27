@@ -87,12 +87,10 @@ internal class AnimeStreamBridge private constructor(
     val lastFailureStatus: Int? get() = synchronized(lock) { failureStatus }
     private var failureRetryable: Boolean? = null
     val lastFailureRetryable: Boolean? get() = synchronized(lock) { failureRetryable }
-    private class ReadAttempt { val mediaDeliveries = atomic(0L) }
+    private class ReadAttempt
     private var attempt = ReadAttempt()
     private val upstreamMediaBytes = atomic(0L)
     val receivedNetworkBytes: Long get() = upstreamMediaBytes.value
-    /** Changes as media payload is delivered on this attempt, independently of playlist or subtitle traffic. */
-    val mediaDeliveryRevision: Long get() = synchronized(lock) { attempt.mediaDeliveries.value }
     private val startupOriginUntil = atomic(0L)
     private var lastStartupOriginAt: Long? = null
     private val releaseCache = runCatching { cache?.retain(asset) }.getOrNull()
@@ -217,7 +215,6 @@ internal class AnimeStreamBridge private constructor(
                             if (count < 0) break
                             warmReads?.admit(count)
                             if (segment == null) output.bytes(buffer, count) else segment.write(buffer, count)
-                            if (count > 0) ownedAttempt.mediaDeliveries.incrementAndGet()
                         }
                     }
                     segment?.finish()
@@ -248,7 +245,6 @@ internal class AnimeStreamBridge private constructor(
                     output.headers(if (range == null) 200 else 206, headers)
                     if (request.method == "GET") connection.write(buffered.bytes, start.toInt(), count)
                 }
-                if (request.method == "GET" && count > 0) ownedAttempt.mediaDeliveries.incrementAndGet()
                 return
             }
             var url = resource.url
@@ -365,7 +361,6 @@ internal class AnimeStreamBridge private constructor(
                         }
                         if (classified && !manifest && count > 0 && (resource.kind == Kind.MEDIA || resource.kind == Kind.AUTO)) {
                             upstreamMediaBytes.addAndGet(unclassifiedBytes + count)
-                            ownedAttempt.mediaDeliveries.incrementAndGet()
                         }
                     },
                 )

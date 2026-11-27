@@ -238,6 +238,8 @@ internal class AndroidAnimePlayer(
     private var bufferingBytes = 0L
     private var bufferingPosition = 0L
     private var bufferingEnd = 0L
+    private val rebufferProgress = AnimeRebufferProgress()
+    private var playedTimeline: Long? = null
     private var bufferingTimedOut = false
     private var nativeFrameWaitSince: Long? = null
     private val videoHosts = mutableSetOf<Any>()
@@ -798,6 +800,7 @@ internal class AndroidAnimePlayer(
         outputFrameReleases = releases
         frameWindow.reset()
         visibleWatchSample = null
+        resetBufferingObservation()
         // Media3 routes this listener through the final VideoSink when effects are active,
         // so synthesized frames are counted too. A release is not a physical Present receipt.
         exo.setVideoFrameMetadataListener { presentationTimeUs, releaseTimeNs, _, _ ->
@@ -808,7 +811,13 @@ internal class AndroidAnimePlayer(
             }
         }
         val observer = object : Player.Listener {
-            override fun onEvents(player: Player, events: Player.Events) { synchronize(generation, exo) }
+            override fun onEvents(player: Player, events: Player.Events) {
+                if (isCurrent(generation) && engine.value === exo && (!exo.playWhenReady ||
+                    exo.playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE)) {
+                    resetBufferingObservation()
+                }
+                synchronize(generation, exo)
+            }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (!isPlaying && isCurrent(generation) && engine.value === exo) {
                     visibleWatchSample = null
@@ -820,6 +829,8 @@ internal class AndroidAnimePlayer(
             ) {
                 if (isCurrent(generation) && engine.value === exo) {
                     visibleWatchSample = null
+                    playedTimeline = null
+                    rebufferProgress.reset()
                     clearLiveEnhancement()
                 }
             }
@@ -1457,9 +1468,11 @@ internal class AndroidAnimePlayer(
         }
     }
 
-    private fun resetBufferingObservation() {
+    private fun resetBufferingObservation(keepPlayedTimeline: Boolean = false) {
         bufferingSince = null
         bufferingProgressAt = 0L
+        rebufferProgress.reset()
+        if (!keepPlayedTimeline) playedTimeline = null
     }
 
     /** Observes actual transport/buffer progress, not a guessed download percentage. */
@@ -1469,8 +1482,12 @@ internal class AndroidAnimePlayer(
             recovery?.isActive == true ||
             !(foreground || state.value.inPictureInPicture) || !exo.playWhenReady ||
             exo.playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE ||
-            exo.playerError != null || exo.playbackState != Player.STATE_BUFFERING) {
+            exo.playerError != null) {
             resetBufferingObservation()
+            return
+        }
+        if (exo.playbackState != Player.STATE_BUFFERING) {
+            resetBufferingObservation(keepPlayedTimeline = exo.isPlaying)
             return
         }
         val now = SystemClock.elapsedRealtime()
@@ -1489,9 +1506,13 @@ internal class AndroidAnimePlayer(
         bufferingEnd = end
         val startup = state.value.firstFrameRendered == false && state.value.hasVideoTracks != false && !nativeVideoOnly
         val noProgressLimit = if (startup) 12_000L else 30_000L
+        val timeline = state.value.timelineGeneration
+        val playableStalled = !startup && playedTimeline == timeline &&
+            rebufferProgress.stalled(now, timeline, position, end, 12_000L)
         if (since == null) return
         val stalledStartup = startup && now - since >= 10_000L && hasStartupAlternative()
-        val stalledPlayback = !startup && now - bufferingProgressAt >= 12_000L && hasRecoveryAlternative()
+        val stalledPlayback = !startup && (playableStalled || now - bufferingProgressAt >= 12_000L) &&
+            hasRecoveryAlternative()
         if (!stalledStartup && !stalledPlayback && now - bufferingProgressAt < noProgressLimit && now - since < 120_000L) return
         stopStalledPlayback(generation, exo, when {
             stalledStartup -> "这条线路起播缓冲超过 10 秒，正在尝试本集备用线路"
@@ -1564,6 +1585,12 @@ internal class AndroidAnimePlayer(
         val position = exo.currentPosition.takeIf { it >= 0L } ?: state.value.positionMs
         val outputFrames = outputFrameReleases.get()
         val watchDelta = if (sampleWatchTime) observeVisibleWatchTime(exo, now, position, outputFrames) else 0L
+        val snapshot = state.value
+        if (sampleWatchTime && localLease == null && exo.isPlaying && (foreground || snapshot.inPictureInPicture)) {
+            // A retained first-frame flag can predate a seek. Arm only on output from this timeline.
+            val audioAdvanced = snapshot.hasVideoTracks == false && exo.audioFormat != null && position > snapshot.positionMs
+            if (watchDelta > 0L || audioAdvanced) playedTimeline = snapshot.timelineGeneration
+        }
         val enhancementActive = lastEnhancementSubmissionAt?.let { now - it < ANIME_ENHANCED_FRAME_FRESH_MS } == true &&
             canReportLiveEnhancement(exo)
         if (!enhancementActive) lastEnhancementSubmissionAt = null

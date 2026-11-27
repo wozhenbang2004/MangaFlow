@@ -395,7 +395,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
                 publish(generation) { it.copy(positionMs = position) }
             }
         }
-        if (transport != null) watchOnlineRebuffer(child, native, transport, request, generation)
+        if (transport != null) watchOnlineRebuffer(child, native, request, generation)
         child.launch(Dispatchers.Main.immediate) {
             native.mediaProperties.collect { properties ->
                 if (properties != null) publish(generation) { it.copy(
@@ -501,32 +501,35 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
         }
     }
 
-    private fun watchOnlineRebuffer(child: CoroutineScope, native: MediampPlayer, transport: AnimeStreamBridge,
+    private fun watchOnlineRebuffer(child: CoroutineScope, native: MediampPlayer,
         request: AnimePlayerRequest, generation: Long) {
         val timeout = onlineRebufferWaitMillis ?: return
         val hasAlternative = request.hasStartupAlternative ?: return
         child.launch(Dispatchers.Main.immediate) {
             var playedTimeline: Long? = null
             state.map { snapshot ->
-                if (snapshot.isPlaying && !snapshot.playbackSuppressed) playedTimeline = snapshot.timelineGeneration
+                if (snapshot.isPlaying && !snapshot.playbackSuppressed && loadedPosition(native) != null)
+                    playedTimeline = snapshot.timelineGeneration
                 snapshot.timelineGeneration.takeIf { timeline ->
                     timeline == playedTimeline && snapshot.phase == AnimePlayerPhase.READY && snapshot.isBuffering &&
                         snapshot.playWhenReady && !snapshot.playbackSuppressed && (foreground || snapshot.inPictureInPicture)
                 }
             }.distinctUntilChanged().collectLatest { timeline ->
                 if (timeline == null) return@collectLatest
+                val progress = AnimeRebufferProgress()
+                val start = state.value
+                progress.stalled(monotonicTimeMillis(), timeline, start.positionMs, start.bufferedMs, timeout)
                 while (isCurrent(generation) && engine.value === native) {
-                    val before = state.value
-                    val deliveries = transport.mediaDeliveryRevision
-                    delay(timeout)
+                    delay(minOf(timeout, 2_000L))
                     val current = state.value
                     val fact = native.state.value
                     if (!isCurrent(generation) || engine.value !== native || current.timelineGeneration != timeline ||
                         current.phase != AnimePlayerPhase.READY || !current.isBuffering || !current.playWhenReady ||
                         current.playbackSuppressed || !(foreground || current.inPictureInPicture) ||
+                        native.mediaData.value == null || bufferSeekCompletion?.isActive == true ||
                         fact.mediaStatus != MediaStatus.Ready || !fact.isBuffering || !fact.playWhenReady) return@collectLatest
-                    if (current.positionMs != before.positionMs || current.bufferedMs != before.bufferedMs ||
-                        transport.mediaDeliveryRevision != deliveries || !hasAlternative()) continue
+                    if (!progress.stalled(monotonicTimeMillis(), timeline, current.positionMs, current.bufferedMs, timeout) ||
+                        !hasAlternative()) continue
                     fail(generation, IllegalStateException("当前线路的播放和缓冲已停滞，可切换本集备用线路"))
                     if (isCurrent(generation) && engine.value === native) {
                         runCatching { native.stopPlayback() }
