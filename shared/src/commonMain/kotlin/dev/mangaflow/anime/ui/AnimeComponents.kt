@@ -1,5 +1,9 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -21,7 +25,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -68,6 +75,7 @@ import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
 
 internal fun animeEpisodeNumber(value: Double): String =
     if (value % 1.0 == 0.0) value.toLong().toString() else value.toString()
@@ -361,8 +369,14 @@ internal fun AnimeSelection(
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
+    val choice = animateFloatAsState(if (selected) 1f else 0f,
+        if (LocalMotionEnabled.current) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
+        label = "anime-choice")
     Row(modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(12.dp))
-        .background(if (selected) colors.primaryContainer else Color.Transparent)
+        .drawBehind {
+            val amount = choice.value.coerceIn(0f, 1f)
+            if (amount > 0f) drawRect(colors.primaryContainer, alpha = amount)
+        }
         .motionPress(interaction, enabled = enabled, pressedScale = .99f)
         .clickable(enabled = enabled, interactionSource = interaction, indication = null,
             role = Role.RadioButton, onClick = onClick)
@@ -377,8 +391,19 @@ internal fun AnimeSelection(
             if (!detail.isNullOrBlank()) Text(detail, style = MaterialTheme.typography.labelSmall,
                 color = colors.onSurfaceVariant, maxLines = detailMaxLines, overflow = TextOverflow.Ellipsis)
         }
-        if (selected) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp), tint = colors.onPrimaryContainer)
-        else Spacer(Modifier.size(18.dp))
+        Canvas(Modifier.size(18.dp).clearAndSetSemantics { }) {
+            val amount = choice.value.coerceIn(0f, 1f)
+            if (amount > 0f) {
+                val start = Offset(size.width * .16f, size.height * .51f)
+                val bend = Offset(size.width * .40f, size.height * .74f)
+                val end = Offset(size.width * .86f, size.height * .25f)
+                val stroke = 1.8.dp.toPx()
+                drawLine(colors.onPrimaryContainer, start, start + (bend - start) * (amount / .34f).coerceAtMost(1f),
+                    stroke, StrokeCap.Round)
+                if (amount > .34f) drawLine(colors.onPrimaryContainer, bend, bend + (end - bend) * ((amount - .34f) / .66f),
+                    stroke, StrokeCap.Round)
+            }
+        }
     }
 }
 

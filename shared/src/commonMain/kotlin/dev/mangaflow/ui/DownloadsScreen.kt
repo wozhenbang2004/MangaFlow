@@ -21,6 +21,7 @@ import dev.mangaflow.ui.platform.*
 
 import dev.mangaflow.ui.motion.BackHandler
 
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.background
@@ -833,7 +834,7 @@ fun DownloadsScreen(
                                 val chapters = chapterIds.mapNotNull(entriesById::get)
                                 val placement = Modifier.animateItem(
                                     fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
-                                    placementSpec = if (motion) tween(MangaMotion.Content) else null,
+                                    placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
                                     fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null)
                                 Box(placement) {
                                     SwipeToRemove(enabled = !managing && !desktop,
@@ -869,10 +870,14 @@ fun DownloadsScreen(
                             if (expanded && !desktopSplit) items(
                                 chapterIds.mapNotNull(entriesById::get).chunked(downloadChapterColumns),
                                 key = { "chapters:" + it.first().id }, contentType = { "download-chapter-grid" }) { row ->
-                                Row(Modifier.fillMaxWidth().padding(start = if (downloadChapterColumns == 1) 24.dp else 12.dp,
+                                Row(Modifier.fillMaxWidth().animateItem(
+                                    fadeInSpec = if (motion) tween(MangaMotion.Quick) else null,
+                                    placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
+                                    fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null
+                                ).padding(start = if (downloadChapterColumns == 1) 24.dp else 12.dp,
                                     end = 4.dp, top = 3.dp, bottom = 3.dp),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    row.forEach { entry ->
+                                    row.forEach { entry -> key(entry.id, entry.createdAt) {
                                         Box(Modifier.weight(1f)) {
                                             SwipeToRemove(enabled = !managing && !desktop, label = "删除 ${entry.chapter.title} 下载",
                                                 onRemove = { removeWithUndo(listOf(entry)) }) {
@@ -887,12 +892,14 @@ fun DownloadsScreen(
                                                     enhancementTasks = enhancementTasks)
                                             }
                                         }
-                                    }
+                                    } }
                                     repeat(downloadChapterColumns - row.size) { Spacer(Modifier.weight(1f)) }
                                 }
                             }
                             item(key = "space:$mangaId", contentType = "download-separator") {
-                                HorizontalDivider(Modifier.padding(start = 60.dp, top = 2.dp, bottom = 2.dp),
+                                HorizontalDivider(Modifier.animateItem(fadeInSpec = null,
+                                    placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
+                                    fadeOutSpec = null).padding(start = 60.dp, top = 2.dp, bottom = 2.dp),
                                     color = foreground.copy(alpha = .05f))
                             }
                         }

@@ -4,10 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -329,7 +326,9 @@ private fun AnimeDiscoveryResumeRow(entry: AnimeLibraryEntry, action: String, ac
                 style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (!progress.completed) animeWatchFraction(progress)?.let { fraction ->
-                AnimeWatchProgressLine(fraction, Modifier.widthIn(max = 164.dp).padding(top = 2.dp))
+                key(entry.subject.id, progress.episodeId) {
+                    AnimeWatchProgressLine(fraction, Modifier.widthIn(max = 164.dp).padding(top = 2.dp))
+                }
             }
         }
         Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp), tint = colors.primary)
@@ -915,12 +914,12 @@ private fun AnimeBroadcastControls(activeTab: AnimeDiscoveryTab, today: LocalDat
         // Only the live weekly feed can receive input, including during a partial exit.
         AnimatedVisibility(visible = inWeek,
             modifier = Modifier.fillMaxWidth().motionInputGate(enabled && inWeek),
-            enter = fadeIn(if (motion) tween(MangaMotion.Content) else snap()) + expandVertically(
+            enter = expandVertically(
                 animationSpec = if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap(),
-                expandFrom = Alignment.Top),
-            exit = fadeOut(if (motion) tween(MangaMotion.Quick) else snap()) + shrinkVertically(
+                expandFrom = Alignment.Bottom),
+            exit = shrinkVertically(
                 animationSpec = if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap(),
-                shrinkTowards = Alignment.Top), label = "broadcast-week") {
+                shrinkTowards = Alignment.Bottom), label = "broadcast-week") {
             if (useAnimeBroadcastDial) AnimeWeeklyDial(today, calendar, enabled && inWeek, ::openWeek)
             else AnimeWeeklyDays(today, calendar.weekday, enabled && inWeek, ::openWeek)
         }

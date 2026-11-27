@@ -12,6 +12,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -47,12 +48,13 @@ internal fun GlassTabRail(
     selectionVisible: Boolean,
     color: Color,
     opacity: State<Float>,
-    pressed: Boolean,
+    pressedIndex: Int?,
+    onDetent: () -> Unit,
     onSelect: (Int) -> Unit,
-    content: @Composable (Modifier) -> Unit,
+    content: @Composable (Modifier, Int?) -> Unit,
 ) {
     if (backdrop == null) {
-        content(modifier)
+        content(modifier, null)
         return
     }
     val motion = LocalMotionEnabled.current
@@ -64,6 +66,7 @@ internal fun GlassTabRail(
     val tail = remember(labels) { Animatable(selected.toFloat()) }
     var finger by remember(labels) { mutableStateOf<Float?>(null) }
     var release by remember(labels) { mutableStateOf<TabRelease?>(null) }
+    var previewIndex by remember(labels) { mutableIntStateOf(-1) }
     val dragging by remember(labels) { derivedStateOf { finger != null && release == null } }
 
     LaunchedEffect(labels, motion) {
@@ -101,10 +104,25 @@ internal fun GlassTabRail(
             } else tail.snapTo(target)
         }
     }
-    val pressure = animateFloatAsState(if (useLens && (pressed || dragging)) 1f else 0f,
+    // A neighbour press draws just the near shoulder towards it. Releasing activates
+    // the tab; scrolling away unloads the pressure and leaves the current page in place.
+    val shoulderTarget = if (useLens && !dragging && pressedIndex != null)
+        .11f * (pressedIndex - selected).coerceIn(-1, 1) else 0f
+    val shoulder = animateFloatAsState(shoulderTarget,
+        if (useLens) spring(1f, MangaMotion.PressAttackStiffness) else snap(), label = "glass-tab-reach")
+    val pressureTarget = when {
+        !useLens -> 0f
+        dragging || pressedIndex == selected -> 1f
+        pressedIndex != null -> .42f
+        else -> 0f
+    }
+    val pressure = animateFloatAsState(pressureTarget,
         if (useLens) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(), label = "glass-tab-pressure")
-    val travel = remember(labels, motion) { derivedStateOf {
-        if (motion) ((finger ?: front.value) - tail.value).coerceIn(-.70f, .70f) else 0f
+    val leading = remember(labels, shoulder) { derivedStateOf {
+        finger ?: (front.value + shoulder.value).coerceIn(0f, labels.lastIndex.toFloat())
+    } }
+    val travel = remember(leading, tail, motion) { derivedStateOf {
+        if (motion) (leading.value - tail.value).coerceIn(-.70f, .70f) else 0f
     } }
     val lensAmount = remember(travel, pressure, opacity, useLens) { derivedStateOf {
         if (useLens) maxOf(pressure.value, abs(travel.value) * 2.4f).coerceIn(0f, 1f) * opacity.value else 0f
@@ -112,15 +130,23 @@ internal fun GlassTabRail(
     val hasLens by remember(lensAmount) { derivedStateOf { lensAmount.value > .012f } }
 
     val gesture = if (selectionVisible) Modifier.glassTabScrub(labels, selected,
-        currentPosition = { ((finger ?: front.value) - .24f * travel.value).coerceIn(0f, labels.lastIndex.toFloat()) },
-        onPreview = {
+        currentPosition = { leading.value },
+        onPreview = { position ->
             release = null
-            finger = it
+            finger = position
+            val previous = if (previewIndex >= 0) previewIndex else index.value
+            // A small dead band stops the lettering and the detent from chattering at a seam.
+            previewIndex = if (abs(position - previous) > .56f) position.roundToInt() else previous
+            if (previewIndex != previous) onDetent()
         },
         onFinish = { at, target, velocity ->
             finger = at
             release = TabRelease(at, velocity)
-            if (target != null && target != index.value) onSelect(target)
+            if (target != null && target != index.value) {
+                if (target != previewIndex) onDetent()
+                onSelect(target)
+            }
+            previewIndex = -1
         }) else Modifier
     Box(modifier.then(gesture)) {
         Box(Modifier.matchParentSize().layout { measurable, bounds ->
@@ -133,7 +159,7 @@ internal fun GlassTabRail(
                 .roundToInt().coerceIn(0, bounds.maxHeight)
             val thumb = measurable.measure(Constraints.fixed(width, height))
             layout(bounds.maxWidth, bounds.maxHeight) {
-                val center = (finger ?: front.value) + .5f - .24f * travel.value
+                val center = leading.value + .5f - .24f * travel.value
                 val x = (slot * center - width / 2f).roundToInt().coerceIn(0, bounds.maxWidth - width)
                 thumb.placeRelative(x, (bounds.maxHeight - height) / 2)
             }
@@ -144,9 +170,9 @@ internal fun GlassTabRail(
             if (hasLens) {
                 LiquidGlassSurface(backdrop, Modifier.fillMaxSize(), role = GlassSurfaceRole.TAB_LENS,
                     surfaceShape = CircleShape, elevation = 0.dp, preferSource = true,
-                    materialExpansion = { lensAmount.value }) {}
+                    materialExpansion = { lensAmount.value }, lensTravel = { travel.value / .70f }) {}
             }
         }
-        content(Modifier.fillMaxSize())
+        content(Modifier.fillMaxSize(), previewIndex.takeIf { dragging && it >= 0 })
     }
 }

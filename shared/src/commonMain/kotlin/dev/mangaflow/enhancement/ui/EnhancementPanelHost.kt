@@ -1,12 +1,7 @@
 package dev.mangaflow.enhancement.ui
 
 import androidx.compose.animation.core.MutableTransitionState
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.rememberTransition
-import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -27,14 +22,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -48,7 +46,8 @@ import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.MangaWindowSize
 import dev.mangaflow.ui.mangaOverlayScrim
 import dev.mangaflow.ui.motion.LocalMotionEnabled
-import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.surfaceReveal
+import dev.mangaflow.ui.motion.surfaceRevealAlpha
 import dev.mangaflow.ui.motion.MotionDialogWindowPolicy
 import dev.mangaflow.ui.motion.motionInputGate
 
@@ -65,6 +64,7 @@ internal fun EnhancementPanelHost(
     content: @Composable () -> Unit,
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
+    val endDirection = if (LocalLayoutDirection.current == LayoutDirection.Rtl) -1f else 1f
     val fallbackBackdrop = rememberHazeState()
     val motion = LocalMotionEnabled.current
     val presence = remember { MutableTransitionState(false) }
@@ -74,15 +74,7 @@ internal fun EnhancementPanelHost(
     LaunchedEffect(presence.currentState, presence.targetState, presence.isIdle) {
         if (presence.isIdle && !presence.currentState && !presence.targetState) closed.value?.invoke()
     }
-    val alpha = transition.animateFloat(
-        transitionSpec = { tween(if (motion) MangaMotion.Content else 0) },
-        label = "enhancement-panel-alpha",
-    ) { if (it) 1f else 0f }
-    val offset = transition.animateFloat(transitionSpec = {
-        if (!motion) snap()
-        else if (targetState) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness)
-        else tween(MangaMotion.Exit, easing = MangaMotion.ExitEasing)
-    }, label = "enhancement-panel-position") { if (it) 0f else 1f }
+    val reveal = transition.surfaceReveal(motion)
     if (presence.currentState || presence.targetState || !presence.isIdle) {
         Dialog(
             onDismissRequest = { if (visible) onDismiss() },
@@ -95,7 +87,9 @@ internal fun EnhancementPanelHost(
                 val scrim = if (playbackOverlay) Color.Transparent else mangaOverlayScrim()
                 val backdropInput = if (playbackOverlay) Modifier.clearAndSetSemantics { }
                     .focusProperties { canFocus = false } else Modifier
-                Box(Modifier.fillMaxSize().background(scrim.copy(alpha = scrim.alpha * alpha.value))
+                Box(Modifier.fillMaxSize().drawBehind {
+                    if (scrim.alpha > 0f) drawRect(scrim, alpha = reveal.value.coerceIn(0f, 1f))
+                }
                     .then(backdropInput)
                     .clickable(enabled = visible, indication = null, interactionSource = remember { MutableInteractionSource() }) {
                         onDismiss()
@@ -121,9 +115,16 @@ internal fun EnhancementPanelHost(
                             .motionInputGate(visible)
                             .pointerInput(Unit) { detectTapGestures(onTap = {}) }
                             .graphicsLayer {
-                                this.alpha = alpha.value
-                                if (sidePanel || desktop) translationX = 24.dp.toPx() * offset.value
-                                else translationY = 24.dp.toPx() * offset.value
+                                val progress = reveal.value.coerceIn(0f, 1f)
+                                val rest = 1f - progress
+                                alpha = surfaceRevealAlpha(progress)
+                                if (sidePanel || desktop) {
+                                    translationX = endDirection * minOf(size.width * .14f, 48.dp.toPx()) * rest
+                                    translationY = 0f
+                                } else {
+                                    translationX = 0f
+                                    translationY = minOf(size.height * .15f, 40.dp.toPx()) * rest
+                                }
                             }
                         if (surface != null) surface(panelModifier, content)
                         else LiquidGlassSurface(

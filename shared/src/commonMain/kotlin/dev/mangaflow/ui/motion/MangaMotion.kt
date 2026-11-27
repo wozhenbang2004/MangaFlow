@@ -15,7 +15,6 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.MutableTransitionState
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
@@ -84,6 +83,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -146,7 +146,7 @@ internal fun Modifier.motionPress(
     interaction: MutableInteractionSource,
     enabled: Boolean = true,
     pressedScale: Float = MangaMotion.SurfacePressScale,
-): Modifier = motionPressFeedback(interaction, enabled, pressedScale, desktopIcon = null)
+): Modifier = motionPressFeedback(interaction, enabled, pressedScale, icon = false, desktopIcon = null)
 
 /** Mouse-origin focus affects drawing only. Real focus and the click action stay with Foundation. */
 private class DesktopIconFocus {
@@ -174,6 +174,7 @@ private fun Modifier.motionPressFeedback(
     interaction: MutableInteractionSource,
     enabled: Boolean,
     pressedScale: Float,
+    icon: Boolean,
     desktopIcon: DesktopIconFocus?,
 ): Modifier {
     val interactionPressed by interaction.collectIsPressedAsState()
@@ -184,6 +185,8 @@ private fun Modifier.motionPressFeedback(
     val iconAccessibility = if (desktopIcon != null) LocalPlatformAccessibilityPreferences.current else null
     var down by remember(interaction) { mutableStateOf(false) }
     var directPress by remember(interaction) { mutableStateOf(false) }
+    var contact by remember(interaction) { mutableStateOf(TransformOrigin.Center) }
+    var mouseContact by remember(interaction) { mutableStateOf(false) }
     var release by remember(interaction) { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
     val pressed = enabled && (directPress || (!down && interactionPressed))
@@ -196,23 +199,34 @@ private fun Modifier.motionPressFeedback(
             down = false
         }
     }
-    val scale = animateFloatAsState(
-        if (pressed && motion) pressedScale else 1f,
+    val pressure = animateFloatAsState(
+        if (pressed) 1f else 0f,
         if (!motion) snap() else if (pressed) spring(1f, MangaMotion.PressAttackStiffness)
         else spring(MangaMotion.PressDamping, MangaMotion.PressStiffness),
-        label = "surface-press",
+        label = "contact-pressure",
     )
     // clickable intentionally delays its Press inside scrolling parents. Observe down without
     // consuming it; Foundation still owns click/long-click/scroll, keyboard and TalkBack.
-    val input = if (enabled) Modifier.pointerInput(interaction, desktopIcon) {
+    val input = if (enabled) Modifier.onPreviewKeyEvent {
+        if (!down && it.type == KeyEventType.KeyDown) {
+            contact = TransformOrigin.Center
+            mouseContact = false
+        }
+        false
+    }.pointerInput(interaction, desktopIcon) {
         awaitEachGesture {
             val first = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-            val mousePress = desktopIcon != null && first.type == PointerType.Mouse && !first.isConsumed &&
-                currentEvent.buttons.isPrimaryPressed
-            // The Initial pass precedes Foundation's focus request on the Main pass.
+            val mousePress = first.type == PointerType.Mouse
+            if (mousePress && !currentEvent.buttons.isPrimaryPressed) return@awaitEachGesture
+            // Inner actions see Main first. Do not compress their enclosing card too.
+            val ownDown = awaitPointerEvent(PointerEventPass.Main).changes.firstOrNull { it.id == first.id }
+            if (ownDown == null || ownDown.isConsumed) return@awaitEachGesture
             if (mousePress) desktopIcon?.mousePressed(true)
             release?.cancel()
             release = null
+            mouseContact = mousePress
+            contact = TransformOrigin((first.position.x / size.width.coerceAtLeast(1)).coerceIn(.06f, .94f),
+                (first.position.y / size.height.coerceAtLeast(1)).coerceIn(.06f, .94f))
             val startedAt = monotonicTimeMillis()
             var released = false
             down = true
@@ -249,14 +263,17 @@ private fun Modifier.motionPressFeedback(
         }
     } else Modifier
     // Foundation owns hover/focus dispatch; draw those existing states only on desktop.
+    val hoverAmount = if (desktop) animateFloatAsState(if (hovered && enabled) 1f else 0f,
+        if (motion) tween(MangaMotion.Quick, easing = MangaMotion.EnterEasing) else snap(), label = "hover-ink") else null
     val desktopFeedback = if (desktop) Modifier.drawBehind {
         if (!enabled) return@drawBehind
+        val hover = hoverAmount?.value ?: 0f
         if (desktopIcon != null) {
             val contrast = iconAccessibility?.increaseContrast == true
             val focusVisible = focused && (contrast || iconAccessibility?.touchExploration == true || !desktopIcon.pointerFocus)
             val hoverRadius = minOf(14.dp.toPx(), size.minDimension / 2f)
-            if (hovered && hoverRadius > 0f) {
-                drawCircle(feedbackColor.copy(alpha = if (contrast) .14f else .055f), radius = hoverRadius)
+            if (hover > 0f && hoverRadius > 0f) {
+                drawCircle(feedbackColor.copy(alpha = hover * if (contrast) .14f else .055f), radius = hoverRadius)
             }
             if (focusVisible) {
                 val inset = (if (contrast) 2.dp else 1.dp).toPx()
@@ -268,17 +285,32 @@ private fun Modifier.motionPressFeedback(
             }
         } else {
             val radius = CornerRadius(minOf(12.dp.toPx(), size.minDimension / 2f))
-            if (hovered || focused) drawRoundRect(
-                feedbackColor.copy(alpha = if (focused) .075f else .045f), cornerRadius = radius)
+            if (hover > 0f || focused) drawRoundRect(
+                feedbackColor.copy(alpha = if (focused) .075f else .045f * hover), cornerRadius = radius)
             if (focused) drawRoundRect(feedbackColor.copy(alpha = .36f),
                 cornerRadius = radius, style = Stroke(1.25.dp.toPx()))
         }
     } else Modifier
+    val iconContact = if (icon && !desktop && motion) Modifier.drawBehind {
+        val amount = pressure.value.coerceIn(0f, 1f)
+        val radius = minOf(15.dp.toPx(), size.minDimension * .39f)
+        if (amount > 0f && radius > 0f) {
+            // The contact has a fixed footprint; it fades as the glyph springs back.
+            val reach = (size.minDimension / 2f - radius).coerceAtLeast(0f)
+            val offset = Offset((contact.pivotFractionX - .5f) * reach, (contact.pivotFractionY - .5f) * reach)
+            drawCircle(feedbackColor.copy(alpha = .075f * amount), radius, center + offset)
+        }
+    } else Modifier
     return then(input).then(desktopFeedback).graphicsLayer {
-        scaleX = scale.value
-        scaleY = scale.value
-        if (!motion) alpha = if (pressed) .72f else 1f
-    }
+        val extent = maxOf(size.width, size.height).coerceAtLeast(1f)
+        // Pin the image or row to the finger. A wide desktop row travels only a few pixels.
+        val compression = minOf((1f - pressedScale).coerceAtLeast(0f), 4.dp.toPx() / extent)
+        val scale = if (motion) 1f - pressure.value * compression * (if (mouseContact) .65f else 1f) else 1f
+        transformOrigin = contact
+        scaleX = scale
+        scaleY = scale
+        alpha = if (!motion && pressed) .72f else 1f
+    }.then(iconContact)
 }
 
 /** beUI PresenceGate: outgoing visuals do not expose controls or handle new input. */
@@ -309,23 +341,31 @@ internal fun MotionIconButton(
     Box(modifier.size(48.dp).then(focusOrigin)
         .clickable(enabled = enabled, interactionSource = interaction, indication = null,
             role = Role.Button, onClick = onClick)
-        .motionPressFeedback(interaction, enabled, MangaMotion.IconPressScale, desktopIcon), contentAlignment = Alignment.Center) {
+        .motionPressFeedback(interaction, enabled, MangaMotion.IconPressScale, icon = true, desktopIcon = desktopIcon),
+        contentAlignment = Alignment.Center) {
         Box(Modifier.graphicsLayer { alpha = if (enabled) 1f else .38f },
             contentAlignment = Alignment.Center) { content() }
         DesktopIconTooltip(tooltip, interaction, enabled)
     }
 }
 
-/** The caller owns the fixed icon slot. Neither entering nor leaving content changes its bounds. */
+/** A glyph can spring into its slot. Labels keep their baseline through a change. */
 @Composable
-internal fun <T> MotionSwap(target: T, modifier: Modifier = Modifier, content: @Composable (T) -> Unit) {
+internal fun <T> MotionSwap(
+    target: T,
+    modifier: Modifier = Modifier,
+    scaleContent: Boolean = true,
+    content: @Composable (T) -> Unit,
+) {
     val motion = LocalMotionEnabled.current
     AnimatedContent(targetState = target, modifier = modifier, contentAlignment = Alignment.Center,
         transitionSpec = {
-            if (motion) {
+            if (!motion) (fadeIn(snap()) togetherWith fadeOut(snap())).using(null)
+            else if (scaleContent) {
                 ((fadeIn(tween(MangaMotion.Quick)) + scaleIn(spring(.943f, 836f), initialScale = .86f)) togetherWith
                     (fadeOut(tween(90)) + scaleOut(tween(MangaMotion.Quick), targetScale = .92f))).using(null)
-            } else (fadeIn(snap()) togetherWith fadeOut(snap())).using(null)
+            } else (fadeIn(tween(MangaMotion.Quick, delayMillis = 25, easing = MangaMotion.EnterEasing)) togetherWith
+                fadeOut(tween(75))).using(null)
         }, label = "state-slot",
     ) { value -> Box(Modifier.motionInputGate(value == target), contentAlignment = Alignment.Center) { content(value) } }
 }
@@ -400,17 +440,8 @@ internal fun MotionDialog(
     if (onClosed != null) LaunchedEffect(state.currentState, state.targetState, state.isIdle) {
         if (state.isIdle && !state.currentState && !state.targetState) closed.value?.invoke()
     }
-    val alpha = transition.animateFloat(
-        transitionSpec = { tween(if (!motion) 0 else if (targetState) MangaMotion.Content else MangaMotion.Quick) },
-        label = "panel-alpha",
-    ) { if (it) 1f else 0f }
-    val position = transition.animateFloat(
-        transitionSpec = {
-            if (!motion) snap()
-            else if (targetState) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness)
-            else tween(MangaMotion.Exit, easing = MangaMotion.ExitEasing)
-        }, label = "panel-position",
-    ) { if (it) 0f else 1f }
+    val reveal = transition.surfaceReveal(motion)
+    val desktop = platformKind == PlatformKind.DESKTOP
     if (state.currentState || state.targetState || !state.isIdle) {
         Dialog(onDismissRequest = { if (visible) onDismissRequest() }, properties = properties) {
             MotionDialogWindowPolicy(visible, backgroundDim = mangaOverlayScrim().alpha)
@@ -423,10 +454,12 @@ internal fun MotionDialog(
             CompositionLocalProvider(LocalMangaWindow provides panelWindow) {
             Box(Modifier.widthIn(max = maximumWidth).heightIn(max = maxHeight)
                 .motionInputGate(visible).graphicsLayer {
-                this.alpha = alpha.value
-                val offset = if (motion) position.value else 0f
-                translationY = 16.dp.toPx() * offset
-                scaleX = 1f - .025f * offset
+                val progress = reveal.value.coerceIn(0f, 1f)
+                val rest = 1f - progress
+                alpha = surfaceRevealAlpha(progress)
+                transformOrigin = TransformOrigin(.5f, if (desktop) .5f else .78f)
+                translationY = minOf(size.height * .11f, if (desktop) 4.dp.toPx() else 24.dp.toPx()) * rest
+                scaleX = 1f - (if (desktop) .028f else .014f) * rest
                 scaleY = scaleX
             }) { content() }
             }
@@ -520,17 +553,11 @@ private fun DesktopSheet(
 ) {
     var visible by remember { mutableStateOf(true) }
     val onDismiss by rememberUpdatedState(onDismissRequest)
-    val motion = LocalMotionEnabled.current
     val dismiss: () -> Unit = { visible = false }
-    LaunchedEffect(visible) {
-        if (!visible) {
-            if (motion) delay(maxOf(MangaMotion.Exit, MangaMotion.Quick).toLong())
-            onDismiss()
-        }
-    }
     MotionDialog(
         visible = visible,
         onDismissRequest = dismiss,
+        onClosed = { if (!visible) onDismiss() },
         properties = DialogProperties(usePlatformDefaultWidth = false),
         maximumWidth = 760.dp,
     ) {

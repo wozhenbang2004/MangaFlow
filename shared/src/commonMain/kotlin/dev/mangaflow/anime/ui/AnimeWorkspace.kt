@@ -818,7 +818,7 @@ private fun AnimeWorkspaceContent(
                             val tabsWidth = headerRoom.coerceIn(112.dp * fontScale, 184.dp * fontScale)
                             val stackDesktopTabs = workspaceTabs && !navigationVisible && headerRoom < tabsWidth
                             val controlsAlpha = {
-                                if (searchExpanded) 0f else 1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f)
+                                1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f)
                             }
                             val returnLabel = when {
                                 shown.depth == 0 && directoryDetailOpen -> "返回片源目录"

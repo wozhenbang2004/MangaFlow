@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.sign
 
 /** A horizontal scrub previews logical slot coordinates and releases in slots per second. */
 @Composable
@@ -79,7 +80,9 @@ internal fun Modifier.glassTabScrub(
                     if (!dragging && abs(delta.x) > slop && abs(delta.x) > abs(delta.y)) {
                         // Keep the grab offset if the thumb was moving. Starting on another item
                         // instead tracks the point under the finger, including either end slot.
-                        if (grabbedThumb) anchor = positionNow()
+                        // Claim only the horizontal distance beyond touch slop. Re-catching a
+                        // travelling lens otherwise adds an entire slop-length to its position.
+                        if (grabbedThumb) anchor = positionNow() - sign * delta.x.sign * slop / slot
                         dragging = true
                     }
                     if (dragging) {

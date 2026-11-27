@@ -48,7 +48,6 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.ReviewProviders
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
-import dev.mangaflow.ui.motion.MotionSwap
 
 /** One measured band shares heat priority and source stacking with discovery cards. */
 @Composable
@@ -97,11 +96,10 @@ internal fun DetailRatingSheet(manga: Manga, backdrop: HazeState? = null, onDism
                         tint = DetailSecondary, modifier = Modifier.size(18.dp))
                 }
             }
-            MotionSwap(showNotes, Modifier.fillMaxWidth()) { visible ->
-                if (visible) Text("各站保留原始分制，不合并总分。平均分、贝叶斯分与热度口径不同；人数仅在来源提供时显示。",
+            CopyShelfReveal(showNotes) {
+                Text("各站保留原始分制，不合并总分。平均分、贝叶斯分与热度口径不同；人数仅在来源提供时显示。",
                     Modifier.fillMaxWidth().padding(bottom = 12.dp),
                     color = DetailSecondary, fontSize = 12.sp, lineHeight = 18.sp)
-                else Spacer(Modifier.height(0.dp))
             }
             heat?.let { value ->
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 12.dp)

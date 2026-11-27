@@ -8,6 +8,10 @@ import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Transition
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -44,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
@@ -170,6 +175,35 @@ internal fun ReaderWorkspace(
     }
 }
 
+/** Both edges of the reader use the same visibility transition without moving the actual pages. */
+@Composable
+internal fun ReaderToolPresence(
+    presence: Transition<Boolean>,
+    top: Boolean,
+    modifier: Modifier,
+    content: @Composable () -> Unit,
+) {
+    val motion = LocalMotionEnabled.current
+    val travel = presence.animateFloat(transitionSpec = {
+        when {
+            !motion -> snap()
+            targetState -> spring(dampingRatio = .91f, stiffness = if (top) 780f else 610f)
+            else -> spring(dampingRatio = 1f, stiffness = 1_050f)
+        }
+    }, label = if (top) "reader-title-travel" else "reader-dock-travel") { if (it) 1f else 0f }
+    if (!presence.currentState && !presence.targetState && !presence.isRunning) return
+    Box(modifier.graphicsLayer {
+        val amount = travel.value.coerceIn(0f, 1f)
+        val remaining = 1f - amount
+        // Keep the insets and the content height fixed even when the exit reverses halfway.
+        transformOrigin = TransformOrigin(.5f, if (top) 0f else 1f)
+        translationY = (if (top) -11.dp.toPx() else 18.dp.toPx()) * remaining
+        scaleX = 1f - (if (top) .012f else .024f) * remaining
+        scaleY = 1f - (if (top) .045f else .09f) * remaining
+        alpha = 1f - remaining * remaining
+    }.motionInputGate(presence.targetState)) { content() }
+}
+
 /** Keeps Material's seek, keyboard and accessibility behavior, with a quiet track and stable thumb slot. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -194,7 +228,9 @@ internal fun ReaderSeekBar(
     val motion = LocalMotionEnabled.current
     val engagement = animateFloatAsState(
         if (engaged) 1f else 0f,
-        tween(if (motion) MangaMotion.Quick else 0), label = "reader-slider-engagement",
+        if (motion) spring(dampingRatio = if (engaged) .9f else 1f,
+            stiffness = if (engaged) MangaMotion.PressAttackStiffness else 760f) else snap(),
+        label = "reader-slider-engagement",
     )
     val fraction = ((value - valueRange.start) /
         (valueRange.endInclusive - valueRange.start).coerceAtLeast(.001f)).coerceIn(0f, 1f)
@@ -209,16 +245,19 @@ internal fun ReaderSeekBar(
         val bubbleWidth = minOf(76.dp * fontScale, maxWidth)
         val travel = (maxWidth - 24.dp).coerceAtLeast(0.dp)
         val bubbleLimit = (maxWidth - bubbleWidth).coerceAtLeast(0.dp)
-        val bubbleX = (12.dp + travel * fraction - bubbleWidth / 2f).coerceIn(0.dp, bubbleLimit)
+        val thumbX = 12.dp + travel * fraction
+        val bubbleX = (thumbX - bubbleWidth / 2f).coerceIn(0.dp, bubbleLimit)
+        val origin = ((thumbX - bubbleX) / bubbleWidth.coerceAtLeast(1.dp)).coerceIn(0f, 1f)
         Surface(
             modifier = Modifier.width(bubbleWidth).heightIn(min = 24.dp).align(Alignment.TopStart)
                 .offset(x = bubbleX, y = (-16).dp)
                 .graphicsLayer {
-                    alpha = engagement.value
-                    val scale = .94f + engagement.value * .06f
-                    scaleX = scale
-                    scaleY = scale
-                    translationY = (1f - engagement.value) * 4.dp.toPx()
+                    val amount = engagement.value.coerceIn(0f, 1f)
+                    transformOrigin = TransformOrigin(if (layoutDirection == LayoutDirection.Rtl) 1f - origin else origin, 1f)
+                    alpha = amount
+                    scaleX = .87f + amount * .13f
+                    scaleY = .72f + amount * .28f
+                    translationY = (1f - amount) * 10.dp.toPx()
                 }
                 .clearAndSetSemantics { },
             shape = RoundedCornerShape(50),

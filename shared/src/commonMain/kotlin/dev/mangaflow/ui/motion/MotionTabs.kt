@@ -95,7 +95,7 @@ internal fun MotionNavigationColumn(
     val rowGap = if (routeMarker) 2.dp else 6.dp
     LaunchedEffect(motion, itemCount) {
         snapshotFlow { latest.value }.collect { target ->
-            val down = target > top.value
+            val down = target > (top.value + bottom.value - 1f) * .5f
             val topVelocity = top.velocity
             val bottomVelocity = bottom.velocity
             launch {
@@ -122,7 +122,6 @@ internal fun MotionNavigationColumn(
             y.also { y += heights.getValue(i) + gap }
         }
         val ends = FloatArray(itemCount) { i -> starts[i] + heights.getValue(i) }
-        val restingHeight = heights.getValue(index).toFloat().coerceAtLeast(1f)
         val cornerRadius = CornerRadius(14.dp.toPx())
         val rtl = layoutDirection == LayoutDirection.Rtl
         val wash = if (routeMarker) Brush.horizontalGradient(
@@ -139,6 +138,8 @@ internal fun MotionNavigationColumn(
             val start = interpolate(top.value, starts)
             val end = interpolate(bottom.value - 1f, ends)
             // A long jump should travel between rows, not turn into a full-column selection panel.
+            val centerSlot = (top.value + bottom.value - 1f) * .5f
+            val restingHeight = (interpolate(centerSlot, ends) - interpolate(centerSlot, starts)).coerceAtLeast(1f)
             val height = (end - start).coerceIn(restingHeight * .9f, restingHeight * 1.22f)
             val offset = ((start + end - height) / 2f).coerceIn(0f, (size.height - height).coerceAtLeast(0f))
             val origin = Offset(0f, offset)
@@ -237,7 +238,7 @@ internal fun MotionTabs(
         // A scrub rail owns its one settling animation; the default tabs keep the two-edge motion.
         if (scrubPosition == null) LaunchedEffect(motion, labels.size) {
             snapshotFlow { latest.value }.collect { target ->
-                val toRight = target > left.value
+                val toRight = target > (left.value + right.value - 1f) * .5f
                 // Capture velocity before animateTo cancels its predecessor. A reverse tap continues here.
                 val leftVelocity = left.velocity
                 val rightVelocity = right.velocity
@@ -291,14 +292,18 @@ internal fun MotionTabs(
                     else interpolate(leading, centers) - interpolate(leading, widths) / 2f
                 val end = if (fillSegment) trailing.coerceIn(0f, labels.size.toFloat()) * slot - inset
                     else interpolate(trailing - 1f, centers) + interpolate(trailing - 1f, widths) / 2f
-                val width = (end - start).coerceAtLeast(2.dp.toPx())
-                val restingWidth = if (fillSegment) slot - inset * 2f else widths[index]
-                val stretch = (width / restingWidth.coerceAtLeast(1f) - 1f).coerceAtLeast(0f)
+                val centerSlot = (leading + trailing - 1f) * .5f
+                val restingWidth = (if (fillSegment) slot - inset * 2f else interpolate(centerSlot, widths)).coerceAtLeast(1f)
+                // Long jumps keep a single travelling mark even when intermediate labels differ in width.
+                val stretchLimit = if (treatment == MotionTabTreatment.Underline) 1.60f else 1.28f
+                val width = (end - start).coerceIn(restingWidth * .76f, restingWidth * stretchLimit).coerceAtMost(size.width)
+                val x = ((start + end - width) * .5f).coerceIn(0f, (size.width - width).coerceAtLeast(0f))
+                val stretch = (width / restingWidth - 1f).coerceAtLeast(0f)
                 val h = (indicatorHeight?.toPx() ?: if (treatment == MotionTabTreatment.Underline) 2.dp.toPx()
                     else if (fillSegment) size.height - 8.dp.toPx()
                     else (if (compact) 28.dp else 32.dp).toPx()).coerceAtLeast(1f) *
                     (1f - .06f * stretch).coerceAtLeast(.8f)
-                val topLeft = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - end else start,
+                val topLeft = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - x - width else x,
                     if (treatment == MotionTabTreatment.Underline) size.height - h - 5.dp.toPx() else (size.height - h) / 2)
                 val pillSize = Size(width, h)
                 val radius = CornerRadius(indicatorCornerRadius?.toPx()
@@ -314,21 +319,23 @@ internal fun MotionTabs(
         }
     }
     GlassTabRail(frame, if (movingGroupFill) selectionBackdrop else null, labels, index, selectionVisible,
-        groupTint, selectionAlpha, pressed = selectionVisible && groupPresses.getOrNull(index)?.value == true,
-        onSelect = { target -> feedback.perform(FeelEvent.Selection); onSelect(target) }) { rowFrame ->
+        groupTint, selectionAlpha, pressedIndex = if (selectionVisible) groupPresses.indexOfFirst { it.value }
+            .takeIf { it >= 0 } else null,
+        onDetent = { feedback.perform(FeelEvent.Selection) }, onSelect = onSelect) { rowFrame, preview ->
         Row(rowFrame.then(selectionInk).padding(horizontal = if (compact) 10.dp else 0.dp).selectableGroup(),
             horizontalArrangement = if (compact) Arrangement.spacedBy(22.dp) else Arrangement.Start,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             labels.forEachIndexed { i, label ->
                 val isSelected = selectionVisible && i == index
+                val emphasized = selectionVisible && i == (preview ?: index)
                 val interaction = selectionInteractions[i]
                 val pressed = if (movingGroupFill) groupPresses[i].value else interaction.collectIsPressedAsState().value
                 val focused = inGlassGroup && interaction.collectIsFocusedAsState().value
                 val hovered = inGlassGroup && interaction.collectIsHoveredAsState().value
                 val pressAlpha = animateFloatAsState(if (pressed) .06f else if (hovered) .035f else 0f,
                     if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-press")
-                val labelColor by animateColorAsState(if (isSelected) foreground else inactiveInk,
+                val labelColor by animateColorAsState(if (emphasized) foreground else inactiveInk,
                     if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-label")
                 // Reserve both weights so selecting a compact tab cannot shift its neighbours.
                 val labelWidth = if (compact && itemContent == null) with(density) {
@@ -359,7 +366,7 @@ internal fun MotionTabs(
                             modifier = if (controlHeight != null) Modifier.padding(
                                 horizontal = if (treatment == MotionTabTreatment.Capsule) 8.dp else 2.dp) else Modifier,
                             textAlign = TextAlign.Center,
-                            fontWeight = if (isSelected) selectedFontWeight else unselectedFontWeight,
+                            fontWeight = if (emphasized) selectedFontWeight else unselectedFontWeight,
                             maxLines = if (wrapLabels) 2 else 1, overflow = TextOverflow.Ellipsis)
                     DesktopIconTooltip(tooltips?.getOrNull(i), interaction, tooltips != null)
                 }

@@ -29,6 +29,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -39,6 +40,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
@@ -78,6 +83,8 @@ internal fun ChapterEndFooter(
     backdrop: HazeState,
     previous: Boolean = false,
 ) {
+    val motion = LocalMotionEnabled.current
+    val armed by remember(pull) { derivedStateOf { pull.progress >= 1f } }
     LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), role = GlassSurfaceRole.READING_DOCK,
         preferSource = true, cornerRadius = 22.dp, trackPointer = onNext != null || onRetry != null) {
         Row(
@@ -88,11 +95,16 @@ internal fun ChapterEndFooter(
             if (onNext != null) Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
                 BottomPullLoadIndicator(pull, Modifier.size(32.dp), color = foreground.copy(alpha = .65f))
             }
-            Column(Modifier.weight(1f).padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Column(Modifier.weight(1f).graphicsLayer {
+                val distance = if (motion && onNext != null) 3.dp.toPx() * pull.progress.coerceIn(0f, 1f) else 0f
+                val shift = if (pull.towardStart) distance else -distance
+                translationX = if (pull.horizontal) shift else 0f
+                translationY = if (pull.horizontal) 0f else shift
+            }.padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 val hint = when {
                     onNext == null -> unavailableMessage
                     pull.loading -> if (previous) "正在打开上一话" else "正在打开下一话"
-                    pull.progress >= 1f -> if (previous) "松手返回上一话" else "松手进入下一话"
+                    armed -> if (previous) "松手返回上一话" else "松手进入下一话"
                     previous -> "下拉返回上一话"
                     !pull.loadActionAvailable -> "点按下一话继续"
                     pull.horizontal && pull.towardStart -> "右滑进入下一话"
@@ -106,7 +118,15 @@ internal fun ChapterEndFooter(
                 if (hasTitle) Text(hint, color = foreground.copy(alpha = .82f),
                     style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
-            if (onNext != null) TextButton(onClick = onNext) {
+            if (onNext != null) TextButton(onClick = onNext, modifier = Modifier.drawBehind {
+                val amount = if (pull.loading) 1f else pull.progress.coerceIn(0f, 1f)
+                if (amount > 0f) {
+                    val h = minOf(size.height, 32.dp.toPx())
+                    val w = size.width * if (motion) .8f + .2f * amount else 1f
+                    drawRoundRect(foreground.copy(alpha = .12f * amount), Offset((size.width - w) / 2f, (size.height - h) / 2f),
+                        Size(w, h), CornerRadius(h / 2f))
+                }
+            }) {
                 Text(if (previous) "上一话" else "下一话", color = foreground.copy(alpha = .8f), fontSize = 12.sp)
             } else if (onRetry != null) TextButton(onClick = onRetry) {
                 Text("重试", color = foreground.copy(alpha = .8f), fontSize = 12.sp)

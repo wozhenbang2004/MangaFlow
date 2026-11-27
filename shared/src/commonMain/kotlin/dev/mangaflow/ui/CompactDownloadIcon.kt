@@ -4,10 +4,10 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -23,8 +23,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -55,16 +56,15 @@ internal fun CompactDownloadIcon(
     val animatedProgress by animateFloatAsState(actualProgress ?: 0f,
         animationSpec = if (motion) tween(MangaMotion.Content) else snap(),
         label = "download-pages")
-    val completeScale = remember { Animatable(1f) }
+    val check = remember { Animatable(1f) }
     var previousState by remember { mutableStateOf(state) }
     LaunchedEffect(state, motion) {
         val completedNow = previousState != CompactDownloadState.COMPLETE && state == CompactDownloadState.COMPLETE
         previousState = state
-        completeScale.snapTo(1f)
         if (completedNow && motion) {
-            completeScale.animateTo(1.14f, tween(MangaMotion.Quick, easing = MangaMotion.EnterEasing))
-            completeScale.animateTo(1f, tween(MangaMotion.Content, easing = MangaMotion.EnterEasing))
-        }
+            check.snapTo(0f)
+            check.animateTo(1f, tween(MangaMotion.Content, easing = MangaMotion.EnterEasing))
+        } else check.snapTo(1f)
     }
     Box(modifier.size(24.dp).semantics {
         if (contentDescription != null) this.contentDescription = contentDescription
@@ -75,10 +75,7 @@ internal fun CompactDownloadIcon(
         }
     }, contentAlignment = Alignment.Center) {
         // Progress changes redraw only this ring, rather than keying another icon transition.
-        MotionSwap(state, Modifier.size(24.dp).clearAndSetSemantics { }.graphicsLayer {
-            scaleX = completeScale.value
-            scaleY = completeScale.value
-        }) { visual ->
+        MotionSwap(state, Modifier.size(24.dp).clearAndSetSemantics { }) { visual ->
             Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
                 when (visual) {
                     CompactDownloadState.DOWNLOADING, CompactDownloadState.PAUSED -> {
@@ -92,11 +89,26 @@ internal fun CompactDownloadIcon(
                             tint = tint)
                     }
                     CompactDownloadState.WAITING -> Icon(Icons.Rounded.Schedule, null, Modifier.size(19.dp), tint = tint)
-                    CompactDownloadState.COMPLETE -> Icon(Icons.Rounded.Check, null, Modifier.size(21.dp), tint = tint)
+                    CompactDownloadState.COMPLETE -> DownloadCheckMark({ check.value }, tint, Modifier.size(21.dp))
                     CompactDownloadState.ERROR -> Icon(Icons.Rounded.Refresh, null, Modifier.size(21.dp), tint = tint)
                     CompactDownloadState.AVAILABLE -> Icon(Icons.Rounded.Download, null, Modifier.size(21.dp), tint = tint)
                 }
             }
         }
+    }
+}
+
+@Composable
+internal fun DownloadCheckMark(reveal: () -> Float, color: Color, modifier: Modifier) {
+    Canvas(modifier) {
+        val amount = reveal().coerceIn(0f, 1f)
+        if (amount <= 0f) return@Canvas
+        val start = Offset(size.width * .15f, size.height * .51f)
+        val joint = Offset(size.width * .40f, size.height * .74f)
+        val end = Offset(size.width * .86f, size.height * .26f)
+        val width = size.minDimension * .12f
+        drawLine(color, start, start + (joint - start) * (amount / .34f).coerceAtMost(1f), width, StrokeCap.Round)
+        if (amount > .34f) drawLine(color, joint, joint + (end - joint) * ((amount - .34f) / .66f),
+            width, StrokeCap.Round)
     }
 }

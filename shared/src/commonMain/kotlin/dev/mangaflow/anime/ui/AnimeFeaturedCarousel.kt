@@ -1,7 +1,10 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -147,9 +150,15 @@ internal fun AnimeFeaturedCarousel(
             derivedStateOf { (state.currentPage + state.currentPageOffsetFraction)
                 .coerceIn(0f, entries.lastIndex.toFloat()) }
         }
-        val coverUrls = remember(entries) { entries.map { it.coverUrl } }
-        val readyCovers = remember(coverUrls) { mutableStateMapOf<String, Boolean>() }
-        val currentCoverReady = entries.getOrNull(state.currentPage)?.coverUrl?.let { readyCovers[it] } == true
+        val artworkKeys = remember(entries) { entries.map { it.sourceId to it.coverUrl } }
+        val readyCovers = remember { mutableStateMapOf<Pair<String, String>, Boolean>() }
+        val coverTints = remember { mutableStateMapOf<Pair<String, String>, Color>() }
+        LaunchedEffect(artworkKeys) {
+            val current = artworkKeys.toSet()
+            readyCovers.keys.filterNot { it in current }.forEach { readyCovers.remove(it) }
+            coverTints.keys.filterNot { it in current }.forEach { coverTints.remove(it) }
+        }
+        val currentCoverReady = readyCovers[artworkKeys[state.currentPage.coerceIn(artworkKeys.indices)]] == true
         val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
         fun decodePixels(size: Dp): Int = with(density) {
             ((size.roundToPx().coerceAtLeast(1) + 63) / 64) * 64
@@ -179,20 +188,21 @@ internal fun AnimeFeaturedCarousel(
                 flingBehavior = fling, userScrollEnabled = active,
                 key = { entries[it].key },
                 modifier = Modifier.fillMaxWidth().height(itemHeight + 8.dp)
-                    .semantics { stateDescription = "番剧 " + (state.currentPage + 1) + " / " + entries.size }) { index ->
+                    .semantics { stateDescription = "番剧 " + (state.settledPage.coerceIn(entries.indices) + 1) + " / " + entries.size }) { index ->
                 val emphasis = { (1f - abs(index - position.value)).coerceIn(0f, 1f) }
                 val settled = state.settledPage == index
                 val acceptTap = active && !state.isScrollInProgress
+                val key = artworkKeys[index]
                 AnimeFeaturedCard(entries[index], compactLayout, imageWidthPx, imageHeightPx,
-                    onReady = { readyCovers[entries[index].coverUrl] = true },
+                    onReady = { readyCovers[key] = true }, onTint = { coverTints[key] = it },
                     modifier = Modifier.fillMaxWidth().height(itemHeight).graphicsLayer {
-                        scaleX = if (motion) .985f + .015f * emphasis() else 1f
-                        scaleY = if (motion) .94f + .06f * emphasis() else 1f
-                        alpha = .72f + .28f * emphasis()
+                        val scale = if (motion) .978f + .022f * emphasis() else 1f
+                        scaleX = scale
+                        scaleY = scale
                     }.mangaCoverCard(20.dp, shadowRadius = 11.dp),
                     offset = { if (motion) (index - position.value).coerceIn(-1f, 1f) *
                         (if (rtl) -1f else 1f) else 0f },
-                    useGlass = visible && acceptTap && settled && readyCovers[entries[index].coverUrl] == true,
+                    useGlass = visible && acceptTap && settled && readyCovers[key] == true,
                     enabled = acceptTap, scoresEnabled = acceptTap && settled,
                     actionLabel = if (settled) "查看详情" else "选中这部推荐番剧",
                     onOpenScores = onOpenScores, onOpen = { entry ->
@@ -210,18 +220,29 @@ internal fun AnimeFeaturedCarousel(
                 }
                 Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
                     val color = MaterialTheme.colorScheme.onSurface
+                    val contrast = LocalGlassAccessibilitySettings.current.increaseContrast
                     Canvas(Modifier.size(width = (entries.size * 14).dp, height = 3.dp)
                         .clearAndSetSemantics { }) {
-                        // Keep each position visible over wallpaper, even when it is not selected.
                         val slot = size.width / entries.size
-                        repeat(entries.size) { index ->
-                            val visualIndex = if (rtl) entries.lastIndex - index else index
-                            val weight = (1f - abs(position.value - index)).coerceIn(0f, 1f)
-                            val width = size.height + (slot * .88f - size.height) * weight
-                            drawRoundRect(color.copy(alpha = .25f + .48f * weight),
-                                topLeft = Offset((visualIndex + .5f) * slot - width / 2f, 0f),
-                                size = Size(width, size.height), cornerRadius = CornerRadius(size.height / 2f))
+                        fun x(index: Float) = (if (rtl) entries.lastIndex - index else index) * slot + slot / 2f
+                        repeat(entries.size) { i ->
+                            drawCircle(color.copy(alpha = if (contrast) .56f else .28f),
+                                size.height / 2f, Offset(x(i.toFloat()), size.height / 2f))
                         }
+                        // Both ends are driven by this drag's exact distance. Reversing the drag
+                        // retracts the leading end before extending back toward the previous stop.
+                        val page = if (motion) position.value else state.currentPage.toFloat().coerceIn(0f, entries.lastIndex.toFloat())
+                        val start = page.toInt()
+                        val next = (start + 1).coerceAtMost(entries.lastIndex)
+                        val t = page - start
+                        val rear = x(start + t * t)
+                        val front = x(start + t * (2f - t))
+                        val half = slot * .32f
+                        val firstColor = coverTints[artworkKeys[start]] ?: color
+                        val nextColor = coverTints[artworkKeys[next]] ?: color
+                        val marker = if (contrast) color else lerp(color, lerp(firstColor, nextColor, t), .24f)
+                        drawRoundRect(marker, Offset(minOf(rear, front) - half, 0f),
+                            Size(abs(front - rear) + 2f * half, size.height), CornerRadius(size.height / 2f))
                     }
                 }
                 if (desktop) MotionIconButton(onClick = { selectPage(state.currentPage + 1) },
@@ -241,6 +262,7 @@ private fun AnimeFeaturedCard(
     imageWidthPx: Int,
     imageHeightPx: Int,
     onReady: () -> Unit,
+    onTint: (Color) -> Unit,
     modifier: Modifier,
     offset: () -> Float,
     useGlass: Boolean,
@@ -267,6 +289,8 @@ private fun AnimeFeaturedCard(
     val colors = MaterialTheme.colorScheme
     val accessibility = LocalGlassAccessibilitySettings.current
     val hue = rememberAnimePosterTint(entry.coverUrl, entry.sourceId, decoded)
+    val reportTint by rememberUpdatedState(onTint)
+    LaunchedEffect(entry.key, hue) { hue?.let(reportTint) }
     val paper = hue?.let { lerp(colors.surface, it, if (colors.surface.luminance() > .5f) .085f else .12f) }
         ?: colors.surface
     val imageGround = hue?.let { lerp(paper, it, .32f) } ?: paper
@@ -275,6 +299,12 @@ private fun AnimeFeaturedCard(
     val landscape = frame != Size.Unspecified && frame.width.isFinite() && frame.height > 0f &&
         frame.width / frame.height >= 1.18f
     val panoramic = !stacked && landscape && !accessibility.reduceTransparency && !accessibility.increaseContrast
+    val seamAllowed = !panoramic && !accessibility.reduceTransparency && !accessibility.increaseContrast
+    val seamTransition = updateTransition(useGlass && seamAllowed, label = "anime-art-seam")
+    val seamAlpha = seamTransition.animateFloat(transitionSpec = { if (motion) tween(MangaMotion.Quick) else snap() },
+        label = "seam-opacity") { if (it) 1f else 0f }
+    val fadingSeam by remember(seamAlpha) { derivedStateOf { seamAlpha.value > .003f } }
+    val sampleSeam = seamAllowed && (useGlass || fadingSeam)
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
     Box(modifier.background(paper).clickable(interactionSource = interaction, indication = null, role = Role.Button,
         enabled = enabled, onClickLabel = actionLabel, onClick = { onOpen(entry) })
@@ -287,18 +317,23 @@ private fun AnimeFeaturedCard(
                 Image(painter, contentDescription = null, contentScale = if (landscape) ContentScale.Crop else ContentScale.Fit,
                     alignment = if (landscape) BiasAlignment(0f, -.35f) else Alignment.Center,
                     modifier = Modifier.matchParentSize()
-                        .then(if (useGlass && !panoramic) Modifier.mangaHazeSource(coverGlass) else Modifier)
+                        .then(if (sampleSeam) Modifier.mangaHazeSource(coverGlass) else Modifier)
                         .graphicsLayer {
                             if (motion && landscape) {
-                                scaleX = 1.03f; scaleY = 1.03f
-                                translationX = offset() * 3.dp.toPx()
+                                val distance = offset()
+                                val travel = minOf(size.width * .026f, 12.dp.toPx())
+                                val scale = 1f + .055f * abs(distance)
+                                scaleX = scale
+                                scaleY = scale
+                                translationX = -distance * travel
                             }
                         })
                 // A narrow optical seam catches the actual picture. The lettering sits on its own paper.
-                if (useGlass && !panoramic && !accessibility.reduceTransparency && !accessibility.increaseContrast) {
+                if (sampleSeam) {
                     val seam = if (stacked) Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(16.dp)
                         else Modifier.align(Alignment.CenterStart).fillMaxHeight().width(14.dp)
                     LiquidGlassSurface(coverGlass, modifier = seam.graphicsLayer {
+                        alpha = seamAlpha.value
                         compositingStrategy = CompositingStrategy.Offscreen
                     }.drawWithCache {
                         val feather = when {
@@ -317,7 +352,13 @@ private fun AnimeFeaturedCard(
             }
         }
         val information: @Composable (Modifier) -> Unit = { area ->
-            Column(area.padding(horizontal = if (stacked) 14.dp else 17.dp, vertical = if (stacked) 8.dp else 14.dp),
+            Column(area.graphicsLayer {
+                if (motion) {
+                    val distance = offset()
+                    translationX = distance * (if (stacked) 6.dp else 10.dp).toPx()
+                    alpha = if (accessibility.increaseContrast) 1f else 1f - .16f * abs(distance)
+                }
+            }.padding(horizontal = if (stacked) 14.dp else 17.dp, vertical = if (stacked) 8.dp else 14.dp),
                 verticalArrangement = if (stacked) Arrangement.spacedBy(3.dp) else Arrangement.Center) {
                 if (!stacked && entry.caption.isNotBlank()) {
                     Text(entry.caption, Modifier.clearAndSetSemantics { }, color = colors.onSurfaceVariant,

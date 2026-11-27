@@ -1,11 +1,11 @@
 package dev.mangaflow.ui
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -45,6 +45,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -52,18 +53,28 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.data.ReviewStatus
 import dev.mangaflow.ui.motion.BackHandler
+import dev.mangaflow.ui.motion.FeelEvent
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBusyIndicator
@@ -72,6 +83,7 @@ import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.rememberFeelFeedback
 
 /** Keep the existing filter state and callbacks, disclosing controls inside the comment layout. */
 @Composable
@@ -103,6 +115,31 @@ internal fun DetailCommentFilter(
     // Clearing them when the close is requested removes content mid-animation.
     LaunchedEffect(present) { if (!present) { more = false; detailsId = null } }
     val reviewSources = remember(sources) { sources.filter { it.hasWorkReviews }.distinctBy { it.id } }
+    val selectedSource = if (selected == null) 0 else reviewSources.indexOfFirst { it.id == selected }
+        .let { if (it < 0) -1 else it + 1 }
+    val cursor = animateFloatAsState(selectedSource.coerceAtLeast(0).toFloat(),
+        if (motion) spring(MangaMotion.PressDamping, MangaMotion.GestureStiffness) else snap(), label = "comment-source-position")
+    val sourceInk = selected?.let { reviewSourceAccent(it, DetailForeground.luminance() > .5f) } ?: DetailForeground
+    val markerColor = animateColorAsState(sourceInk, if (motion) tween(MangaMotion.Quick) else snap(),
+        label = "comment-source-ink")
+    val sourceScroll = rememberScrollState()
+    val density = LocalDensity.current
+    var stripWidth by remember { mutableIntStateOf(0) }
+    LaunchedEffect(visible, selectedSource, stripWidth, sourceScroll.maxValue) {
+        if (!visible || selectedSource < 0 || stripWidth <= 0) return@LaunchedEffect
+        val cell = with(density) { 44.dp.roundToPx() }
+        val step = cell + with(density) { 2.dp.roundToPx() }
+        val start = selectedSource * step
+        val current = sourceScroll.value
+        val target = when {
+            start < current -> start
+            start + cell > current + stripWidth -> start + cell - stripWidth
+            else -> current
+        }.coerceIn(0, sourceScroll.maxValue)
+        if (target != current) {
+            if (motion) sourceScroll.animateScrollTo(target) else sourceScroll.scrollTo(target)
+        }
+    }
     val pending = remember(sources) { sources.filter {
         it.status == ReviewStatus.UNAVAILABLE || it.reviewsError != null ||
             (it.status == ReviewStatus.NO_MATCH && it.candidates.isNotEmpty())
@@ -125,16 +162,26 @@ internal fun DetailCommentFilter(
         Column(Modifier.fillMaxWidth().motionInputGate(visible)
             .padding(start = 12.dp, end = 12.dp, bottom = 4.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()).selectableGroup(),
+                Row(Modifier.weight(1f).onSizeChanged { stripWidth = it.width }
+                    .horizontalScroll(sourceScroll).selectableGroup().drawBehind {
+                        if (selectedSource >= 0) {
+                            val cell = 44.dp.roundToPx().toFloat()
+                            val offset = cursor.value * (cell + 2.dp.roundToPx())
+                            val x = if (layoutDirection == LayoutDirection.Rtl) size.width - cell - offset else offset
+                            val h = minOf(size.height, 36.dp.toPx())
+                            drawRoundRect(markerColor.value.copy(alpha = .11f), Offset(x + 2.dp.toPx(), (size.height - h) / 2f),
+                                Size(cell - 4.dp.toPx(), h), CornerRadius(h / 2f))
+                        }
+                    },
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    SourceChoice(null, "全部评论来源", selected == null) {
+                    SourceChoice(null, "全部评论来源", selected == null, ownHighlight = false) {
                         detailsId = null
                         onSelect(null)
                     }
                     reviewSources.forEach { source ->
                         androidx.compose.runtime.key(source.id) {
-                            SourceChoice(source.id, source.name, selected == source.id, source) {
+                            SourceChoice(source.id, source.name, selected == source.id, source, ownHighlight = false) {
                                 onSelect(source.id)
                                 detailsId = source.id.takeIf { id -> pending.any { it.id == id } }
                             }
@@ -212,15 +259,20 @@ private fun SourceChoice(
     name: String,
     selected: Boolean,
     source: ReviewSource? = null,
+    ownHighlight: Boolean = true,
     onClick: () -> Unit,
 ) {
     val accent = id?.let { reviewSourceAccent(it, DetailForeground.luminance() > .5f) } ?: DetailForeground
     val motion = LocalMotionEnabled.current
     val interaction = remember(id) { MutableInteractionSource() }
-    val background by animateColorAsState(if (selected) accent.copy(alpha = .10f) else androidx.compose.ui.graphics.Color.Transparent,
-        tween(if (motion) MangaMotion.Content else 0), label = "source-selection-color")
+    val feedback = rememberFeelFeedback()
+    val background = if (ownHighlight) animateColorAsState(if (selected) accent.copy(alpha = .10f) else Color.Transparent,
+        tween(if (motion) MangaMotion.Content else 0), label = "source-selection-color").value else Color.Transparent
     Box(Modifier.size(44.dp).clip(RoundedCornerShape(20.dp)).background(background)
-        .selectable(selected, interactionSource = interaction, indication = null, role = Role.RadioButton, onClick = onClick)
+        .selectable(selected, interactionSource = interaction, indication = null, role = Role.RadioButton, onClick = {
+            if (!selected) feedback.perform(FeelEvent.Selection)
+            onClick()
+        })
         .motionPress(interaction, pressedScale = .95f)
         .semantics(mergeDescendants = true) {
             contentDescription = name
@@ -252,18 +304,22 @@ private fun FilterToggle(icon: ImageVector, label: String, checked: Boolean, onC
     val motion = LocalMotionEnabled.current
     val color by animateColorAsState(if (checked) DetailForeground else DetailSecondary,
         tween(if (motion) MangaMotion.Content else 0), label = "comment-filter-toggle")
-    Row(Modifier.heightIn(min = 40.dp).clip(RoundedCornerShape(12.dp))
-        .toggleable(checked, interactionSource = interaction, indication = null, role = Role.Switch) { onClick() }
+    val marked = animateFloatAsState(if (checked) 1f else 0f,
+        if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(), label = "comment-filter-check")
+    val feedback = rememberFeelFeedback()
+    Row(Modifier.heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
+        .toggleable(checked, interactionSource = interaction, indication = null, role = Role.Switch) {
+            feedback.perform(FeelEvent.Selection)
+            onClick()
+        }
         .motionPress(interaction, pressedScale = .98f).padding(horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Icon(icon, null, tint = color, modifier = Modifier.size(15.dp))
         Text(label, color = color, fontSize = 12.sp)
-        AnimatedVisibility(checked,
-            enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
-                expandHorizontally(tween(if (motion) MangaMotion.Content else 0), expandFrom = Alignment.Start),
-            exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
-                shrinkHorizontally(tween(if (motion) MangaMotion.Content else 0), shrinkTowards = Alignment.Start)) {
-            Icon(Icons.Outlined.Check, null, tint = color, modifier = Modifier.size(13.dp))
-        }
+        Icon(Icons.Outlined.Check, null, tint = color, modifier = Modifier.size(13.dp).graphicsLayer {
+            alpha = marked.value.coerceIn(0f, 1f)
+            scaleX = .72f + .28f * marked.value
+            scaleY = scaleX
+        })
     }
 }

@@ -1,8 +1,5 @@
 package dev.mangaflow.anime.ui
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -406,10 +403,7 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
 
 @Composable
 private fun AnimeDownloadProgress(fraction: Float, modifier: Modifier = Modifier) {
-    val motion = LocalMotionEnabled.current
-    val progress by animateFloatAsState(fraction,
-        if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(), label = "anime-download-progress")
-    AnimeProgressTrack(progress, modifier.semantics {
+    AnimeProgressTrack(fraction, modifier.semantics {
         progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
     })
 }

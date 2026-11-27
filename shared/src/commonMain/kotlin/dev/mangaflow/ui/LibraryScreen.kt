@@ -72,6 +72,7 @@ import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.BookmarkAdd
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material3.ButtonDefaults
@@ -87,6 +88,7 @@ import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -135,6 +137,7 @@ import dev.mangaflow.storage.PageCollection
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabContent
+import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.BackHandler
@@ -147,6 +150,7 @@ import dev.mangaflow.ui.motion.motionPress
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.glass.mangaHazeSource
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -270,7 +274,7 @@ fun LibraryScreen(
         val radius = minOf(bounds.width, bounds.height) / 2f
         return (point - bounds.center).getDistanceSquared() <= radius * radius
     }
-    val trashArmed = draggedFavorite != null && isTrashDrop(dragPoint)
+    val trashArmed by remember { derivedStateOf { draggedFavorite != null && isTrashDrop(dragPoint) } }
     val trashColor by animateColorAsState(
         if (trashArmed) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
         tween(if (motion) MangaMotion.Quick else 0), label = "trash-target-color")
@@ -307,7 +311,7 @@ fun LibraryScreen(
         }
     }
     var pendingFavorites by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var pendingHistory by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val historyRemoval = rememberHistoryRemoval(snackbar)
     // Projection, not an import: cloud-only titles remain remote and never gain local delete authority.
     // Same title is not proof of the same work. Only identical source-qualified IDs collapse.
     val localKeys = remember(scopedFavorites, pendingFavorites) {
@@ -348,7 +352,9 @@ fun LibraryScreen(
         }
     }
     val visibleFavorites = siteShelf?.books ?: localAndCopyFavorites
-    val visibleHistory = remember(scopedHistory, pendingHistory) { scopedHistory.filterNot { it.manga.id in pendingHistory } }
+    val visibleHistory = remember(scopedHistory, historyRemoval.pending) {
+        scopedHistory.filterNot { it.manga.id in historyRemoval.pending }
+    }
     val copyNotice = copySyncState?.takeIf {
         it.owner != null && (it.differences.isNotEmpty() || it.favoritesError != null || it.progressError != null)
     }
@@ -373,20 +379,7 @@ fun LibraryScreen(
         }
     }
     fun removeHistoryWithUndo(mangaId: String) {
-        if (scopedHistory.none { it.manga.id == mangaId } || mangaId in pendingHistory) return
-        pendingHistory = pendingHistory + mangaId
-        snackbar.currentSnackbarData?.dismiss()
-        removalScope.launch {
-            var undone = false
-            try {
-                undone = snackbar.showSnackbar("已移除阅读记录", actionLabel = "撤销",
-                    withDismissAction = true, duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed
-                if (undone) haptics.perform(dev.mangaflow.ui.motion.FeelEvent.Undo)
-            } finally {
-                if (!undone) withContext(NonCancellable) { onRemoveHistory(mangaId) }
-                pendingHistory = pendingHistory - mangaId
-            }
-        }
+        if (scopedHistory.any { it.manga.id == mangaId }) historyRemoval.request(mangaId, onRemoveHistory)
     }
     LaunchedEffect(active, showHistory, shelfScope) {
         if (!active) { libraryActionsOpen = false; pendingLibraryTool = null }
@@ -649,6 +642,7 @@ fun LibraryScreen(
                                 val hovered by interaction.collectIsHoveredAsState()
                                 var cardFocused by remember(manga.id) { mutableStateOf(false) }
                                 var bookMenuOpen by remember(manga.id) { mutableStateOf(false) }
+                                val desktopTools = desktop && (hovered || cardFocused || bookMenuOpen)
                                 val bookActions = listOf(
                                     DesktopMenuAction(if (hasContinuation) "继续阅读" else "开始阅读") { onOpen(manga) },
                                     DesktopMenuAction("详情与目录") { onCancelOpen(); onDetails(manga) },
@@ -705,18 +699,12 @@ fun LibraryScreen(
                                         if (local) Icon(Icons.Outlined.Bookmarks, "本机与拷贝", Modifier.size(13.dp))
                                         ChapterSourceLogo("copy", "拷贝", Modifier.size(15.dp))
                                     }
-                                    if ((fromCopy || remote) && !local && addBook != null) {
-                                        Surface(Modifier.align(Alignment.TopEnd).padding(6.dp),
-                                            shape = RoundedCornerShape(10.dp),
-                                            color = MaterialTheme.colorScheme.surface.copy(alpha = .9f)) {
-                                            MotionIconButton(onClick = { addBook(manga) },
-                                                enabled = active, modifier = Modifier.size(30.dp),
-                                                tooltip = "加入本机书架") {
-                                                Icon(Icons.Outlined.BookmarkAdd, "加入本机书架", Modifier.size(16.dp))
-                                            }
+                                    if ((fromCopy || remote) && addBook != null) {
+                                        Box(Modifier.align(Alignment.TopEnd)) {
+                                            ShelfLocalAddition(local, active, desktopTools) { addBook(manga) }
                                         }
                                     }
-                                    if (desktop && (hovered || cardFocused || bookMenuOpen)) Row(Modifier.align(Alignment.TopEnd).padding(4.dp),
+                                    if (desktopTools) Row(Modifier.align(Alignment.TopEnd).padding(4.dp),
                                         verticalAlignment = Alignment.CenterVertically) {
                                         Surface(shape = RoundedCornerShape(10.dp),
                                             color = MaterialTheme.colorScheme.surface.copy(alpha = .94f)) {
@@ -962,6 +950,40 @@ fun LibraryScreen(
         }
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
             .padding(horizontal = 20.dp, vertical = 12.dp))
+    }
+}
+
+/** A confirmed local addition briefly occupies its original badge on a cloud or site cover. */
+@Composable
+private fun ShelfLocalAddition(local: Boolean, active: Boolean, coveredByTools: Boolean, onClick: () -> Unit) {
+    var wasLocal by remember { mutableStateOf(local) }
+    var receipt by remember { mutableStateOf(false) }
+    LaunchedEffect(local, active) {
+        val added = active && local && !wasLocal
+        wasLocal = local
+        receipt = added
+        if (added) {
+            delay(1_050L)
+            receipt = false
+        }
+    }
+    val interaction = remember { MutableInteractionSource() }
+    val colors = MaterialTheme.colorScheme
+    val success = mangaStatusColors().success
+    CopyShelfTool(!coveredByTools && (!local || receipt || active && !wasLocal)) {
+        val action = if (local || coveredByTools) Modifier else Modifier.clickable(
+            interactionSource = interaction, indication = null, enabled = active, role = Role.Button,
+            onClickLabel = "加入本机书架", onClick = onClick).motionPress(interaction, active)
+        Box(Modifier.size(44.dp).then(action), contentAlignment = Alignment.Center) {
+            Surface(shape = RoundedCornerShape(10.dp), color = colors.surface.copy(alpha = .9f)) {
+                MotionSwap(local, Modifier.size(30.dp)) { added ->
+                    Icon(if (added) Icons.Outlined.Check else Icons.Outlined.BookmarkAdd,
+                        if (added) "已加入本机书架" else "加入本机书架", Modifier.size(16.dp),
+                        tint = if (added) success else colors.onSurface)
+                }
+            }
+            DesktopIconTooltip("加入本机书架", interaction, active && !local && !coveredByTools)
+        }
     }
 }
 

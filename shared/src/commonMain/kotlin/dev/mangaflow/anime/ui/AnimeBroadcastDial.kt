@@ -73,10 +73,12 @@ import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.*
 import kotlin.math.abs
+import kotlin.math.PI
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
@@ -304,19 +306,23 @@ internal fun AnimeBroadcastDial(label: String, previous: String, next: String, n
                                 val distance = abs(page - pager.currentPage - pager.currentPageOffsetFraction +
                                     (if (rtl) -i else i).toFloat() / DialTicksPerPage)
                                 val contact = (1f - distance * DialTicksPerPage).coerceIn(0f, 1f)
-                                drawLine(ink.copy(alpha = if (contrast) 1f else .18f + .46f * contact),
-                                    Offset(x, 1.dp.toPx()), Offset(x, (if (i == 0) 7.dp else 4.dp).toPx()),
+                                val length = if (i == 0) 6f else 3f
+                                val tip = if (motion) length + 2f * contact else length + 1f
+                                val color = if (contrast) ink else lerp(ink, colors.primary, contact).copy(alpha = .22f + .60f * contact)
+                                drawLine(color, Offset(x, 1.dp.toPx()), Offset(x, tip.dp.toPx()),
                                     (if (i == 0) 1.5.dp else 1.dp).toPx(), StrokeCap.Round)
                             }
                         }
                     }
                 }
-                Canvas(Modifier.align(Alignment.TopCenter).width(2.dp).height(5.dp).clearAndSetSemantics { }) {
-                    // Clock-style fixed index. Marks travel under it; the index catches each detent visually.
+                Canvas(Modifier.align(Alignment.TopCenter).size(8.dp).clearAndSetSemantics { }) {
                     val tickOffset = pager.currentPageOffsetFraction * DialTicksPerPage
                     val contact = (1f - 2f * abs(tickOffset - tickOffset.roundToInt())).coerceIn(0f, 1f)
-                    drawLine(colors.primary.copy(alpha = if (contrast) 1f else .67f + .33f * contact), Offset(size.width / 2, 1.dp.toPx()),
-                        Offset(size.width / 2, size.height), size.width, StrokeCap.Round)
+                    // The index stays anchored; its tip yields and returns as each mark passes.
+                    val bend = if (motion) sin(2.0 * PI * tickOffset).toFloat() * 1.4.dp.toPx() * (if (rtl) -1f else 1f) else 0f
+                    val length = if (motion) (4f + 1.5f * contact).dp else 5.dp
+                    drawLine(colors.primary.copy(alpha = if (contrast) 1f else .67f + .33f * contact),
+                        Offset(size.width / 2f, 1.dp.toPx()), Offset(size.width / 2f + bend, length.toPx()), 1.8.dp.toPx(), StrokeCap.Round)
                 }
             }
             MotionIconButton(onClick = { step(1) }, enabled = interactive && pager.currentPage < pageCount - 1,

@@ -9,10 +9,12 @@ import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.LocalMotionBackState
@@ -29,6 +31,8 @@ internal class MangaCoverTransition(
 )
 
 internal val LocalMangaCoverTransition = compositionLocalOf<MangaCoverTransition?> { null }
+private val coverBounds = spring(dampingRatio = .95f, stiffness = MangaMotion.NavigationStiffness,
+    visibilityThreshold = Rect(.5f, .5f, .5f, .5f))
 
 /** Keep the route scope even inside nested tab transitions, as in AndroidX's shared-cover example. */
 @OptIn(ExperimentalSharedTransitionApi::class)
@@ -52,11 +56,11 @@ internal fun Modifier.mangaSharedCover(mangaId: String, placement: String? = nul
             renderInOverlayDuringTransition = false,
             enter = fadeIn(tween(MangaMotion.NavigationFade, easing = MangaMotion.EnterEasing)),
             exit = fadeOut(tween(MangaMotion.Quick, easing = MangaMotion.ExitEasing)),
-            boundsTransform = { _, _ -> tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) },
+            boundsTransform = { _, _ -> coverBounds },
         ) else this@mangaSharedCover.sharedElement(
             content, animatedVisibilityScope = host.visibility,
             renderInOverlayDuringTransition = false,
-            boundsTransform = { _, _ -> tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) },
+            boundsTransform = { _, _ -> coverBounds },
         )
     }
 }

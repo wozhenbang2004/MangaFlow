@@ -99,3 +99,10 @@ Further user feedback “侧边栏切换没做好” reopens sidebar acceptance.
 Concurrent main `b680687` was integrated before delivery: preserve automatic source discovery, Baozi/Manhuagui/MangaBZ adapters and the latest explicit low-saturation-blue “拷” character. The latter remains the shared CopySourceWordmark for chapter/source rows and rating markers; the deleted paired-page resource is not restored. Only the other letter-based rating marks become pictograms.
 
 The subsequent intermittent double-tap report is tracked under DRAWER-TAP-24 in DESIGN.md. Reading the actual BOM-pinned Material3 1.4.0 / Foundation 1.12.1 source identifies native animation capture consuming DOWN before the selectable row. A bounded outer drawer tap observer preserves the first valid release during that capture, with native swipes, synthetic cancellation, stable-state Surface semantics and vertical-fling stopping retained. Independent read-only review found no source blocker; the user's real-device report remains open pending the replacement artifact. No unit/local/device test was performed.
+
+## Gestures, transitions and feedback · 2026-11-27
+
+- Pin a cover or row to the point of contact. A press on a nested action belongs to that action. Mouse compression is smaller, and keyboard focus stays visible in its own right.
+- Search geometry, the toolbar underneath and result visibility follow the same reveal progress. Menus uncover their rows from the trigger or cursor, including menus that open above it. Text keeps its final type size.
+- Use real drag progress for carousel artwork, page marks, tab glass and threshold cues. When a user changes direction or takes over a moving surface, carry its current position into the next movement. A remote chapter or episode jump lands directly with a local highlight.
+- Give feedback at the actual change. A seek shows its resulting time, a download draws its check on completion, and a swipe can still return home before deletion. Respect reduced motion and retain keyboard and accessible actions.

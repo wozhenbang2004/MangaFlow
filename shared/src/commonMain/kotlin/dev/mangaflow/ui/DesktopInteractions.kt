@@ -1,11 +1,7 @@
 package dev.mangaflow.ui
 
 import androidx.compose.animation.core.MutableTransitionState
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.rememberTransition
-import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
@@ -49,7 +45,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
@@ -75,7 +70,8 @@ import androidx.compose.ui.window.PopupProperties
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.LocalMotionEnabled
-import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.anchoredMenuReveal
+import dev.mangaflow.ui.motion.surfaceReveal
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
@@ -177,12 +173,7 @@ private fun DesktopActionPopup(
     val presence = remember { MutableTransitionState(false) }
     presence.targetState = visible
     val transition = rememberTransition(presence, label = "desktop-actions")
-    val opacity = transition.animateFloat(transitionSpec = {
-        tween(if (motion) if (targetState) MangaMotion.Content else MangaMotion.Quick else 0)
-    }, label = "desktop-actions-opacity") { if (it) 1f else 0f }
-    val scale = transition.animateFloat(transitionSpec = {
-        if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap()
-    }, label = "desktop-actions-scale") { if (it) 1f else .94f }
+    val reveal = transition.surfaceReveal(motion, compact = true)
     val present = presence.currentState || presence.targetState || !presence.isIdle
     val reportPresence by rememberUpdatedState(onPresenceChange)
     SideEffect { mounted = present }
@@ -195,6 +186,7 @@ private fun DesktopActionPopup(
     val enabledIndices = actions.indices.filter { actions[it].enabled }
     val requesters = remember(actions.size) { List(actions.size) { FocusRequester() } }
     var focusedIndex by remember { mutableIntStateOf(-1) }
+    var origin by remember(anchor) { mutableStateOf(TransformOrigin(.5f, 0f)) }
     val latestDismiss by rememberUpdatedState(onDismiss)
     val position = remember(anchor, density) {
         val margin = with(density) { 8.dp.roundToPx() }
@@ -206,16 +198,19 @@ private fun DesktopActionPopup(
                 layoutDirection: LayoutDirection,
                 popupContentSize: IntSize,
             ): IntOffset {
-                val pointX = anchorBounds.left + (anchor?.x ?: anchorBounds.width)
+                val pointX = anchorBounds.left + (anchor?.x ?: if (layoutDirection == LayoutDirection.Ltr) anchorBounds.width else 0)
                 val pointY = anchorBounds.top + (anchor?.y ?: anchorBounds.height)
                 val desiredX = if (pointX + popupContentSize.width > windowSize.width - margin)
                     pointX - popupContentSize.width else pointX
                 val desiredY = if (pointY + popupContentSize.height + gap > windowSize.height - margin)
                     pointY - popupContentSize.height - gap else pointY + gap
-                return IntOffset(
+                val placed = IntOffset(
                     desiredX.coerceIn(margin, (windowSize.width - popupContentSize.width - margin).coerceAtLeast(margin)),
                     desiredY.coerceIn(margin, (windowSize.height - popupContentSize.height - margin).coerceAtLeast(margin)),
                 )
+                origin = TransformOrigin(((pointX - placed.x).toFloat() / popupContentSize.width.coerceAtLeast(1)).coerceIn(0f, 1f),
+                    ((pointY - placed.y).toFloat() / popupContentSize.height.coerceAtLeast(1)).coerceIn(0f, 1f))
+                return placed
             }
         }
     }
@@ -251,13 +246,7 @@ private fun DesktopActionPopup(
                         }
                         else -> false
                     }
-                }.graphicsLayer {
-                    alpha = opacity.value
-                    scaleX = scale.value
-                    scaleY = scale.value
-                    transformOrigin = TransformOrigin(.5f, 0f)
-                    translationY = -4.dp.toPx() * (1f - opacity.value)
-                },
+                }.anchoredMenuReveal(reveal, 18.dp) { origin },
             shape = RoundedCornerShape(18.dp),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = 0.dp,

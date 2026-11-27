@@ -38,6 +38,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -86,13 +87,13 @@ internal fun BookshelfBook(
     var rootOrigin by remember(manga.id) { mutableStateOf(Offset.Zero) }
     var dragOffset by remember(manga.id) { mutableStateOf(Offset.Zero) }
     var dragPoint by remember(manga.id) { mutableStateOf(Offset.Zero) }
+    var grip by remember(manga.id) { mutableStateOf(TransformOrigin.Center) }
     val returnPosition = remember(manga.id) { Animatable(Offset.Zero, Offset.VectorConverter) }
     val velocityTracker = remember(manga.id) { VelocityTracker() }
     val scope = rememberCoroutineScope()
     var returning by remember(manga.id) { mutableStateOf(false) }
     var settleJob by remember(manga.id) { mutableStateOf<Job?>(null) }
     val latestMotion by rememberUpdatedState(motion)
-    val latestDeleteArmed by rememberUpdatedState(deleteArmed)
     val latestDragEnd by rememberUpdatedState(onDragEnd)
     val latestDragCancel by rememberUpdatedState(onDragCancel)
     fun returnToSlot(velocity: Offset = Offset.Zero) {
@@ -115,16 +116,11 @@ internal fun BookshelfBook(
             dragOffset = Offset.Zero
         }
     }
-    val scale = animateFloatAsState(
-        targetValue = when {
-            !motion -> 1f
-            dragging && deleteArmed -> .9f
-            dragging -> 1.02f
-            else -> 1f
-        },
-        animationSpec = if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(),
-        label = "collection-cover-press",
-    )
+    val lift = animateFloatAsState(if (dragging && motion) 1f else 0f,
+        if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(), label = "shelf-lift")
+    val drop = animateFloatAsState(if (dragging && deleteArmed && motion) 1f else 0f,
+        if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(), label = "shelf-drop-target")
+    val artworkShape = remember { RoundedCornerShape(12.dp) }
     val colors = MaterialTheme.colorScheme
     val readingState = resumeTarget?.let {
         "已采用拷贝进度，继续至 ${it.chapterTitle.ifBlank { "已保存章节" }}"
@@ -143,6 +139,8 @@ internal fun BookshelfBook(
                     returning = false
                     dragOffset = caught
                     velocityTracker.resetTracking()
+                    grip = TransformOrigin((local.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f),
+                        (local.y / size.height.coerceAtLeast(1)).coerceIn(0f, 1f))
                     dragPoint = rootOrigin + local
                     onDragStart(dragPoint)
                 },
@@ -154,11 +152,9 @@ internal fun BookshelfBook(
                     onDragMove(dragPoint)
                 },
                 onDragEnd = {
-                    val remove = latestDeleteArmed
                     val velocity = velocityTracker.calculateVelocity()
                     latestDragEnd(dragPoint)
-                    if (remove) dragOffset = Offset.Zero
-                    else returnToSlot(Offset(velocity.x, velocity.y))
+                    returnToSlot(Offset(velocity.x, velocity.y))
                 },
                 onDragCancel = {
                     latestDragCancel()
@@ -171,9 +167,15 @@ internal fun BookshelfBook(
             val offset = if (returning) returnPosition.value else dragOffset
             translationX = offset.x
             translationY = offset.y
-            scaleX = scale.value
-            scaleY = scale.value
-            alpha = if (dragging && deleteArmed) .82f else 1f
+            transformOrigin = grip
+            val raised = lift.value.coerceIn(0f, 1f)
+            val overTarget = drop.value.coerceIn(0f, 1f)
+            scaleX = 1f + .035f * raised - .105f * overTarget
+            scaleY = scaleX
+            rotationZ = (offset.x / size.width.coerceAtLeast(1f)).coerceIn(-1f, 1f) * 2.6f * raised
+            shape = artworkShape
+            shadowElevation = 8.dp.toPx() * raised
+            alpha = 1f - .14f * overTarget
         }
         .motionPress(interaction, enabled = !dragging && !returning)
         .zIndex(if (dragging) 8f else if (pressed) 1f else 0f)

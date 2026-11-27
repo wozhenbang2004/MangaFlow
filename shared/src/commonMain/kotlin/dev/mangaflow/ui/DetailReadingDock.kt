@@ -4,9 +4,10 @@ import dev.mangaflow.ui.platform.*
 
 import dev.mangaflow.platform.*
 
-import dev.mangaflow.ui.motion.BackHandler
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -29,19 +30,24 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -61,11 +67,16 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.FeelEvent
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.rememberFeelFeedback
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 @Composable
 internal fun DetailReadingDock(
@@ -168,7 +179,12 @@ internal fun DetailActionDock(
 ) {
     val interaction = remember { MutableInteractionSource() }
     var actions by remember(ownerKey) { mutableStateOf(false) }
+    LaunchedEffect(ownerKey, active) { if (!active) actions = false }
+    var pull by remember(ownerKey) { mutableFloatStateOf(0f) }
+    var pullReturn by remember(ownerKey) { mutableStateOf<Job?>(null) }
+    val scope = rememberCoroutineScope()
     val motion = LocalMotionEnabled.current
+    val feedback = rememberFeelFeedback()
     val desktop = platformKind == PlatformKind.DESKTOP
     val desktopActions = if (desktop) options.map { option ->
         DesktopMenuAction(option.desktopLabel, enabled = active, onClick = option.onClick)
@@ -178,8 +194,10 @@ internal fun DetailActionDock(
     val collapse = if (desktop || persistent) 0f else if (motion) collapseProgress().coerceIn(0f, 1f)
         else if (collapseProgress() < .5f) 0f else 1f
     val minimumHeight = lerp(56.dp, 36.dp, collapse)
-    val visibility by animateFloatAsState(if (!desktop && !persistent && hidden && !actions) 0f else 1f,
-        tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing), label = "detail-dock")
+    val shown = desktop || persistent || !hidden || actions
+    val visibility by animateFloatAsState(if (shown) 1f else 0f,
+        if (!motion) snap() else if (shown) spring(MangaMotion.PressDamping, MangaMotion.GestureStiffness)
+        else tween(MangaMotion.Quick, easing = MangaMotion.ExitEasing), label = "detail-dock")
     val displayedProgress by animateFloatAsState(content.fraction ?: 0f,
         if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(), label = "dock-saved-progress")
     val percent = content.percent
@@ -187,30 +205,75 @@ internal fun DetailActionDock(
         val fullWidth = if (persistent) maxWidth else minOf(maxWidth, 280.dp + 40.dp * (fontScale - 1f).coerceIn(0f, 1f))
         val compactWidth = minOf(fullWidth, 104.dp * fontScale.coerceAtMost(1.6f))
         val width = lerp(fullWidth, compactWidth, collapse)
-        val enabled = active && canActivate && visibility > .9f
+        val available = active && shown && !actions && visibility > .4f
+        val enabled = available && canActivate
         val hasTouchOptions = !desktop && options.isNotEmpty()
         val readTarget = Modifier.fillMaxWidth().heightIn(min = 48.dp)
             .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
                 enabled = enabled, onClickLabel = content.clickLabel, onLongClickLabel = optionsLabel,
                 onLongClick = if (hasTouchOptions) ({ actions = true }) else null,
                 onClick = onActivate)
-            .then(if (!hasTouchOptions || !enabled) Modifier else Modifier.pointerInput(ownerKey) {
+            .then(if (!hasTouchOptions || !enabled) Modifier else Modifier.pointerInput(ownerKey, motion) {
                 var travel = 0f
-                detectVerticalDragGestures(onDragStart = { travel = 0f }, onVerticalDrag = { change, dy ->
-                    travel += dy
-                    if (travel < -24.dp.toPx()) { change.consume(); actions = true }
-                })
+                var armed = false
+                var tracking = false
+                val threshold = 28.dp.toPx()
+                fun release() {
+                    if (!tracking) return
+                    tracking = false
+                    armed = false
+                    if (motion && pull > 0f) {
+                        val start = pull
+                        pullReturn = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                            animate(start, 0f, animationSpec = spring(
+                                MangaMotion.PressDamping, MangaMotion.PressStiffness)) { value, _ ->
+                                pull = value.coerceIn(0f, 1f)
+                            }
+                        }
+                    } else pull = 0f
+                }
+                try {
+                    detectVerticalDragGestures(
+                        onDragStart = {
+                            pullReturn?.cancel()
+                            travel = pull * threshold
+                            armed = false
+                            tracking = true
+                        },
+                        onVerticalDrag = { change, delta ->
+                            travel = (travel - delta).coerceIn(0f, threshold * 1.2f)
+                            pull = (travel / threshold).coerceAtMost(1f)
+                            if (!armed && travel >= threshold) {
+                                armed = true
+                                feedback.perform(FeelEvent.Threshold)
+                            } else if (travel < threshold * .78f) armed = false
+                            if (travel > 0f) change.consume()
+                        },
+                        onDragEnd = {
+                            val open = armed
+                            release()
+                            if (open) actions = true
+                        },
+                        onDragCancel = { release() },
+                    )
+                } finally { release() }
             })
             .motionPress(interaction, enabled = enabled, pressedScale = .985f)
             .semantics(mergeDescendants = true) { contentDescription = content.description }
         Box(Modifier.align(BiasAlignment(collapse, 1f)).width(width)
             .onSizeChanged { onHeightChanged(it.height) }.graphicsLayer {
-                alpha = visibility
-                translationY = (1f - visibility) * 86.dp.toPx()
-            }.motionInputGate(active && visibility > .9f)) {
+                alpha = visibility.coerceIn(0f, 1f)
+                translationY = (1f - visibility) * minOf(size.height * .55f, 28.dp.toPx())
+            }.motionInputGate(active && shown && visibility > .4f)) {
             DesktopContextMenuArea(desktopActions) {
                 Box(readTarget, contentAlignment = Alignment.Center) {
-                    LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(),
+                    LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().graphicsLayer {
+                        val reach = if (motion) pull else 0f
+                        transformOrigin = TransformOrigin(.5f, 1f)
+                        translationY = -5.dp.toPx() * reach
+                        scaleX = 1f - .015f * reach
+                        scaleY = 1f + .045f * reach
+                    },
                         cornerRadius = lerp(28.dp, 18.dp, collapse), role = GlassSurfaceRole.READING_DOCK,
                         interactionSource = interaction.takeIf { enabled }, preferSource = true,
                         softCard = true) {
@@ -229,15 +292,29 @@ internal fun DetailActionDock(
                                 }
                                 if (content.busy) MotionBusyIndicator(Modifier.size(lerp(18.dp, 13.dp, collapse)),
                                     color = DetailSecondary, strokeWidth = 1.5.dp)
-                                else Icon(content.icon, null, tint = if (enabled) progressColor else DetailMuted,
-                                    modifier = Modifier.size(lerp(22.dp, 16.dp, collapse)))
+                                else {
+                                    val markSize = lerp(22.dp, 16.dp, collapse)
+                                    Icon(content.icon, null, tint = if (enabled) progressColor else DetailMuted,
+                                        modifier = Modifier.size(markSize).graphicsLayer { alpha = 1f - pull })
+                                    if (hasTouchOptions) Icon(Icons.Outlined.ExpandLess, null, tint = progressColor,
+                                        modifier = Modifier.size(markSize).graphicsLayer { alpha = pull })
+                                }
                             }
                             Spacer(Modifier.width(lerp(12.dp, 6.dp, collapse)))
                             Column(Modifier.weight(1f).clearAndSetSemantics {}) {
-                                Text(if (collapse < .6f) content.title else content.compactTitle,
-                                    color = DetailForeground, fontSize = (16f - 4f * collapse).sp,
-                                    lineHeight = (22f - 5f * collapse).sp, fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                val compact = if (content.title == content.compactTitle) 0f
+                                    else ((collapse - .32f) / .36f).coerceIn(0f, 1f)
+                                val titleStyle = MaterialTheme.typography.bodyMedium.copy(
+                                    fontSize = (16f - 4f * collapse).sp, lineHeight = (22f - 5f * collapse).sp,
+                                    fontWeight = FontWeight.SemiBold)
+                                Box {
+                                    if (compact < 1f) Text(content.title, color = DetailForeground, style = titleStyle,
+                                        modifier = Modifier.graphicsLayer { alpha = 1f - compact },
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    if (compact > 0f) Text(content.compactTitle, color = DetailForeground, style = titleStyle,
+                                        modifier = Modifier.graphicsLayer { alpha = compact },
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
                                 val chapterReveal = (1f - collapse / .6f).coerceIn(0f, 1f)
                                 if (content.caption.isNotBlank() && chapterReveal > 0f) {
                                     Box(Modifier.height(18.dp * fontScale * chapterReveal).clipToBounds()
@@ -270,13 +347,12 @@ internal fun DetailActionDock(
             }
         }
     }
-    BackHandler(enabled = active && actions) { actions = false }
     if (actions && active) MotionBottomSheet(onDismissRequest = { actions = false },
         backdrop = backdrop, desktopCloseButton = true,
         containerColor = DetailBackground, contentColor = DetailForeground) { dismiss ->
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 20.dp)) {
             options.forEach { option ->
-                DockOption(option.label) { actions = false; dismiss(); option.onClick() }
+                DockOption(option.label) { dismiss(); option.onClick() }
             }
         }
     }

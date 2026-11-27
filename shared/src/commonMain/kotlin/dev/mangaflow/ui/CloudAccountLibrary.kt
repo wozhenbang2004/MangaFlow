@@ -143,7 +143,7 @@ internal fun CloudAccountHeader(
         }
     } else PageTitleHeader(title, backdrop, navigation, modifier.padding(horizontal = 8.dp, vertical = 2.dp),
         summary = {
-            MotionSwap(title) { label -> Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
+            MotionSwap(title, scaleContent = false) { label -> Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis) }
         }, actions = if (profile != null) actions else null)
     key(profile?.username) {
@@ -353,7 +353,7 @@ internal fun CloudAccountLibrary(
                     MotionTextButton(onClick = { sortMenu = !sortMenu }, enabled = active,
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)) {
                         Icon(Icons.Outlined.Sort, null, Modifier.size(16.dp))
-                        MotionSwap(sort.label, Modifier.weight(1f, fill = false).padding(start = 6.dp)) { label ->
+                        MotionSwap(sort.label, Modifier.weight(1f, fill = false).padding(start = 6.dp), scaleContent = false) { label ->
                             Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         Icon(Icons.Outlined.KeyboardArrowDown, "选择排序", Modifier.padding(start = 3.dp).size(15.dp)

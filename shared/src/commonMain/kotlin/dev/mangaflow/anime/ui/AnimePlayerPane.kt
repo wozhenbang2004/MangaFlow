@@ -2,7 +2,7 @@ package dev.mangaflow.anime.ui
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
@@ -35,7 +35,9 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.key.*
@@ -219,10 +221,18 @@ internal fun AnimePlayerPane(
     val showChrome = !playback.inPictureInPicture && !panelPresent && !(obscured && headerOverVideo) && (!locked || touchExploration) &&
         (controlsVisible || forceControls)
     val motion = LocalMotionEnabled.current
-    val reveal by animateFloatAsState(if (showChrome) 1f else 0f,
-        if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
+    val reveal = animateFloatAsState(if (showChrome) 1f else 0f,
+        if (!motion) snap() else if (showChrome) spring(dampingRatio = .92f, stiffness = 650f)
+        else spring(dampingRatio = 1f, stiffness = 1_050f),
         label = "anime-player-controls")
-    val chromeReveal = if (playback.inPictureInPicture) 0f else reveal
+    // Only the small chrome layers observe the spring on each frame. Native video and its
+    // sampling source need to know only when those layers actually mount or leave.
+    val stillRevealed by remember(reveal) { derivedStateOf { reveal.value > .001f } }
+    val chromeMounted = !playback.inPictureInPicture && (showChrome || stillRevealed)
+    val seekNotice = remember(player, playback.sessionGeneration, playback.assetKey, playback.episodeId) {
+        mutableStateOf<AnimeSeekCue?>(null)
+    }
+    val touchFeedback = rememberFeelFeedback()
     val colors = MaterialTheme.colorScheme
     val density = LocalDensity.current
     val safeInsets = screenFitContentInsets()
@@ -249,7 +259,7 @@ internal fun AnimePlayerPane(
     // Desktop has no firstFrameRendered acknowledgement. Use its current libmpv decoder
     // observations to admit the live Canvas, not a CPU snapshot or a synthetic frame.
     val videoDockSource = if (windowsDockRenderer == true && active && !obscured && !locked && !panelPresent &&
-        chromeReveal > 0f && !showStage && showingCurrentPlayback && canControl && playback.canSourceVideoGlass &&
+        chromeMounted && !showStage && showingCurrentPlayback && canControl && playback.canSourceVideoGlass &&
         playback.assetKey != null && playback.episodeId != null &&
         !glassAccessibility.reduceTransparency && !glassAccessibility.increaseContrast) {
         key(player, playback.sessionGeneration, playback.timelineGeneration, playback.assetKey, playback.episodeId) {
@@ -283,12 +293,18 @@ internal fun AnimePlayerPane(
         watchPanelOpen = true
         interact()
     }
-    fun seek(delta: Long) {
+    fun jump(current: AnimePlayerState, delta: Long, point: Offset?) {
+        val requested = (current.positionMs + delta).coerceAtLeast(0L)
+        val destination = if (current.durationMs > 0L) requested.coerceAtMost(current.durationMs) else requested
+        player.seekTo(destination)
+        seekNotice.value = AnimeSeekCue(destination, delta > 0L, point)
+        interact()
+    }
+    fun seek(delta: Long, point: Offset? = null) {
         val current = player.state.value
         if (!canControl || !playback.owns(current) || current.durationMs <= 0L ||
             current.phase != AnimePlayerPhase.READY && !current.ended) return
-        interact()
-        player.seekTo((current.positionMs + delta).coerceIn(0L, current.durationMs))
+        jump(current, delta, point)
     }
     fun toggle() {
         val current = player.state.value
@@ -407,11 +423,11 @@ internal fun AnimePlayerPane(
             val railWidth = (maxWidth * .29f).coerceIn(if (browsing) 278.dp else 234.dp, 340.dp)
             val videoWidth = if (fillVideo || !sideBySide) maxWidth else maxWidth - railWidth
             val inlineWatching = !browsing && !fillVideo && episodesVisible && (sideBySide || room >= 380.dp)
-            LaunchedEffect(active, showChrome, focusChromeOnReveal, chromeReveal > 0f, panelPresent, obscured,
+            LaunchedEffect(active, showChrome, focusChromeOnReveal, chromeMounted, panelPresent, obscured,
                 playback.inPictureInPicture, inlineWatching, detail == null) {
                 val destination = focusChromeOnReveal ?: return@LaunchedEffect
                 if (!active || obscured || playback.inPictureInPicture) focusChromeOnReveal = null
-                else if (showChrome && chromeReveal > 0f && !panelPresent) {
+                else if (showChrome && chromeMounted && !panelPresent) {
                     withFrameNanos { }
                     val targetFocus = when {
                         destination == watchingFocus && (inlineWatching || detail == null) -> chromeFocus
@@ -438,7 +454,7 @@ internal fun AnimePlayerPane(
             val latestChrome by rememberUpdatedState(playback)
             val latestRequiredControls by rememberUpdatedState(requiredControls)
             val latestChromeVisible by rememberUpdatedState(showChrome)
-            val seekBareVideo by rememberUpdatedState<(AnimePlaybackChrome, Long) -> Unit> { owner, delta ->
+            val seekBareVideo by rememberUpdatedState<(AnimePlaybackChrome, Long, Offset) -> Unit> { owner, delta, point ->
                 val live = controller.state.value
                 val current = player.state.value
                 if (active && !locked && !obscured && !settingsPresent && !watchPanelPresent &&
@@ -447,7 +463,7 @@ internal fun AnimePlayerPane(
                     !live.resolving && live.pendingPlayback == null && owner.owns(current) &&
                     canControl && current.durationMs > 0L && (current.phase == AnimePlayerPhase.READY || current.ended)) {
                     focus.requestFocus()
-                    seek(delta)
+                    seek(delta, point)
                 }
             }
 
@@ -480,9 +496,8 @@ internal fun AnimePlayerPane(
                             if (canControl && pointerMedia.sameMedia(current) && latestChrome.owns(current) &&
                                 (current.phase == AnimePlayerPhase.READY || current.ended)) {
                                 val delta = if (point.x < size.width / 2f) -10_000L else 10_000L
-                                val position = (current.positionMs + delta).coerceAtLeast(0L)
-                                player.seekTo(if (current.durationMs > 0L) position.coerceAtMost(current.durationMs) else position)
-                                interact()
+                                jump(current, delta, Offset(point.x / size.width.coerceAtLeast(1),
+                                    point.y / size.height.coerceAtLeast(1)))
                             }
                         },
                         onPress = press@{
@@ -500,6 +515,7 @@ internal fun AnimePlayerPane(
                                         accelerated = true
                                         holdingFast = true
                                         player.setSpeed(state.settings.longPressSpeed)
+                                        if (state.settings.longPressSpeed != originalSpeed) touchFeedback.perform(FeelEvent.Threshold)
                                     }
                                 }
                                 try { tryAwaitRelease() }
@@ -519,7 +535,9 @@ internal fun AnimePlayerPane(
                     target == null && !state.resolving && state.pendingPlayback == null) {
                     // A backmost hit target, not a parent of the buttons, timeline or panels.
                     // The stock touch detector still handles non-mouse pointers.
-                    Box(Modifier.matchParentSize().desktopVideoSeek(pointerMedia) { seekBareVideo(pointerMedia, it) })
+                    Box(Modifier.matchParentSize().desktopVideoSeek(pointerMedia) { delta, point ->
+                        seekBareVideo(pointerMedia, delta, point)
+                    })
                 }
                 AnimePlaybackObservation(observations) { current ->
                     AnimeDanmakuOverlay(controller, current, visible = playback.owns(current) &&
@@ -537,8 +555,8 @@ internal fun AnimePlayerPane(
                         onLoading = { posterLoaded.value = false },
                         modifier = Modifier.fillMaxSize().then(if (artwork != null) Modifier.mangaHazeSource(artwork) else Modifier))
                 }
-                val statusTop = if (headerOverVideo && chromeReveal > 0f) headerHeight else 0.dp
-                val statusBottom = if (chromeReveal > 0f) footerHeight else 0.dp
+                val statusTop = if (headerOverVideo && chromeMounted) headerHeight else 0.dp
+                val statusBottom = if (chromeMounted) footerHeight else 0.dp
                 if (!playback.inPictureInPicture) Box(Modifier.fillMaxSize()
                     .padding(top = statusTop, bottom = statusBottom)
                     .motionInputGate(active && !locked && !obscured && !settingsPresent && !watchPanelPresent),
@@ -576,7 +594,7 @@ internal fun AnimePlayerPane(
                             }
                     }
                 val readingsRoom = videoHeight - statusTop - statusBottom - 16.dp
-                val readingsHeight = minOf(160.dp, if (centralTransport && chromeReveal > 0f)
+                val readingsHeight = minOf(160.dp, if (centralTransport && chromeMounted)
                     (readingsRoom - 64.dp) * .5f else readingsRoom * .5f)
                 val showVideoReadings = readingsVisible && !panelPresent && !playback.inPictureInPicture &&
                     showingCurrentPlayback && failure == null && !blockingResolution && !awaitingVideo && readingsHeight >= 44.dp
@@ -614,7 +632,7 @@ internal fun AnimePlayerPane(
                                 .windowInsetsPadding(safeInsets.only(WindowInsetsSides.Horizontal))
                                 .padding(top = resolutionTop, end = 12.dp).widthIn(max = videoWidth * .82f))
                     }
-                } else if (!desktop && active && !showChrome && chromeReveal <= 0f && !locked && !obscured && !panelPresent &&
+                } else if (!desktop && active && !chromeMounted && !locked && !obscured && !panelPresent &&
                     !readingsVisible && !holdingFast && !playback.inPictureInPicture && !showStage &&
                     showingCurrentPlayback && playback.isPlaying && !playback.playbackSuppressed &&
                     playback.hasVideoTracks != false && videoWidth >= 220.dp * quietFontScale &&
@@ -628,9 +646,14 @@ internal fun AnimePlayerPane(
                                 .widthIn(max = videoWidth * .75f))
                     }
                 }
-                if (centralTransport && canControl && !playback.inPictureInPicture && chromeReveal > 0f) {
+                if (centralTransport && canControl && chromeMounted) {
                     Box(Modifier.fillMaxSize().padding(top = statusTop, bottom = statusBottom), contentAlignment = Alignment.Center) {
-                        AnimePlaybackSurface(artwork, Modifier.graphicsLayer { alpha = chromeReveal }
+                        AnimePlaybackSurface(artwork, Modifier.graphicsLayer {
+                            val amount = reveal.value.coerceIn(0f, 1f)
+                            alpha = amount
+                            scaleX = .92f + .08f * amount
+                            scaleY = scaleX
+                        }
                             .onFocusChanged { centerFocused = it.hasFocus }.focusGroup()
                             .motionInputGate(active && showChrome && !obscured && !settingsPresent && !watchPanelPresent),
                             cornerRadius = 32.dp) {
@@ -644,8 +667,8 @@ internal fun AnimePlayerPane(
                                 MotionIconButton(onClick = ::toggle, modifier = Modifier.size(52.dp), tooltip = "$playLabel · 空格") {
                                     Box(Modifier.size(44.dp).background(MaterialTheme.colorScheme.onSurface,
                                         RoundedCornerShape(50)), contentAlignment = Alignment.Center) {
-                                        Icon(if (playback.playWhenReady) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
-                                            playLabel, Modifier.size(27.dp), tint = MaterialTheme.colorScheme.surface)
+                                        AnimeTransportGlyph(playback.playWhenReady, playLabel, MaterialTheme.colorScheme.surface,
+                                            Modifier.size(27.dp))
                                     }
                                 }
                                 if (next != null) MotionIconButton(onClick = { interact(); onEpisode(next) },
@@ -656,16 +679,23 @@ internal fun AnimePlayerPane(
                         }
                     }
                 }
+                AnimeSeekFeedback(seekNotice, active && !obscured && !locked && !panelPresent &&
+                    !playback.inPictureInPicture && showingCurrentPlayback && failure == null)
             }
 
-            val headerReveal = if (headerOverVideo) chromeReveal else 1f
             val headerInteractive = !headerOverVideo || showChrome
-            if (!playback.inPictureInPicture && headerReveal > 0f) {
+            if (!playback.inPictureInPicture && (!headerOverVideo || chromeMounted)) {
                 val headerArtwork = artwork.takeIf { headerOverVideo }
                 val headerShell = Modifier.align(Alignment.TopStart)
                     .width(if (!fillVideo && headerOverVideo) videoWidth else maxWidth)
                     .onSizeChanged { headerHeight = with(density) { it.height.toDp() } }
-                    .graphicsLayer { alpha = headerReveal; translationY = (1f - headerReveal) * -8.dp.toPx() }
+                    .graphicsLayer {
+                        val amount = if (headerOverVideo) reveal.value.coerceIn(0f, 1f) else 1f
+                        alpha = amount
+                        transformOrigin = TransformOrigin(.5f, 0f)
+                        scaleY = .96f + .04f * amount
+                        translationY = (1f - amount) * -11.dp.toPx()
+                    }
                     .motionInputGate(active && headerInteractive && !obscured && !settingsPresent && !watchPanelPresent)
                     .onFocusChanged { headerFocused = it.hasFocus }.focusGroup()
                     .windowInsetsPadding(safeInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
@@ -743,12 +773,19 @@ internal fun AnimePlayerPane(
                 }
             }
 
-            if (!playback.inPictureInPicture && chromeReveal > 0f) {
+            if (chromeMounted) {
                 val transportPlacement = if (fillVideo) Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                     else Modifier.align(Alignment.BottomStart).offset(y = controlsTop - maxHeight).width(videoWidth)
                 Box(transportPlacement
                     .onSizeChanged { footerHeight = with(density) { it.height.toDp() } }
-                    .graphicsLayer { alpha = chromeReveal; translationY = (1f - chromeReveal) * 8.dp.toPx() }
+                    .graphicsLayer {
+                        val amount = reveal.value.coerceIn(0f, 1f)
+                        alpha = amount
+                        transformOrigin = TransformOrigin(.5f, 1f)
+                        scaleX = .98f + .02f * amount
+                        scaleY = .92f + .08f * amount
+                        translationY = (1f - amount) * 16.dp.toPx()
+                    }
                     .motionInputGate(active && showChrome && !locked && !obscured && !settingsPresent && !watchPanelPresent)
                     .onFocusChanged { transportFocused = it.hasFocus }.focusGroup()
                     .then(if (fillVideo) Modifier.windowInsetsPadding(
@@ -858,7 +895,7 @@ private fun Modifier.revealOnMouseMove(enabled: Boolean, onMove: () -> Unit): Mo
 
 // Match an ordinary click rather than treating a drag, wheel or mouse chord as a seek.
 // Read raw Press/Release because Foundation's tap detector is primary-button oriented.
-private fun Modifier.desktopVideoSeek(owner: AnimePlaybackChrome, onSeek: (Long) -> Unit): Modifier =
+private fun Modifier.desktopVideoSeek(owner: AnimePlaybackChrome, onSeek: (Long, Offset) -> Unit): Modifier =
     pointerInput(owner.sessionGeneration, owner.timelineGeneration, owner.assetKey, owner.episodeId) {
         awaitPointerEventScope {
             var down: PointerInputChange? = null
@@ -889,7 +926,8 @@ private fun Modifier.desktopVideoSeek(owner: AnimePlaybackChrome, onSeek: (Long)
                     down = null
                     if (!event.buttons.areAnyPressed) {
                         mouse.consume()
-                        onSeek(delta)
+                        onSeek(delta, Offset(mouse.position.x / size.width.coerceAtLeast(1),
+                            mouse.position.y / size.height.coerceAtLeast(1)))
                     }
                 }
             }
@@ -1205,9 +1243,10 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
                 MotionIconButton(onClick = onToggle, modifier = Modifier.size(44.dp), tooltip = "$playLabel · 空格") {
                     Box(Modifier.size(33.dp).background(MaterialTheme.colorScheme.onSurface,
                         RoundedCornerShape(50)), contentAlignment = Alignment.Center) {
-                        Icon(if (state.ended) Icons.Outlined.Replay else if (state.playWhenReady)
-                            Icons.Outlined.Pause else Icons.Outlined.PlayArrow, playLabel, Modifier.size(22.dp),
+                        if (state.ended) Icon(Icons.Outlined.Replay, playLabel, Modifier.size(22.dp),
                             tint = MaterialTheme.colorScheme.surface)
+                        else AnimeTransportGlyph(state.playWhenReady, playLabel, MaterialTheme.colorScheme.surface,
+                            Modifier.size(22.dp))
                     }
                 }
             }

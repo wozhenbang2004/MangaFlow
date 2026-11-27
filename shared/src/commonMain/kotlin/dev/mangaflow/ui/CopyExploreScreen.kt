@@ -2,6 +2,10 @@
 
 package dev.mangaflow.ui
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -42,6 +46,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -587,11 +592,16 @@ private fun CopyTopicHeading(topic: CopyTopic, repository: MangaRepository, acti
     val description = remember(topic.intro, topic.brief) { copyTopicPlainText(topic.intro.ifBlank { topic.brief }) }
     var expanded by rememberSaveable(topic.path) { mutableStateOf(false) }
     var descriptionOverflows by remember(description) { mutableStateOf(false) }
+    val motion = LocalMotionEnabled.current
+    val disclosure = animateFloatAsState(if (expanded) 1f else 0f,
+        if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(), label = "topic-disclosure")
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (topic.coverUrl.isNotBlank()) CopyTopicCover(topic, repository,
             Modifier.fillMaxWidth().heightIn(max = 236.dp).aspectRatio(2.65f).mangaCoverCard(14.dp, shadowRadius = 9.dp))
         SelectionContainer {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.animateContentSize(if (motion)
+                spring(MangaMotion.NavigationDamping, MangaMotion.GestureStiffness) else snap()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(topic.title, style = browseTitleStyle(25.sp, 32.sp))
                 if (description.isNotBlank()) Text(description, style = MaterialTheme.typography.bodyMedium,
                     color = colors.onSurfaceVariant, maxLines = if (expanded) Int.MAX_VALUE else 3,
@@ -603,6 +613,8 @@ private fun CopyTopicHeading(topic: CopyTopic, repository: MangaRepository, acti
             enabled = active, contentPadding = PaddingValues(horizontal = 0.dp),
             colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant)) {
             Text(if (expanded) "收起简介" else "展开简介", style = MaterialTheme.typography.labelSmall)
+            Icon(Icons.Outlined.ExpandMore, null, Modifier.padding(start = 4.dp).size(15.dp)
+                .graphicsLayer { rotationZ = 180f * disclosure.value })
         }
         Text(listOf(topic.period, "拷贝专题顺序").filter { it.isNotBlank() }.joinToString(" · "),
             style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,

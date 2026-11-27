@@ -10,12 +10,12 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.ui.platform.LocalWindowInfo
 import dev.mangaflow.ui.motion.MotionBackHandler
 import dev.mangaflow.ui.motion.MotionBackState
-import androidx.compose.animation.core.animateDp
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.updateTransition
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -35,10 +35,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -62,6 +59,10 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.pointerInput
@@ -88,9 +89,13 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.motionInputGate
 import kotlinx.coroutines.flow.first
-import kotlin.math.sin
 
 private val SearchShellShape = RoundedCornerShape(24.dp)
+
+private fun searchRevealWindow(progress: Float, from: Float, to: Float): Float {
+    val t = ((progress - from) / (to - from)).coerceIn(0f, 1f)
+    return t * t * (3f - 2f * t)
+}
 
 /**
  * beUI Morphing Search: one root-level shell, with a separately revealed, full-size foreground.
@@ -145,31 +150,22 @@ internal fun ExpandingSearchBar(
             if (motion) spring(MangaMotion.SearchDamping, MangaMotion.SearchStiffness) else snap()
         }, label = "search-morph",
     ) { if (it) 1f else 0f }
-    val foreground = shell.animateFloat(
-        transitionSpec = {
-            if (motion) tween(MangaMotion.SearchClip, easing = MangaMotion.SearchEasing) else snap()
-        }, label = "search-foreground",
-    ) { if (it) 1f else 0f }
-    val iconTransition = updateTransition(expanded, label = "search-trigger")
-    val icon = iconTransition.animateFloat(
-        transitionSpec = {
-            if (motion) tween(MangaMotion.Content, easing = MangaMotion.SearchEasing) else snap()
-        }, label = "search-icon",
-    ) { if (it) 1f else 0f }
     val present = expanded || shell.currentState || shell.targetState || shell.isRunning
     val backRemaining = remember(back) { derivedStateOf { 1f - back.progress.value.coerceIn(0f, 1f) } }
-    val visibleForeground = remember(foreground, backRemaining) {
-        derivedStateOf { foreground.value.coerceIn(0f, 1f) * backRemaining.value }
-    }
     val progress = remember(reveal, backRemaining) {
         derivedStateOf { (reveal.value * backRemaining.value).coerceIn(0f, 1f) }
+    }
+    val visibleForeground = remember(progress) {
+        derivedStateOf { searchRevealWindow(progress.value, .10f, .82f) }
+    }
+    val obscuredToolbar = remember(progress) {
+        derivedStateOf { searchRevealWindow(progress.value, 0f, .50f) }
     }
     SideEffect {
         if (expanded) retainedQuery = query
         onPresenceChange(present)
-        // Restore the underlying controls with the foreground's finite exit, not the spring's long tail.
-        // An opening hides them immediately, including the trigger's lead-in, to avoid icon flashes.
-        onForegroundState(visibleForeground)
+        // The stationary toolbar can return as soon as the last visible ink clears the trigger.
+        onForegroundState(obscuredToolbar)
     }
 
     LaunchedEffect(expanded, active) {
@@ -207,29 +203,19 @@ internal fun ExpandingSearchBar(
         // An empty title/author query is exactly the toolbar height, without an empty result gutter.
         val inputOnly = expanded && query.isBlank() && searchTarget != SearchTarget.TAG && !scopeCopyOnly && !showEmptyResults
         val panelHeight = if (inputOnly) 44.dp else foregroundHeight.coerceIn(44.dp, 44.dp + resultsRoom)
-        val width = shell.animateDp(
-            transitionSpec = {
-                if (motion) spring(MangaMotion.SearchDamping, MangaMotion.SearchStiffness) else snap()
-            }, label = "search-shell-width",
-        ) { if (it) panelWidth else 44.dp }
-        val height = shell.animateDp(
-            transitionSpec = {
-                if (motion) spring(MangaMotion.SearchDamping, MangaMotion.SearchStiffness) else snap()
-            }, label = "search-shell-height",
-        ) { if (it) panelHeight else 44.dp }
-        val visibleWidth = remember(width, backRemaining) {
-            derivedStateOf { 44.dp + (width.value - 44.dp) * backRemaining.value }
-        }
-        val exposedWidth = remember(visibleWidth, visibleForeground, panelWidth) {
-            derivedStateOf {
-                minOf(visibleWidth.value, 44.dp + (panelWidth - 44.dp) * visibleForeground.value)
-                    .coerceIn(44.dp, panelWidth)
-            }
+        // Only incoming results change the fully open height. A single reversible extension
+        // owns the trigger, horizontal opening, lower edge and real pointer clipping.
+        val contentHeight = animateDpAsState(panelHeight,
+            if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
+            label = "search-results-height")
+        val exposedWidth = remember(progress, panelWidth) {
+            derivedStateOf { 44.dp + (panelWidth - 44.dp) * progress.value }
         }
         // Measure the glass and its clipped foreground from the same live dimensions.
         val shellBounds = Modifier.layout { measurable, constraints ->
-            val w = visibleWidth.value.roundToPx().coerceIn(constraints.minWidth, constraints.maxWidth)
-            val h = (44.dp + (height.value - 44.dp) * backRemaining.value).roundToPx()
+            val w = exposedWidth.value.roundToPx().coerceIn(constraints.minWidth, constraints.maxWidth)
+            val lowerEdge = searchRevealWindow(progress.value, .24f, 1f)
+            val h = (44.dp + (contentHeight.value - 44.dp) * lowerEdge).roundToPx()
                 .coerceIn(constraints.minHeight, constraints.maxHeight)
             val child = measurable.measure(Constraints.fixed(w, h))
             layout(w, h) { child.place(0, 0) }
@@ -376,19 +362,30 @@ internal fun ExpandingSearchBar(
                     stateDescription = if (expanded) "已展开" else "已收起"
                 },
         ) {
-            Box(Modifier.size(22.dp).graphicsLayer {
-                val response = sin((icon.value * backRemaining.value).coerceIn(0f, 1f) * kotlin.math.PI).toFloat()
-                scaleX = 1f - .16f * response
-                scaleY = scaleX
-            }) {
-                Icon(Icons.Outlined.Search, null, Modifier.fillMaxSize().graphicsLayer {
-                    alpha = 1f - icon.value * backRemaining.value
-                    rotationZ = -45f * icon.value * backRemaining.value
-                })
-                Icon(Icons.Outlined.Close, null, Modifier.fillMaxSize().graphicsLayer {
-                    alpha = icon.value * backRemaining.value
-                    rotationZ = 45f * (1f - icon.value * backRemaining.value)
-                })
+            SearchTriggerGlyph(progress)
+        }
+    }
+}
+
+/** The magnifier's ring folds into one arm of the close mark, including during a back swipe. */
+@Composable
+private fun SearchTriggerGlyph(progress: State<Float>) {
+    val ink = LocalContentColor.current
+    Canvas(Modifier.size(22.dp)) {
+        val t = searchRevealWindow(progress.value, 0f, .83f)
+        val c = 9.5f + 2.5f * t
+        val radius = 6.45f + 2.15f * t
+        val thickness = 6.45f * (1f - t)
+        val stroke = 2f
+        scale(size.width / 24f, size.height / 24f, Offset.Zero) {
+            rotate(45f, Offset(c, c)) {
+                if (thickness > .12f) drawOval(ink, Offset(c - radius, c - thickness),
+                    Size(2f * radius, 2f * thickness), style = Stroke(stroke))
+                else drawLine(ink, Offset(c - radius, c), Offset(c + radius, c), stroke, StrokeCap.Round)
+                val tip = radius + 6.4f * (1f - t)
+                if (tip > radius) drawLine(ink, Offset(c + radius, c), Offset(c + tip, c), stroke, StrokeCap.Round)
+                val cross = 8.6f * searchRevealWindow(t, .32f, 1f)
+                if (cross > 0f) drawLine(ink, Offset(c, c - cross), Offset(c, c + cross), stroke, StrokeCap.Round)
             }
         }
     }

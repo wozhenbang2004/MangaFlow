@@ -1,5 +1,6 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
@@ -56,6 +57,7 @@ import dev.mangaflow.experience.*
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
+import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionSlider
@@ -68,14 +70,17 @@ import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.MotionBackHandler
 import dev.mangaflow.ui.motion.motionInputGate
+import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 private enum class ExperienceWorkspace { OVERVIEW, TUNING }
+private enum class ExperienceSaveIndicator { QUIET, SAVING, SAVED }
 
 /** One retained workspace saves each accepted edit, with a single serialized latest-value writer. */
 @Composable
@@ -88,6 +93,8 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
     val savedCustom by store.overrides.collectAsStateWithLifecycle()
     val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
     var applying by remember { mutableStateOf(false) }
+    var savedAt by remember { mutableStateOf<Long?>(null) }
+    var showSaveReceipt by remember { mutableStateOf(false) }
     val applyScope = rememberCoroutineScope()
     val latestVisible by rememberUpdatedState(visible)
     var hostAlive by remember { mutableStateOf(true) }
@@ -143,6 +150,7 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
             return
         }
         notice = null
+        savedAt = null
         applying = true
         applyScope.launch(start = CoroutineStart.UNDISPATCHED) {
             // Accepted slider steps survive a host/navigation disposal while disk IO is in flight.
@@ -162,7 +170,10 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                         baseline = candidate
                         baselineMode = candidateMode
                     }
-                    if (hostAlive && latestVisible) pendingExit?.let(::finishExit)
+                    if (hostAlive && latestVisible) {
+                        savedAt = monotonicTimeMillis()
+                        pendingExit?.let(::finishExit)
+                    }
                 } catch (cancel: CancellationException) { throw cancel }
                 catch (_: Exception) { notice = "设置未保存，请重试" }
                 finally { applying = false }
@@ -212,6 +223,17 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
         if (visible && !applying && !dirty && editor.field == null) reload()
     }
     LaunchedEffect(workspace, expanded) { detailScroll.scrollTo(0) }
+    LaunchedEffect(savedAt, visible) {
+        showSaveReceipt = false
+        if (!visible) savedAt = null
+        else if (savedAt != null) {
+            // Coalesce a slider drag into one confirmation after the last accepted write.
+            delay(MangaMotion.Quick.toLong())
+            showSaveReceipt = true
+            delay(1_100L)
+            showSaveReceipt = false
+        }
+    }
     MotionDialog(visible, onDismissRequest = {
         if (pendingExit != null) pendingExit = null
         else requestExit()
@@ -237,6 +259,23 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                 ExperienceWorkspace.TUNING -> expanded
             }
             val interactive = active && pendingExit == null
+            val motion = LocalMotionEnabled.current
+            val saving = rememberDelayedBusy(applying)
+            val saveIndicator = when {
+                saving -> ExperienceSaveIndicator.SAVING
+                !applying && !dirty && !conflict && notice == null && showSaveReceipt -> ExperienceSaveIndicator.SAVED
+                else -> ExperienceSaveIndicator.QUIET
+            }
+            val arrival = remember { Animatable(1f) }
+            var previousCategory by remember { mutableStateOf(shownCategory) }
+            LaunchedEffect(shownCategory, motion, visible) {
+                val changed = previousCategory != shownCategory
+                previousCategory = shownCategory
+                if (changed && motion && visible) {
+                    arrival.snapTo(0f)
+                    arrival.animateTo(1f, tween(MangaMotion.Content, easing = MangaMotion.EnterEasing))
+                } else arrival.snapTo(1f)
+            }
             LaunchedEffect(wide) { focus.clearFocus(force = true) }
             val panelWidth = if (wide) maxWidth else minOf(maxWidth, 640.dp * window.fontScale)
             val maximumHeight = minOf(maxHeight, window.height * .96f, if (wide) 780.dp else window.height)
@@ -248,10 +287,15 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                         PreferenceHeading("体验策略", Modifier.weight(1f))
                         // A stable header slot replaces the permanently empty bottom action row.
-                        Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
-                            if (applying) MotionBusyIndicator(Modifier.size(16.dp).semantics {
-                                contentDescription = "正在保存设置"
-                            }, strokeWidth = 1.5.dp)
+                        MotionSwap(saveIndicator, Modifier.size(24.dp)) { indicator ->
+                            when (indicator) {
+                                ExperienceSaveIndicator.SAVING -> MotionBusyIndicator(Modifier.size(16.dp).semantics {
+                                    contentDescription = "正在保存设置"
+                                }, strokeWidth = 1.5.dp)
+                                ExperienceSaveIndicator.SAVED -> Icon(Icons.Outlined.Check, "设置已保存",
+                                    Modifier.size(18.dp), tint = statusColors.success)
+                                ExperienceSaveIndicator.QUIET -> Spacer(Modifier.size(18.dp))
+                            }
                         }
                         MotionIconButton(onClick = { showLegend = !showLegend }, enabled = interactive,
                             modifier = Modifier.size(44.dp), tooltip = "图标与数值说明") {
@@ -280,7 +324,10 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                             Modifier.width(176.dp * window.fontScale).fillMaxHeight().verticalScroll(navigationScroll)) {
                             ExperienceCategoryNavigation(expanded, draft, interactive, vertical = true) { selectCategory(it) }
                         }
-                        Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(detailScroll)) {
+                        Column(Modifier.weight(1f).fillMaxHeight().graphicsLayer {
+                            alpha = .76f + .24f * arrival.value
+                            translationY = 7.dp.toPx() * (1f - arrival.value)
+                        }.verticalScroll(detailScroll)) {
                             ExperienceReveal(showLegend) { ExperienceNavigationLegend() }
                             if (workspace == ExperienceWorkspace.OVERVIEW) {
                                 ExperienceOverview(preview, draft, draftMode, interactive,

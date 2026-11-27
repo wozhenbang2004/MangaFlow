@@ -2,6 +2,8 @@ package dev.mangaflow.anime.ui
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -27,12 +29,14 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -43,12 +47,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -60,6 +69,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -110,6 +120,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -727,8 +738,10 @@ internal fun AnimeDetailPane(
                                     }
                                 }
                                 AnimatedVisibility(episodeSearch,
-                                    enter = expandVertically(tween(if (motion) MangaMotion.Content else 0)) + fadeIn(),
-                                    exit = shrinkVertically(tween(if (motion) MangaMotion.Content else 0)) + fadeOut()) {
+                                    enter = expandVertically(if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap(),
+                                        expandFrom = Alignment.Bottom),
+                                    exit = shrinkVertically(if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap(),
+                                        shrinkTowards = Alignment.Bottom)) {
                                     AnimeTextField(episodeQuery, { episodeQuery = it }, "集号或标题",
                                         Modifier.padding(horizontal = horizontal, vertical = 4.dp).motionInputGate(paneActive && episodeSearch))
                                 }
@@ -748,10 +761,29 @@ internal fun AnimeDetailPane(
                                         val missingResume = savedProgress != null && savedEpisode == null && !state.detailLoading
                                         val prefix = (if (state.libraryReadUnavailable) 1 else 0) + (if (showStatus) 1 else 0) +
                                             (if (missingResume) 1 else 0)
-                                        LaunchedEffect(locateRevision, selectedTab, episodes, columns, paneActive, prefix) {
+                                        val locateMotion = motion && !LocalTouchExplorationEnabled.current
+                                        val landing = remember(position) { Animatable(0f) }
+                                        var locatedId by remember(position) { mutableStateOf<String?>(null) }
+                                        val landingInk = MaterialTheme.colorScheme.onPrimaryContainer
+                                        LaunchedEffect(locateRevision, selectedTab, episodes, columns, paneActive, prefix, position, locateMotion) {
                                             if (!paneActive || locateRevision == appliedLocate || search.isNotEmpty()) return@LaunchedEffect
                                             val index = episodes.indexOfFirst { it.id == savedProgress?.episodeId }
-                                            if (index >= 0) { position.scrollToItem(prefix + index / columns); appliedLocate = locateRevision }
+                                            if (index < 0) return@LaunchedEffect
+                                            appliedLocate = locateRevision
+                                            val row = prefix + index / columns
+                                            val visibleRows = position.layoutInfo.visibleItemsInfo.size
+                                            if (locateMotion && visibleRows > 0 && abs(row - position.firstVisibleItemIndex) <= visibleRows)
+                                                position.animateScrollToItem(row)
+                                            else position.scrollToItem(row)
+                                            if (locateMotion) {
+                                                locatedId = episodes[index].id
+                                                try {
+                                                    landing.snapTo(1f)
+                                                    landing.animateTo(0f, tween(550, easing = MangaMotion.ExitEasing))
+                                                } finally {
+                                                    locatedId = null
+                                                }
+                                            }
                                         }
                                         Column(Modifier.fillMaxSize()) {
                                             if (!native && selectedTab == 0 && search.isEmpty() && rows.size > 9) {
@@ -803,7 +835,14 @@ internal fun AnimeDetailPane(
                                                                     onCompleted = { controller.setEpisodeCompleted(episode.id, episode.id !in completed) },
                                                                     onMenuPresenceChange = { present -> if (present) episodeMenuOwner = episode.id
                                                                         else if (episodeMenuOwner == episode.id) episodeMenuOwner = null },
-                                                                    modifier = Modifier.weight(1f))
+                                                                    modifier = Modifier.weight(1f).then(if (episode.id == locatedId) Modifier.drawWithContent {
+                                                                        drawContent()
+                                                                        val amount = landing.value.coerceIn(0f, 1f)
+                                                                        val width = size.width * (.18f + .44f * amount)
+                                                                        val stroke = 2.dp.toPx()
+                                                                        drawRoundRect(landingInk, Offset((size.width - width) / 2f, size.height - stroke * 2f),
+                                                                            Size(width, stroke), CornerRadius(stroke / 2f), alpha = amount)
+                                                                    } else Modifier))
                                                             } }
                                                             repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
                                                         }
@@ -1254,19 +1293,46 @@ private fun AnimeDetailFollow(
     }
     val followed = entry?.followed == true
     val status = entry?.takeIf { it.followed }?.status
+    val motion = LocalMotionEnabled.current
+    val touchExploration = LocalTouchExplorationEnabled.current
+    val feedback = rememberFeelFeedback()
+    val fill = animateFloatAsState(if (followed) 1f else 0f,
+        if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
+        label = "anime-follow-bookmark")
     Box {
         LiquidGlassSurface(backdrop, cornerRadius = 22.dp, role = GlassSurfaceRole.ARTWORK,
             contentColor = MaterialTheme.colorScheme.onSurface, trackPointer = active && libraryAvailable,
             preferSource = true) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 val followLabel = if (followed) "取消追番" else "加入追番"
-                MotionTextButton(onClick = onFollow, enabled = libraryAvailable && active,
-                    modifier = Modifier.heightIn(min = 48.dp).semantics { stateDescription = followLabel },
+                MotionTextButton(onClick = {
+                    if (motion && !touchExploration) feedback.perform(FeelEvent.Selection)
+                    onFollow()
+                }, enabled = libraryAvailable && active,
+                    modifier = Modifier.heightIn(min = 48.dp).semantics {
+                        contentDescription = followLabel
+                        stateDescription = if (followed) "已追番" else "未追番"
+                    },
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp)) {
-                    Icon(if (followed) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder, null, Modifier.size(17.dp))
+                    Box(Modifier.size(17.dp).graphicsLayer {
+                        val amount = fill.value.coerceIn(0f, 1f)
+                        translationY = 2.dp.toPx() * 4f * amount * (1f - amount)
+                    }) {
+                        Icon(Icons.Outlined.BookmarkBorder, null, Modifier.matchParentSize())
+                        Icon(Icons.Filled.Bookmark, null, Modifier.matchParentSize().drawWithContent {
+                            val edge = size.height * fill.value.coerceIn(0f, 1f)
+                            if (edge > 0f) clipRect(bottom = edge) { this@drawWithContent.drawContent() }
+                        }, tint = MaterialTheme.colorScheme.primary)
+                    }
                     Spacer(Modifier.width(4.dp))
-                    Text(if (followed) "已追番" else "追番", maxLines = 1)
+                    val measure = rememberTextMeasurer()
+                    val style = LocalTextStyle.current
+                    val density = LocalDensity.current
+                    val labelWidth = remember(measure, style, density) {
+                        with(density) { measure.measure("已追番", style, maxLines = 1).size.width.toDp() }
+                    }
+                    Text(if (followed) "已追番" else "追番", Modifier.widthIn(min = labelWidth), maxLines = 1)
                 }
                 MotionIconButton(
                     onClick = { open = true }, enabled = libraryAvailable && active,
@@ -1351,29 +1417,37 @@ private fun AnimeDetailStatus(
 ) {
     val colors = MaterialTheme.colorScheme
     var expanded by remember(detail) { mutableStateOf(false) }
-    Row(
-        Modifier.fillMaxWidth().heightIn(min = 44.dp)
-            .semantics { liveRegion = LiveRegionMode.Polite },
-        horizontalArrangement = Arrangement.spacedBy(7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (loading) MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
-        else Icon(icon, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
-        Column(Modifier.weight(1f).padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(title, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-            if (expanded && !detail.isNullOrBlank()) {
-                Text(detail, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+    val motion = LocalMotionEnabled.current
+    Column(Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite }) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), horizontalArrangement = Arrangement.spacedBy(7.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            if (loading) MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+            else Icon(icon, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+            Text(title, Modifier.weight(1f).padding(vertical = 4.dp), style = MaterialTheme.typography.labelMedium,
+                color = colors.onSurfaceVariant)
+            if (!detail.isNullOrBlank()) {
+                val label = if (expanded) "收起原因" else "查看原因"
+                val angle = animateFloatAsState(if (expanded) 180f else 0f,
+                    if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
+                    label = "anime-detail-disclosure")
+                MotionIconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(44.dp), tooltip = label) {
+                    Icon(Icons.Outlined.ExpandMore, label, Modifier.size(18.dp).graphicsLayer { rotationZ = angle.value })
+                }
+            }
+            if (actionLabel != null) {
+                MotionIconButton(onClick = onAction, modifier = Modifier.size(44.dp), tooltip = actionLabel) {
+                    Icon(actionIcon, actionLabel, Modifier.size(18.dp))
+                }
             }
         }
         if (!detail.isNullOrBlank()) {
-            val label = if (expanded) "收起原因" else "查看原因"
-            MotionIconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(44.dp), tooltip = label) {
-                Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, label, Modifier.size(18.dp))
-            }
-        }
-        if (actionLabel != null) {
-            MotionIconButton(onClick = onAction, modifier = Modifier.size(44.dp), tooltip = actionLabel) {
-                Icon(actionIcon, actionLabel, Modifier.size(18.dp))
+            AnimatedVisibility(expanded, modifier = Modifier.motionInputGate(expanded),
+                enter = expandVertically(if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap(),
+                    expandFrom = Alignment.Top),
+                exit = shrinkVertically(if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap(),
+                    shrinkTowards = Alignment.Top)) {
+                Text(detail, Modifier.padding(start = 24.dp, end = 8.dp, bottom = 6.dp),
+                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             }
         }
     }

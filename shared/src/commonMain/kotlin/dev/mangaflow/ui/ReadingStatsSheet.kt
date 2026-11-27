@@ -6,6 +6,11 @@ import dev.mangaflow.platform.*
 
 import dev.mangaflow.ui.platform.*
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.VectorConverter
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -77,6 +82,10 @@ import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.LocalPlatformAccessibilityPreferences
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.FeelEvent
+import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.rememberFeelFeedback
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.motionPress
 import kotlinx.datetime.LocalDate
@@ -265,6 +274,13 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
         }
     }
     var selectedDay by remember(firstDay, today) { mutableStateOf(today) }
+    val motion = LocalMotionEnabled.current
+    val feedback = rememberFeelFeedback()
+    fun selectDay(date: LocalDate) {
+        if (date == selectedDay) return
+        selectedDay = date
+        feedback.perform(FeelEvent.Selection)
+    }
     val selectedMillis = daily[selectedDay.toString()] ?: 0L
     val selectedBooks = activity.count { (it.days[selectedDay.toString()] ?: 0L) > 0L }
     val scroll = rememberScrollState()
@@ -292,6 +308,25 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
         val rows = if (compactCalendar) weeks else 7
         val chartWidth = step * columns - gap
         val chartHeight = labelHeight + step * rows - gap
+        val selectedIndex = daysBetween(calendarStart, selectedDay).toInt()
+        val target = if (compactCalendar) Offset((selectedIndex % 7).toFloat(), (selectedIndex / 7).toFloat())
+            else Offset((selectedIndex / 7).toFloat(), (selectedIndex % 7).toFloat())
+        val marker = remember(firstDay, today) { Animatable(target, Offset.VectorConverter) }
+        val strength = remember(firstDay, today) { Animatable(1f) }
+        LaunchedEffect(target, motion) {
+            if (!motion) {
+                marker.snapTo(target)
+                strength.snapTo(1f)
+            } else if ((marker.value - target).getDistanceSquared() <= 2.05f) {
+                strength.snapTo(1f)
+                marker.animateTo(target, spring(MangaMotion.NavigationDamping, MangaMotion.PanelStiffness))
+            } else {
+                // A tap on a distant date should not trail across unrelated weeks.
+                marker.snapTo(target)
+                strength.snapTo(.4f)
+                strength.animateTo(1f, tween(MangaMotion.Quick))
+            }
+        }
         LaunchedEffect(firstDay, today, scroll.maxValue) { scroll.scrollTo(scroll.maxValue) }
         Row(Modifier.fillMaxWidth()) {
             if (!compactCalendar) Canvas(Modifier.width(weekdayWidth).height(chartHeight)) {
@@ -300,9 +335,9 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
                         topLeft = Offset(0f, labelHeight.toPx() + row * step.toPx() + (block.toPx() - 10.sp.toPx()) / 2f))
                 }
             }
-            Row(Modifier.weight(1f).horizontalScroll(scroll)) {
+            Box(Modifier.weight(1f).horizontalScroll(scroll)) {
                 Canvas(Modifier.width(chartWidth).height(chartHeight)
-                    .pointerInput(calendarStart, firstDay, today, step, labelHeight) {
+                    .pointerInput(calendarStart, firstDay, today, step, labelHeight, feedback) {
                         detectTapGestures { position ->
                             val column = (position.x / step.toPx()).toInt()
                             val row = ((position.y - labelHeight.toPx()) / step.toPx()).toInt()
@@ -312,19 +347,19 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
                                 column in 0 until columns && row in 0 until rows) {
                                 val index = if (compactCalendar) row * 7L + column else column * 7L + row
                                 val date = calendarStart.plusDays(index)
-                                if (!date.isBefore(firstDay) && !date.isAfter(today)) selectedDay = date
+                                if (!date.isBefore(firstDay) && !date.isAfter(today)) selectDay(date)
                             }
                         }
                     }.semantics {
                         contentDescription = "每日阅读时长热力图。颜色由少至多：0、少于15分钟、15至30分钟、30至60分钟、至少60分钟。"
                         stateDescription = "${selectedDay.year}年${selectedDay.monthNumber}月${selectedDay.dayOfMonth}日 ${readingDuration(selectedMillis)}"
-                        onClick("查看今天") { selectedDay = today; true }
+                        onClick("查看今天") { selectDay(today); true }
                         customActions = listOf(
                             CustomAccessibilityAction("前一天") {
-                                if (selectedDay.isAfter(firstDay)) { selectedDay = selectedDay.minusDays(1); true } else false
+                                if (selectedDay.isAfter(firstDay)) { selectDay(selectedDay.minusDays(1)); true } else false
                             },
                             CustomAccessibilityAction("后一天") {
-                                if (selectedDay.isBefore(today)) { selectedDay = selectedDay.plusDays(1); true } else false
+                                if (selectedDay.isBefore(today)) { selectDay(selectedDay.plusDays(1)); true } else false
                             })
                     }) {
                     if (compactCalendar) listOf("一", "二", "三", "四", "五", "六", "日").forEachIndexed { column, label ->
@@ -342,11 +377,15 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
                             val point = Offset(column * step.toPx(), labelHeight.toPx() + row * step.toPx())
                             drawRoundRect(levels[level(daily[date.toString()] ?: 0L)], point,
                                 Size(block.toPx(), block.toPx()), CornerRadius(2.dp.toPx()))
-                            if (date == selectedDay) drawRoundRect(colors.onSurface.copy(alpha = .85f), point,
-                                Size(block.toPx(), block.toPx()), CornerRadius(2.dp.toPx()),
-                                style = Stroke(1.2.dp.toPx()))
                         }
                     }
+                }
+                Canvas(Modifier.width(chartWidth).height(chartHeight)) {
+                    val stroke = if (strong) 2.dp.toPx() else 1.3.dp.toPx()
+                    val position = marker.value * step.toPx() + Offset(stroke / 2f, labelHeight.toPx() + stroke / 2f)
+                    val side = block.toPx() - stroke
+                    drawRoundRect(colors.onSurface.copy(alpha = .9f * strength.value), position,
+                        Size(side, side), CornerRadius(2.dp.toPx()), style = Stroke(stroke))
                 }
             }
         }

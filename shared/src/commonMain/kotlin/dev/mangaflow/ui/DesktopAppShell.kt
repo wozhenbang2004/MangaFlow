@@ -1,5 +1,13 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
@@ -48,7 +56,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -59,6 +70,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
@@ -72,6 +84,7 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionNavigationColumn
 import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.motionInputGate
 import kotlinx.coroutines.delay
 
 internal data class DesktopDestination(
@@ -114,9 +127,13 @@ internal fun SidebarGroupLabel(title: String, modifier: Modifier = Modifier, com
         color = ink, letterSpacing = .45.sp, fontWeight = FontWeight.Medium)
 }
 
-private fun Modifier.revealDesktopNavigationLabel(progress: State<Float>): Modifier = graphicsLayer {
-    alpha = progress.value.coerceIn(0f, 1f)
-    translationX = -4.dp.toPx() * (1f - alpha)
+@Composable
+private fun Modifier.revealDesktopNavigationLabel(progress: State<Float>): Modifier {
+    val start = if (LocalLayoutDirection.current == LayoutDirection.Ltr) -4.dp else 4.dp
+    return graphicsLayer {
+        alpha = progress.value.coerceIn(0f, 1f)
+        translationX = start.toPx() * (1f - alpha)
+    }
 }
 
 /** Keep the same focus/hit target and icon origin; only the label slot is disclosed. */
@@ -151,7 +168,7 @@ private fun DesktopNavigationAction(
                 Text(title, Modifier.weight(1f).revealDesktopNavigationLabel(labels).clearAndSetSemantics {},
                     color = colors.onSurface, style = MaterialTheme.typography.bodyMedium,
                     fontWeight = if (current == true) FontWeight.SemiBold else FontWeight.Normal,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
                 if (shortcut != null) Text(shortcut, Modifier.padding(end = 7.dp)
                     .revealDesktopNavigationLabel(labels).background(colors.surface, RoundedCornerShape(5.dp))
                     .padding(horizontal = 5.dp, vertical = 1.dp).clearAndSetSemantics {},
@@ -193,14 +210,25 @@ internal fun DesktopNavigationWorkspace(
             val labels = animateFloatAsState(if (expanded) 1f else 0f,
                 if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
                 label = "desktop-navigation-labels")
+            val wideRail = desktopNavigationLabelWidth(LocalMangaWindow.current.fontScale)
+            val labelsPresent by remember(labels) { derivedStateOf { labels.value > .03f } }
+            val wideProfile by remember(labels) { derivedStateOf { labels.value >= .66f } }
             if (visible) {
                 Box(Modifier.matchParentSize().mangaHazeSource(workspaceBackdrop, zIndex = -1f)
                     .background(MaterialTheme.colorScheme.background)) { wallpaper() }
             }
-            Row(Modifier.fillMaxSize()) {
-                // Commit the workspace width once. Label motion is draw-only; a sidebar click
-                // no longer remeasures the gallery and its breakpoints through a spring.
-                if (visible) LiquidGlassSurface(workspaceBackdrop, Modifier.width(sidebarWidth)
+            Box(Modifier.fillMaxSize()) {
+                // The content takes its final width once. Only this independent rail measures
+                // the moving edge, so gallery columns and image requests stay still during travel.
+                Box(Modifier.fillMaxSize().padding(start = if (visible) sidebarWidth else 0.dp).clipToBounds()) {
+                    MangaAdaptiveLayout(content)
+                }
+                if (visible) LiquidGlassSurface(workspaceBackdrop, Modifier.align(Alignment.CenterStart).layout { measurable, bounds ->
+                    val live = DesktopNavigationRailWidth + (wideRail - DesktopNavigationRailWidth) * labels.value.coerceIn(0f, 1f)
+                    val width = live.roundToPx().coerceIn(bounds.minWidth, bounds.maxWidth)
+                    val rail = measurable.measure(bounds.copy(minWidth = width, maxWidth = width))
+                    layout(width, rail.height) { rail.placeRelative(0, 0) }
+                }.pointerInput(Unit) {}
                     .fillMaxHeight().padding(start = 8.dp, top = 8.dp, bottom = 8.dp),
                     cornerRadius = 20.dp, role = GlassSurfaceRole.DRAWER, elevation = 0.dp) {
                     val railHover = remember { MutableInteractionSource() }
@@ -220,7 +248,7 @@ internal fun DesktopNavigationWorkspace(
                         val toolIndices = remember(destinations, pinTools) {
                             destinations.indices.filter { pinTools && destinations[it].utility }
                         }
-                        DesktopNavigationAction("搜索", Icons.Outlined.Search, expanded, labels, onSearch,
+                        DesktopNavigationAction("搜索", Icons.Outlined.Search, labelsPresent, labels, onSearch,
                             modifier = Modifier.heightIn(min = 44.dp), shortcut = "Ctrl+K")
                         Spacer(Modifier.height(10.dp))
                         val scroll = rememberScrollState()
@@ -230,15 +258,18 @@ internal fun DesktopNavigationWorkspace(
                         val selectedRow = rows.indexOf(SidebarNavigationRow.Destination(bodyIndices.indexOf(selectedIndex)))
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 3.dp)) {
-                                profileControl(!expanded)
+                                Box(Modifier.fillMaxWidth().then(if (motion) Modifier.animateContentSize(
+                                    spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness)) else Modifier)) {
+                                    profileControl(!wideProfile)
+                                }
                                 MotionNavigationColumn(selected = selectedRow, itemCount = rows.size,
                                     selectionVisible = selectedRow >= 0, routeMarker = true) { index, itemModifier ->
                                     when (val row = rows[index]) {
-                                        is SidebarNavigationRow.Heading -> SidebarGroupLabel(row.title, itemModifier, compact = !expanded)
+                                        is SidebarNavigationRow.Heading -> SidebarGroupLabel(row.title, itemModifier, compact = !wideProfile)
                                         is SidebarNavigationRow.Destination -> {
                                             val route = bodyIndices[row.index]
                                             val destination = destinations[route]
-                                            DesktopNavigationAction(destination.title, destination.icon, expanded, labels,
+                                            DesktopNavigationAction(destination.title, destination.icon, labelsPresent, labels,
                                                 onClick = { onNavigate(route) }, modifier = itemModifier.heightIn(min = 46.dp),
                                                 current = selectedIndex == route)
                                         }
@@ -255,7 +286,7 @@ internal fun DesktopNavigationWorkspace(
                                 toolIndices.forEach { route ->
                                     val target = destinations[route]
                                     val current = route == selectedIndex
-                                    DesktopNavigationAction(target.title, target.icon, expanded, labels, { onNavigate(route) },
+                                    DesktopNavigationAction(target.title, target.icon, labelsPresent, labels, { onNavigate(route) },
                                         modifier = Modifier.heightIn(min = 44.dp).then(if (current)
                                             Modifier.background(colors.surface, RoundedCornerShape(13.dp)) else Modifier),
                                         current = current)
@@ -268,14 +299,11 @@ internal fun DesktopNavigationWorkspace(
                                 Icon(Icons.Outlined.ViewSidebar, action, Modifier.size(18.dp),
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            if (expanded) Text(version, modifier = Modifier.revealDesktopNavigationLabel(labels),
+                            if (labelsPresent) Text(version, modifier = Modifier.revealDesktopNavigationLabel(labels),
                                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
-                }
-                Box(Modifier.weight(1f).fillMaxHeight().clipToBounds()) {
-                    MangaAdaptiveLayout(content)
                 }
             }
         }
@@ -443,6 +471,7 @@ internal fun DesktopDiscoveryHeader(
     ranking: @Composable () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val motion = LocalMotionEnabled.current
     Column(modifier) {
         val ink = rememberBrowseTabInk(tabLabels)
         val tabGroup: @Composable (Modifier) -> Unit = { bounds ->
@@ -453,18 +482,43 @@ internal fun DesktopDiscoveryHeader(
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val stacked = maxWidth < 680.dp * LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
             Column {
-                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (searching) MotionIconButton(onClick = onLeaveSearch, modifier = Modifier.size(36.dp),
-                        tooltip = "返回发现，保留搜索") {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回发现", Modifier.size(20.dp))
-                    } else navigation()
-                    if (!stacked && !searching) tabGroup(Modifier.widthIn(max = 244.dp))
-                    input(Modifier.weight(1f))
-                    recent()
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.animateContentSize(if (motion) spring(MangaMotion.NavigationDamping,
+                        MangaMotion.NavigationStiffness) else snap()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (searching) MotionIconButton(onClick = onLeaveSearch, modifier = Modifier.size(36.dp),
+                            tooltip = "返回发现，保留搜索") {
+                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回发现", Modifier.size(20.dp))
+                        } else navigation()
+                        // The gap belongs to the navigation button, including when the rail supplies it instead.
+                        Spacer(Modifier.width(0.dp))
+                    }
+                    if (!stacked) AnimatedVisibility(!searching,
+                        enter = expandHorizontally(if (motion) spring(MangaMotion.NavigationDamping,
+                            MangaMotion.NavigationStiffness) else snap(), expandFrom = Alignment.Start) +
+                            fadeIn(if (motion) tween(MangaMotion.Content) else snap()),
+                        exit = shrinkHorizontally(if (motion) spring(MangaMotion.NavigationDamping,
+                            MangaMotion.NavigationStiffness) else snap(), shrinkTowards = Alignment.Start) +
+                            fadeOut(if (motion) tween(MangaMotion.Quick) else snap())) {
+                        Box(Modifier.padding(end = 10.dp).motionInputGate(!searching)) {
+                            tabGroup(Modifier.widthIn(max = 244.dp))
+                        }
+                    }
+                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        input(Modifier.weight(1f))
+                        recent()
+                    }
                 }
-                if (!searching && stacked) Box(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp)) {
-                    tabGroup(Modifier.widthIn(max = 300.dp).align(Alignment.CenterStart))
+                if (stacked) AnimatedVisibility(!searching,
+                    enter = expandVertically(if (motion) spring(MangaMotion.NavigationDamping,
+                        MangaMotion.NavigationStiffness) else snap(), expandFrom = Alignment.Top) +
+                        fadeIn(if (motion) tween(MangaMotion.Content) else snap()),
+                    exit = shrinkVertically(if (motion) spring(MangaMotion.NavigationDamping,
+                        MangaMotion.NavigationStiffness) else snap(), shrinkTowards = Alignment.Top) +
+                        fadeOut(if (motion) tween(MangaMotion.Quick) else snap())) {
+                    Box(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp).motionInputGate(!searching)) {
+                        tabGroup(Modifier.widthIn(max = 300.dp).align(Alignment.CenterStart))
+                    }
                 }
             }
         }
@@ -479,7 +533,14 @@ internal fun DesktopDiscoveryWorkspace(
     results: @Composable () -> Unit,
 ) {
     val panes = rememberSaveableStateHolder()
+    val progress = animateFloatAsState(if (searching) 1f else 0f,
+        if (LocalMotionEnabled.current) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
+        label = "desktop-search-workspace")
     panes.SaveableStateProvider(if (searching) "desktop-search-results" else "desktop-discovery") {
-        if (searching) results() else browse()
+        Box(Modifier.fillMaxSize().graphicsLayer {
+            val remaining = if (searching) 1f - progress.value else progress.value
+            alpha = 1f - .13f * remaining
+            translationY = (if (searching) 5.dp else (-3).dp).toPx() * remaining
+        }) { if (searching) results() else browse() }
     }
 }

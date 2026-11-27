@@ -197,7 +197,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                         val title = if (scene == NetworkDownloadScene.CHECK)
                             if (autoState.historyOnly) "上次检测" else if (autoState.complete || autoState.applied) "检测结果"
                             else "网络检测" else "网络与代理"
-                        MotionSwap(title, Modifier.weight(1f)) { heading ->
+                        MotionSwap(title, Modifier.weight(1f), scaleContent = false) { heading ->
                             PreferenceHeading(heading)
                         }
                         MotionIconButton(onClick = { autoInfoRow = null; showInfo = !showInfo }, enabled = active,

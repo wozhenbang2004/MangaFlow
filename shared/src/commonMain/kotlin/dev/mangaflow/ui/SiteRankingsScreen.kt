@@ -6,6 +6,8 @@ package dev.mangaflow.ui
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -16,6 +18,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.*
@@ -72,6 +76,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
@@ -391,6 +396,11 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
     onOpen: (SiteRankedWork) -> Unit, onInspect: (SiteRankedWork) -> Unit,
 ) {
     val grid = rememberLazyGridState()
+    val motion = LocalMotionEnabled.current
+    val placement = remember(motion) {
+        if (motion) spring<IntOffset>(MangaMotion.NavigationDamping, MangaMotion.GestureStiffness,
+            visibilityThreshold = IntOffset(1, 1)) else snap()
+    }
     val desktop = platformKind == PlatformKind.DESKTOP
     val empty = state.entries.isEmpty()
     val firstError = state.error?.takeIf { empty || (state.failedPage ?: 0) == 0 }
@@ -445,7 +455,8 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
             }
             items(state.entries, key = { it.work.key }, contentType = { "native-ranking" }) { entry ->
                 SiteRankingRow(entry, state.selection.kind, entry.work.key in state.linkedIds, ordinalWidth,
-                    state.selection.key, onOpen, onInspect)
+                    state.selection.key, onOpen, onInspect,
+                    modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null, placementSpec = placement))
             }
             if (!empty && (state.loadingMore || state.error != null && firstError == null)) item(
                 key = "rank-footer", span = { GridItemSpan(maxLineSpan) }
@@ -466,11 +477,14 @@ private fun RankingPane(state: SiteRankingsState, backdrop: HazeState,
 
 @Composable
 private fun SiteRankingRow(entry: SiteRankingEntry, kind: SiteRankingKind, linked: Boolean, ordinalWidth: Dp,
-    selectionKey: String, onOpen: (SiteRankedWork) -> Unit, onInspect: (SiteRankedWork) -> Unit) {
+    selectionKey: String, onOpen: (SiteRankedWork) -> Unit, onInspect: (SiteRankedWork) -> Unit, modifier: Modifier) {
     val w = entry.work
     val colors = MaterialTheme.colorScheme
     val lead = entry.position == 1
-    val coverHeight = if (lead) 112.dp else 96.dp
+    val coverEmphasis by animateFloatAsState(if (lead) 1f else 0f, if (LocalMotionEnabled.current)
+        spring(MangaMotion.NavigationDamping, MangaMotion.GestureStiffness) else snap(), label = "rank-cover-size")
+    val coverHeight = 96.dp + 16.dp * coverEmphasis
+    val coverWidth = 66.dp + 12.dp * coverEmphasis
     val interaction = remember { MutableInteractionSource() }
     val transition = LocalMangaCoverTransition.current
     val placement = "ranking-site-" + selectionKey
@@ -478,7 +492,7 @@ private fun SiteRankingRow(entry: SiteRankingEntry, kind: SiteRankingKind, linke
         transition?.select?.invoke(MangaCoverKey(w.manga.id, placement))
         onInspect(w)
     }
-    Row(Modifier.fillMaxWidth().combinedClickable(role = Role.Button, interactionSource = interaction,
+    Row(modifier.fillMaxWidth().combinedClickable(role = Role.Button, interactionSource = interaction,
         indication = null, onLongClickLabel = "查看作品与更换阅读来源", onLongClick = inspect, onClick = {
             transition?.select?.invoke(if (linked) null else MangaCoverKey(w.manga.id, placement))
             onOpen(w)
@@ -489,7 +503,7 @@ private fun SiteRankingRow(entry: SiteRankingEntry, kind: SiteRankingKind, linke
             style = mangaMetricValueStyle(16.sp, 22.sp), maxLines = 1,
             fontWeight = if (entry.position <= 3) FontWeight.SemiBold else FontWeight.Normal,
             color = if (entry.position <= 3) colors.primary else colors.onSurfaceVariant)
-        CatalogueCover(w.manga, Modifier.width(if (lead) 78.dp else 66.dp).height(coverHeight)
+        CatalogueCover(w.manga, Modifier.width(coverWidth).height(coverHeight)
             .mangaSharedCover(w.manga.id, placement).mangaCoverCard(9.dp, shadowRadius = 7.dp))
         Column(Modifier.weight(1f).padding(start = 13.dp).heightIn(min = coverHeight),
             verticalArrangement = Arrangement.SpaceBetween) {
@@ -652,8 +666,23 @@ internal fun RankedWorkDetailScreen(
             LaunchedEffect(previewIdentity, active) {
                 if (active && previewIdentity != null && !scroll.isScrollInProgress) {
                     val group = groups.firstOrNull { group -> group.matches.any { federatedMangaIdentity(it) == previewIdentity } }
-                    val visible = scroll.layoutInfo.visibleItemsInfo.firstOrNull { it.key == group?.let(::rankedSourceGroupKey) }
-                    if (visible != null) scroll.animateScrollToItem(visible.index)
+                    val view = scroll.layoutInfo
+                    val row = view.visibleItemsInfo.firstOrNull { it.key == group?.let(::rankedSourceGroupKey) }
+                    if (row != null) {
+                        val top = row.offset - view.viewportStartOffset
+                        val bottom = row.offset + row.size - view.viewportEndOffset
+                        val delta = when {
+                            row.size > view.viewportEndOffset - view.viewportStartOffset -> top
+                            top < 0 -> top
+                            bottom > 0 -> bottom
+                            else -> 0
+                        }.toFloat()
+                        if (delta != 0f) {
+                            if (discloseWithMotion) scroll.animateScrollBy(delta,
+                                spring(MangaMotion.NavigationDamping, MangaMotion.GestureStiffness))
+                            else scroll.scrollBy(delta)
+                        }
+                    }
                 }
             }
             val bottom = screenFitContentInsets().asPaddingValues().calculateBottomPadding()

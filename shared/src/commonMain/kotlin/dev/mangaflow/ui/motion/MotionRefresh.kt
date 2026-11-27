@@ -1,5 +1,9 @@
 package dev.mangaflow.ui.motion
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -21,10 +25,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -50,17 +51,33 @@ internal fun MotionRefreshBox(
     val feedback = rememberFeelFeedback()
     val motion = LocalMotionEnabled.current
     val color = MaterialTheme.colorScheme.onSurface
+    val actionColor = MaterialTheme.colorScheme.primary
     var pointerDown by remember { mutableStateOf(false) }
+    var initiatedPull by remember { mutableStateOf(false) }
+    var armed by remember { mutableStateOf(false) }
     LaunchedEffect(state, enabled, refreshing) {
         var announced = false
+        var previous = state.distanceFraction
         snapshotFlow { pointerDown to state.distanceFraction }.collect { (down, fraction) ->
+            val extending = fraction > previous
+            previous = fraction
+            if (enabled && down && !refreshing && extending) initiatedPull = true
+            if (refreshing || !enabled || (!down && fraction <= .001f)) initiatedPull = false
+            if (enabled && down && !refreshing) armed = fraction >= 1f
+            else if (fraction < .88f) armed = false
             if (!down || fraction < .88f) announced = false
-            if (down && enabled && !refreshing && fraction >= 1f && !announced) {
+            if (down && enabled && !refreshing && extending && fraction >= 1f && !announced) {
                 announced = true
                 feedback.perform(FeelEvent.Threshold)
             }
         }
     }
+    val readiness = animateFloatAsState(if (armed) 1f else 0f,
+        if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(), label = "refresh-ready")
+    // In-place refresh hands the released check back to the toolbar. An aborted pull simply
+    // rides the platform return; an unrelated programmatic refresh never reveals a gesture.
+    val overlay = animateFloatAsState(if (showRefreshingIndicator || initiatedPull) 1f else 0f,
+        if (motion && !initiatedPull) tween(MangaMotion.Quick) else snap(), label = "refresh-handoff")
     Box(Modifier.fillMaxSize()
         .pointerInput(enabled) {
             if (!enabled) return@pointerInput
@@ -85,23 +102,16 @@ internal fun MotionRefreshBox(
         Box(Modifier.align(Alignment.TopCenter).padding(top = indicatorTop).size(32.dp)
             .graphicsLayer {
                 val p = state.distanceFraction.coerceIn(0f, 1.2f)
-                alpha = when {
-                    refreshing -> if (showRefreshingIndicator) 1f else 0f
-                    !showRefreshingIndicator && !pointerDown -> 0f
-                    else -> p.coerceIn(0f, 1f)
-                }
+                alpha = overlay.value * if (refreshing && showRefreshingIndicator) 1f else p.coerceIn(0f, 1f)
                 translationY = if (motion) 18.dp.toPx() * p else 0f
                 val scale = if (motion) .82f + .18f * p.coerceAtMost(1f) else 1f
                 scaleX = scale; scaleY = scale
             }, contentAlignment = Alignment.Center) {
             if (refreshing && showRefreshingIndicator) MotionBusyIndicator(Modifier.size(22.dp), color, 1.75.dp)
             else Canvas(Modifier.size(22.dp)) {
-                val stroke = Stroke(1.75.dp.toPx(), cap = StrokeCap.Round)
-                val origin = Offset(stroke.width / 2f, stroke.width / 2f)
-                val bounds = Size(size.width - stroke.width, size.height - stroke.width)
-                drawArc(color.copy(alpha = .12f), 0f, 360f, false, origin, bounds, style = stroke)
-                drawArc(color, -90f, 360f * state.distanceFraction.coerceIn(0f, 1f),
-                    false, origin, bounds, style = stroke)
+                drawPullRing(lerp(color, actionColor, readiness.value.coerceIn(0f, 1f)),
+                    state.distanceFraction, readiness.value, 1.75.dp,
+                    horizontal = false, towardStart = true, motion = motion)
             }
         }
     }

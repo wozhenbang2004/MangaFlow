@@ -360,7 +360,7 @@ internal fun UnifiedSourceManager(
                                                 color = if (row.chapters > 0) colors.onSurfaceVariant else colors.error, maxLines = 1)
                                             Icon(Icons.Outlined.Info, null, Modifier.size(13.dp), tint = colors.error)
                                         }
-                                    } else MotionSwap(statusLabel) { label ->
+                                    } else MotionSwap(statusLabel, scaleContent = false) { label ->
                                         Text(label, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                             color = if (row.status == "NEEDS_CONFIRMATION") colors.primary else colors.onSurfaceVariant)
                                     }

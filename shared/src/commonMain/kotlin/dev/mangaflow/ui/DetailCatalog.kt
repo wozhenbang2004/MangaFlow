@@ -7,16 +7,12 @@ import dev.mangaflow.platform.*
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -127,7 +123,6 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabContent
-import dev.mangaflow.ui.motion.LocalTabVisibilityScope
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlinx.coroutines.CancellationException
@@ -136,6 +131,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+
+private data class ChapterLanding(val index: Int, val chapterId: String, val revision: Int)
 
 /**
  * Group panes share one fixed toolbar. Changing download mode never inserts a row
@@ -215,17 +212,7 @@ internal fun DetailCatalog(
     val volumeCovers = remember(mangaId) { linkedMapOf<String, MutableState<VolumeCoverState>>() }
     val coverPermits = remember(mangaId) { Semaphore(2) }
 
-    val presence = LocalTabVisibilityScope.current
-    val flow = if (presence != null && LocalMotionEnabled.current) with(presence) {
-        Modifier.animateEnterExit(
-            enter = fadeIn(tween(MangaMotion.Content)) +
-                slideInVertically(spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness)) { -it / 2 } +
-                expandVertically(spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness),
-                    expandFrom = Alignment.Top),
-            exit = fadeOut(tween(MangaMotion.Quick)) +
-                slideOutVertically(tween(MangaMotion.Quick)) { -it / 2 } +
-                shrinkVertically(tween(MangaMotion.Quick), shrinkTowards = Alignment.Top))
-    } else Modifier
+    val motion = LocalMotionEnabled.current
     val showBusy = rememberDelayedBusy(loading)
     Column(Modifier.fillMaxSize()) {
         if (desktop) Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 14.dp, bottom = 4.dp),
@@ -238,7 +225,7 @@ internal fun DetailCatalog(
                 enabled = active && !sourcePresent, onClick = onLocate)
         }
         if (groups.size > 1 && !searching || !desktop && progress != null) Row(
-            Modifier.fillMaxWidth().then(flow).heightIn(min = 44.dp).padding(horizontal = 16.dp),
+            Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
@@ -286,6 +273,33 @@ internal fun DetailCatalog(
             val catalogPosition = rememberLazyGridState()
             val searchPosition = if (desktop) rememberLazyGridState() else catalogPosition
             val grid = if (searching) searchPosition else catalogPosition
+            var landing by remember(grid) { mutableStateOf<ChapterLanding?>(null) }
+            val locateLight = remember(grid) { Animatable(0f) }
+            val locateInk = MaterialTheme.colorScheme.primary
+            LaunchedEffect(landing, paneActive, motion) {
+                val destination = landing ?: return@LaunchedEffect
+                if (!paneActive) { landing = null; return@LaunchedEffect }
+                try {
+                    locateLight.snapTo(0f)
+                    val layout = grid.layoutInfo
+                    val visible = layout.visibleItemsInfo
+                    val target = visible.firstOrNull { it.index == destination.index }
+                    val inView = target != null && target.offset.y >= layout.viewportStartOffset &&
+                        target.offset.y + target.size.height <= layout.viewportEndOffset
+                    if (!inView) {
+                        val reach = visible.size
+                        val near = visible.isNotEmpty() && destination.index in
+                            (visible.first().index - reach)..(visible.last().index + reach)
+                        if (motion && near) grid.animateScrollToItem(destination.index)
+                        else grid.scrollToItem(destination.index)
+                    }
+                    locateLight.snapTo(1f)
+                    if (motion) locateLight.animateTo(0f, tween(640, easing = MangaMotion.ExitEasing))
+                    else delay(420)
+                } finally {
+                    if (landing == destination) landing = null
+                }
+            }
             var appliedSearch by rememberSaveable(mangaId) { mutableStateOf("") }
             LaunchedEffect(search, paneActive) {
                 if (paneActive && search != appliedSearch) {
@@ -362,8 +376,8 @@ internal fun DetailCatalog(
                 }
                 LaunchedEffect(paneActive, groupVisit, locateRevision, locateIndex, searching) {
                     if (!paneActive || searching) return@LaunchedEffect
-                    if (locateIndex != null && appliedLocate != locateRevision) {
-                        grid.scrollToItem(locateIndex)
+                    if (locateIndex != null && locateChapter != null && appliedLocate != locateRevision) {
+                        landing = ChapterLanding(locateIndex, locateChapter.id, locateRevision)
                         chosenGroup = targetGroup
                         appliedVisit = groupVisit
                         appliedLocate = locateRevision
@@ -411,7 +425,14 @@ internal fun DetailCatalog(
                                     val origin = coordinates.localToScreen(Offset.Zero)
                                     if (origin.isSpecified) downloadAnchor = Rect(origin, androidx.compose.ui.geometry.Size(
                                         coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
-                                }
+                                }.then(if (landing?.chapterId != chapter.id) Modifier else Modifier.drawWithContent {
+                                    drawContent()
+                                    val inset = 4.dp.toPx()
+                                    drawRoundRect(locateInk.copy(alpha = .17f * locateLight.value),
+                                        topLeft = Offset(0f, inset),
+                                        size = Size(size.width, (size.height - inset * 2f).coerceAtLeast(0f)),
+                                        cornerRadius = CornerRadius(10.dp.toPx()))
+                                })
                                 if (isVolumeChapter(chapter)) {
                                     val coverState = remember(mangaId, chapter.id) {
                                         val retained = volumeCovers.remove(chapter.id) ?: mutableStateOf(VolumeCoverState())

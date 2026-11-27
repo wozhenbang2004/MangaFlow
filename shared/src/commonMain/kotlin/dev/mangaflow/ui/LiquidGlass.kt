@@ -14,6 +14,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
@@ -95,6 +96,7 @@ internal fun LiquidGlassSurface(
     preferSource: Boolean = false,
     contentColor: Color? = null,
     headerInk: HeaderInkCells? = null,
+    lensTravel: () -> Float = { 0f },
     content: @Composable BoxScope.() -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -128,6 +130,7 @@ internal fun LiquidGlassSurface(
     // External sources add focus/keyboard/ancestor presses; raw touch needs no second detector.
     val interactive = liquid && motion && !tabLens && (trackPointer || interactionSource != null)
     val expansion = rememberUpdatedState(materialExpansion)
+    val lensDirection = if (tabLens) rememberUpdatedState(lensTravel) else null
     // Popups/dialogs, artwork-specific samples and nested glass controls need the
     // explicitly selected source. A window backdrop cannot cross a window boundary.
     val input = remember(state, role, preferSource) {
@@ -198,10 +201,13 @@ internal fun LiquidGlassSurface(
                         contentNormalBlend(.045f)
                     }
                     GlassSurfaceRole.TAB_LENS -> {
-                        // Only the travelling thumb samples this thin lens. Its resting selection is ink.
+                        // The lit arc rolls toward the leading shoulder of the lens, then recentres as it settles.
+                        val direction = lensDirection?.value?.invoke()?.coerceIn(-1f, 1f) ?: 0f
+                        val stretch = kotlin.math.abs(direction)
+                        lightPosition(BiasAlignment(-.16f + .74f * direction, -.95f))
                         alpha(MaxTabLensOpacity * progress)
-                        optics { copy(refractionStrength = .82f, refractionHeightFraction = .30f,
-                            refractionDisplacement = 10.dp, refractionProfile = RefractionProfile.Edge(4.dp),
+                        optics { copy(refractionStrength = .62f + .20f * stretch, refractionHeightFraction = .30f,
+                            refractionDisplacement = 7.dp + 3.dp * stretch, refractionProfile = RefractionProfile.Edge(4.dp),
                             depth = OpticalSizeValue.Fixed(.50f), blurRadius = OpticalSizeValue.Fixed(1.5.dp),
                             refractionDetailIntensity = 0f) }
                         tint(tintColor.copy(alpha = navigationTint))

@@ -150,10 +150,12 @@ import dev.mangaflow.platform.*
 import dev.mangaflow.platform.storage.applicationContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.Lifecycle
@@ -1102,7 +1104,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         if (drawerVisible) drawerAction = DrawerAction(DrawerValue.Closed)
         else model.cancelLibraryReading()
     }
-    val routeTravel = with(density) { 24.dp.roundToPx() }
+    val routeTravel = with(density) { (if (desktop) 18.dp else 34.dp).roundToPx() }
+    val forwardSign = if (LocalLayoutDirection.current == LayoutDirection.Ltr) 1 else -1
     CompositionLocalProvider(
         LocalMangaMetrics provides displayedMetrics,
         LocalWallpaperActive provides (frame is Frame.Root && hasWallpaper && !(section == Section.ANIME && animeImmersive)),
@@ -1292,15 +1295,21 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             Box(Modifier.fillMaxSize().padding(innerPadding)) {
             SharedTransitionLayout {
             val coverScope = this
+            val backPreviews = remember { mutableMapOf<String, MotionBackState>() }
             AnimatedContent(
                 targetState = frame,
                 // Root destinations share the shell; only their body owns a section save-state key.
                 contentKey = { if (it is Frame.Root) "root-shell" else it.key },
                 transitionSpec = {
-                    if (!motion || initialState.profile != targetState.profile ||
+                    val transform = if (!motion || initialState.profile != targetState.profile ||
                         (initialState is Frame.Root && targetState is Frame.Root &&
                         (targetState as Frame.Root).section == drawerRootTransition))
                         (fadeIn(snap()) togetherWith fadeOut(snap())).using(null)
+                    else if (targetState.depth < initialState.depth && backPreviews[initialState.key]?.completed == true) {
+                        // The outgoing page is already travelling with the user's edge gesture.
+                        // Reveal its actual destination underneath while that same preview settles.
+                        (fadeIn(snap()) togetherWith fadeOut(tween(MangaMotion.Exit, easing = MangaMotion.ExitEasing))).using(null)
+                    }
                     else if (((initialState is Frame.Root || initialState is Frame.CopyExplore) && targetState is Frame.Detail ||
                         initialState is Frame.Detail && (targetState is Frame.Root || targetState is Frame.CopyExplore)) &&
                         selectedCover?.mangaId == ((targetState as? Frame.Detail)?.state?.manga?.id
@@ -1311,13 +1320,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             fadeOut(tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing))).using(null)
                     } else {
                         val forward = targetState.depth >= initialState.depth
-                        val direction = if (forward) 1 else -1
-                        ((fadeIn(tween(MangaMotion.NavigationFade)) +
-                            slideInHorizontally(spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness)) { direction * routeTravel }) togetherWith
-                            (fadeOut(tween(MangaMotion.Quick)) +
-                                slideOutHorizontally(tween(MangaMotion.Exit, easing = MangaMotion.EnterEasing)) { -direction * routeTravel / 2 }))
+                        val enterFrom = forwardSign * if (forward) routeTravel else -routeTravel / 3
+                        val exitTo = forwardSign * if (forward) -routeTravel / 3 else routeTravel
+                        ((fadeIn(tween(MangaMotion.NavigationFade, easing = MangaMotion.EnterEasing)) +
+                            slideInHorizontally(spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness)) { enterFrom }) togetherWith
+                            (fadeOut(tween(MangaMotion.Exit, easing = MangaMotion.ExitEasing)) +
+                                slideOutHorizontally(tween(MangaMotion.Exit, easing = MangaMotion.EnterEasing)) { exitTo }))
                             .using(null)
                     }
+                    transform.apply { targetContentZIndex = targetState.depth.toFloat() }
                 },
                 contentAlignment = Alignment.TopStart,
                 label = "page",
@@ -1350,6 +1361,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     }
                 }
                 val currentBack = remember(current.key) { MotionBackState() }
+                DisposableEffect(current.key, currentBack) {
+                    backPreviews[current.key] = currentBack
+                    onDispose { if (backPreviews[current.key] === currentBack) backPreviews.remove(current.key) }
+                }
                 MotionBackHandler(
                     enabled = current.key == frame.key && !drawerVisible && libraryOpening == null &&
                         !recentReadingOpen && authorWorks == null &&
@@ -2079,7 +2094,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         .padding(horizontal = 8.dp, vertical = 2.dp),
                                     controlsAlpha = {
                                         if (current.section != Section.DISCOVER) 1f
-                                        else if (searchExpanded) 0f
                                         else 1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f)
                                     },
                                     actions = {

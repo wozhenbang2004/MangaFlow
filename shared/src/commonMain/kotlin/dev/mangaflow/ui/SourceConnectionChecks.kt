@@ -1,11 +1,13 @@
 package dev.mangaflow.ui
 
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Refresh
@@ -44,11 +46,14 @@ private data class SourceConnectionResult(
     val source: BodySourceInfo,
     val route: DownloadRouteSnapshot?,
     val running: Boolean = false,
+    val stopped: Boolean = false,
     val complete: Boolean = false,
     val usable: Boolean = false,
     val message: String = "等待检查",
     val millis: Long? = null,
 )
+
+private enum class SourceCheckSignal { WAITING, RUNNING, USABLE, FAILED, STOPPED }
 
 /** Explicit, bounded catalogue checks use the same frozen source route as real browsing. */
 @Composable
@@ -79,13 +84,14 @@ internal fun SourceConnectionChecks(
     var notice by remember(repository) { mutableStateOf<String?>(null) }
     val motion = LocalMotionEnabled.current
     val detailsAngle by animateFloatAsState(if (expanded) 180f else 0f,
-        tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing), label = "source-check-disclosure")
+        if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.PanelStiffness) else snap(),
+        label = "source-check-disclosure")
 
     fun cancel(clear: Boolean) {
         generation++
         job?.cancel()
         job = null
-        rows = if (clear) emptyList() else rows.map { if (it.complete) it else it.copy(running = false, message = "已取消") }
+        rows = if (clear) emptyList() else rows.map { if (it.complete) it else it.copy(running = false, stopped = true, message = "已取消") }
         if (clear) { checkedSettings = null; checkedSources = null; checkedConfiguration = null; showAll = false }
     }
     LaunchedEffect(settings, sourceKey, configuration) {
@@ -154,7 +160,7 @@ internal fun SourceConnectionChecks(
                 if (generation == run) {
                     job = null
                     if (!current()) notice = "设置或来源已变化，请重新检查"
-                    else rows = rows.map { if (it.complete) it else it.copy(running = false, message = "检查已停止") }
+                    else rows = rows.map { if (it.complete) it else it.copy(running = false, stopped = true, message = "检查已停止") }
                 }
             }
         }
@@ -176,15 +182,19 @@ internal fun SourceConnectionChecks(
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
-            if (job != null) {
-                MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)
-                MotionIconButton(onClick = { cancel(clear = false) }, enabled = active,
-                    modifier = Modifier.size(44.dp), tooltip = "取消来源检查") {
-                    Icon(Icons.Outlined.Close, "取消来源检查", Modifier.size(17.dp))
-                }
-            } else MotionTextButton(onClick = { start(targets, replace = true) }, enabled = active && targets.isNotEmpty(),
+            MotionTextButton(onClick = { if (job != null) cancel(clear = false) else start(targets, replace = true) },
+                enabled = active && (job != null || targets.isNotEmpty()),
                 contentPadding = PaddingValues(horizontal = 8.dp)) {
-                Text(if (targets.size == 1) "检查目录" else "一键检查", style = MaterialTheme.typography.labelMedium)
+                MotionSwap(job != null, scaleContent = false) { checking ->
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        if (!checking) Icon(Icons.Outlined.Refresh, null, Modifier.size(14.dp))
+                        else if (completed > 0 && shown.size > 1) MotionBusyIndicator(
+                            progress = { completed.toFloat() / shown.size }, modifier = Modifier.size(14.dp), strokeWidth = 1.4.dp)
+                        else MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)
+                        Text(if (checking) "取消检查" else if (targets.size == 1) "检查目录" else "一键检查",
+                            style = MaterialTheme.typography.labelMedium)
+                    }
+                }
             }
             if (shown.isNotEmpty()) MotionIconButton(onClick = { expanded = !expanded }, enabled = active,
                 modifier = Modifier.size(44.dp), tooltip = if (expanded) "收起各源结果" else "查看各源结果") {
@@ -194,13 +204,24 @@ internal fun SourceConnectionChecks(
         }
         val detailsContent: @Composable () -> Unit = {
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            (if (showAll) shown else shown.take(4)).forEach { row ->
+            (if (showAll) shown else shown.take(4)).forEach { row -> key(row.source.id) {
+                val signal = when {
+                    row.running -> SourceCheckSignal.RUNNING
+                    row.usable -> SourceCheckSignal.USABLE
+                    row.complete -> SourceCheckSignal.FAILED
+                    row.stopped -> SourceCheckSignal.STOPPED
+                    else -> SourceCheckSignal.WAITING
+                }
                 Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
-                        if (row.running) MotionBusyIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp)
-                        else Icon(if (row.usable) Icons.Outlined.Check else Icons.Outlined.Info, null, Modifier.size(15.dp),
-                            tint = if (row.complete && !row.usable) colors.error else colors.onSurfaceVariant)
+                    MotionSwap(signal, Modifier.size(18.dp)) { visual ->
+                        when (visual) {
+                            SourceCheckSignal.RUNNING -> MotionBusyIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp)
+                            SourceCheckSignal.USABLE -> Icon(Icons.Outlined.Check, null, Modifier.size(15.dp), tint = mangaStatusColors().success)
+                            SourceCheckSignal.FAILED -> Icon(Icons.Outlined.Info, null, Modifier.size(15.dp), tint = colors.error)
+                            SourceCheckSignal.WAITING -> Icon(Icons.Outlined.Schedule, null, Modifier.size(15.dp), tint = colors.onSurfaceVariant)
+                            SourceCheckSignal.STOPPED -> Icon(Icons.Outlined.Pause, null, Modifier.size(15.dp), tint = colors.onSurfaceVariant)
+                        }
                     }
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(row.source.name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -212,9 +233,9 @@ internal fun SourceConnectionChecks(
                     if (!row.running) MotionIconButton(onClick = { start(listOf(row.source), replace = false) },
                         enabled = active && job == null, modifier = Modifier.size(44.dp), tooltip = "重新检查" + row.source.name) {
                         Icon(Icons.Outlined.Refresh, "重新检查" + row.source.name, Modifier.size(16.dp))
-                    }
+                    } else Spacer(Modifier.size(44.dp))
                 }
-            }
+            } }
             if (shown.size > 4) MotionTextButton(onClick = { showAll = !showAll }, enabled = active) {
                 Text(if (showAll) "收起其余结果" else "其余 " + (shown.size - 4) + " 个来源", style = MaterialTheme.typography.labelSmall)
             }

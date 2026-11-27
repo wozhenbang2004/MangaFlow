@@ -28,6 +28,9 @@ import androidx.compose.material.icons.outlined.PlayArrow
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
@@ -35,6 +38,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,8 +61,14 @@ import dev.mangaflow.storage.ReaderCatalogStore
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.FeelEvent
+import dev.mangaflow.ui.motion.FeelFeedback
+import dev.mangaflow.ui.motion.rememberFeelFeedback
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private data class ChapterHistoryRow(
@@ -66,6 +76,43 @@ private data class ChapterHistoryRow(
     val source: SourceChapterRef?,
     val sourceName: String,
 )
+
+/** The shelf and recent-reading sheet hide the exact row until undo or commit. */
+internal class ReadingHistoryRemoval(
+    private val snackbar: SnackbarHostState,
+    private val scope: CoroutineScope,
+    private val feedback: FeelFeedback,
+) {
+    var pending by mutableStateOf(emptySet<String>())
+        private set
+
+    fun request(id: String, commit: (String) -> Unit) {
+        if (id in pending) return
+        pending += id
+        snackbar.currentSnackbarData?.dismiss()
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            var undone = false
+            try {
+                undone = snackbar.showSnackbar("已移除阅读记录", actionLabel = "撤销", withDismissAction = true,
+                    duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed
+                if (undone) feedback.perform(FeelEvent.Undo)
+            } finally {
+                try {
+                    if (!undone) commit(id)
+                } finally {
+                    pending -= id
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun rememberHistoryRemoval(snackbar: SnackbarHostState): ReadingHistoryRemoval {
+    val scope = rememberCoroutineScope()
+    val feedback = rememberFeelFeedback()
+    return remember(snackbar, scope, feedback) { ReadingHistoryRemoval(snackbar, scope, feedback) }
+}
 
 /** Exact native identity only: titles and page counts never establish equivalent records. */
 private fun historyChapterSource(manga: Manga, chapterId: String): SourceChapterRef? = runCatching {

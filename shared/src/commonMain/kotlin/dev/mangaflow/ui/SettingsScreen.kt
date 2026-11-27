@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -395,8 +396,9 @@ fun SettingsScreen(
     ) {
         item {
             // Keep the import controls composed while scrolling; their in-progress copy owns this lifetime.
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(if (desktop) 0.dp else 24.dp)) {
-                RetainedSettingsCategory(!desktop || settingsCategory == 0) {
+            val selected = if (desktop) settingsCategory else null
+            val sections: @Composable () -> Unit = {
+                RetainedSettingsCategory(0, selected) {
                 SettingsSection("阅读", sourceBackdrop) {
                     SettingsDisclosure("阅读顺序", when (preferences.mode) {
                         ReadingMode.VERTICAL -> "纵向滚动"
@@ -441,7 +443,7 @@ fun SettingsScreen(
                     }
                 }
                 }
-                RetainedSettingsCategory(!desktop || settingsCategory == 1) {
+                RetainedSettingsCategory(1, selected) {
                 SettingsSection("外观", sourceBackdrop) {
                     DetailAppearanceSettings()
                     SettingsDisclosure("字体", "", Icons.Outlined.TextFields,
@@ -459,7 +461,7 @@ fun SettingsScreen(
                     }
                 }
                 }
-                RetainedSettingsCategory(!desktop || settingsCategory == 2) {
+                RetainedSettingsCategory(2, selected) {
                 SettingsSection("数据", sourceBackdrop) {
                     val lanReadingSyncEntry: @Composable () -> Unit = {
                         onOpenLanReadingSync?.let { open ->
@@ -525,7 +527,7 @@ fun SettingsScreen(
                         modifier = Modifier.padding(vertical = 6.dp)) }
                 }
                 }
-                RetainedSettingsCategory(!desktop || settingsCategory == 3) {
+                RetainedSettingsCategory(3, selected) {
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SettingsSection("应用", sourceBackdrop) {
                         SettingsLinkRow("体验策略", "画质、补帧、缓冲与预读 · ${experienceModeLabel(experienceMode)}", Icons.Outlined.Tune,
@@ -650,6 +652,8 @@ fun SettingsScreen(
                 }
                 }
             }
+            if (desktop) Box(Modifier.fillMaxWidth().clipToBounds()) { sections() }
+            else Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(24.dp)) { sections() }
         }
     }
     if (desktop) DesktopVerticalScrollbar(settingsScroll,
@@ -1119,7 +1123,7 @@ internal fun SettingsDisclosure(
     val motion = LocalMotionEnabled.current
     val interaction = remember { MutableInteractionSource() }
     val reveal = animateFloatAsState(if (expanded) 1f else 0f,
-        if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(), label = "setting-disclosure")
+        if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.PanelStiffness) else snap(), label = "setting-disclosure")
     Column(Modifier.fillMaxWidth()) {
         val header: @Composable (Boolean) -> Unit = { stacked ->
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
@@ -1168,11 +1172,16 @@ internal fun SettingsDisclosure(
                     layout(constraints.minWidth.coerceAtLeast(0), 0) {}
                 } else {
                     val body = measurable.measure(constraints.copy(minHeight = 0))
-                    layout(body.width, (body.height * reveal.value).toInt().coerceAtLeast(0)) {
-                        body.placeRelative(0, 0)
+                    val extent = reveal.value.coerceIn(0f, 1f)
+                    layout(body.width, (body.height * extent).toInt().coerceAtLeast(0)) {
+                        body.placeRelativeWithLayer(0, 0) {
+                            // Let the first line unfold immediately beneath its own header.
+                            translationY = if (motion) -6.dp.toPx() * (1f - extent) else 0f
+                            alpha = (extent / .62f).coerceIn(0f, 1f)
+                        }
                     }
                 }
-            }.graphicsLayer { alpha = reveal.value }
+            }
             .padding(top = 4.dp, bottom = if (compact) 8.dp else 12.dp),
             verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 10.dp), content = content)
     }

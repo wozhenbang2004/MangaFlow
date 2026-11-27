@@ -24,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -33,6 +34,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
@@ -79,7 +81,6 @@ internal fun SwipeToRemove(
     val velocityTracker = remember { VelocityTracker() }
     var settleJob by remember { mutableStateOf<Job?>(null) }
     var returning by remember { mutableStateOf(false) }
-    var thresholdAnnounced by remember { mutableStateOf(false) }
     val currentMotion by rememberUpdatedState(motion)
     fun drawnOffset() = if (returning) position.value.coerceIn(-width.toFloat(), 0f) else offset
     fun returnToRest(velocity: Float = 0f) {
@@ -95,20 +96,15 @@ internal fun SwipeToRemove(
             returning = false
         }
     }
-    val fraction = if (width > 0) (-offset / width).coerceIn(0f, 1f) else 0f
-    val armed = enabled && fraction >= .55f
+    // The artwork follows every pointer sample in its layer; only crossings change composition.
+    val armed by remember { derivedStateOf { width > 0 && -drawnOffset() >= width * .55f } }
+    val showingAction by remember { derivedStateOf { dragging || returning || offset < 0f } }
     val readiness = animateFloatAsState(if (armed) 1f else 0f,
         if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(),
         label = "record-delete-ready")
     val haptics = rememberFeelFeedback()
     val colors = MaterialTheme.colorScheme
     val wallpaper = LocalWallpaperActive.current
-    LaunchedEffect(fraction, dragging) {
-        if (armed && dragging && !thresholdAnnounced) {
-            thresholdAnnounced = true
-            haptics.perform(FeelEvent.Threshold)
-        } else if (!dragging || fraction < .47f) thresholdAnnounced = false
-    }
     LaunchedEffect(enabled, motion) {
         if (!enabled || !motion) {
             settleJob?.cancel()
@@ -118,6 +114,7 @@ internal fun SwipeToRemove(
         }
     }
     val gesture = if (enabled) Modifier.pointerInput(width) {
+        var thresholdAnnounced = false
         detectHorizontalDragGestures(
             onDragStart = {
                 if (swipeEnabled) {
@@ -125,7 +122,7 @@ internal fun SwipeToRemove(
                     settleJob?.cancel()
                     returning = false
                     offset = caught.coerceIn(-width.toFloat(), 0f)
-                    thresholdAnnounced = false
+                    thresholdAnnounced = width > 0 && -offset >= width * .55f
                     velocityTracker.resetTracking()
                     dragging = true
                 }
@@ -134,11 +131,10 @@ internal fun SwipeToRemove(
             onDragEnd = {
                 val commit = swipeEnabled && width > 0 && -offset >= width * .55f
                 dragging = false
-                if (commit) {
-                    // The parent keyed item's exit owns removal; undo/storage never waits for it.
-                    offset = 0f
-                    remove()
-                } else returnToRest(velocityTracker.calculateVelocity().x)
+                // Remove on UP. A keyed exit captures the exposed artwork; if the owner
+                // keeps the record, it returns smoothly from the same physical position.
+                if (commit) remove()
+                returnToRest(if (commit) 0f else velocityTracker.calculateVelocity().x)
             },
             onHorizontalDrag = { change, amount ->
                 if (swipeEnabled) {
@@ -146,18 +142,22 @@ internal fun SwipeToRemove(
                     val next = (offset + amount).coerceIn(-width.toFloat(), 0f)
                     if (offset < 0f || next < 0f) change.consume()
                     offset = next
+                    if (!thresholdAnnounced && width > 0 && -next >= width * .55f) {
+                        thresholdAnnounced = true
+                        haptics.perform(FeelEvent.Threshold)
+                    } else if (-next < width * .47f) thresholdAnnounced = false
                 }
             },
         )
     } else Modifier
     Box(modifier.fillMaxWidth().onSizeChanged { width = it.width }
-        .then(if (enabled && (dragging || returning || offset < 0f))
+        .then(if (enabled && showingAction)
             Modifier.clip(RoundedCornerShape(12.dp)) else Modifier)
         .semantics {
             customActions = if (enabled) listOf(CustomAccessibilityAction(label) { remove(); true }) else emptyList()
         }
         .then(gesture)) {
-        if (enabled && (offset < 0f || returning)) Box(
+        if (enabled && showingAction) Box(
             Modifier.matchParentSize().drawWithContent {
                 // A wallpaper row has no opaque backing to mask the action underneath.
                 // Keep the complete reveal (including icons) inside the exposed strip.
@@ -179,9 +179,12 @@ internal fun SwipeToRemove(
                 }
                 drawPath(shape, colors.error.copy(alpha = .055f + .085f * eased))
             },
-            contentAlignment = Alignment.CenterEnd,
+            contentAlignment = AbsoluteAlignment.CenterRight,
         ) {
-            Row(Modifier.padding(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
+            Row(Modifier.graphicsLayer {
+                // The action moves into the opening instead of remaining pinned to the screen edge.
+                translationX = if (motion) -(-drawnOffset() - size.width).coerceAtLeast(0f) * .46f else 0f
+            }.padding(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.DeleteOutline, null, Modifier.size(22.dp).graphicsLayer {
                     if (motion) {

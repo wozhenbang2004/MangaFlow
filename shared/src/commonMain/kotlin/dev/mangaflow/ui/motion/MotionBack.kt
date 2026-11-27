@@ -17,8 +17,12 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.unit.dp
+import dev.mangaflow.platform.monotonicTimeMillis
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -69,6 +73,7 @@ internal fun MotionBackHandler(
         state.settling?.cancel()
         state.progress.stop()
         val origin = state.progress.value * if (state.fromLeft) 1f else -1f
+        val velocity = VelocityTracker()
         var hasProgress = false
         try {
             events.collect { event ->
@@ -77,6 +82,7 @@ internal fun MotionBackHandler(
                 val p = event.progress.coerceIn(0f, 1f)
                 val signed = origin * (1f - p) + p * if (event.swipeEdge == LEFT_BACK_EDGE) 1f else -1f
                 state.fromLeft = signed >= 0f
+                velocity.addPosition(monotonicTimeMillis(), Offset(abs(signed), 0f))
                 state.progress.snapTo(abs(signed))
             }
             state.gesturing = false
@@ -85,19 +91,22 @@ internal fun MotionBackHandler(
                 if (hasProgress) {
                     state.completed = true
                     state.settling = scope.launch {
-                        state.progress.animateTo(1f, spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness))
+                        state.progress.animateTo(1f, spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness),
+                            initialVelocity = velocity.calculateVelocity().x.coerceIn(0f, 5f))
                     }
                 }
                 latestBack()
             } else {
                 state.settling = scope.launch {
-                    state.progress.animateTo(0f, spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness))
+                    state.progress.animateTo(0f, spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness),
+                        initialVelocity = velocity.calculateVelocity().x.coerceIn(-5f, 0f))
                 }
             }
         } catch (cancelled: CancellationException) {
             state.gesturing = false
             state.settling = scope.launch {
-                state.progress.animateTo(0f, spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness))
+                state.progress.animateTo(0f, spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness),
+                    initialVelocity = velocity.calculateVelocity().x.coerceIn(-5f, 0f))
             }
             throw cancelled
         }
@@ -106,8 +115,9 @@ internal fun MotionBackHandler(
 
 internal fun Modifier.motionBackPreview(state: MotionBackState): Modifier = graphicsLayer {
     val p = state.progress.value.coerceIn(0f, 1f)
-    translationX = size.width * .08f * p * if (state.fromLeft) 1f else -1f
-    scaleX = 1f - .03f * p
+    transformOrigin = TransformOrigin(if (state.fromLeft) 1f else 0f, .5f)
+    translationX = minOf(size.width * .055f, 30.dp.toPx()) * p * if (state.fromLeft) 1f else -1f
+    scaleX = 1f - .035f * p
     scaleY = scaleX
     clip = p > 0f
     shape = RoundedCornerShape((24f * p).dp)

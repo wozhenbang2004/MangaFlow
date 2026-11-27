@@ -5,6 +5,7 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -89,13 +90,14 @@ import dev.chrisbanes.haze.blur.hazeBlur
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.FeelEvent
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
-import kotlin.math.PI
+import dev.mangaflow.ui.motion.rememberFeelFeedback
+import kotlin.math.abs
 import kotlin.math.roundToInt
-import kotlin.math.sin
 
 private object SourceOrbitWindowOrigin : PopupPositionProvider {
     override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize,
@@ -123,10 +125,18 @@ internal fun ChapterSourceOrbit(
 ) {
     val sourceAnchor = remember(identity) { anchor }
     val motion = LocalMotionEnabled.current
+    val feedback = rememberFeelFeedback()
     val density = LocalDensity.current
     val layoutDirection = LocalLayoutDirection.current
     var closing by remember(identity) { mutableStateOf(false) }
     var page by remember(identity) { mutableIntStateOf(0) }
+    var pageTurn by remember(identity) { mutableIntStateOf(0) }
+    val pageArrival = remember(identity, pageTurn) { Animatable(if (pageTurn > 0 && motion) 0f else 1f) }
+    LaunchedEffect(pageArrival, motion) {
+        if (!motion) pageArrival.snapTo(1f)
+        else if (pageArrival.value < 1f) pageArrival.animateTo(1f,
+            tween(MangaMotion.Content, easing = MangaMotion.EnterEasing))
+    }
     var origin by remember(identity) { mutableStateOf<Offset?>(null) }
     val onClosed by rememberUpdatedState(onDismiss)
     val cancel by rememberUpdatedState(onCancel)
@@ -138,6 +148,7 @@ internal fun ChapterSourceOrbit(
     LaunchedEffect(identity, closeRequested) { if (closeRequested) setClosing(true) }
     val close = { if (!closing) { setClosing(true); cancel() } }
     val progress = remember(identity) { Animatable(0f) }
+    val flightVelocity = remember(identity) { floatArrayOf(0f) }
     val canInteract by remember(identity, closing) {
         // Rows are already separated at 0.6; delaying taps to 0.9 swallowed the first touch.
         derivedStateOf { !closing && origin != null && progress.value >= .6f }
@@ -164,11 +175,12 @@ internal fun ChapterSourceOrbit(
             if (closing) onClosed()
             return@LaunchedEffect
         }
-        // Keep the same spring and current position when a closing flight is reversed.
         progress.animateTo(if (closing) 0f else 1f,
             if (!motion) snap() else spring(
                 dampingRatio = MangaMotion.NavigationDamping,
-                stiffness = MangaMotion.NavigationStiffness))
+                stiffness = MangaMotion.NavigationStiffness),
+            initialVelocity = if (motion) flightVelocity[0] else 0f) { flightVelocity[0] = velocity }
+        flightVelocity[0] = 0f
         if (closing) onClosed()
     }
     Popup(popupPositionProvider = SourceOrbitWindowOrigin, onDismissRequest = close,
@@ -199,8 +211,11 @@ internal fun ChapterSourceOrbit(
                 val pageSize = if (paged) capacity - 1 else capacity
                 val pages = ((count + pageSize - 1) / pageSize).coerceAtLeast(1)
                 val currentPage = page.coerceIn(0, pages - 1)
-                val first = currentPage * pageSize
-                val visibleCount = (count - first).coerceIn(0, pageSize)
+                // Even groups keep the next-page control close to its previous position.
+                val regularCount = count / pages
+                val extra = count % pages
+                val first = currentPage * regularCount + minOf(currentPage, extra)
+                val visibleCount = regularCount + if (currentPage < extra) 1 else 0
                 val slots = visibleCount + if (paged) 1 else 0
                 val localAnchor = sourceAnchor?.translate(-(origin ?: Offset.Zero))
                 val start = localAnchor?.center ?: Offset(width / 2f, height / 2f)
@@ -225,8 +240,8 @@ internal fun ChapterSourceOrbit(
                 // Disc's 4dp inset and 36dp mark slot locate the glyph, not the text box.
                 val markInset = with(density) { 22.dp.toPx() }
                 val markCenterX = if (layoutDirection == LayoutDirection.Ltr) markInset else railWidthPx - markInset
-                val landingY = (slots * rowHeightPx / 2f - railScroll.value)
-                    .coerceIn(0f, with(density) { availableHeight.toPx() })
+                val railExtent = minOf(slots * rowHeightPx, height - edge * 2f).coerceAtLeast(0f)
+                val landingY = { (start.y - top).coerceIn(0f, railExtent) }
                 Column(Modifier.absoluteOffset { IntOffset(left.roundToInt(), top.roundToInt()) }
                     .width(railWidth).heightIn(max = availableHeight)
                     .animateContentSize(if (motion) spring(MangaMotion.NavigationDamping,
@@ -235,17 +250,19 @@ internal fun ChapterSourceOrbit(
                         val p = progress.value.coerceIn(0f, 1f)
                         transformOrigin = TransformOrigin(
                             (markCenterX / size.width.coerceAtLeast(1f)).coerceIn(0f, 1f),
-                            (landingY / size.height.coerceAtLeast(1f)).coerceIn(0f, 1f))
+                            (landingY() / size.height.coerceAtLeast(1f)).coerceIn(0f, 1f))
                         translationX = (start.x - left - markCenterX) * (1f - p)
-                        translationY = (start.y - top - landingY) * (1f - p)
+                        translationY = (start.y - top - landingY()) * (1f - p)
                         scaleX = .62f + .38f * p
                         scaleY = scaleX
                         // Keep the glyphs visible until they reach the actual trigger.
                         alpha = if (origin == null) 0f else (p / .12f).coerceIn(0f, 1f)
                     }.verticalScroll(railScroll)) {
                     repeat(slots) { slot ->
+                        val distance = { (slot + .5f) * rowHeightPx - railScroll.value - landingY() }
+                        val spread = { (abs(distance()) / (rowHeightPx * (slots - 1).coerceAtLeast(1))).coerceIn(0f, 1f) }
                         val reveal = {
-                            val delay = slot * .018f
+                            val delay = spread() * .125f
                             ((progress.value - delay) / (1f - delay)).coerceIn(0f, 1f)
                         }
                         val modifier = Modifier.fillMaxWidth().height(rowHeight)
@@ -253,10 +270,11 @@ internal fun ChapterSourceOrbit(
                             .motionInputGate(canInteract)
                             .graphicsLayer {
                                 val p = reveal()
-                                translationY = (landingY - ((slot + .5f) * rowHeightPx -
-                                    railScroll.value)) * (1f - p)
+                                val turn = if (slot < visibleCount && motion) pageArrival.value else 1f
+                                translationY = -distance() * (1f - p)
                                 translationX = (if (placeLeft) -edge else edge) *
-                                    sin(p * PI).toFloat() * (slot - (slots - 1) / 2f) / slots.coerceAtLeast(1)
+                                    (4f * p * (1f - p) * spread() + (1f - turn) * .8f)
+                                alpha = .55f + .45f * turn
                             }
                         if (slot < visibleCount) item(first + slot, modifier, close, reveal, canInteract)
                         else {
@@ -265,7 +283,11 @@ internal fun ChapterSourceOrbit(
                                 .clickable(enabled = canInteract,
                                     interactionSource = interaction, indication = null,
                                     role = Role.Button, onClickLabel = "下一组来源",
-                                    onClick = { page = (currentPage + 1) % pages })
+                                    onClick = {
+                                        feedback.perform(FeelEvent.Selection)
+                                        page = (currentPage + 1) % pages
+                                        pageTurn++
+                                    })
                                 .motionPress(interaction, enabled = !closing, pressedScale = .97f)
                                 .padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Outlined.MoreHoriz, null, Modifier.size(36.dp).padding(7.dp))

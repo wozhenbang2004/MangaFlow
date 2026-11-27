@@ -72,6 +72,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -86,6 +87,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.ScaleFactor
 import androidx.compose.ui.layout.layout
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.*
@@ -114,8 +116,12 @@ import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.FeelEvent
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.rememberFeelFeedback
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
@@ -185,6 +191,20 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
         }
         val state = rememberPagerState { manga.size }
         val scope = rememberCoroutineScope()
+        val feedback = rememberFeelFeedback()
+        val dragged by state.interactionSource.collectIsDraggedAsState()
+        LaunchedEffect(state, visible, manga) {
+            if (!visible) return@LaunchedEffect
+            var dragOrigin: Int? = null
+            snapshotFlow { Triple(dragged, state.isScrollInProgress, state.settledPage) }
+                .collect { (dragging, moving, page) ->
+                    if (dragging && dragOrigin == null) dragOrigin = page
+                    if (!dragging && !moving) {
+                        if (dragOrigin != null && dragOrigin != page) feedback.perform(FeelEvent.Selection)
+                        dragOrigin = null
+                    }
+                }
+        }
         val fling = PagerDefaults.flingBehavior(state,
             snapAnimationSpec = if (motion) spring(dampingRatio = MangaMotion.GestureDamping,
                 stiffness = MangaMotion.GestureStiffness) else snap())
@@ -260,12 +280,15 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                             radius = if (strongContrast) size.height / 2f else 1.4.dp.toPx(),
                             center = Offset((index + .5f) * slot, size.height / 2f))
                     }
-                    val center = (visualPage + .5f) * slot
-                    val fraction = page - floor(page)
-                    val width = 14.dp.toPx() + if (motion) 4.dp.toPx() * (4f * fraction * (1f - fraction)) else 0f
+                    val base = floor(visualPage)
+                    val fraction = visualPage - base
+                    val origin = (base + .5f) * slot
+                    val half = minOf(7.dp.toPx(), slot / 2f)
+                    val left = origin + slot * (if (motion) fraction * fraction else fraction) - half
+                    val right = origin + slot * (if (motion) fraction * (2f - fraction) else fraction) + half
                     val activeInk = if (strongContrast) ink else lerp(ink, atmosphere.value, .24f)
-                    drawRoundRect(activeInk, topLeft = Offset(center - width / 2f, 0f),
-                        size = Size(width, size.height), cornerRadius = CornerRadius(size.height / 2f))
+                    drawRoundRect(activeInk, topLeft = Offset(left, 0f),
+                        size = Size(right - left, size.height), cornerRadius = CornerRadius(size.height / 2f))
                 }
             }
         }
@@ -430,6 +453,7 @@ private fun FeaturedManga(
 ) {
     val context = LocalContext.current
     val motion = LocalMotionEnabled.current
+    val pageDirection = if (LocalLayoutDirection.current == LayoutDirection.Rtl) -1f else 1f
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val transition = LocalMangaCoverTransition.current
     val accessibility = LocalGlassAccessibilitySettings.current
@@ -459,6 +483,20 @@ private fun FeaturedManga(
     // The peek and fitted poster share one bounded Coil decode and the original request headers.
     val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Fit,
         onSuccess = { decoded = it.result.image; latestOnReady() })
+    val currentEmphasis by rememberUpdatedState(emphasis)
+    val travelingPoster = remember {
+        object : ContentScale {
+            override fun computeScaleFactor(srcSize: Size, dstSize: Size): ScaleFactor {
+                if (srcSize.width <= 0f || srcSize.height <= 0f) return ScaleFactor(1f, 1f)
+                val crop = ContentScale.Crop.computeScaleFactor(srcSize, dstSize).scaleX
+                val fit = ContentScale.Fit.computeScaleFactor(srcSize, dstSize).scaleX
+                val fraction = ((currentEmphasis() - .45f) / .55f).coerceIn(0f, 1f)
+                val eased = fraction * fraction * (3f - 2f * fraction)
+                val scale = crop + (fit - crop) * eased
+                return ScaleFactor(scale, scale)
+            }
+        }
+    }
     val theme = MaterialTheme.colorScheme
     val paper = lerp(theme.background, theme.surface, .65f)
     val ink = theme.onSurface
@@ -543,7 +581,7 @@ private fun FeaturedManga(
                 if (decoded == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
                     tint = ink.copy(alpha = .22f), modifier = Modifier.size(28.dp))
                 Image(painter, contentDescription = null, modifier = Modifier.matchParentSize(),
-                    contentScale = if (settled && (!scrolling || !motion)) ContentScale.Fit else ContentScale.Crop)
+                    contentScale = if (motion) travelingPoster else if (settled) ContentScale.Fit else ContentScale.Crop)
             }
             val titleSize = when {
                 !inlineInformation -> 18.sp
@@ -583,7 +621,8 @@ private fun FeaturedManga(
             }) {
                 Column(Modifier.offset(infoLeft, infoTop).size(infoWidth, infoHeight).graphicsLayer {
                     alpha = information()
-                    translationY = if (motion) (1f - information()) * 4.dp.toPx() else 0f
+                    translationX = if (motion) pageDirection * offset() * 9.dp.toPx() else 0f
+                    translationY = if (motion) (1f - information()) * 3.dp.toPx() else 0f
                 }.padding(vertical = captionInset)) {
                     if (inlineInformation) Spacer(Modifier.weight(.38f))
                     Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), modifier = Modifier.clearAndSetSemantics { }, color = ink,

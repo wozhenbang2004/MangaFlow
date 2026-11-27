@@ -1,7 +1,9 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -12,16 +14,25 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.anime.AnimeEpisode
@@ -33,6 +44,8 @@ import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.DesktopContextMenuArea
 import dev.mangaflow.ui.DesktopMenuAction
 import dev.mangaflow.ui.mangaMetricValueStyle
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.motionPress
 
 internal fun animeEpisodeGridColumns(available: Dp, fontScale: Float, wide: Boolean = false): Int {
@@ -59,6 +72,13 @@ internal fun AnimeEpisodeTile(
     val colors = MaterialTheme.colorScheme
     val interaction = remember(episode.id) { MutableInteractionSource() }
     val selectedEpisode = selectionLabel != null
+    val motion = LocalMotionEnabled.current
+    val selection = key(episode.subjectId, episode.id) {
+        animateFloatAsState(if (selectedEpisode) 1f else 0f,
+            if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
+            label = "episode-selection")
+    }
+    val showPlayMark by remember(selection) { derivedStateOf { selection.value > .005f } }
     val label = animeEpisodeLabel(episode)
     val showNumber = !listRow && episode.kind == AnimeEpisodeKind.MAIN && !episode.subjectId.startsWith("native:")
     val subtitle = animeEpisodeSubtitle(episode)
@@ -87,10 +107,14 @@ internal fun AnimeEpisodeTile(
         else -> colors.onSurface
     }
     val shape = RoundedCornerShape(12.dp)
-    val surface = when {
-        selectedEpisode -> colors.primaryContainer
-        listRow -> Color.Transparent
-        else -> lerp(colors.surface, colors.onSurface, .035f)
+    val surface = if (listRow) Color.Transparent else lerp(colors.surface, colors.onSurface, .035f)
+    val playMark: @Composable (Dp) -> Unit = { side ->
+        if (showPlayMark) Icon(Icons.Filled.PlayArrow, null, Modifier.size(side).graphicsLayer {
+            val amount = selection.value.coerceIn(0f, 1f)
+            alpha = amount
+            scaleX = .72f + .28f * amount
+            scaleY = scaleX
+        }, tint = colors.onPrimaryContainer)
     }
     val sourcesLabel = "选择本集线路"
     Box(modifier) {
@@ -99,7 +123,16 @@ internal fun AnimeEpisodeTile(
             if (onMore != null) add(DesktopMenuAction(menuLabel, onClick = onMore))
         }) {
             Box(Modifier.fillMaxWidth().motionPress(interaction, enabled = enabled, pressedScale = .98f)
-                .clip(shape).background(surface)
+                .clip(shape).drawBehind {
+                    drawRect(surface)
+                    val amount = selection.value.coerceIn(0f, 1f)
+                    if (amount > 0f) {
+                        val width = size.width * amount
+                        drawRoundRect(colors.primaryContainer,
+                            topLeft = Offset(if (layoutDirection == LayoutDirection.Ltr) size.width - width else 0f, 0f),
+                            size = Size(width, size.height), cornerRadius = CornerRadius(12.dp.toPx()), alpha = amount)
+                    }
+                }
                 .combinedClickable(interactionSource = interaction, indication = null, enabled = enabled,
                     role = Role.Button, onClickLabel = actionLabel,
                     onClick = if (availability == AnimeEpisodeAvailability.UPCOMING) onSources else onPlay,
@@ -118,22 +151,22 @@ internal fun AnimeEpisodeTile(
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                        if (listRow && selectedEpisode) Icon(Icons.Filled.PlayArrow, null, Modifier.size(12.dp), tint = ink)
                         Text(if (showNumber) animeEpisodeNumber(episode.number) else label, Modifier.weight(1f),
                             style = if (showNumber) mangaMetricValueStyle(19.sp, 24.sp) else MaterialTheme.typography.labelLarge,
                             fontWeight = if (selectedEpisode) FontWeight.SemiBold else FontWeight.Medium,
                             maxLines = if (episode.subjectId.startsWith("native:")) 2 else 1,
                             color = ink, overflow = TextOverflow.Ellipsis)
+                        if (listRow) playMark(12.dp)
                         if (listRow && hasProgress) AnimeWatchProgressMark(progress, watched,
                             Modifier.clearAndSetSemantics { }, size = 12.dp)
                     }
                     if (caption != null || !listRow && hasProgress) Row(Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                        if (!listRow && selectedEpisode) Icon(Icons.Filled.PlayArrow, null, Modifier.size(10.dp), tint = ink)
                         if (caption != null) Text(caption, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
                             color = if (selectedEpisode) colors.onPrimaryContainer else colors.onSurfaceVariant,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         else Spacer(Modifier.weight(1f))
+                        if (!listRow) playMark(10.dp)
                         if (!listRow && hasProgress) AnimeWatchProgressMark(progress, watched,
                             Modifier.clearAndSetSemantics { }, size = 11.dp)
                     }

@@ -61,8 +61,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
@@ -273,6 +272,8 @@ import dev.mangaflow.ui.motion.BottomPullLoadState
 import dev.mangaflow.ui.motion.bottomPullLoad
 import dev.mangaflow.ui.motion.rememberBottomPullLoadState
 import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.FeelEvent
+import dev.mangaflow.ui.motion.rememberFeelFeedback
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.MotionDialog
@@ -826,7 +827,6 @@ fun ReaderScreen(
             }
         }
     }
-    val toolbarTravel = with(LocalDensity.current) { 12.dp.roundToPx() }
     val readerDockWidth = 440.dp
     val touchExploration = rememberReaderTouchExploration()
     val chapterWaitVisible = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
@@ -1518,13 +1518,8 @@ fun ReaderScreen(
                 readerStatusOpen = true
             }
         }
-        AnimatedVisibility(
-            readerToolsVisible, Modifier.align(Alignment.TopCenter),
-            enter = fadeIn(tween(if (motionEnabled) MangaMotion.Content else 0)) +
-                slideInVertically(tween(if (motionEnabled) MangaMotion.Chrome else 0, easing = MangaMotion.EnterEasing)) { -toolbarTravel },
-            exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
-                slideOutVertically(tween(if (motionEnabled) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) { -toolbarTravel },
-        ) {
+        val toolsPresence = updateTransition(readerToolsVisible, label = "reader-tools")
+        ReaderToolPresence(toolsPresence, top = true, modifier = Modifier.align(Alignment.TopCenter)) {
             LiquidGlassSurface(
                 state = readerBackdrop,
                 role = GlassSurfaceRole.NAVIGATION,
@@ -1592,13 +1587,8 @@ fun ReaderScreen(
             }
         }
 
-        AnimatedVisibility(
-            readerToolsVisible, Modifier.align(Alignment.BottomCenter).onSizeChanged { bottomControlsHeightPx = it.height },
-            enter = fadeIn(tween(if (motionEnabled) MangaMotion.Content else 0)) +
-                slideInVertically(tween(if (motionEnabled) MangaMotion.Chrome else 0, easing = MangaMotion.EnterEasing)) { toolbarTravel },
-            exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
-                slideOutVertically(tween(if (motionEnabled) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) { toolbarTravel },
-        ) {
+        ReaderToolPresence(toolsPresence, top = false, modifier = Modifier.align(Alignment.BottomCenter)
+            .onSizeChanged { bottomControlsHeightPx = it.height }) {
             Box(Modifier.hoverable(bottomChromeInteraction, enabled = desktop)
                 .then(if (desktop) Modifier.onFocusChanged { bottomChromeFocused = it.hasFocus }.focusGroup() else Modifier)
                 .windowInsetsPadding(dev.mangaflow.reader.readerNavigationInsets().union(WindowInsets.displayCutout)
@@ -4572,6 +4562,7 @@ private fun ReaderProgressSlider(
     val pressed by interactions.collectIsPressedAsState()
     val dragged by interactions.collectIsDraggedAsState()
     val interactionChanged by rememberUpdatedState(onInteractionChanged)
+    val feedback = rememberFeelFeedback()
     var preview by remember { mutableStateOf<Float?>(null) }
     val pageCount = pages.size
     val lastPage = (pageCount - 1).coerceAtLeast(0)
@@ -4615,7 +4606,11 @@ private fun ReaderProgressSlider(
             value = shown,
             onValueChange = { preview = it },
             onValueChangeFinished = {
-                preview?.let { onSeek(it.roundToInt().coerceIn(0, lastPage)) }
+                preview?.let {
+                    val destination = it.roundToInt().coerceIn(0, lastPage)
+                    if (destination != (pendingPage ?: pageIndex)) feedback.perform(FeelEvent.Selection)
+                    onSeek(destination)
+                }
                 preview = null
             },
             valueRange = 0f..lastPage.coerceAtLeast(1).toFloat(),

@@ -322,7 +322,9 @@ internal fun AccountError(message: String, busy: Boolean, onRetry: (() -> Unit)?
             TextButton(onClick = {
                 clipboard.setText(AnnotatedString("MangaFlow ${versionName}\n$message"))
                 copied = true
-            }, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) { MotionSwap(copied) { done -> Text(if (done) "已复制" else "复制错误") } }
+            }, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
+                MotionSwap(copied, scaleContent = false) { done -> Text(if (done) "已复制" else "复制错误") }
+            }
             if (onRetry != null) TextButton(onClick = onRetry, enabled = !busy,
                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) { Text("重试") }
         }

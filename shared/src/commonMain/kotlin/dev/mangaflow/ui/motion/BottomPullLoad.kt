@@ -26,7 +26,6 @@ import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -44,6 +43,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
@@ -62,6 +62,7 @@ import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -93,7 +94,7 @@ internal class BottomPullLoadState private constructor(
     internal val feedbackFraction: Float get() = feedback
     internal val horizontal: Boolean get() = orientation == Orientation.Horizontal
     internal val contentOffsetPx: Float
-        get() = if (inputs().motion) -direction * thresholdPx * .42f * feedback.coerceIn(-.06f, 1.25f) else 0f
+        get() = if (inputs().motion) -direction * thresholdPx * .42f * feedback.coerceIn(-.06f, 1.28f) else 0f
     private val direction: Float get() = if (towardStart) -1f else 1f
     val loading: Boolean get() = inputs().loading
     val actionLabel: String get() = inputs().actionLabel
@@ -126,6 +127,7 @@ internal class BottomPullLoadState private constructor(
                 distancePulled -= consumed
                 updateGesturePresentation()
                 if (distancePulled < thresholdPx * .88f) thresholdAnnounced = false
+                if (distancePulled == 0f) settle(initialVelocity = 0f)
                 return axisOffset(consumed)
             }
             if ((horizontal || towardStart) && delta < 0f && !inputs().canScrollForward()) {
@@ -161,15 +163,16 @@ internal class BottomPullLoadState private constructor(
 
     private fun pullBy(delta: Float): Float {
         settleJob?.cancel()
-        // Only finger deltas accumulate. Presentation resistance never changes the threshold.
-        val previous = distancePulled
-        distancePulled = (distancePulled - delta).coerceAtMost(thresholdPx * 1.35f)
+        // Catch the returning page only when the edge actually accepts movement; a tap or
+        // a scroll elsewhere in the list leaves its return animation alone.
+        if (distancePulled == 0f) gestureFeedbackOrigin = feedback.coerceIn(0f, 1.28f)
+        distancePulled -= delta
         updateGesturePresentation()
         if (distancePulled >= thresholdPx && !thresholdAnnounced) {
             thresholdAnnounced = true
             inputs().onThresholdReached()
         } else if (distancePulled < thresholdPx * .88f) thresholdAnnounced = false
-        return previous - distancePulled
+        return delta
     }
 
     internal fun beginGesture() {
@@ -180,10 +183,6 @@ internal class BottomPullLoadState private constructor(
         consumeReleaseVelocity = false
         distancePulled = 0f
         velocityTracker.resetTracking()
-        settleJob?.cancel()
-        gestureFeedbackOrigin = feedback.coerceIn(0f, 1f)
-        feedbackVelocity = 0f
-        if (!loading) progress = 0f
     }
 
     internal fun trackPointer(timeMillis: Long, position: Offset) {
@@ -193,23 +192,30 @@ internal class BottomPullLoadState private constructor(
     private fun updateGesturePresentation() {
         val fraction = distancePulled / thresholdPx
         progress = fraction.coerceIn(0f, 1f)
-        // A new gesture catches the returning surface, but its threshold starts from zero.
-        val resisted = if (fraction <= 1f) fraction else 1f + (fraction - 1f) * .5f
-        feedback = gestureFeedbackOrigin + (1f - gestureFeedbackOrigin) * resisted
+        // The two pieces meet at (1, 1) with the same slope. After arming the page
+        // progressively firms up while the actual finger can still move and reverse freely.
+        val resisted = if (fraction <= 1f) fraction * (1.35f - .35f * fraction)
+            else 1f + .28f * (1f - 1f / (1f + (fraction - 1f) * (.65f / .28f)))
+        feedback = gestureFeedbackOrigin + (1f - gestureFeedbackOrigin / 1.28f) * resisted
     }
 
     internal fun finishGesture(released: Boolean) {
         if (!pointerDown) return
-        val pointerVelocity = velocityTracker.calculateVelocity()
-        // Presentation momentum cannot arm an action. The distance/release checks below own it.
-        val releaseVelocity = if (released)
-            (-direction * (if (horizontal) pointerVelocity.x else pointerVelocity.y) / thresholdPx).coerceIn(-8f, 8f)
-            else feedbackVelocity
         val ready = released && gestureEligible && distancePulled >= thresholdPx && !inputs().canScrollForward()
         consumeReleaseVelocity = distancePulled > 0f
         pointerDown = false
         gestureEligible = false
         thresholdAnnounced = false
+        if (!consumeReleaseVelocity) return
+        val pointerVelocity = velocityTracker.calculateVelocity()
+        val fraction = distancePulled / thresholdPx
+        val extension = 1f + (fraction - 1f).coerceAtLeast(0f) * (.65f / .28f)
+        val slope = if (fraction < 1f) 1.35f - .70f * fraction else .65f / (extension * extension)
+        // Velocity is measured in finger space. A stretched edge carries less momentum
+        // into the spring than the same flick near rest.
+        val v = -direction * (if (horizontal) pointerVelocity.x else pointerVelocity.y) / thresholdPx
+        val releaseVelocity = if (released && v.isFinite())
+            (v * slope * (1f - gestureFeedbackOrigin / 1.28f)).coerceIn(-8f, 8f) else 0f
         distancePulled = 0f
         if (ready && requestMore()) {
             progress = 1f
@@ -230,7 +236,7 @@ internal class BottomPullLoadState private constructor(
         dispatchJob = scope.launch {
             withFrameNanos { }
             dispatchPending = false
-            if (!loading && !pointerDown) settle()
+            if (!loading && distancePulled == 0f) settle()
         }
         inputs().onLoadMore()
         return true
@@ -381,35 +387,43 @@ internal fun BottomPullLoadIndicator(
         scaleX = scale
         scaleY = scale
     }
-    if (state.loading && motion) {
-        CircularProgressIndicator(modifier = indicator, color = color, strokeWidth = 2.dp)
+    if (state.loading) {
+        MotionBusyIndicator(modifier = indicator, color = color, strokeWidth = 2.dp)
     } else {
         Canvas(indicator) {
-            val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
-            val radius = ((size.minDimension - stroke.width) / 2f).coerceAtLeast(0f)
-            drawCircle(color.copy(alpha = .12f), radius = radius, style = stroke)
-            val fraction = if (state.loading) 1f else state.progress.coerceIn(0f, 1f)
-            if (fraction > 0f) drawArc(
-                color = color, startAngle = -90f, sweepAngle = 360f * fraction,
-                useCenter = false, topLeft = center - Offset(radius, radius),
-                size = Size(radius * 2f, radius * 2f), style = stroke,
-            )
-            val checked = ready.value.coerceIn(0f, 1f)
-            val unit = (size.minDimension * .16f).coerceAtLeast(1f)
-            fun point(x: Float, y: Float) = center + Offset(x * unit, y * unit)
-            fun arrowPoint(x: Float, y: Float) = if (state.horizontal) point(y, -x)
-                else if (state.towardStart) point(x, -y) else point(x, y)
-            fun morph(arrow: Offset, check: Offset) = arrow + (check - arrow) * checked
-            val a = morph(arrowPoint(-.65f, -.05f), point(-.85f, -.05f))
-            val b = morph(arrowPoint(0f, -.7f), point(-.2f, .55f))
-            val c = morph(arrowPoint(.65f, -.05f), point(.9f, -.65f))
-            rotate(if (motion) -18f * fraction * (1f - checked) else 0f, pivot = center) {
-                val glyph = color.copy(alpha = .62f + .38f * fraction)
-                drawLine(glyph, a, b, 1.7.dp.toPx(), StrokeCap.Round)
-                drawLine(glyph, b, c, 1.7.dp.toPx(), StrokeCap.Round)
-                if (checked < 1f) drawLine(glyph.copy(alpha = glyph.alpha * (1f - checked)),
-                    arrowPoint(0f, -.7f), arrowPoint(0f, .8f), 1.7.dp.toPx(), StrokeCap.Round)
-            }
+            drawPullRing(color, state.progress, ready.value, 2.dp, state.horizontal, state.towardStart, motion)
         }
+    }
+}
+
+/** The same distance/armed language serves pull-to-refresh, load more and chapter boundaries. */
+internal fun DrawScope.drawPullRing(color: Color, progress: Float, armed: Float, strokeWidth: Dp,
+    horizontal: Boolean, towardStart: Boolean, motion: Boolean) {
+    val stroke = Stroke(width = strokeWidth.toPx(), cap = StrokeCap.Round)
+    val radius = ((size.minDimension - stroke.width) / 2f).coerceAtLeast(0f)
+    drawCircle(color.copy(alpha = color.alpha * .12f), radius = radius, style = stroke)
+    val fraction = progress.coerceIn(0f, 1f)
+    if (fraction > 0f) drawArc(color, startAngle = -90f, sweepAngle = 360f * fraction,
+        useCenter = false, topLeft = center - Offset(radius, radius),
+        size = Size(radius * 2f, radius * 2f), style = stroke)
+    val checked = armed.coerceIn(0f, 1f)
+    val unit = size.minDimension * .16f
+    fun point(x: Float, y: Float) = center + Offset(x * unit, y * unit)
+    fun arrowPoint(x: Float, y: Float) = when {
+        horizontal -> if (towardStart) point(-y, x) else point(y, -x)
+        towardStart -> point(x, -y)
+        else -> point(x, y)
+    }
+    fun morph(arrow: Offset, check: Offset) = arrow + (check - arrow) * checked
+    val a = morph(arrowPoint(-.65f, -.05f), point(-.85f, -.05f))
+    val b = morph(arrowPoint(0f, -.7f), point(-.2f, .55f))
+    val c = morph(arrowPoint(.65f, -.05f), point(.9f, -.65f))
+    rotate(if (motion) -18f * fraction * (1f - checked) else 0f, pivot = center) {
+        val glyph = color.copy(alpha = color.alpha * (.62f + .38f * fraction))
+        val width = 1.65.dp.toPx()
+        drawLine(glyph, a, b, width, StrokeCap.Round)
+        drawLine(glyph, b, c, width, StrokeCap.Round)
+        if (checked < 1f) drawLine(glyph.copy(alpha = glyph.alpha * (1f - checked)),
+            arrowPoint(0f, -.7f), arrowPoint(0f, .8f), width, StrokeCap.Round)
     }
 }

@@ -32,10 +32,11 @@
 
 package dev.mangaflow.ui.motion
 
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
@@ -50,8 +51,13 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -71,6 +77,8 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.mangaflow.ui.mangaNumberText
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -109,20 +117,29 @@ internal fun MotionSlider(
     val focused by interaction.collectIsFocusedAsState()
     val tracking = available && (pressed || dragged)
     val motion = LocalMotionEnabled.current
-    val lift = animateFloatAsState(if (tracking) 1f else 0f,
-        if (!motion) snap() else if (tracking)
-            spring(MangaMotion.SwitchDamping, MangaMotion.GestureStiffness)
-        else tween(220, easing = MangaMotion.ExitEasing), label = "slider-value-lift")
-    val stretch = animateFloatAsState(if (tracking && motion) 1f else 0f,
-        if (motion) spring(MangaMotion.SwitchDamping, MangaMotion.SwitchStiffness) else snap(),
-        label = "slider-thumb-pressure")
+    val gesture = updateTransition(tracking, label = "slider-contact")
+    val lift = gesture.animateFloat(transitionSpec = {
+        if (!motion) snap() else spring(dampingRatio = if (targetState) .86f else 1f,
+            stiffness = if (targetState) MangaMotion.GestureStiffness else MangaMotion.PanelStiffness)
+    }, label = "slider-value-lift") { if (it) 1f else 0f }
+    val stretch = gesture.animateFloat(transitionSpec = {
+        if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap()
+    }, label = "slider-thumb-pressure") { if (it && motion) 1f else 0f }
+    val showValue = available && (tracking || gesture.currentState || gesture.isRunning)
+    val feedback = rememberFeelFeedback()
+    var edge by remember(interaction, valueRange, tracking) {
+        mutableIntStateOf(if (fraction <= .025f) -1 else if (fraction >= .975f) 1 else 0)
+    }
     val colors = MaterialTheme.colorScheme
     val density = LocalDensity.current
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-    val textMeasurer = rememberTextMeasurer()
-    val labelStyle = MaterialTheme.typography.labelMedium.copy(
-        fontSize = 11.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = "tnum")
     val label = formatValue(current)
+    var lastLabel by remember(valueRange) { mutableStateOf(label) }
+    var lastFraction by remember(valueRange) { mutableFloatStateOf(fraction) }
+    if (tracking) SideEffect { lastLabel = label; lastFraction = fraction }
+    val follow = if (motion && showValue) animateFloatAsState(if (tracking) fraction else lastFraction,
+        spring(.92f, MangaMotion.NavigationStiffness, visibilityThreshold = .0005f),
+        label = "slider-value-follow") else null
     val accessibilityLabel = buffered?.let {
         "$label，已缓冲 ${formatValue(it.start)} 至 ${formatValue(it.endInclusive)}"
     } ?: label
@@ -130,11 +147,32 @@ internal fun MotionSlider(
     BoxWithConstraints(modifier.fillMaxWidth().heightIn(min = 48.dp)) {
         val sliderWidth = with(density) { maxWidth.toPx() }
         val labelWidth = with(density) { (maxWidth - 28.dp).roundToPx().coerceAtLeast(1) }
-        val labelLayout = remember(label, labelStyle, density, labelWidth) {
-            textMeasurer.measure(label, style = labelStyle, maxLines = 1,
-                overflow = TextOverflow.Ellipsis, constraints = Constraints(maxWidth = labelWidth))
-        }
-        Slider(value = current, onValueChange = { onValueChange(it.coerceIn(valueRange)) },
+        // Playback and buffering change while idle. Measuring text and running the follow
+        // spring are only needed while the user can actually see this label.
+        val labelLayout = if (showValue) {
+            val textMeasurer = rememberTextMeasurer()
+            val text = mangaNumberText(if (tracking) label else lastLabel)
+            val style = MaterialTheme.typography.labelMedium.copy(fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            remember(text, style, textMeasurer, labelWidth) { textMeasurer.measure(text, style = style, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, constraints = Constraints(maxWidth = labelWidth)) }
+        } else null
+        val link = if (showValue) remember { Path() } else null
+        Slider(value = current, onValueChange = {
+            val next = it.coerceIn(valueRange)
+            if (tracking && available) {
+                val limit = when (next) {
+                    valueRange.start -> -1
+                    valueRange.endInclusive -> 1
+                    else -> 0
+                }
+                val position = (next - valueRange.start) / (valueRange.endInclusive - valueRange.start)
+                if (limit != 0) {
+                    if (limit != edge && next != current) feedback.perform(FeelEvent.Threshold)
+                    edge = limit
+                } else if (position >= .025f && position <= .975f) edge = 0
+            }
+            onValueChange(next)
+        },
             valueRange = valueRange, enabled = available,
             onValueChangeFinished = onValueChangeFinished,
             interactionSource = interaction,
@@ -144,7 +182,10 @@ internal fun MotionSlider(
                     val center = Offset(size.width / 2f, size.height / 2f)
                     val strength = if (available) 1f else .38f
                     val pressure = stretch.value.coerceIn(0f, 1f)
-                    val thumbWidth = (16f + pressure * 3f).dp.toPx()
+                    val travelWidth = (sliderWidth - size.width).coerceAtLeast(0f)
+                    val lag = ((follow?.value ?: fraction) - fraction) * travelWidth * (if (rtl) -1f else 1f)
+                    val bend = lag.coerceIn(-10.dp.toPx(), 10.dp.toPx()) * pressure
+                    val thumbWidth = (16f + pressure * 2f).dp.toPx() + abs(bend) * .22f
                     val thumbHeight = (16f - pressure).dp.toPx()
                     val thumbTop = Offset(center.x - thumbWidth / 2f, center.y - thumbHeight / 2f)
                     if (available && focused) drawRoundRect(
@@ -166,23 +207,24 @@ internal fun MotionSlider(
 
                     val progress = lift.value.coerceIn(0f, 1.12f)
                     val alpha = progress.coerceIn(0f, 1f)
-                    if (alpha <= .001f) return@Canvas
-                    val bubbleWidth = labelLayout.size.width + 16.dp.toPx()
+                    if (alpha <= .001f || labelLayout == null || link == null) return@Canvas
+                    val bubbleWidth = minOf(labelLayout.size.width + 16.dp.toPx(), sliderWidth.coerceAtLeast(1f))
                     val bubbleHeight = maxOf(24.dp.toPx(), labelLayout.size.height + 8.dp.toPx())
                     val physicalFraction = if (rtl) 1f - fraction else fraction
-                    val globalCenter = size.width / 2f +
-                        (sliderWidth - size.width).coerceAtLeast(0f) * physicalFraction
+                    val globalCenter = size.width / 2f + travelWidth * physicalFraction
                     val half = bubbleWidth / 2f
-                    val minCenter = half + 4.dp.toPx()
-                    val maxCenter = (sliderWidth - half - 4.dp.toPx()).coerceAtLeast(minCenter)
-                    val bubbleX = center.x + globalCenter.coerceIn(minCenter, maxCenter) - globalCenter
+                    val margin = minOf(4.dp.toPx(), (sliderWidth - bubbleWidth).coerceAtLeast(0f) / 2f)
+                    val minCenter = half + margin
+                    val maxCenter = (sliderWidth - half - margin).coerceAtLeast(minCenter)
+                    val bubbleX = center.x + (globalCenter + bend).coerceIn(minCenter, maxCenter) - globalCenter
                     val travel = bubbleHeight / 2f + thumbHeight / 2f + 8.dp.toPx()
                     val bubbleY = center.y - travel * progress
                     val bubbleTop = Offset(bubbleX - half, bubbleY - bubbleHeight / 2f)
                     val bubbleBottom = bubbleY + bubbleHeight / 2f
                     val bubbleColor = colors.inverseSurface.copy(alpha = alpha)
                     // Bounded vector counterpart of the source's blurred/thresholded connection.
-                    val neck = Path().apply {
+                    link.apply {
+                        reset()
                         moveTo(center.x - 3.dp.toPx(), center.y - 3.dp.toPx())
                         cubicTo(center.x - 3.dp.toPx(), center.y - 12.dp.toPx(),
                             bubbleX - 5.dp.toPx(), bubbleBottom + 4.dp.toPx(),
@@ -193,7 +235,7 @@ internal fun MotionSlider(
                             center.x + 3.dp.toPx(), center.y - 3.dp.toPx())
                         close()
                     }
-                    drawPath(neck, bubbleColor.copy(alpha = alpha * .72f))
+                    drawPath(link, bubbleColor.copy(alpha = alpha * .72f))
                     drawRoundRect(bubbleColor, topLeft = bubbleTop,
                         size = Size(bubbleWidth, bubbleHeight), cornerRadius = CornerRadius(bubbleHeight / 2f))
                     drawText(labelLayout, colors.inverseOnSurface.copy(alpha = alpha),
@@ -202,12 +244,13 @@ internal fun MotionSlider(
                 }
             },
             track = { _ ->
-                Canvas(Modifier.fillMaxWidth().height(3.dp)) {
+                Canvas(Modifier.fillMaxWidth().height(5.dp)) {
+                    val stroke = (3f + stretch.value.coerceIn(0f, 1f)).dp.toPx()
                     val start = Offset(if (rtl) size.width else 0f, size.height / 2f)
                     val end = Offset(if (rtl) 0f else size.width, size.height / 2f)
                     val thumb = Offset(start.x + (end.x - start.x) * fraction, start.y)
                     drawLine(colors.onSurface.copy(alpha = if (available) .10f else .055f),
-                        start, end, strokeWidth = size.height, cap = StrokeCap.Round)
+                        start, end, strokeWidth = stroke, cap = StrokeCap.Round)
                     buffered?.let { range ->
                         val extent = valueRange.endInclusive - valueRange.start
                         val from = (range.start - valueRange.start) / extent
@@ -215,10 +258,10 @@ internal fun MotionSlider(
                         drawLine(colors.onSurface.copy(alpha = if (available) .28f else .10f),
                             Offset(start.x + (end.x - start.x) * from, start.y),
                             Offset(start.x + (end.x - start.x) * until, start.y),
-                            strokeWidth = size.height, cap = StrokeCap.Round)
+                            strokeWidth = stroke, cap = StrokeCap.Round)
                     }
                     drawLine(colors.onSurface.copy(alpha = if (available) .62f else .20f),
-                        start, thumb, strokeWidth = size.height, cap = StrokeCap.Round)
+                        start, thumb, strokeWidth = stroke, cap = StrokeCap.Round)
                 }
             })
     }

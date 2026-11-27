@@ -5,10 +5,6 @@ import dev.mangaflow.ui.platform.*
 import dev.mangaflow.platform.*
 
 import androidx.compose.animation.core.MutableTransitionState
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.rememberTransition
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -39,7 +35,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -55,7 +50,8 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.motion.LocalMotionEnabled
-import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.anchoredMenuReveal
+import dev.mangaflow.ui.motion.surfaceReveal
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 
@@ -79,12 +75,7 @@ internal fun CompactGlassPopover(
     val presence = remember { MutableTransitionState(false) }
     presence.targetState = visible
     val transition = rememberTransition(presence, label = "reader-actions")
-    val alpha = transition.animateFloat(transitionSpec = {
-        tween(if (motion) if (targetState) MangaMotion.Content else MangaMotion.Quick else 0)
-    }, label = "reader-actions-opacity") { if (it) 1f else 0f }
-    val scale = transition.animateFloat(transitionSpec = {
-        if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap()
-    }, label = "reader-actions-scale") { if (it) 1f else .94f }
+    val reveal = transition.surfaceReveal(motion, compact = true)
     val present = presence.currentState || presence.targetState || !presence.isIdle
     val reportPresence by rememberUpdatedState(onPresenceChange)
     var origin by remember(direction, aboveAnchor, alignToStart) {
@@ -140,13 +131,9 @@ internal fun CompactGlassPopover(
         properties = PopupProperties(focusable = visible)) {
         LiquidGlassSurface(backdrop,
             Modifier.width((LocalMangaWindow.current.width - 48.dp).coerceAtLeast(1.dp).coerceAtMost(maximumWidth))
-                .motionInputGate(visible).graphicsLayer {
-                    this.alpha = alpha.value
-                    scaleX = scale.value; scaleY = scale.value
-                    transformOrigin = origin
-                    translationY = (if (origin.pivotFractionY >= .5f) 6.dp.toPx() else -6.dp.toPx()) * (1f - alpha.value)
-                }, cornerRadius = 20.dp, role = GlassSurfaceRole.POPOVER, softCard = true, preferSource = true,
-            materialExpansion = { alpha.value }) {
+                .motionInputGate(visible).anchoredMenuReveal(reveal, 20.dp) { origin },
+            cornerRadius = 20.dp, role = GlassSurfaceRole.POPOVER, softCard = true, preferSource = true,
+            materialExpansion = { reveal.value }) {
             val windowHeight = (LocalMangaWindow.current.height - 64.dp).coerceAtLeast(1.dp)
             val height = if (scrollContent) minOf(windowHeight, maximumHeight, with(density) { anchorRoom.toDp() })
                 else minOf(windowHeight, maximumHeight)

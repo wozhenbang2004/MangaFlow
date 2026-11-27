@@ -2,6 +2,7 @@ package dev.mangaflow.ui
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -14,7 +15,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -30,11 +30,13 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
@@ -133,13 +135,34 @@ internal fun DesktopSettingsLayout(
 
 /** Retain import/font/wallpaper composition and work when switching category; hide only its layout. */
 @Composable
-internal fun RetainedSettingsCategory(visible: Boolean, content: @Composable () -> Unit) {
-    val opacity by animateFloatAsState(if (visible) 1f else 0f,
-        animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Content) else snap(),
-        label = "settings-category")
-    val appearance = if (visible) Modifier.fillMaxWidth().graphicsLayer { alpha = opacity }
-        else Modifier.fillMaxWidth().height(0.dp).clipToBounds()
-    Box(appearance.motionInputGate(visible)) {
+internal fun RetainedSettingsCategory(index: Int, selected: Int?, content: @Composable () -> Unit) {
+    if (selected == null) {
         content()
+        return
     }
+    val visible = index == selected
+    val motion = LocalMotionEnabled.current
+    val opacity = animateFloatAsState(if (visible) 1f else 0f,
+        if (motion) tween(if (visible) MangaMotion.Content else MangaMotion.Quick) else snap(), label = "settings-category")
+    val position = animateFloatAsState(index.compareTo(selected).toFloat(),
+        if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
+        label = "settings-category-position")
+    val stillPainting = remember { derivedStateOf { opacity.value > .001f } }
+    Box(Modifier.fillMaxWidth().zIndex(if (visible) 1f else 0f).motionInputGate(visible)
+        .layout { measurable, bounds ->
+            if (!visible && !stillPainting.value) {
+                layout(bounds.minWidth, 0) {}
+            } else {
+                val body = measurable.measure(bounds.copy(minHeight = 0))
+                // Only the selected category owns scroll height; the outgoing page can finish
+                // painting at the same origin while retaining its import and editing state.
+                layout(body.width, if (visible) body.height else 0) {
+                    body.placeRelativeWithLayer(0, 0) {
+                        alpha = opacity.value
+                        translationY = 12.dp.toPx() * position.value
+                        compositingStrategy = CompositingStrategy.ModulateAlpha
+                    }
+                }
+            }
+        }) { content() }
 }

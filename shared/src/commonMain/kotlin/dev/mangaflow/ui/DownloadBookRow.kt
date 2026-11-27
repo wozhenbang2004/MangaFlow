@@ -13,6 +13,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -32,19 +35,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
-import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -57,6 +59,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -66,6 +69,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.unit.sp
@@ -79,7 +83,7 @@ import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
-import dev.mangaflow.ui.motion.MotionSwap
+import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 
 /** One cover per actual work; disclosure and queue actions keep separate tap targets. */
@@ -119,8 +123,9 @@ internal fun DownloadBookRow(
     val manga = entries.first().manga
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
-    val rotation by animateFloatAsState(if (expanded) 180f else 0f,
-        tween(if (LocalMotionEnabled.current) MangaMotion.Content else 0), label = "download-book-disclosure")
+    val rotation by animateFloatAsState(if (expanded && !inspectMode) 180f else 0f,
+        if (LocalMotionEnabled.current) spring(MangaMotion.NavigationDamping, MangaMotion.PanelStiffness) else snap(),
+        label = "download-book-disclosure")
     DesktopContextMenuArea(actions) {
     Column {
         Row(Modifier.fillMaxWidth().then(if (desktop && inspectMode && expanded)
@@ -153,7 +158,7 @@ internal fun DownloadBookRow(
             if (entries.size > 1 || desktop) MotionIconButton(onClick = onExpand, modifier = Modifier.size(if (desktop) 36.dp else 44.dp)) {
                 Icon(if (inspectMode) Icons.Outlined.ChevronRight else Icons.Outlined.KeyboardArrowDown,
                     if (inspectMode) "查看章节" else if (expanded) "收起章节" else "展开 ${entries.size} 话",
-                    Modifier.size(20.dp).graphicsLayer { rotationZ = if (inspectMode) 0f else rotation },
+                    Modifier.size(20.dp).graphicsLayer { rotationZ = rotation },
                     tint = if (inspectMode && expanded) colors.onSurface else colors.onSurfaceVariant)
             }
             if (desktop) {
@@ -335,6 +340,8 @@ private fun DownloadFailureDetails(message: String, modifier: Modifier = Modifie
     var expanded by remember(message) { mutableStateOf(false) }
     val colors = MaterialTheme.colorScheme
     val motion = LocalMotionEnabled.current
+    val rotation by animateFloatAsState(if (expanded) 180f else 0f,
+        if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.PanelStiffness) else snap(), label = "download-error-angle")
     val interaction = remember { MutableInteractionSource() }
     Column(modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp)
@@ -348,15 +355,17 @@ private fun DownloadFailureDetails(message: String, modifier: Modifier = Modifie
                 Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, color = colors.error,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(13.dp).graphicsLayer {
-                rotationZ = if (expanded) 180f else 0f
+                rotationZ = rotation
             }, tint = colors.onSurfaceVariant)
         }
         AnimatedVisibility(expanded,
             enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
-                expandVertically(tween(if (motion) MangaMotion.Content else 0)),
+                expandVertically(if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.PanelStiffness) else snap(),
+                    expandFrom = Alignment.Top),
             exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
-                shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
-            SelectionContainer {
+                shrinkVertically(if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.PanelStiffness) else snap(),
+                    shrinkTowards = Alignment.Top)) {
+            SelectionContainer(Modifier.motionInputGate(expanded)) {
                 Text(message, Modifier.padding(bottom = 8.dp), color = colors.error,
                     style = MaterialTheme.typography.bodySmall)
             }
@@ -377,10 +386,23 @@ private fun downloadPageProgress(entries: List<DownloadEntry>): String {
 @Composable
 private fun DownloadSelection(selected: Boolean, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
-    MotionIconButton(onClick = onClick, modifier = Modifier.size(44.dp)) {
-        Icon(if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-            if (selected) "取消选择" else "选择", Modifier.size(20.dp),
-            tint = if (selected) colors.primary else colors.onSurfaceVariant.copy(alpha = .6f))
+    val fill = animateFloatAsState(if (selected) 1f else 0f,
+        if (LocalMotionEnabled.current) spring(MangaMotion.NavigationDamping, MangaMotion.PanelStiffness) else snap(),
+        label = "download-selection")
+    MotionIconButton(onClick = onClick, modifier = Modifier.size(44.dp).semantics {
+        this.selected = selected
+        contentDescription = if (selected) "取消选择" else "选择"
+    }) {
+        Box(Modifier.size(20.dp).drawBehind {
+            val amount = fill.value.coerceIn(0f, 1f)
+            val stroke = 1.65.dp.toPx()
+            val radius = size.minDimension * .5f
+            drawCircle(colors.onSurfaceVariant.copy(alpha = .65f * (1f - amount)), radius - stroke / 2f,
+                style = Stroke(stroke))
+            if (amount > 0f) drawCircle(colors.primary, radius * amount)
+        }, contentAlignment = Alignment.Center) {
+            DownloadCheckMark({ (fill.value - .2f) / .8f }, colors.onPrimary, Modifier.size(15.dp))
+        }
     }
 }
 
@@ -393,37 +415,37 @@ private fun DownloadTransferAction(entries: List<DownloadEntry>, refreshingIds: 
     val pausable = entries.filter { it.status in setOf(DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.WAITING) && !it.needsSourceRefresh }
     val retryable = entries.filter { it.status != DownloadStatus.COMPLETED && it.manga.sourceUrl != LOCAL_SOURCE_URL }
     val busy = entries.any { it.id in refreshingIds }
-    if (finished) {
-        Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
-            CompactDownloadIcon(CompactDownloadState.COMPLETE, contentDescription = "已下载",
-                tint = colors.onSurfaceVariant.copy(alpha = .65f))
-        }
-        return
+    val state = when {
+        finished -> CompactDownloadState.COMPLETE
+        pausable.any { it.status == DownloadStatus.RUNNING } -> CompactDownloadState.DOWNLOADING
+        pausable.isNotEmpty() -> CompactDownloadState.WAITING
+        retryable.any { it.needsSourceRefresh || it.status == DownloadStatus.FAILED } -> CompactDownloadState.ERROR
+        retryable.isNotEmpty() -> CompactDownloadState.PAUSED
+        else -> null
     }
-    MotionIconButton(enabled = !busy && (pausable.isNotEmpty() || retryable.isNotEmpty()),
-        modifier = Modifier.size(44.dp),
-        onClick = { if (pausable.isNotEmpty()) pausable.forEach(onPause) else retryable.forEach(onRetry) }) {
-        val state = when {
-            busy -> "busy"
-            pausable.isNotEmpty() -> "pause"
-            retryable.any { it.needsSourceRefresh || it.status == DownloadStatus.FAILED } -> "retry"
-            retryable.isNotEmpty() -> "resume"
-            else -> "unavailable"
-        }
-        MotionSwap(state, Modifier.size(24.dp)) {
-            when (it) {
-                "busy" -> CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = colors.primary)
-                "pause" -> CompactDownloadIcon(
-                    if (pausable.any { entry -> entry.status == DownloadStatus.RUNNING }) CompactDownloadState.DOWNLOADING
-                        else CompactDownloadState.WAITING,
-                    progress = downloadKnownProgress(entries),
-                    contentDescription = "暂停下载", tint = colors.primary)
-                "retry" -> CompactDownloadIcon(CompactDownloadState.ERROR,
-                    contentDescription = "刷新并重试下载", tint = colors.error)
-                "resume" -> CompactDownloadIcon(CompactDownloadState.PAUSED,
-                    progress = downloadKnownProgress(entries), contentDescription = "继续下载", tint = colors.primary)
-                else -> Icon(Icons.Outlined.Info, "文件不可用，请删除后重新导入", tint = colors.error)
-            }
+    val interaction = remember { MutableInteractionSource() }
+    val enabled = !busy && !finished && state != null
+    val action = if (finished) Modifier else Modifier.clip(RoundedCornerShape(50)).clickable(
+        enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button,
+        onClick = { if (pausable.isNotEmpty()) pausable.forEach(onPause) else retryable.forEach(onRetry) })
+        .motionPress(interaction, enabled)
+    Box(Modifier.size(44.dp).then(action), contentAlignment = Alignment.Center) {
+        when {
+            busy && !finished -> CircularProgressIndicator(Modifier.size(15.dp).semantics {
+                contentDescription = "正在刷新下载来源"
+            }, strokeWidth = 1.5.dp, color = colors.primary)
+            state != null -> CompactDownloadIcon(state, downloadKnownProgress(entries),
+                contentDescription = when (state) {
+                    CompactDownloadState.COMPLETE -> "已下载"
+                    CompactDownloadState.ERROR -> "刷新并重试下载"
+                    CompactDownloadState.PAUSED -> "继续下载"
+                    else -> "暂停下载"
+                }, tint = when (state) {
+                    CompactDownloadState.COMPLETE -> colors.onSurfaceVariant.copy(alpha = .75f)
+                    CompactDownloadState.ERROR -> colors.error
+                    else -> colors.primary
+                })
+            else -> Icon(Icons.Outlined.Info, "文件不可用，请删除后重新导入", tint = colors.error)
         }
     }
 }
@@ -431,15 +453,21 @@ private fun DownloadTransferAction(entries: List<DownloadEntry>, refreshingIds: 
 @Composable
 private fun DownloadProgressLine(entries: List<DownloadEntry>) {
     val knownProgress = downloadCurrentPageFraction(entries) ?: return
-    val progress by animateFloatAsState(knownProgress, tween(if (LocalMotionEnabled.current) MangaMotion.Quick else 0),
-        label = "download-real-progress")
+    val observed = downloadObservedEntry(entries) ?: return
+    val motion = LocalMotionEnabled.current
+    // A new page / retry starts at its actual fraction instead of running the old bar backwards.
+    val progress = key(observed.id, observed.createdAt, observed.progress.pageIndex,
+        observed.progress.generation, observed.progress.transferId) {
+        animateFloatAsState(knownProgress, if (motion) tween(MangaMotion.Quick, easing = LinearEasing) else snap(),
+            label = "download-real-progress")
+    }
     val color = mangaStatusColors().activity
     Box(Modifier.fillMaxWidth().padding(bottom = 3.dp).height(3.dp).clip(RoundedCornerShape(2.dp))
         .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .08f)).semantics {
             contentDescription = "当前图片接收进度"
             progressBarRangeInfo = ProgressBarRangeInfo(knownProgress, 0f..1f)
         }.drawBehind {
-            val fill = size.width * progress
+            val fill = size.width * progress.value
             val x = if (layoutDirection == LayoutDirection.Rtl) size.width - fill else 0f
             if (fill > 0f) drawRoundRect(color, Offset(x, 0f), Size(fill, size.height), CornerRadius(size.height / 2f))
         })

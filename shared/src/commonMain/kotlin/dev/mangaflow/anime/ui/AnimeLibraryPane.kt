@@ -1,5 +1,11 @@
 package dev.mangaflow.anime.ui
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -109,6 +115,7 @@ internal fun AnimeLibrary(
     var pendingHistory by remember { mutableStateOf<Set<String>>(emptySet()) }
     val latestState by rememberUpdatedState(state)
     val contentActive = active && !optionsPresent && !entryPresent && historyId == null
+    val motion = LocalMotionEnabled.current
     fun removeHistory(entry: AnimeLibraryEntry) {
         val original = entry.resume ?: return
         val originalEpoch = controller.libraryRestoreEpoch
@@ -271,6 +278,8 @@ internal fun AnimeLibrary(
                                 val target = controller.continuationEpisode(continuation.subject.id)
                                 AnimeLibraryWorkRow(continuation, animeContinuationLabel(continuation, target),
                                     onOpen = { onResume(continuation) },
+                                    modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
+                                        placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null),
                                     featured = true, active = contentActive,
                                     onManage = { entryPresent = true; selectedId = continuation.subject.id })
                             }
@@ -323,7 +332,9 @@ internal fun AnimeLibrary(
                             SwipeToRemove(onRemove = {
                                 if (showingHistory) removeHistory(entry)
                                 else controller.setFollowed(entry.subject, false)
-                            }, enabled = contentActive && !state.libraryReadUnavailable && filter != 0,
+                            }, modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
+                                placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null),
+                                enabled = contentActive && !state.libraryReadUnavailable && filter != 0,
                                 label = if (showingHistory) "移除观看记录" else "取消追番", transparentBackground = true) {
                                 AnimeLibraryWorkRow(entry, action,
                                     onOpen = {
@@ -399,6 +410,7 @@ internal fun AnimeLibraryWorkRow(
     showRatings: Boolean = false,
     active: Boolean = true,
     historyPlayback: AnimeHistoryPlayback? = null,
+    modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
     val resume = entry.resume
@@ -414,7 +426,7 @@ internal fun AnimeLibraryWorkRow(
             "置顶".takeIf { entry.pinned },
         ).joinToString(" · ")
     }
-    Row(Modifier.fillMaxWidth().clip(shape)
+    Row(modifier.fillMaxWidth().clip(shape)
         .then(if (featured) Modifier.background(lerp(colors.surface, colors.primary, .07f)) else Modifier),
         verticalAlignment = Alignment.CenterVertically) {
         Row(Modifier.weight(1f).clip(shape).motionPress(interaction, enabled = active, pressedScale = .99f)
@@ -449,8 +461,10 @@ internal fun AnimeLibraryWorkRow(
                         Text(actionLabel, style = MaterialTheme.typography.labelMedium,
                             color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     } else if (!resume.completed) animeWatchFraction(resume)?.let { fraction ->
-                        AnimeWatchProgressLine(fraction, Modifier.widthIn(max = if (featured) 188.dp else 128.dp)
-                            .padding(vertical = 2.dp))
+                        key(resume.episodeId) {
+                            AnimeWatchProgressLine(fraction, Modifier.widthIn(max = if (featured) 188.dp else 128.dp)
+                                .padding(vertical = 2.dp))
+                        }
                     }
                 }
                 if (historyPlayback != null && resume != null)
@@ -484,9 +498,13 @@ internal fun AnimeWatchProgressLine(fraction: Float, modifier: Modifier = Modifi
 internal fun AnimeProgressTrack(fraction: Float, modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
     val contrast = LocalGlassAccessibilitySettings.current.increaseContrast
+    val target = fraction.coerceIn(0f, 1f)
+    val amount = animateFloatAsState(target,
+        if (LocalMotionEnabled.current && target > 0f && target < 1f) tween(MangaMotion.Quick, easing = LinearOutSlowInEasing) else snap(),
+        label = "anime-recorded-progress")
     Canvas(modifier.fillMaxWidth().height(3.dp)) {
         val corner = CornerRadius(size.height / 2f)
-        val width = size.width * fraction.coerceIn(0f, 1f)
+        val width = size.width * amount.value
         drawRoundRect(colors.onSurface.copy(alpha = if (contrast) .32f else .11f), cornerRadius = corner)
         if (width > 0f) drawRoundRect(if (contrast) colors.onSurface else colors.primary,
             topLeft = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - width else 0f, 0f),
@@ -503,16 +521,21 @@ private fun AnimeLibraryEntryPanel(entry: AnimeLibraryEntry?, controller: AnimeC
     val shown = entry ?: retained
     var section by remember(shown?.subject?.id) { mutableIntStateOf(0) }
     var folderDraft by remember(shown?.subject?.id) { mutableStateOf(shown?.folder.orEmpty()) }
+    val motion = LocalMotionEnabled.current
     MotionDialog(entry != null, onDismiss, maximumWidth = 480.dp, onClosed = { retained = null; onClosed() }) {
         if (shown != null) AnimePanelSurface(backdrop) {
-            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight).padding(16.dp)) {
+            val managementScroll = key(shown.subject.id) { rememberScrollState() }
+            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)
+                .animateContentSize(if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap())
+                .padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (section != 0) MotionIconButton(onClick = { section = 0 }, modifier = Modifier.size(44.dp), tooltip = "返回管理") {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
-                    }
-                    if (section == 0) {
-                        AnimePoster(shown.subject, Modifier.width(42.dp).height(62.dp))
-                        Spacer(Modifier.width(12.dp))
+                    Box(Modifier.width(54.dp), contentAlignment = Alignment.CenterStart) {
+                        MotionSwap(section == 0, Modifier.size(44.dp, 62.dp)) { root ->
+                            if (root) AnimePoster(shown.subject, Modifier.width(42.dp).height(62.dp))
+                            else MotionIconButton(onClick = { section = 0 }, modifier = Modifier.size(44.dp), tooltip = "返回管理") {
+                                Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
+                            }
+                        }
                     }
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(when (section) {
@@ -528,41 +551,45 @@ private fun AnimeLibraryEntryPanel(entry: AnimeLibraryEntry?, controller: AnimeC
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
                 }
-                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(top = 8.dp)) {
-                    when (section) {
-                        0 -> {
-                            CompactMenuAction(Icons.Outlined.Info, "详情与选集", onClick = { onOpen(shown) })
-                            if (shown.resume != null) CompactMenuAction(Icons.Outlined.History, "逐集观看记录",
-                                onClick = { onHistory(shown) })
-                            CompactMenuAction(Icons.Outlined.PushPin, if (shown.pinned) "取消置顶" else "置顶", onClick = {
-                                controller.setPinned(shown.subject.id, !shown.pinned); onDismiss()
-                            })
-                            CompactMenuAction(Icons.Outlined.Folder, shown.folder.ifBlank { "移动到文件夹" }, onClick = { section = 1 })
-                            CompactMenuAction(Icons.Outlined.BookmarkBorder, if (shown.followed) "取消追番" else "加入追番", onClick = {
-                                controller.setFollowed(shown.subject, !shown.followed); onDismiss()
-                            })
-                            CompactMenuAction(Icons.Outlined.History, "清除观看记录", enabled = shown.resume != null,
-                                onClick = { section = 2 })
-                            CompactMenuAction(Icons.Outlined.DeleteOutline, "移除这部番剧", destructive = true,
-                                onClick = { section = 3 })
-                        }
-                        1 -> {
-                            AnimeTextField(folderDraft, { folderDraft = it }, "文件夹名称，留空放入未分组", Modifier.padding(vertical = 10.dp))
-                            folders.forEach { name -> AnimeSelection(name, selected = folderDraft == name,
-                                onClick = { folderDraft = name }) }
-                            MotionButton(onClick = { controller.setFolder(shown.subject.id, folderDraft.trim()); onDismiss() },
-                                modifier = Modifier.fillMaxWidth().padding(top = 10.dp).heightIn(min = 48.dp)) { Text("保存文件夹") }
-                        }
-                        else -> {
-                            Text(if (section == 2) "清除这部番的逐集观看位置和已记录时长。追番和已看标记保留。"
-                                else "移除这部番的本地追番、观看记录与来源关联。此操作不会删除追番平台的数据。",
-                                Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.bodyMedium)
-                            MotionButton(onClick = {
-                                if (section == 2) controller.clearWatchHistory(shown.subject.id)
-                                else controller.removeLibraryEntry(shown.subject.id)
-                                onDismiss()
-                            }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                                Text(if (section == 2) "确认清除观看记录" else "确认移除本地记录")
+                MotionTabContent(section, Modifier.weight(1f, fill = false).fillMaxWidth(), contentKey = { it },
+                    order = { if (it == 0) 0 else 1 }, fillContent = false, soft = true) { page ->
+                    val scroll = if (page == 0) managementScroll else rememberScrollState()
+                    Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(top = 8.dp)) {
+                        when (page) {
+                            0 -> {
+                                CompactMenuAction(Icons.Outlined.Info, "详情与选集", onClick = { onOpen(shown) })
+                                if (shown.resume != null) CompactMenuAction(Icons.Outlined.History, "逐集观看记录",
+                                    onClick = { onHistory(shown) })
+                                CompactMenuAction(Icons.Outlined.PushPin, if (shown.pinned) "取消置顶" else "置顶", onClick = {
+                                    controller.setPinned(shown.subject.id, !shown.pinned); onDismiss()
+                                })
+                                CompactMenuAction(Icons.Outlined.Folder, shown.folder.ifBlank { "移动到文件夹" }, onClick = { section = 1 })
+                                CompactMenuAction(Icons.Outlined.BookmarkBorder, if (shown.followed) "取消追番" else "加入追番", onClick = {
+                                    controller.setFollowed(shown.subject, !shown.followed); onDismiss()
+                                })
+                                CompactMenuAction(Icons.Outlined.History, "清除观看记录", enabled = shown.resume != null,
+                                    onClick = { section = 2 })
+                                CompactMenuAction(Icons.Outlined.DeleteOutline, "移除这部番剧", destructive = true,
+                                    onClick = { section = 3 })
+                            }
+                            1 -> {
+                                AnimeTextField(folderDraft, { folderDraft = it }, "文件夹名称，留空放入未分组", Modifier.padding(vertical = 10.dp))
+                                folders.forEach { name -> AnimeSelection(name, selected = folderDraft == name,
+                                    onClick = { folderDraft = name }) }
+                                MotionButton(onClick = { controller.setFolder(shown.subject.id, folderDraft.trim()); onDismiss() },
+                                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp).heightIn(min = 48.dp)) { Text("保存文件夹") }
+                            }
+                            else -> {
+                                Text(if (page == 2) "清除这部番的逐集观看位置和已记录时长。追番和已看标记保留。"
+                                    else "移除这部番的本地追番、观看记录与来源关联。此操作不会删除追番平台的数据。",
+                                    Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.bodyMedium)
+                                MotionButton(onClick = {
+                                    if (page == 2) controller.clearWatchHistory(shown.subject.id)
+                                    else controller.removeLibraryEntry(shown.subject.id)
+                                    onDismiss()
+                                }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                                    Text(if (page == 2) "确认清除观看记录" else "确认移除本地记录")
+                                }
                             }
                         }
                     }

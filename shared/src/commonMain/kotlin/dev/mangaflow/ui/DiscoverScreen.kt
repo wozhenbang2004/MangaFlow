@@ -790,6 +790,10 @@ private fun DiscoveryPane(
     }
     val motion = LocalMotionEnabled.current
     val firstEntranceIndex = remember(paneKey) { retainedGrid.firstVisibleItemIndex }
+    val bookPlacement = remember(motion) {
+        if (motion) spring<IntOffset>(MangaMotion.NavigationDamping, MangaMotion.GestureStiffness,
+            visibilityThreshold = IntOffset(1, 1)) else snap()
+    }
     // Compute the editorial rotation only for the pane that actually renders a carousel.
     val featured = when {
         !recommended -> emptyList()
@@ -1043,7 +1047,7 @@ private fun DiscoveryPane(
                             contentType = { _, _ -> "source-ranking-book" },
                             span = { _, _ -> GridItemSpan(maxLineSpan) }) { index, manga ->
                             Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
-                                placementSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap())) {
+                                placementSpec = bookPlacement)) {
                                 DesktopBrowseActions(if (desktop) desktopActions(manga) else emptyList(), active) {
                                     RankRow(manga.copy(rank = index + 1), repository, state.period, paneKey, rankGutter,
                                         showProvider = false, onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
@@ -1055,7 +1059,7 @@ private fun DiscoveryPane(
                     itemsIndexed(state.items, key = { _, manga -> manga.id }, contentType = { _, _ -> "ranking-book" },
                         span = { _, _ -> GridItemSpan(maxLineSpan) }) { index, manga ->
                         Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
-                            placementSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap())
+                            placementSpec = bookPlacement)
                             .rankingRowEntrance(index - firstEntranceIndex)) {
                             DesktopBrowseActions(if (desktop) desktopActions(manga) else emptyList(), active) {
                                 RankRow(manga, repository, state.period, paneKey, rankGutter,
@@ -1067,11 +1071,11 @@ private fun DiscoveryPane(
             } else {
                 items(displayedBooks, key = Manga::id, contentType = { "browse-book" }) { manga ->
                     Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
-                        placementSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap())
+                        placementSpec = bookPlacement)
                         .padding(bottom = afterCover)) {
                         DesktopBrowseActions(if (desktop) desktopActions(manga) else emptyList(), active) {
                             MotionTabContent(selected = columns == 1, modifier = Modifier.fillMaxWidth(),
-                                contentKey = { it }, order = { if (it) 0 else 1 }, fillContent = false) { list ->
+                                contentKey = { it }, order = { 0 }, fillContent = false) { list ->
                                 val placement = "discovery-grid-$paneKey-" + if (list) "list" else "tile"
                                 if (list) BrowseListRow(manga, repository,
                                     showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
@@ -1694,10 +1698,14 @@ internal fun RecentReadingSheet(
 ) {
     var chapterManga by remember { mutableStateOf<Manga?>(null) }
     val recentPosition = rememberLazyListState()
+    val motion = LocalMotionEnabled.current
+    val snackbar = remember { androidx.compose.material3.SnackbarHostState() }
+    val removals = rememberHistoryRemoval(snackbar)
+    val visibleHistory = remember(history, removals.pending) { history.filterNot { it.manga.id in removals.pending } }
     val recentFeedback = dev.mangaflow.ui.motion.rememberFeelFeedback()
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.background,
         backdrop = backdrop, desktopCloseButton = true) { dismiss ->
-        MotionTabContent(selected = chapterManga, modifier = Modifier.fillMaxWidth(),
+        MotionTabContent(selected = chapterManga, modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
             contentKey = { it?.id ?: "recent-books" }, order = { if (it == null) 0 else 1 },
             fillContent = false, soft = true) { selected ->
             if (selected != null) ChapterHistoryContent(selected, library,
@@ -1707,20 +1715,23 @@ internal fun RecentReadingSheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("最近阅读", style = MaterialTheme.typography.titleLarge,
                         modifier = Modifier.semantics { heading() })
-                    Text(history.size.toString(), style = mangaMetricValueStyle(),
+                    Text(visibleHistory.size.toString(), style = mangaMetricValueStyle(),
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(), state = recentPosition,
                     contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    if (history.isEmpty()) item(key = "empty") {
+                    if (visibleHistory.isEmpty()) item(key = "empty") {
                         Text("还没有阅读记录", Modifier.padding(horizontal = 4.dp, vertical = 12.dp),
                             style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    items(history, key = { it.manga.id }) { progress ->
+                    items(visibleHistory, key = { it.manga.id }) { progress ->
                         val rowInteraction = remember(progress.manga.id) { MutableInteractionSource() }
-                        SwipeToRemove(onRemove = { onRemoveHistory(progress.manga.id) }, label = "删除阅读记录",
-                            transparentBackground = true) {
+                        SwipeToRemove(onRemove = { removals.request(progress.manga.id, onRemoveHistory) },
+                            label = "删除阅读记录", transparentBackground = true, modifier = Modifier.animateItem(
+                                fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
+                                placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
+                                fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null)) {
                             Row(Modifier.fillMaxWidth()
                                 .clickable(interactionSource = rowInteraction, indication = null, role = Role.Button,
                                     onClickLabel = "继续阅读", onClick = { onContinue(progress); dismiss() })
@@ -1749,6 +1760,7 @@ internal fun RecentReadingSheet(
                 }
             }
         }
+        androidx.compose.material3.SnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 12.dp))
     }
 }
 

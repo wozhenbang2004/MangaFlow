@@ -15,8 +15,8 @@ import coil3.Image as CoilImage
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.rememberSplineBasedDecay
@@ -130,6 +130,7 @@ import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.*
 import dev.mangaflow.platform.storage.applicationContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.LayoutDirection
@@ -182,6 +183,7 @@ import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.motionPress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
@@ -515,11 +517,19 @@ fun DetailScreen(
         var chapterHeaderOffset by remember(current.id) { mutableFloatStateOf(0f) }
         var commentsOwnHeader by remember(current.id) { mutableStateOf(false) }
         var contentsRequestedWhileInComments by remember(current.id) { mutableStateOf(false) }
-        // The artwork remains the same measured node throughout the handoff. Animate its
-        // existing header offset rather than switching the hero to a separate layout.
-        // A rapid reverse starts at the last drawn position, not at either endpoint.
+        var headerFlight by remember(header) { mutableStateOf<Job?>(null) }
+        val headerVelocity = remember(header) { floatArrayOf(0f) }
+        fun takeChapterHeader() {
+            headerFlight?.cancel()
+            headerVelocity[0] = 0f
+            commentsOwnHeader = false
+            contentsRequestedWhileInComments = false
+        }
         LaunchedEffect(active, activeSection, header, naturalHeroHeight.intValue, desktopDetail, motion) {
-            if (!active || desktopDetail || naturalHeroHeight.intValue <= 0) return@LaunchedEffect
+            if (!active || desktopDetail || naturalHeroHeight.intValue <= 0) {
+                headerVelocity[0] = 0f
+                return@LaunchedEffect
+            }
             if (activeSection == 1 && !commentsOwnHeader) {
                 chapterHeaderOffset = header.heightOffset
                 commentsOwnHeader = true
@@ -528,20 +538,24 @@ fun DetailScreen(
             val destination = (if (activeSection == 1 || contentsRequestedWhileInComments)
                 header.heightOffsetLimit else chapterHeaderOffset).coerceIn(header.heightOffsetLimit, 0f)
             val start = header.heightOffset.coerceIn(header.heightOffsetLimit, 0f)
-            if (!motion || start == destination) {
-                header.heightOffset = destination
-            } else {
-                Animatable(start).animateTo(destination, spring(
-                    dampingRatio = MangaMotion.NavigationDamping,
-                    stiffness = 240f,
-                )) {
-                    header.heightOffset = value.coerceIn(header.heightOffsetLimit, 0f)
+            val flight = currentCoroutineContext()[Job]
+            headerFlight = flight
+            try {
+                if (motion && start != destination) {
+                    animate(start, destination, initialVelocity = headerVelocity[0],
+                        animationSpec = spring(MangaMotion.NavigationDamping, 240f)) { value, velocity ->
+                        header.heightOffset = value.coerceIn(header.heightOffsetLimit, 0f)
+                        headerVelocity[0] = velocity
+                    }
                 }
                 header.heightOffset = destination
-            }
-            if (activeSection == 0) {
-                commentsOwnHeader = false
-                contentsRequestedWhileInComments = false
+                headerVelocity[0] = 0f
+                if (activeSection == 0) {
+                    commentsOwnHeader = false
+                    contentsRequestedWhileInComments = false
+                }
+            } finally {
+                if (headerFlight === flight) headerFlight = null
             }
         }
         val dockScrollTravel = with(density) { 96.dp.toPx() }
@@ -564,11 +578,13 @@ fun DetailScreen(
         val behavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(
             state = header, snapAnimationSpec = null, flingAnimationSpec = rememberSplineBasedDecay(),
         )
-        val scrolling = remember(behavior) {
+        val scrolling = remember(behavior, header) {
             object : NestedScrollConnection by behavior.nestedScrollConnection {
                 override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                    if (source == NestedScrollSource.UserInput && available.y != 0f)
+                    if (source == NestedScrollSource.UserInput && available.y != 0f) {
                         contentsJump?.cancel()
+                        if (headerFlight != null || commentsOwnHeader) takeChapterHeader()
+                    }
                     return behavior.nestedScrollConnection.onPreScroll(available, source)
                 }
             }
@@ -580,6 +596,7 @@ fun DetailScreen(
         val artworkScroll: ScrollableState = catalogGrid ?: emptyCatalogScroll
         val openContents: () -> Unit = {
             val fromComments = activeSection == 1
+            if (!fromComments) takeChapterHeader()
             // Opening the chapter catalogue from comments goes to the collapsed
             // chapter header; tapping its ordinary tab restores the prior hero.
             contentsRequestedWhileInComments = fromComments
@@ -877,7 +894,7 @@ private fun ArtworkToolbar(
             verticalArrangement = Arrangement.Center) {
             // The small toolbar title crosses into its Comments identity instead
             // of swapping two different text baselines on the first tap frame.
-            MotionSwap(comments, Modifier.fillMaxWidth().heightIn(min = 38.dp)) { showComments ->
+            MotionSwap(comments, Modifier.fillMaxWidth().heightIn(min = 38.dp), scaleContent = false) { showComments ->
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.Center) {
                     if (showComments) Row(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -952,7 +969,14 @@ private fun HeroBookInformation(
     val coverSize = cover.intrinsicSize
     val actualAspect = if (coverSize != Size.Unspecified && coverSize.width.isFinite() && coverSize.height.isFinite() &&
         coverSize.width > 0f && coverSize.height > 0f) coverSize.width / coverSize.height else null
-    val route = LocalMangaCoverTransition.current?.visibility?.transition
+    val coverHost = LocalMangaCoverTransition.current
+    val route = coverHost?.visibility?.transition
+    val copyArrival = if (route != null && coverHost?.selected?.mangaId == manga.id && LocalMotionEnabled.current)
+        route.animateFloat(transitionSpec = {
+            if (targetState == EnterExitState.Visible) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing)
+            else tween(MangaMotion.Quick, easing = MangaMotion.ExitEasing)
+        }, label = "cover-to-title") { if (it == EnterExitState.Visible) 1f else 0f }
+    else null
     val arrived = route == null || route.currentState == EnterExitState.Visible &&
         route.targetState == EnterExitState.Visible && !route.isRunning
     var targetAspect by remember(manga.id, manga.coverUrl) { mutableFloatStateOf(actualAspect ?: 2f / 3f) }
@@ -966,6 +990,7 @@ private fun HeroBookInformation(
         label = "detail-poster-aspect")
     val ink = DetailForeground
     val titleInteraction = remember(manga.id) { MutableInteractionSource() }
+    val titleDirection = if (LocalLayoutDirection.current == LayoutDirection.Ltr) -1f else 1f
     val editorial = platformKind == PlatformKind.ANDROID && !adultProfile
     val titleStyle = if (compact) browseTitleStyle(23.sp, 30.sp) else browseTitleStyle(27.sp, 34.sp)
     val contentGap = if (compact) 14.dp else 18.dp
@@ -1003,7 +1028,13 @@ private fun HeroBookInformation(
                         }
                     }
                 }
-                Column(Modifier.width(if (stacked) contentWidth else infoWidth).align(Alignment.CenterVertically),
+                Column(Modifier.width(if (stacked) contentWidth else infoWidth).align(Alignment.CenterVertically)
+                    .graphicsLayer {
+                        val remaining = 1f - (copyArrival?.value ?: 1f)
+                        alpha = 1f - .32f * remaining
+                        translationY = if (stacked) 6.dp.toPx() * remaining else 0f
+                        translationX = if (stacked) 0f else titleDirection * 8.dp.toPx() * remaining
+                    },
                     verticalArrangement = Arrangement.spacedBy(9.dp)) {
                     if (adultProfile) MangaBrowseSource(manga, foreground = ink.copy(alpha = .75f))
                     Text(manga.title, color = ink, style = titleStyle,
@@ -1279,7 +1310,7 @@ private fun DetailSections(
                     }
                 })
             Spacer(Modifier.weight(1f))
-            MotionSwap(comments, Modifier.width(actionsWidth).height(44.dp)) { showingComments ->
+            MotionSwap(comments, Modifier.width(actionsWidth).height(44.dp), scaleContent = false) { showingComments ->
                 Row(Modifier.fillMaxWidth().motionInputGate(showingComments == comments),
                     horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End),
                     verticalAlignment = Alignment.CenterVertically) {
