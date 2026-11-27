@@ -48,6 +48,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -398,7 +399,7 @@ fun DetailScreen(
     }
 
     // Both layouts keep one catalogue/comment implementation and the same saved section state.
-    val sectionPane: @Composable (Modifier, Dp) -> Unit = { paneModifier, paneBottomPadding ->
+    val sectionPane: @Composable (Modifier, Dp, () -> Unit) -> Unit = { paneModifier, paneBottomPadding, openMobileSearch ->
         Column(paneModifier) {
             DetailSections(
                 selected = activeSection,
@@ -461,6 +462,7 @@ fun DetailScreen(
                             onCancelSourceSelection = onCancelSourceSelection,
                             sourceLoading = sourceLoading, sourceError = sourceError,
                             desktopFindRequest = handledFindRequest,
+                            onOpenMobileSearch = openMobileSearch,
                             onBatchDownload = { scoped ->
                                 if (active) batchChapterIds = scoped.mapTo(linkedSetOf(), Chapter::id)
                             },
@@ -502,6 +504,8 @@ fun DetailScreen(
         val fontScale = density.fontScale.coerceAtLeast(1f)
         val desktopDetail = platformKind == PlatformKind.DESKTOP &&
             maxWidth >= 768.dp * fontScale.coerceAtMost(1.65f) && maxHeight >= 390.dp
+        val directoryKeyboard = platformKind != PlatformKind.DESKTOP && activeSection == 0 &&
+            WindowInsets.ime.getBottom(density) > 0
         val desktopWidth = minOf(maxWidth, 1440.dp)
         val desktopMargin = if (desktopWidth >= 1100.dp) 28.dp else 16.dp
         val columnGap = if (desktopWidth >= 1040.dp) 24.dp else 12.dp
@@ -610,6 +614,15 @@ fun DetailScreen(
         val chapterScrollConnection = if (activeSection == 0) Modifier.nestedScroll(scrolling) else Modifier
         val emptyCatalogScroll = rememberScrollableState { 0f }
         val artworkScroll: ScrollableState = catalogGrid ?: emptyCatalogScroll
+        fun collapseChapterHeader() {
+            contentsJump?.cancel()
+            contentsJump = scope.launch {
+                animate(header.heightOffset, header.heightOffsetLimit,
+                    animationSpec = tween(if (motion) 320 else 0, easing = MangaMotion.EnterEasing)) { value, _ ->
+                    header.heightOffset = value
+                }
+            }
+        }
         val openContents: () -> Unit = {
             val fromComments = activeSection == 1
             if (!fromComments) takeChapterHeader()
@@ -619,18 +632,12 @@ fun DetailScreen(
             section = 0
             if (resume != null) chapterLocateRevision++
             dockHidden = false
-            contentsJump?.cancel()
-            if (!desktopDetail && !fromComments) contentsJump = scope.launch {
-                animate(header.heightOffset, header.heightOffsetLimit,
-                    animationSpec = tween(if (motion) 320 else 0, easing = MangaMotion.EnterEasing)) { value, _ ->
-                    header.heightOffset = value
-                }
-            }
+            if (!desktopDetail && !fromComments) collapseChapterHeader() else contentsJump?.cancel()
         }
         val dock: @Composable (Modifier, Boolean) -> Unit = { dockModifier, permanent ->
             DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
                 resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
-                hidden = !permanent && dockHidden, collapseProgress = { dockCollapse }, active = active,
+                hidden = !permanent && (dockHidden || directoryKeyboard), collapseProgress = { dockCollapse }, active = active,
                 persistent = permanent, modifier = dockModifier,
                 onHeightChanged = { if (!permanent) measuredDockHeight = maxOf(measuredDockHeight, it) },
                 onContinue = onContinue, onRead = onRead, onRestart = onRestart, onContents = openContents,
@@ -662,7 +669,7 @@ fun DetailScreen(
                     Column(frame, verticalArrangement = Arrangement.spacedBy(18.dp)) {
                         book()
                         sectionPane(Modifier.fillMaxWidth().weight(1f).background(informationTone,
-                            RoundedCornerShape(16.dp)).padding(top = 8.dp), 14.dp)
+                            RoundedCornerShape(16.dp)).padding(top = 8.dp), 14.dp) {}
                     }
                 } else Row(frame, horizontalArrangement = Arrangement.spacedBy(columnGap)) {
                     Column(Modifier.width(summaryWidth).fillMaxHeight()) {
@@ -676,7 +683,7 @@ fun DetailScreen(
                         }
                     }
                     sectionPane(Modifier.weight(1f).fillMaxHeight().background(informationTone,
-                        RoundedCornerShape(16.dp)).padding(top = 8.dp), 12.dp)
+                        RoundedCornerShape(16.dp)).padding(top = 8.dp), 12.dp) {}
                 }
             } else {
                 Column(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
@@ -749,7 +756,10 @@ fun DetailScreen(
                                 .coerceIn(0, constraints.maxHeight)
                             layout(constraints.maxWidth, seam) {}
                         })
-                        sectionPane(Modifier.weight(1f).fillMaxWidth(), readingInset + 16.dp)
+                        sectionPane(Modifier.weight(1f).fillMaxWidth(), if (directoryKeyboard) 12.dp else readingInset + 16.dp) {
+                            takeChapterHeader()
+                            collapseChapterHeader()
+                        }
                     }
                 }
             }

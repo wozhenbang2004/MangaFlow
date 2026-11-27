@@ -40,10 +40,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
-import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.Pause
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -66,9 +66,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import dev.mangaflow.data.MangaRepository
@@ -110,7 +112,9 @@ internal fun DownloadBookRow(
     val actions = buildList {
         add(DesktopMenuAction("继续阅读", icon = Icons.Outlined.AutoStories, onClick = onRead))
         onDetails?.let { add(DesktopMenuAction("详情与目录", icon = Icons.Outlined.ViewList, onClick = it)) }
-        add(DesktopMenuAction("查看章节", icon = Icons.Outlined.ViewList, onClick = onExpand))
+        if (inspectMode || entries.size > 1) add(DesktopMenuAction(
+            if (inspectMode) "查看章节" else if (expanded) "收起章节" else "展开章节",
+            icon = Icons.Outlined.ViewList, onClick = onExpand))
         if (onInspect != null) downloadObservedEntry(entries)?.let { task ->
             add(DesktopMenuAction("下载状态与线路", icon = Icons.Outlined.Timeline, onClick = { onInspect(task) }))
         }
@@ -129,8 +133,8 @@ internal fun DownloadBookRow(
     val rotation by animateFloatAsState(if (expanded && !inspectMode) 180f else 0f,
         if (LocalMotionEnabled.current) spring(MangaMotion.NavigationDamping, MangaMotion.PanelStiffness) else snap(),
         label = "download-book-disclosure")
-    DesktopContextMenuArea(actions) {
-    Column {
+    DesktopContextMenuArea(if (active) actions else emptyList()) {
+    Column(Modifier.motionInputGate(active)) {
         Row(Modifier.fillMaxWidth().then(directoryRow).combinedClickable(
             enabled = active,
             interactionSource = interaction, indication = null,
@@ -159,20 +163,24 @@ internal fun DownloadBookRow(
                     val phase = observed?.takeUnless { complete == entries.size }?.let {
                         downloadTransferPhaseLabel(it, downloadObservationTime(entries, active))
                     }
-                    Text(mangaNumberText(listOfNotNull("$complete/${entries.size} 话已保存", phase).joinToString(" · ")),
+                    Text(mangaNumberText(listOfNotNull(phase, "$complete/${entries.size} 话已保存").joinToString(" · ")),
                         style = MaterialTheme.typography.bodySmall, color = if (observed?.status == DownloadStatus.FAILED)
                             colors.error else colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 } else DownloadInlineTransferSummary(entries, active, if (managing) null else onInspect)
                 DownloadProgressLine(entries)
                 if (!inspectMode) DownloadEnhancementSummary(entries, enhancementTasks, if (managing) null else onInspect)
             }
-            if (managing) DownloadSelection(selected, onSelect)
-            else DownloadTransferAction(entries, refreshingIds, onPause, onRetry)
-            if (!inspectMode && (entries.size > 1 || desktop)) MotionIconButton(onClick = onExpand, modifier = Modifier.size(if (desktop) 36.dp else 44.dp)) {
-                Icon(if (inspectMode) Icons.Outlined.ChevronRight else Icons.Outlined.KeyboardArrowDown,
-                    if (inspectMode) "查看章节" else if (expanded) "收起章节" else "展开 ${entries.size} 话",
-                    Modifier.size(20.dp).graphicsLayer { rotationZ = rotation },
-                    tint = if (inspectMode && expanded) colors.onSurface else colors.onSurfaceVariant)
+            if (managing) DownloadSelection(selected, active, onSelect)
+            else DownloadTransferAction(entries, refreshingIds, active, onPause, onRetry)
+            if (!inspectMode && entries.size > 1) {
+                val label = if (expanded) "收起章节" else "展开 ${entries.size} 话"
+                MotionIconButton(onClick = onExpand, enabled = active, tooltip = label,
+                    modifier = Modifier.size(if (desktop) 36.dp else 48.dp).semantics {
+                        stateDescription = if (expanded) "已展开" else "已收起"
+                    }) {
+                    Icon(Icons.Outlined.KeyboardArrowDown, label,
+                        Modifier.size(20.dp).graphicsLayer { rotationZ = rotation }, tint = colors.onSurfaceVariant)
+                }
             }
             if (desktop) {
                 if (!inspectMode && onDetails != null) MotionIconButton(onClick = onDetails, modifier = Modifier.size(32.dp)) {
@@ -217,8 +225,8 @@ internal fun DownloadChapterRow(
     }
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
-    DesktopContextMenuArea(actions) {
-    Column(Modifier.fillMaxWidth().combinedClickable(interactionSource = interaction, indication = null,
+    DesktopContextMenuArea(if (active) actions else emptyList()) {
+    Column(Modifier.fillMaxWidth().motionInputGate(active).combinedClickable(enabled = active, interactionSource = interaction, indication = null,
         onClickLabel = if (managing) "选择 ${entry.chapter.title}" else "阅读 ${entry.chapter.title}",
         onClick = if (managing) onSelect else onRead,
         onLongClickLabel = "管理这一话", onLongClick = onManage)
@@ -263,8 +271,8 @@ internal fun DownloadChapterRow(
                     DownloadProgressLine(stats)
                 }
             }
-            if (managing) DownloadSelection(selected, onSelect)
-            else DownloadTransferAction(listOf(entry), refreshingIds, { group -> group.forEach(onPause) }, { group -> group.forEach(onRetry) })
+            if (managing) DownloadSelection(selected, active, onSelect)
+            else DownloadTransferAction(listOf(entry), refreshingIds, active, { group -> group.forEach(onPause) }, { group -> group.forEach(onRetry) })
             if (desktop) DesktopMoreButton(actions, "章节下载操作")
         }
         if (alignedStatus) DownloadEnhancementSummary(listOf(entry), enhancementTasks, if (managing) null else onInspect)
@@ -335,16 +343,19 @@ private fun DownloadInlineTransferSummary(
     val saved = entries.count { it.status == DownloadStatus.COMPLETED }
     val allSaved = saved == entries.size
     val signal = downloadStatusColor(entry.status)
-    val title = when {
-        source != null -> source + " · " + downloadPageProgress(entries)
-        entries.size == 1 -> entry.chapter.title + " · " + downloadPageProgress(entries)
-        else -> "$saved/${entries.size} 话已保存 · " + downloadPageProgress(entries)
+    val phase = downloadTransferPhaseLabel(entry, now)
+    val status = when {
+        entries.size == 1 -> phase
+        allSaved -> "已保存 $saved 话"
+        else -> "$phase · ${entry.chapter.title}"
     }
-    val detail = if (allSaved) downloadBytes(entries.sumOf { it.downloadedBytes })
-        else listOfNotNull(
-            downloadTransferByteLabel(entry, now).takeIf(String::isNotBlank),
-            (if (entries.size > 1) entry.chapter.title + " · " else "") + downloadTransferPhaseLabel(entry, now),
-        ).joinToString(" · ")
+    val scope = source ?: when {
+        entries.size == 1 -> entry.chapter.title
+        allSaved -> null
+        else -> "$saved/${entries.size} 话已保存"
+    }
+    val bytes = if (allSaved) downloadBytes(entries.sumOf { it.downloadedBytes }) else downloadTransferByteLabel(entry, now)
+    val detail = listOfNotNull(scope, downloadPageProgress(entries), bytes).filter(String::isNotBlank).joinToString(" · ")
     Column(Modifier.fillMaxWidth().heightIn(min = if (allSaved) 44.dp else 52.dp).then(if (onInspect != null)
         Modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = "查看 ${entry.chapter.title} 下载状态与线路", onClick = { onInspect(entry) })
@@ -352,18 +363,15 @@ private fun DownloadInlineTransferSummary(
         verticalArrangement = Arrangement.Center) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(mangaNumberText(title), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Box(Modifier.size(5.dp).background(signal, RoundedCornerShape(50)))
+            Text(mangaNumberText(status), Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
+                color = if (entry.status == DownloadStatus.FAILED) colors.error else colors.onSurface,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (onInspect != null) Icon(Icons.Outlined.Info, null, Modifier.size(12.dp),
                 tint = colors.onSurfaceVariant.copy(alpha = .7f))
         }
-        Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            Box(Modifier.size(5.dp).background(signal, RoundedCornerShape(50)))
-            Text(mangaNumberText(detail), style = MaterialTheme.typography.labelSmall,
-                color = if (entry.status == DownloadStatus.FAILED) colors.error else colors.onSurfaceVariant,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
-        }
+        Text(mangaNumberText(detail), Modifier.padding(top = 3.dp), style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -416,12 +424,13 @@ private fun downloadPageProgress(entries: List<DownloadEntry>): String {
 }
 
 @Composable
-private fun DownloadSelection(selected: Boolean, onClick: () -> Unit) {
+private fun DownloadSelection(selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val fill = animateFloatAsState(if (selected) 1f else 0f,
         if (LocalMotionEnabled.current) spring(MangaMotion.NavigationDamping, MangaMotion.PanelStiffness) else snap(),
         label = "download-selection")
-    MotionIconButton(onClick = onClick, modifier = Modifier.size(44.dp).semantics {
+    MotionIconButton(onClick = onClick, enabled = enabled,
+        modifier = Modifier.size(if (platformKind == PlatformKind.DESKTOP) 44.dp else 48.dp).semantics {
         this.selected = selected
         contentDescription = if (selected) "取消选择" else "选择"
     }) {
@@ -440,7 +449,7 @@ private fun DownloadSelection(selected: Boolean, onClick: () -> Unit) {
 
 /** Transfer state retains its current pause/source-refresh/retry behavior, now without a full row menu. */
 @Composable
-private fun DownloadTransferAction(entries: List<DownloadEntry>, refreshingIds: Set<String>,
+private fun DownloadTransferAction(entries: List<DownloadEntry>, refreshingIds: Set<String>, active: Boolean,
     onPause: (List<DownloadEntry>) -> Unit, onRetry: (List<DownloadEntry>) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val finished = entries.all { it.status == DownloadStatus.COMPLETED }
@@ -455,30 +464,33 @@ private fun DownloadTransferAction(entries: List<DownloadEntry>, refreshingIds: 
         retryable.isNotEmpty() -> CompactDownloadState.PAUSED
         else -> null
     }
-    val interaction = remember { MutableInteractionSource() }
-    val enabled = !busy && !finished && state != null
-    val action = if (finished) Modifier else Modifier.clip(RoundedCornerShape(50)).clickable(
-        enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button,
-        onClick = { if (pausable.isNotEmpty()) onPause(pausable) else onRetry(retryable) })
-        .motionPress(interaction, enabled)
-    Box(Modifier.size(44.dp).then(action), contentAlignment = Alignment.Center) {
-        when {
-            busy && !finished -> CircularProgressIndicator(Modifier.size(15.dp).semantics {
-                contentDescription = "正在刷新下载来源"
-            }, strokeWidth = 1.5.dp, color = colors.primary)
-            state != null -> CompactDownloadIcon(state, downloadKnownProgress(entries),
-                contentDescription = when (state) {
-                    CompactDownloadState.COMPLETE -> "已下载"
-                    CompactDownloadState.ERROR -> "刷新并重试下载"
-                    CompactDownloadState.PAUSED -> "继续下载"
-                    else -> "暂停下载"
-                }, tint = when (state) {
-                    CompactDownloadState.COMPLETE -> colors.onSurfaceVariant.copy(alpha = .75f)
-                    CompactDownloadState.ERROR -> colors.error
-                    else -> colors.primary
-                })
-            else -> Icon(Icons.Outlined.Info, "文件不可用，请删除后重新导入", tint = colors.error)
+    val buttonSize = if (platformKind == PlatformKind.DESKTOP) 44.dp else 48.dp
+    if (busy || finished || state == null) {
+        Box(Modifier.size(buttonSize), contentAlignment = Alignment.Center) {
+            when {
+                finished -> CompactDownloadIcon(CompactDownloadState.COMPLETE, contentDescription = "已下载",
+                    tint = colors.onSurfaceVariant.copy(alpha = .75f))
+                busy -> CircularProgressIndicator(Modifier.size(15.dp).semantics {
+                    contentDescription = "正在刷新下载来源"
+                }, strokeWidth = 1.5.dp, color = colors.primary)
+                else -> Icon(Icons.Outlined.Info, "文件不可用，请删除后重新导入", tint = colors.error)
+            }
         }
+        return
+    }
+    val targets = if (pausable.isNotEmpty()) pausable else retryable
+    val verb = when {
+        pausable.isNotEmpty() -> "暂停"
+        retryable.any { it.needsSourceRefresh } -> "刷新来源并重试"
+        state == CompactDownloadState.ERROR -> "重试"
+        else -> "继续"
+    }
+    val label = if (targets.size > 1) "$verb ${targets.size} 话" else "$verb ${targets.first().chapter.title}"
+    MotionIconButton(onClick = { if (pausable.isNotEmpty()) onPause(targets) else onRetry(targets) },
+        modifier = Modifier.size(buttonSize), enabled = active, tooltip = label) {
+        if (state == CompactDownloadState.WAITING) Icon(Icons.Outlined.Pause, label, Modifier.size(20.dp), tint = colors.primary)
+        else CompactDownloadIcon(state, downloadKnownProgress(entries), contentDescription = label,
+            tint = if (state == CompactDownloadState.ERROR) colors.error else colors.primary)
     }
 }
 
@@ -488,8 +500,13 @@ internal fun DownloadProgressLine(entries: List<DownloadEntry>) {
     val observed = downloadObservedEntry(entries) ?: return
     key(observed.id, observed.createdAt, observed.progress.pageIndex, observed.progress.generation,
         observed.progress.transferId, observed.progress.expectedBytes) {
-        ManagementProgressTrack(knownProgress, "当前图片接收进度", mangaStatusColors().activity,
-            Modifier.fillMaxWidth().padding(bottom = 3.dp).height(3.dp))
+        Row(Modifier.fillMaxWidth().padding(bottom = 3.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            ManagementProgressTrack(knownProgress, "当前图片接收进度", mangaStatusColors().activity,
+                Modifier.weight(1f).height(3.dp))
+            Text(mangaNumberText("当前页 ${(knownProgress * 100).toInt()}%"), Modifier.clearAndSetSemantics {},
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+        }
     }
 }
 

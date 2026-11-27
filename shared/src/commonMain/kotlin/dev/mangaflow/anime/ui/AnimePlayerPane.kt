@@ -231,7 +231,13 @@ internal fun AnimePlayerPane(
     val touchExploration = LocalTouchExplorationEnabled.current
     var videoWorkspaceFocused by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
-    var controlsHeld by remember { mutableStateOf(false) }
+    var chromeContacts by remember { mutableIntStateOf(0) }
+    val onChromeContact: (Boolean) -> Unit = remember {
+        { pressed ->
+            chromeContacts += if (pressed) 1 else -1
+            if (pressed) controlsVisible = true
+        }
+    }
     var readingsHeld by remember { mutableStateOf(false) }
     var headerFocused by remember { mutableStateOf(false) }
     var transportFocused by remember { mutableStateOf(false) }
@@ -262,7 +268,8 @@ internal fun AnimePlayerPane(
     val headerHovered = if (desktop) headerPointer.collectIsHoveredAsState().value else false
     val transportHovered = if (desktop) transportPointer.collectIsHoveredAsState().value else false
     val pointerOverTools = desktop && (titleHovered || headerHovered || transportHovered)
-    val forceControls = requiredControls || headerFocused || transportFocused || centerFocused || readingsHeld || pointerOverTools
+    val forceControls = requiredControls || chromeContacts > 0 || headerFocused || transportFocused || centerFocused ||
+        readingsHeld || pointerOverTools
     val showChrome = !playback.inPictureInPicture && !panelPresent && !(obscured && headerOverVideo) && (!locked || touchExploration) &&
         (controlsVisible || forceControls)
     val motion = LocalMotionEnabled.current
@@ -291,6 +298,9 @@ internal fun AnimePlayerPane(
     val canControl = showingCurrentPlayback && !blockingResolution && failure == null &&
         (playback.phase == AnimePlayerPhase.READY || playback.ended)
     val hoverEnabled = active && !locked && !obscured && !panelPresent && !playback.inPictureInPicture
+    val timelineInteractive = canControl && hoverEnabled && showChrome && windowInfo.isWindowFocused
+    val seekPreview = remember(player, playback.sessionGeneration, playback.timelineGeneration, playback.assetKey,
+        playback.episodeId, fullscreen, timelineInteractive) { mutableStateOf<AnimeSeekPreview?>(null) }
     val subject = detail?.subject
     if (desktop && active) LocalWindowFullscreen.current?.onPlaybackTitleChange?.let { update ->
         val windowTitle = remember(showingCurrentPlayback, subject?.id, subject?.title, playback.episodeId, activeEpisode) {
@@ -467,8 +477,8 @@ internal fun AnimePlayerPane(
         }
     }
     MotionBackHandler(active && locked && !obscured, state = null, onBack = { locked = false; interact() })
-    LaunchedEffect(controlsVisible, forceControls, controlsHeld, interactionEpoch, active) {
-        if (active && controlsVisible && !forceControls && !controlsHeld) {
+    LaunchedEffect(controlsVisible, forceControls, interactionEpoch, active) {
+        if (active && controlsVisible && !forceControls) {
             delay(3_500L)
             controlsVisible = false
         }
@@ -617,6 +627,9 @@ internal fun AnimePlayerPane(
                 state.notice == null && playback.notice == null &&
                 videoHeight >= 250.dp * density.fontScale.coerceAtLeast(1f)
             val controlsTop = videoTop + videoHeight
+            val statusBottom = if (chromeMounted) footerHeight else 0.dp
+            val statusTop = if (headerOverVideo && chromeMounted) headerHeight else 0.dp
+            val seekReadoutFits = videoHeight - statusTop - statusBottom >= with(density) { 18.sp.toDp() } + 14.dp
             val compactStage = videoHeight - (if (headerOverVideo) headerHeight else 0.dp) - footerHeight < 108.dp
             val pointerMedia = playback
             val latestChrome by rememberUpdatedState(playback)
@@ -723,8 +736,6 @@ internal fun AnimePlayerPane(
                         onLoading = { posterLoaded.value = false },
                         modifier = Modifier.fillMaxSize().then(if (artwork != null) Modifier.mangaHazeSource(artwork) else Modifier))
                 }
-                val statusTop = if (headerOverVideo && chromeMounted) headerHeight else 0.dp
-                val statusBottom = if (chromeMounted) footerHeight else 0.dp
                 if (!playback.inPictureInPicture) Box(Modifier.fillMaxSize()
                     .padding(top = statusTop, bottom = statusBottom)
                     .motionInputGate(active && !locked && !obscured && !settingsPresent && !watchPanelPresent),
@@ -822,6 +833,10 @@ internal fun AnimePlayerPane(
                             scaleX = .92f + .08f * amount
                             scaleY = scaleX
                         }
+                            .playerChromeContact(hoverEnabled && showChrome, onChromeContact)
+                            // This group lives inside the bare video's gesture detector. Its gaps
+                            // can consume an unclaimed tap after the actual buttons have seen it.
+                            .pointerInput(Unit) { detectTapGestures { } }
                             .onFocusChanged { centerFocused = it.hasFocus }.focusGroup()
                             .motionInputGate(active && showChrome && !obscured && !settingsPresent && !watchPanelPresent),
                             cornerRadius = 32.dp) {
@@ -847,8 +862,11 @@ internal fun AnimePlayerPane(
                         }
                     }
                 }
-                AnimePlayerFeedback(feedbackNotice, active && !obscured && !locked && !panelPresent &&
+                val scrubbing by remember(seekPreview) { derivedStateOf { seekPreview.value != null } }
+                AnimePlayerFeedback(feedbackNotice, active && !obscured && !locked && !panelPresent && !scrubbing &&
                     !playback.inPictureInPicture && showingCurrentPlayback && failure == null, desktop, observations)
+                if (timelineInteractive && seekReadoutFits) AnimeTimelinePreview(seekPreview,
+                    Modifier.align(Alignment.BottomCenter).padding(start = 8.dp, end = 8.dp, bottom = statusBottom + 6.dp))
             }
 
             val headerInteractive = !headerOverVideo || showChrome
@@ -870,7 +888,7 @@ internal fun AnimePlayerPane(
                     .padding(horizontal = 8.dp, vertical = 5.dp)
                 Row(headerShell, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     AnimePlaybackSurface(headerBackdrop, Modifier.weight(1f, fill = false).widthIn(max = 440.dp)
-                        .desktopChromeHitPath(desktop).hoverable(titlePointer, enabled = desktop && hoverEnabled),
+                        .playerChromeContact(hoverEnabled && headerInteractive, onChromeContact).hoverable(titlePointer, enabled = desktop && hoverEnabled),
                         overVideo = headerOverVideo) {
                         Row(Modifier.heightIn(min = 46.dp).padding(start = 2.dp, end = 14.dp),
                             verticalAlignment = Alignment.CenterVertically) {
@@ -902,7 +920,7 @@ internal fun AnimePlayerPane(
                         !fillVideo && widePlayer && detail != null
                     if (hasHeaderActions) {
                         AnimePlaybackSurface(headerBackdrop,
-                            Modifier.desktopChromeHitPath(desktop).hoverable(headerPointer, enabled = desktop && hoverEnabled),
+                            Modifier.playerChromeContact(hoverEnabled && headerInteractive, onChromeContact).hoverable(headerPointer, enabled = desktop && hoverEnabled),
                             overVideo = headerOverVideo) {
                             Row(Modifier.padding(horizontal = 2.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
                                 if (fullscreen && canControl && !touchExploration) MotionIconButton(onClick = { locked = true },
@@ -978,13 +996,18 @@ internal fun AnimePlayerPane(
                         else -> 18.dp + 44.dp * (1 + (if (canOpenLines) 1 else 0) + (if (canOpenWatching) 1 else 0))
                     }
                     AnimePlaybackSurface(controlBackdrop,
-                        Modifier.widthIn(max = dockWidth).fillMaxWidth().desktopChromeHitPath(desktop)
+                        Modifier.widthIn(max = dockWidth).fillMaxWidth().playerChromeContact(hoverEnabled && showChrome, onChromeContact)
                             .hoverable(transportPointer, enabled = desktop && hoverEnabled),
                         cornerRadius = if (desktop) 16.dp else 23.dp, localizedTimelineInk = localizedTimelineInk) {
                         AnimePlayerControls(player, playback, observations,
                             previous, next, onEpisode, onToggle = { toggle() },
-                            onSeekTo = { current, position -> movePlayhead(current, current.positionMs, position, null, null) },
-                            onInteraction = ::interact, onHoldControls = { controlsHeld = it },
+                            onSeekTo = { current, position ->
+                                val screen = controller.state.value
+                                if (screen.selectedEpisodeId == current.episodeId &&
+                                    screen.playbackTarget?.episode?.let { it.id != current.episodeId } != true)
+                                    movePlayhead(current, current.positionMs, position, null, null)
+                            },
+                            onInteraction = ::interact, seekPreview = seekPreview, timelineInteractive = timelineInteractive,
                             nextPreparation = state.nextEpisodePreparation,
                             workspaceNotice = state.notice, onDismissNotice = controller::dismissNotice,
                             centralTransport = centralTransport, canControl = canControl, desktop = desktop,
@@ -1142,9 +1165,31 @@ private fun Modifier.desktopVideoSeek(player: AnimePlayer, owner: AnimePlaybackC
         }
     }
 
-// Chrome can own passive padding/labels as well as its clickable children.
-private fun Modifier.desktopChromeHitPath(desktop: Boolean): Modifier =
-    if (desktop) pointerInput(Unit) { } else this
+// The whole visible control owns its hit area, including labels and padding. Observe contact
+// before children handle it so holding a stationary thumb also suspends auto-hide.
+private fun Modifier.playerChromeContact(enabled: Boolean, onContact: (Boolean) -> Unit): Modifier =
+    if (!enabled) this else pointerInput(onContact) {
+        val pointers = mutableSetOf<PointerId>()
+        var held = false
+        try {
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    for (change in event.changes) {
+                        if (change.pressed && !change.previousPressed && !change.isConsumed) pointers.add(change.id)
+                        else if (!change.pressed) pointers.remove(change.id)
+                    }
+                    val down = pointers.isNotEmpty()
+                    if (held != down) {
+                        held = down
+                        onContact(down)
+                    }
+                }
+            }
+        } finally {
+            if (held) onContact(false)
+        }
+    }
 
 @Composable
 private fun AnimeWatchingPane(
@@ -1371,20 +1416,18 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
     previous: AnimeEpisode?, next: AnimeEpisode?, onEpisode: (AnimeEpisode) -> Unit,
     onToggle: () -> Unit, onInteraction: () -> Unit,
     onSeekTo: (AnimePlayerState, Long) -> Unit,
-    onHoldControls: (Boolean) -> Unit, workspaceNotice: String?, onDismissNotice: () -> Unit,
+    seekPreview: MutableState<AnimeSeekPreview?>, timelineInteractive: Boolean,
+    workspaceNotice: String?, onDismissNotice: () -> Unit,
     nextPreparation: AnimeNextEpisodePreparation?, centralTransport: Boolean, canControl: Boolean, desktop: Boolean,
     localizedTimelineInk: Boolean,
     sourceName: String?, onSources: (() -> Unit)?,
     fullscreen: Boolean, onFullscreen: () -> Unit, onWatching: (() -> Unit)?, watchingFocus: FocusRequester,
     settingsFocus: FocusRequester, onSettings: () -> Unit, onVolume: (Float?) -> Unit,
     modifier: Modifier = Modifier) {
-    var scrub by remember(state.sessionGeneration, state.timelineGeneration, state.assetKey, state.episodeId) {
-        mutableStateOf<Long?>(null)
-    }
     val canSeek = canControl && state.hasTimeline
+    val window = LocalWindowInfo.current
     val ink = if (localizedTimelineInk) AnimeTimelineInk else Modifier
     val trackOutline = if (localizedTimelineInk) MaterialTheme.colorScheme.surface else Color.Unspecified
-    val releaseControls by rememberUpdatedState(onHoldControls)
     BoxWithConstraints(modifier) {
         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
         val wide = maxWidth / fontScale >= 380.dp
@@ -1405,13 +1448,12 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
         val scrollTools = desktop && maxWidth < desktopActions
         val volumeSliderMinimumWidth = if (inlineTimeline) singleRowWidth + 96.dp else desktopActions + 120.dp * fontScale
         val showVolumeSlider = showVolume && maxWidth >= volumeSliderMinimumWidth
-        DisposableEffect(canSeek, state.sessionGeneration, state.timelineGeneration, state.assetKey, inlineTimeline) {
-            // A changed timeline or a moved slider can end a drag before onValueChangeFinished.
-            scrub = null
-            releaseControls(false)
+        var editOpen by remember(seekPreview, inlineTimeline, canSeek) { mutableStateOf(timelineInteractive && canSeek) }
+        DisposableEffect(seekPreview, inlineTimeline, canSeek) {
+            // A moved slider can leave before Material calls onValueChangeFinished.
             onDispose {
-                scrub = null
-                releaseControls(false)
+                editOpen = false
+                seekPreview.value = null
             }
         }
         val timeline: @Composable (Modifier) -> Unit = { placement ->
@@ -1428,34 +1470,43 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     val timeStyle = MaterialTheme.typography.labelSmall.copy(fontFamily = mangaFontFamily(MangaFontScene.NUMBERS),
                         fontFeatureSettings = "tnum", fontSize = 12.sp, lineHeight = 18.sp)
-                    Text(animeTime(scrub ?: current.positionMs), modifier = ink, style = timeStyle, fontSize = 14.sp,
+                    val position = seekPreview.value?.positionMs ?: current.positionMs
+                    Text(animeTime(position), modifier = ink, style = timeStyle, fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold, maxLines = 1, color = MaterialTheme.colorScheme.onSurface)
                     MaterialTheme(colorScheme = MaterialTheme.colorScheme.copy(surface = MaterialTheme.colorScheme.onSurface)) {
                         val restoreFocus = timelineFocused
                         // Material's drag otherwise follows replaced callbacks into a new timeline.
-                        key(state.sessionGeneration, state.timelineGeneration, state.assetKey, state.episodeId) {
+                        key(seekPreview) {
                             LaunchedEffect(timelineFocus) {
-                                if (restoreFocus) {
+                                if (restoreFocus && editOpen) {
                                     withFrameNanos { }
-                                    timelineFocus.requestFocus()
+                                    if (editOpen && window.isWindowFocused) timelineFocus.requestFocus()
                                 }
                             }
                             AnimeTimelineSlot(desktop, duration, Modifier.weight(1f)) { track ->
-                                MotionSlider(value = (scrub ?: current.positionMs).toFloat(),
-                                    onValueChange = {
-                                        if (state.owns(player.state.value)) { onHoldControls(true); scrub = it.toLong() }
+                                MotionSlider(value = position.toFloat(), enabled = timelineInteractive,
+                                    onValueChange = { requested ->
+                                        val live = player.state.value
+                                        if (editOpen && window.isWindowFocused && state.owns(live) &&
+                                            !live.inPictureInPicture && live.durationMs > 0L) {
+                                            val origin = seekPreview.value?.originMs ?: live.positionMs
+                                            seekPreview.value = AnimeSeekPreview(origin, requested.toLong().coerceIn(0L, live.durationMs))
+                                        }
                                     },
                                     valueRange = 0f..duration.toFloat(),
                                     bufferedRange = bufferedRange, trackOutline = trackOutline,
+                                    showValueBubble = false,
                                     onValueChangeFinished = {
-                                        val requested = scrub
-                                        val live = player.state.value
-                                        if (requested != null && state.owns(live) && live.durationMs > 0L &&
-                                            (live.phase == AnimePlayerPhase.READY || live.ended)) {
-                                            onSeekTo(live, requested.coerceIn(0L, live.durationMs))
-                                        } else onInteraction()
-                                        scrub = null
-                                        onHoldControls(false)
+                                        if (editOpen) {
+                                            val requested = seekPreview.value
+                                            val live = player.state.value
+                                            seekPreview.value = null
+                                            if (requested != null && window.isWindowFocused && state.owns(live) &&
+                                                !live.inPictureInPicture && live.durationMs > 0L &&
+                                                (live.phase == AnimePlayerPhase.READY || live.ended)) {
+                                                onSeekTo(live, requested.positionMs.coerceIn(0L, live.durationMs))
+                                            } else if (window.isWindowFocused) onInteraction()
+                                        }
                                     },
                                     formatValue = { animeTime(it.toLong()) },
                                     modifier = track.focusRequester(timelineFocus)

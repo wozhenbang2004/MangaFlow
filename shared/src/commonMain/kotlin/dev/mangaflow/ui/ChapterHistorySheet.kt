@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.PlayArrow
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -138,7 +139,8 @@ internal fun ChapterHistorySheet(manga: Manga, library: LibraryStore,
 
 @Composable
 internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
-    onContinue: (ReadingProgress) -> Unit, onBack: (() -> Unit)? = null, embedded: Boolean = false) {
+    onContinue: (ReadingProgress) -> Unit, onBack: (() -> Unit)? = null, embedded: Boolean = false,
+    onClose: (() -> Unit)? = null) {
     val context = LocalContext.current.applicationContext
     val revision by library.chapterHistoryRevision.collectAsStateWithLifecycle()
     var records by remember(manga.id) { mutableStateOf<List<ChapterHistoryRow>?>(null) }
@@ -205,6 +207,9 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
             }
             records?.let { Text(it.size.toString(), color = secondary, style = mangaMetricValueStyle(),
                 modifier = Modifier.padding(start = 8.dp)) }
+            if (onClose != null) MotionIconButton(onClick = onClose, modifier = Modifier.size(44.dp), tooltip = "关闭最近阅读") {
+                Icon(Icons.Outlined.Close, "关闭最近阅读", Modifier.size(18.dp))
+            }
         }
         val list = androidx.compose.runtime.key(manga.id) { rememberLazyListState() }
         BoxWithConstraints(Modifier.fillMaxWidth()) {

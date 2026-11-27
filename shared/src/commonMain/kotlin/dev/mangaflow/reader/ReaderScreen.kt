@@ -74,6 +74,8 @@ import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -215,6 +217,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
@@ -1764,18 +1768,20 @@ fun ReaderScreen(
                                     }
                                 },
                                 onOpenNavigator = ::openPageNavigator,
-                                onInteractionChanged = { progressInteracting = it; if (!it) keyboardFocusRestore++ },
+                                onInteractionChanged = { engaged ->
+                                    progressInteracting = engaged
+                                    if (desktop && !engaged) keyboardFocusRestore++
+                                },
                                 statusContent = if (statusPlacement == ReaderStatusPlacement.BOTTOM) statusButton else null,
                                 pageControls = { counter ->
-                                    if (wideReaderChrome && preferences.panelEngine == PanelEngine.OFF) {
-                                        val mayTurn = readerToolsVisible && keyboardTurnOwned && readingEligible
-                                        ReaderPageStepButtons(
-                                            forwardOnLeft = preferences.mode != ReadingMode.VERTICAL && preferences.swipeRightForNext(desktop = true),
-                                            previousEnabled = mayTurn && (currentSpread?.first ?: pageIndex) > 0,
-                                            nextEnabled = mayTurn && (currentSpread?.last ?: pageIndex) < pages.lastIndex,
-                                            counter = counter,
-                                        ) { action -> requestTurn(action) }
-                                    } else counter()
+                                    val mayTurn = readerToolsVisible && keyboardTurnOwned && readingEligible
+                                    ReaderPageStepButtons(
+                                        showSteps = wideReaderChrome && preferences.panelEngine == PanelEngine.OFF,
+                                        forwardOnLeft = preferences.mode != ReadingMode.VERTICAL && preferences.swipeRightForNext(desktop = true),
+                                        previousEnabled = mayTurn && (currentSpread?.first ?: pageIndex) > 0,
+                                        nextEnabled = mayTurn && (currentSpread?.last ?: pageIndex) < pages.lastIndex,
+                                        counter = counter,
+                                    ) { action -> requestTurn(action) }
                                 },
                                 sourceContent = {
                                     if (canChooseSource || sourceLoading) Box(
@@ -1803,21 +1809,21 @@ fun ReaderScreen(
                         if (pages.isEmpty() && statusPlacement == ReaderStatusPlacement.BOTTOM) {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { statusButton() }
                         }
-                    }, actions = { stacked ->
+                    }, actions = {
                         BoxWithConstraints(Modifier.fillMaxWidth()) {
                             val canCorrectSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage &&
                                 preferences.mode in setOf(ReadingMode.RIGHT_TO_LEFT, ReadingMode.LEFT_TO_RIGHT)
-                            // Keep download in the final slot; disclose only actions that need overflow.
-                            val reserveSecondarySlot = desktop || maxWidth < 264.dp || canCorrectSpread ||
+                            val buttonSlots = with(LocalDensity.current) {
+                                constraints.maxWidth / ReaderDockActionSize.roundToPx().coerceAtLeast(1)
+                            }
+                            val reserveSecondarySlot = desktop || buttonSlots < 6 || canCorrectSpread ||
                                 returnLocation != null || (canChooseSource && pages.isEmpty())
                             val finalSlots = if (reserveSecondarySlot) 2 else 1
-                            val inlineChapterNavigation = (!desktop || stacked) &&
-                                maxWidth >= (((if (desktop) 2 else 3) + finalSlots) * 44).dp
-                            val inlineCatalog = !desktop && maxWidth >= ((1 + finalSlots) * 44).dp
-                            val chapterSlots = if (inlineChapterNavigation) (if (desktop) 2 else 3)
-                                else if (inlineCatalog) 1 else 0
-                            val extraSlots = ((maxWidth.value - (chapterSlots + finalSlots) * 44f) / 44f)
-                                .toInt().coerceIn(0, 2)
+                            val chapterGroupSlots = if (desktop) 2 else 3
+                            val inlineChapterNavigation = buttonSlots >= chapterGroupSlots + finalSlots
+                            val inlineCatalog = !desktop && buttonSlots >= 1 + finalSlots
+                            val chapterSlots = if (inlineChapterNavigation) chapterGroupSlots else if (inlineCatalog) 1 else 0
+                            val extraSlots = (buttonSlots - chapterSlots - finalSlots).coerceIn(0, 2)
                             val inlinePicture = extraSlots >= 1
                             val inlineComments = extraSlots >= 2
                             val pictureLabel = if (currentPictureCollected) "取消画面收藏"
@@ -1829,6 +1835,10 @@ fun ReaderScreen(
                             val openPrevious: () -> Unit = {
                                 openPreviousChapter?.invoke()
                             }
+                            val canChangeChapter = active && !leavingReader && !sourcePickerBlocking &&
+                                !chapterChangeRequested && chapterId == chapter.id
+                            val canGoPrevious = canChangeChapter && openPreviousChapter != null
+                            val canGoNext = canChangeChapter && openNextChapter != null
                             val commentsLabel = when {
                                 privateDiscussion != null -> "本话私有讨论"
                                 commentsAvailable -> "本章评论"
@@ -1891,27 +1901,26 @@ fun ReaderScreen(
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 if (inlineChapterNavigation) ReaderIcon(
                                     if (desktop) Icons.Outlined.SkipPrevious else Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "上一章",
-                                    enabled = chapterIndex > 0, interactive = readerToolsVisible,
-                                    buttonSize = 44.dp, onClick = openPrevious)
+                                    enabled = canGoPrevious, interactive = readerToolsVisible,
+                                    buttonSize = ReaderDockActionSize, onClick = openPrevious)
                                 if (inlineCatalog) ReaderIcon(
                                     Icons.AutoMirrored.Outlined.MenuBook, "章节目录", interactive = readerToolsVisible,
-                                    buttonSize = 44.dp, onClick = ::toggleReaderChapters)
+                                    buttonSize = ReaderDockActionSize, onClick = ::toggleReaderChapters)
                                 if (inlineChapterNavigation) ReaderIcon(
                                     if (desktop) Icons.Outlined.SkipNext else Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
-                                    enabled = openNextChapter != null && !chapterChangeRequested,
-                                    interactive = readerToolsVisible, buttonSize = 44.dp,
+                                    enabled = canGoNext, interactive = readerToolsVisible, buttonSize = ReaderDockActionSize,
                                     onClick = { openNextChapter?.invoke() })
                                 Spacer(Modifier.weight(1f))
                                 if (inlinePicture) ReaderIcon(
                                     pictureIcon, pictureLabel, enabled = currentPicture != null,
-                                    interactive = readerToolsVisible, buttonSize = 44.dp, onClick = toggleCurrentPicture)
+                                    interactive = readerToolsVisible, buttonSize = ReaderDockActionSize, onClick = toggleCurrentPicture)
                                 if (inlineComments) ReaderIcon(
                                     Icons.Outlined.Forum, commentsLabel, enabled = pages.isNotEmpty() && commentsAvailable,
-                                    interactive = readerToolsVisible, buttonSize = 44.dp, onClick = { showComments = true })
+                                    interactive = readerToolsVisible, buttonSize = ReaderDockActionSize, onClick = { showComments = true })
                                 key(chapterId) {
                                     Box {
                                         if (secondaryActions) ReaderIcon(Icons.Outlined.MoreHoriz, "其他阅读操作", interactive = readerToolsVisible,
-                                            buttonSize = 44.dp) { showReaderActions = !showReaderActions }
+                                            buttonSize = ReaderDockActionSize) { showReaderActions = !showReaderActions }
                                         CompactGlassPopover(
                                             visible = secondaryActions && showReaderActions && readerToolsVisible && active && !leavingReader,
                                             backdrop = readerBackdrop, aboveAnchor = true,
@@ -1941,7 +1950,7 @@ fun ReaderScreen(
                                             }
                                             if (!inlineChapterNavigation) {
                                                 CompactMenuAction(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "上一章",
-                                                    enabled = showReaderActions && chapterIndex > 0) {
+                                                    enabled = showReaderActions && canGoPrevious) {
                                                     showReaderActions = false
                                                     openPrevious()
                                                 }
@@ -1953,7 +1962,7 @@ fun ReaderScreen(
                                             }
                                             if (!inlineChapterNavigation) {
                                                 CompactMenuAction(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
-                                                    enabled = showReaderActions && openNextChapter != null && !chapterChangeRequested) {
+                                                    enabled = showReaderActions && canGoNext) {
                                                     showReaderActions = false
                                                     openNextChapter?.invoke()
                                                 }
@@ -4688,16 +4697,17 @@ private enum class ReaderInspector(val label: String, val description: String) {
 }
 
 @Composable
-private fun ReaderPageStepButtons(forwardOnLeft: Boolean, previousEnabled: Boolean, nextEnabled: Boolean,
+private fun ReaderPageStepButtons(showSteps: Boolean, forwardOnLeft: Boolean, previousEnabled: Boolean, nextEnabled: Boolean,
     counter: @Composable () -> Unit, onTurn: (ReaderKeyboardAction) -> Unit) {
     val step: @Composable (Boolean, ImageVector) -> Unit = { forward, icon ->
         ReaderIcon(icon, if (forward) "下一页" else "上一页", enabled = if (forward) nextEnabled else previousEnabled,
             buttonSize = 36.dp) { onTurn(if (forward) ReaderKeyboardAction.NEXT_PAGE else ReaderKeyboardAction.PREVIOUS_PAGE) }
     }
+    val forwardAtStart = if (LocalLayoutDirection.current == LayoutDirection.Ltr) forwardOnLeft else !forwardOnLeft
     Row(verticalAlignment = Alignment.CenterVertically) {
-        step(forwardOnLeft, Icons.AutoMirrored.Rounded.KeyboardArrowLeft)
+        if (showSteps) step(forwardAtStart, Icons.AutoMirrored.Rounded.KeyboardArrowLeft)
         counter()
-        step(!forwardOnLeft, Icons.AutoMirrored.Rounded.KeyboardArrowRight)
+        if (showSteps) step(!forwardAtStart, Icons.AutoMirrored.Rounded.KeyboardArrowRight)
     }
 }
 
@@ -4735,62 +4745,19 @@ private fun ReaderPageNavigatorDialog(
             Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp)) {
                 if (embedded) Spacer(Modifier.height(10.dp))
                 else ReaderPanelHeading(if (desktop) "书页" else "页导航", "关闭页导航", onDismiss)
-                val grid = rememberLazyGridState(initialFirstVisibleItemIndex =
-                    if (desktop && pages.isNotEmpty()) currentPage.coerceIn(pages.indices) else 0)
-                if (desktop && pages.isNotEmpty()) {
-                    var input by remember(pages, visible) { mutableStateOf("") }
-                    val destination = input.toIntOrNull()?.takeIf { it in 1..pages.size }?.minus(1)
-                    val numberFocus = remember { FocusRequester() }
-                    val navigationScope = rememberCoroutineScope()
-                    LaunchedEffect(visible, focusRequest) {
-                        if (visible) {
-                            withFrameNanos { }
-                            numberFocus.requestFocus()
-                        }
-                    }
-                    val go: () -> Unit = {
-                        if (visible && destination != null) {
-                            onSelect(destination)
-                            if (embedded) navigationScope.launch { grid.scrollToItem(destination) }
-                            input = ""
-                        }
-                    }
-                    // Keep the same editor and focus target while resizing moves the actions to a second row.
-                    Layout(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), content = {
-                        OutlinedTextField(value = input, onValueChange = { value ->
-                            input = value.trim().take(12)
-                        }, modifier = Modifier.focusRequester(numberFocus).onPreviewKeyEvent { event ->
-                            if (event.key == Key.Enter || event.key == Key.NumPadEnter) {
-                                if (event.type == KeyEventType.KeyDown) go()
-                                true
-                            } else false
-                        }, singleLine = true, isError = input.isNotEmpty() && destination == null,
-                            label = { Text(if (input.isNotEmpty() && destination == null) "请输入 1–${pages.size} 的页码" else "跳到页码") },
-                            placeholder = { Text("${currentPage + 1} / ${pages.size}") },
-                            textStyle = MaterialTheme.typography.bodyMedium, shape = RoundedCornerShape(12.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            TextButton(onClick = go, enabled = visible && destination != null) { Text("前往") }
-                            ReaderIcon(Icons.Outlined.MyLocation, "在缩略图中定位当前页", enabled = visible, buttonSize = 38.dp) {
-                                navigationScope.launch { grid.scrollToItem(currentPage.coerceIn(pages.indices)) }
-                            }
-                        }
-                    }) { children, bounds ->
-                        val loose = bounds.copy(minWidth = 0, minHeight = 0)
-                        val actions = children[1].measure(loose)
-                        val beside = bounds.maxWidth - actions.width - 6.dp.roundToPx()
-                        val inline = beside >= (150.dp * fontScale.coerceAtLeast(1f)).roundToPx()
-                        val fieldWidth = if (inline) beside else bounds.maxWidth
-                        val field = children[0].measure(loose.copy(minWidth = fieldWidth, maxWidth = fieldWidth,
-                            maxHeight = if (inline) bounds.maxHeight else (bounds.maxHeight - actions.height).coerceAtLeast(0)))
-                        val height = (if (inline) maxOf(field.height, actions.height) else field.height + actions.height)
-                            .coerceIn(bounds.minHeight, bounds.maxHeight)
-                        layout(bounds.maxWidth, height) {
-                            field.placeRelative(0, if (inline) (height - field.height) / 2 else 0)
-                            actions.placeRelative(bounds.maxWidth - actions.width,
-                                if (inline) (height - actions.height) / 2 else field.height)
-                        }
-                    }
+                val currentIndex = currentPage.coerceIn(0, pages.lastIndex.coerceAtLeast(0))
+                val grid = rememberLazyGridState(initialFirstVisibleItemIndex = currentIndex)
+                LaunchedEffect(visible, focusRequest, sourceId, pages.isNotEmpty()) {
+                    if (visible && pages.isNotEmpty()) grid.requestScrollToItem(currentIndex)
                 }
+                val jumpControl: @Composable () -> Unit = {
+                    if (pages.isNotEmpty()) ReaderPageJump(visible, desktop, focusRequest, currentIndex, pages.size,
+                        onJump = { destination ->
+                            onSelect(destination)
+                            if (embedded) grid.requestScrollToItem(destination)
+                        }, onLocateCurrent = { grid.requestScrollToItem(currentIndex) })
+                }
+                if (desktop) jumpControl()
                 pageInformation()
                 Box(Modifier.fillMaxWidth().weight(1f, fill = embedded)) {
                     LazyVerticalGrid(
@@ -4803,8 +4770,8 @@ private fun ReaderPageNavigatorDialog(
                     ) {
                         items(pages, key = { it.index }) { page ->
                             val selected = page.index == currentPage
-                            var preview by remember(page) { mutableStateOf<Page?>(null) }
-                            LaunchedEffect(page, visible, resolvePage) {
+                            var preview by remember(page, sourceId, resolvePage) { mutableStateOf<Page?>(null) }
+                            LaunchedEffect(page, sourceId, visible, resolvePage) {
                                 if (!visible) return@LaunchedEffect
                                 try { preview = resolvePage(page, null) }
                                 catch (cancel: CancellationException) { throw cancel }
@@ -4820,9 +4787,9 @@ private fun ReaderPageNavigatorDialog(
                             val cell = if (pointer != null) Modifier.hoverable(pointer)
                                 .onFocusChanged { focused = it.hasFocus }.focusGroup() else Modifier
                             Column(cell.clip(RoundedCornerShape(8.dp))
-                                .then(if (desktop && selected) Modifier.background(colors.primary.copy(alpha = .10f)) else Modifier)
+                                .then(if (selected) Modifier.background(colors.primary.copy(alpha = .10f)) else Modifier)
                                 .selectable(selected, enabled = visible, role = Role.RadioButton, onClick = { onSelect(page.index) })
-                                .then(if (desktop) Modifier.padding(3.dp) else Modifier)) {
+                                .padding(3.dp)) {
                                 Box(Modifier.fillMaxWidth().aspectRatio(.7f)
                                     .clip(RoundedCornerShape(8.dp)).background(colors.surfaceVariant)) {
                                     AsyncImage(
@@ -4845,7 +4812,7 @@ private fun ReaderPageNavigatorDialog(
                                 }
                                 Row(Modifier.padding(start = 2.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                                    if (selected) Spacer(Modifier.size(12.dp, 3.dp).background(colors.primary, CircleShape))
+                                    if (selected) Icon(Icons.Rounded.Check, "当前阅读页", Modifier.size(14.dp), tint = colors.primary)
                                     Text("${page.index + 1}", fontFamily = mangaFontFamily(MangaFontScene.NUMBERS),
                                         fontSize = 13.sp, lineHeight = 17.sp,
                                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
@@ -4858,11 +4825,78 @@ private fun ReaderPageNavigatorDialog(
                         DesktopVerticalScrollbar(grid, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                     }
                 }
+                if (platformKind == PlatformKind.ANDROID) jumpControl()
             }
         }
     }
     if (embedded) panel() else MotionDialog(visible = visible, onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)) { panel() }
+}
+
+@Composable
+private fun ReaderPageJump(
+    visible: Boolean, desktop: Boolean, focusRequest: Int, currentIndex: Int, pageCount: Int,
+    onJump: (Int) -> Unit, onLocateCurrent: () -> Unit,
+) {
+    var input by remember(visible) { mutableStateOf("") }
+    val destination = input.toIntOrNull()?.takeIf { it in 1..pageCount }?.minus(1)
+    val numberFocus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focus = LocalFocusManager.current
+    LaunchedEffect(visible, focusRequest) {
+        if (desktop && visible) {
+            withFrameNanos { }
+            numberFocus.requestFocus()
+        }
+    }
+    val go: () -> Unit = {
+        if (visible && destination != null) {
+            input = ""
+            if (!desktop) keyboard?.hide()
+            onJump(destination)
+        }
+    }
+    val enter = if (desktop) Modifier.onPreviewKeyEvent { event ->
+        if (event.key != Key.Enter && event.key != Key.NumPadEnter) false
+        else {
+            if (event.type == KeyEventType.KeyUp) go()
+            true
+        }
+    } else Modifier
+    val invalid = input.isNotEmpty() && destination == null
+    // Retain the editing session when a narrow inspector or large text moves the actions below it.
+    Layout(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), content = {
+        OutlinedTextField(value = input, onValueChange = { input = it.trim().take(12) },
+            modifier = Modifier.focusRequester(numberFocus).then(enter), enabled = visible, singleLine = true, isError = invalid,
+            label = { Text(if (invalid) "页码范围 1–$pageCount" else "跳到页码", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            placeholder = { Text("${currentIndex + 1} / $pageCount") }, textStyle = MaterialTheme.typography.bodyMedium,
+            shape = RoundedCornerShape(12.dp), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Go),
+            keyboardActions = KeyboardActions(onGo = { go() }))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = go, enabled = visible && destination != null) { Text("前往") }
+            ReaderIcon(Icons.Outlined.MyLocation, "在缩略图中定位当前页", enabled = visible, buttonSize = if (desktop) 38.dp else 48.dp) {
+                if (!desktop) {
+                    focus.clearFocus()
+                    keyboard?.hide()
+                }
+                onLocateCurrent()
+            }
+        }
+    }) { children, bounds ->
+        val loose = bounds.copy(minWidth = 0, minHeight = 0)
+        val actions = children[1].measure(loose)
+        val beside = bounds.maxWidth - actions.width - 6.dp.roundToPx()
+        val inline = beside >= (150.dp * fontScale.coerceAtLeast(1f)).roundToPx()
+        val fieldWidth = if (inline) beside else bounds.maxWidth
+        val field = children[0].measure(loose.copy(minWidth = fieldWidth, maxWidth = fieldWidth,
+            maxHeight = if (inline) bounds.maxHeight else (bounds.maxHeight - actions.height).coerceAtLeast(0)))
+        val height = (if (inline) maxOf(field.height, actions.height) else field.height + actions.height)
+            .coerceIn(bounds.minHeight, bounds.maxHeight)
+        layout(bounds.maxWidth, height) {
+            field.placeRelative(0, if (inline) (height - field.height) / 2 else 0)
+            actions.placeRelative(bounds.maxWidth - actions.width, if (inline) (height - actions.height) / 2 else field.height)
+        }
+    }
 }
 
 @Composable
@@ -4910,16 +4944,17 @@ private fun ReaderProgressSlider(
     val labelWidth = (with(LocalDensity.current) { labelPixels.toDp() } + 12.dp)
         .coerceIn(48.dp, (LocalMangaWindow.current.width * .35f).coerceAtLeast(48.dp))
 
-    LaunchedEffect(pressed, dragged, enabled) {
-        interactionChanged(enabled && (pressed || dragged))
-        if (!enabled) preview = null
+    val engaged = enabled && (pressed || dragged)
+    DisposableEffect(engaged) {
+        if (engaged) interactionChanged(true)
+        onDispose { if (engaged) interactionChanged(false) }
     }
+    LaunchedEffect(enabled) { if (!enabled) preview = null }
     LaunchedEffect(interactions) {
         interactions.interactions.collect { interaction ->
             if (interaction is DragInteraction.Cancel) preview = null
         }
     }
-    DisposableEffect(interactions) { onDispose { interactionChanged(false) } }
 
     val counter: @Composable () -> Unit = {
         val counterInteraction = remember { MutableInteractionSource() }
@@ -5346,7 +5381,7 @@ private fun ReaderDownloadAction(
     }
     val actionFinished = LocalReaderActionFinished.current
     MotionIconButton({ onClick(); actionFinished() }, enabled = enabled && interactive,
-        modifier = Modifier.size(44.dp), tooltip = label) {
+        modifier = Modifier.size(ReaderDockActionSize), tooltip = label) {
         key(chapterId) {
             CompactDownloadIcon(state, progress = if (submitting) null else progress,
                 contentDescription = label,
@@ -5358,7 +5393,8 @@ private fun ReaderDownloadAction(
 @Composable
 private fun ReaderIcon(icon: ImageVector, label: String, enabled: Boolean = true, interactive: Boolean = true,
     emphasis: Float = .82f, buttonSize: Dp = 48.dp, onClick: () -> Unit) {
-    val tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) emphasis else .25f)
+    // MotionIconButton supplies the disabled opacity for the entire glyph.
+    val tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled && interactive) emphasis else 1f)
     val actionFinished = LocalReaderActionFinished.current
     MotionIconButton(onClick = { onClick(); actionFinished() }, enabled = enabled && interactive,
         modifier = Modifier.size(buttonSize), tooltip = label) {

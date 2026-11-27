@@ -65,7 +65,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -79,7 +78,6 @@ import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -164,14 +162,12 @@ import dev.mangaflow.data.DiscoveryMode
 import dev.mangaflow.data.RankPeriod
 import dev.mangaflow.data.RankAudience
 import dev.mangaflow.storage.ReadingProgress
-import dev.mangaflow.storage.LibraryStore
 import androidx.compose.material.icons.outlined.History
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.LocalPlatformAccessibilityPreferences
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
-import dev.mangaflow.ui.motion.HistoryActionIcon
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.data.MangaTag
 import dev.mangaflow.data.SearchTarget
@@ -2068,7 +2064,7 @@ internal fun ContinueRow(
         else Modifier.background(androidx.compose.ui.graphics.Brush.horizontalGradient(tones), RoundedCornerShape(17.dp))
     } else Modifier
     Row(Modifier.fillMaxWidth()
-        .combinedClickable(interactionSource = interaction, indication = null,
+        .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = "继续阅读", onClick = { onContinue(progress) },
             onLongClickLabel = if (onManage != null) "管理阅读记录" else null,
             onLongClick = onManage)
@@ -2121,97 +2117,6 @@ internal fun ContinueRow(
             tooltip = if (namedHistory) "${progress.manga.title}的章节记录" else "章节阅读记录") {
             Icon(Icons.Outlined.History, "章节阅读记录", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
-@Composable
-internal fun RecentReadingSheet(
-    history: List<ReadingProgress>,
-    repository: MangaRepository,
-    library: LibraryStore,
-    onDismiss: () -> Unit,
-    onContinue: (ReadingProgress) -> Unit,
-    onRemoveHistory: (String) -> Unit,
-    backdrop: HazeState? = null,
-) {
-    var chapterManga by remember { mutableStateOf<Manga?>(null) }
-    var desktopHistoryBook by rememberSaveable { mutableStateOf<String?>(null) }
-    val recentPosition = rememberLazyListState()
-    val motion = LocalMotionEnabled.current
-    val snackbar = remember { androidx.compose.material3.SnackbarHostState() }
-    val removals = rememberHistoryRemoval(snackbar)
-    val visibleHistory = remember(history, removals.pending) { history.filterNot { it.manga.id in removals.pending } }
-    val recentFeedback = dev.mangaflow.ui.motion.rememberFeelFeedback()
-    MotionBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.background,
-        backdrop = backdrop, desktopCloseButton = true, desktopWidth = 930.dp) { dismiss ->
-        BoxWithConstraints(Modifier.fillMaxWidth().weight(1f, fill = false)) {
-        val split = platformKind == PlatformKind.DESKTOP && maxWidth >= 630.dp * LocalDensity.current.fontScale.coerceAtLeast(1f) &&
-            maxHeight >= 340.dp && visibleHistory.isNotEmpty()
-        if (split) Column(Modifier.fillMaxWidth().height(maxHeight.coerceAtMost(568.dp)).padding(horizontal = 16.dp)) {
-            Text("最近阅读", Modifier.padding(bottom = 10.dp).semantics { heading() },
-                style = MaterialTheme.typography.titleLarge)
-            DesktopReadingHistory(visibleHistory, repository, library, recentPosition, true,
-                onContinue = { onContinue(it); dismiss() }, onRemove = { removals.request(it, onRemoveHistory) },
-                modifier = Modifier.fillMaxSize().padding(bottom = 12.dp), selection = desktopHistoryBook,
-                onSelect = { desktopHistoryBook = it })
-        } else MotionTabContent(selected = chapterManga, modifier = Modifier.fillMaxWidth(),
-            contentKey = { it?.id ?: "recent-books" }, order = { if (it == null) 0 else 1 },
-            fillContent = false, soft = true) { selected ->
-            if (selected != null) ChapterHistoryContent(selected, library,
-                onContinue = { onContinue(it); dismiss() }, onBack = { chapterManga = null })
-            else Column(Modifier.fillMaxWidth()) {
-                Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("最近阅读", style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.semantics { heading() })
-                    Text(visibleHistory.size.toString(), style = mangaMetricValueStyle(),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(), state = recentPosition,
-                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    if (visibleHistory.isEmpty()) item(key = "empty") {
-                        Text("还没有阅读记录", Modifier.padding(horizontal = 4.dp, vertical = 12.dp),
-                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    items(visibleHistory, key = { it.manga.id }) { progress ->
-                        val rowInteraction = remember(progress.manga.id) { MutableInteractionSource() }
-                        SwipeToRemove(onRemove = { removals.request(progress.manga.id, onRemoveHistory) },
-                            label = "删除阅读记录", transparentBackground = true, modifier = Modifier.animateItem(
-                                fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
-                                placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
-                                fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null)) {
-                            Row(Modifier.fillMaxWidth()
-                                .clickable(interactionSource = rowInteraction, indication = null, role = Role.Button,
-                                    onClickLabel = "继续阅读", onClick = { onContinue(progress); dismiss() })
-                                .motionPress(rowInteraction, pressedScale = .985f)
-                                .padding(horizontal = 4.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically) {
-                                MangaCover(progress.manga, repository, Modifier.width(40.dp).height(56.dp).mangaCoverCard(7.dp, shadowRadius = 5.dp))
-                                Column(Modifier.weight(1f).padding(start = 12.dp, end = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Text(progress.manga.title, style = browseTitleStyle(15.sp, 20.sp),
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text(mangaNumberText(recentReadingLocation(progress)),
-                                        fontSize = 12.sp, lineHeight = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
-                                MotionIconButton(onClick = {
-                                    recentFeedback.perform(dev.mangaflow.ui.motion.FeelEvent.Selection)
-                                    chapterManga = progress.manga
-                                }, modifier = Modifier.size(44.dp)) {
-                                    HistoryActionIcon(active = chapterManga?.id == progress.manga.id,
-                                        description = "章节阅读记录", modifier = Modifier.size(19.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        }
-        MangaSnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 12.dp))
     }
 }
 

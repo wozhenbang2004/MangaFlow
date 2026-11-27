@@ -65,6 +65,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -260,23 +261,36 @@ private fun ReaderHeadingCapsule(
     }
 }
 
-/** Give the ruler the flexible column; fold the secondary actions into a separate row only when needed. */
+internal val ReaderDockActionSize = if (platformKind == PlatformKind.ANDROID) 48.dp else 44.dp
+
+/** Keep the ruler and action menu mounted when the dock moves between one and two rows. */
 @Composable
-internal fun ReaderDockGroups(desktop: Boolean, modifier: Modifier, progress: @Composable () -> Unit, actions: @Composable (stacked: Boolean) -> Unit) {
-    val content = modifier.fillMaxWidth().pointerInput(Unit) {}.padding(horizontal = 10.dp, vertical = 4.dp)
-    if (!desktop) {
-        Column(content) { progress(); actions(true) }
-        return
-    }
-    BoxWithConstraints(content) {
-        val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-        if (maxWidth >= 530.dp * scale) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) { progress() }
-                Spacer(Modifier.width(10.dp))
-                Box(Modifier.width(132.dp)) { actions(false) }
-            }
-        } else Column(Modifier.fillMaxWidth()) { progress(); actions(true) }
+internal fun ReaderDockGroups(desktop: Boolean, modifier: Modifier, progress: @Composable () -> Unit, actions: @Composable () -> Unit) {
+    Layout(modifier = modifier.fillMaxWidth().pointerInput(Unit) {}.padding(horizontal = 10.dp, vertical = 4.dp), content = {
+        Box { progress() }
+        Box { actions() }
+    }) { children, bounds ->
+        val width = bounds.maxWidth
+        val actionSize = ReaderDockActionSize.roundToPx().coerceAtLeast(1)
+        val gap = 10.dp.roundToPx()
+        val minRuler = (370.dp * fontScale.coerceAtLeast(1f)).roundToPx()
+        // Two chapter buttons, overflow and download must fit together. Extra space can show
+        // the picture and discussion actions before giving the rest back to the ruler.
+        val slots = ((width - minRuler - gap) / actionSize).coerceIn(0, 6)
+        val inline = desktop && slots >= 4
+        val actionsWidth = if (inline) slots * actionSize else width
+        val rulerWidth = if (inline) width - gap - actionsWidth else width
+        val ruler = children[0].measure(bounds.copy(minWidth = rulerWidth, maxWidth = rulerWidth, minHeight = 0))
+        val actionsHeight = if (inline) bounds.maxHeight else (bounds.maxHeight - ruler.height).coerceAtLeast(0)
+        val actionRow = children[1].measure(bounds.copy(minWidth = actionsWidth, maxWidth = actionsWidth,
+            minHeight = 0, maxHeight = actionsHeight))
+        val height = (if (inline) maxOf(ruler.height, actionRow.height) else ruler.height + actionRow.height)
+            .coerceIn(bounds.minHeight, bounds.maxHeight)
+        layout(width, height) {
+            ruler.placeRelative(0, if (inline) (height - ruler.height) / 2 else 0)
+            actionRow.placeRelative(if (inline) rulerWidth + gap else 0,
+                if (inline) (height - actionRow.height) / 2 else ruler.height)
+        }
     }
 }
 
@@ -302,6 +316,7 @@ internal fun ReaderSeekBar(
     val layoutDirection = LocalLayoutDirection.current
     val lastHoverIndex = (pageCount ?: 0) - 1
     val desktopRuler = platformKind == PlatformKind.DESKTOP && pageCount != null
+    val floatingRulerLabel = desktopRuler || (platformKind == PlatformKind.ANDROID && pageCount != null)
     val canInspect = enabled && desktopRuler && lastHoverIndex > 0
     var hoverIndex by remember(canInspect, lastHoverIndex, layoutDirection) { mutableIntStateOf(-1) }
     var hovering by remember(canInspect, lastHoverIndex, layoutDirection) { mutableStateOf(false) }
@@ -373,7 +388,7 @@ internal fun ReaderSeekBar(
                 }
             }
         }
-        if (desktopRuler) {
+        if (floatingRulerLabel) {
             val revealing by remember(bubbleReveal) { derivedStateOf { bubbleReveal.value > 0f } }
             if (enabled && (bubbleShown || revealing)) {
                 val position = remember(density) { ReaderRulerLabelPosition(with(density) { 4.dp.roundToPx() }) }

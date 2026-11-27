@@ -1132,7 +1132,7 @@ private fun MangaFlowContent(
             desktopSearchRequest++
         }
     }
-    if (recentReadingOpen) {
+    if (recentReadingOpen) androidx.compose.runtime.key(restrictedMode) {
         RecentReadingSheet(ordinaryHistory, model.repository, model.library,
             onDismiss = { recentReadingOpen = false },
             onContinue = { model.continueReading(it) },
@@ -1265,8 +1265,14 @@ private fun MangaFlowContent(
     val desktopForwardAction = desktopForward.takeIf { desktopShortcutsActive && canAdvanceDesktop }
     val desktopNavigation: @Composable (State<Float>, Boolean) -> Unit = { labels, floating ->
         DesktopNavigationPane(labels, contentProfile, desktopDestinations, desktopSections.indexOf(desktopSelection),
-            onSelectProfile = requestProfile, onNavigate = { index ->
+            onSelectProfile = requestProfile, onNavigate = navigate@{ index ->
                 val destination = desktopSections[index]
+                if (destination == pendingSidebarDestination) return@navigate
+                if (destination == desktopSelection && frame is Frame.Root && !destination.experience && !animeOwnsBack) {
+                    if (section == Section.DISCOVER && searchExpanded) desktopBack()
+                    if (floating) drawerAction = DrawerAction(DrawerValue.Closed)
+                    return@navigate
+                }
                 desktopTrail?.cancelReplay()
                 if (destination.experience) {
                     if (floating) drawerAction = DrawerAction(DrawerValue.Closed, openExperience = true)
@@ -2212,14 +2218,21 @@ private fun MangaFlowContent(
                                         .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
                                         .padding(horizontal = 8.dp, vertical = 2.dp))
                             } else if (current.section == Section.DISCOVER && desktop) {
+                                val editSearch: () -> Unit = {
+                                    if (!searchExpanded) {
+                                        browseActions.resumeBrowseSearch()
+                                        searchExpanded = true
+                                    }
+                                }
                                 DesktopDiscoveryHeader(
                                     title = if (restrictedMode) "成人漫画" else "发现漫画",
-                                    searching = desktopSearchContent, tabLabels = discoveryLabels,
+                                    searching = desktopSearchContent, editingSearch = searchVisible, tabLabels = discoveryLabels,
                                     selectedTab = discoveryModes.indexOf(displayedDiscovery.mode).coerceAtLeast(0),
                                     onSelectTab = { index ->
-                                        closeSearch()
+                                        if (searchVisible) closeSearch()
                                         browseActions.selectDiscovery(discoveryModes[index], clearQuery = true)
-                                    }, onLeaveSearch = closeSearch, navigation = navigation,
+                                    }, onEnterSearch = { editSearch(); desktopSearchRequest++ },
+                                    onLeaveSearch = closeSearch, navigation = navigation,
                                     input = { inputModifier ->
                                         DesktopSearchField(
                                             query = browse.query, target = browse.searchTarget,
@@ -2233,11 +2246,11 @@ private fun MangaFlowContent(
                                             },
                                             modifier = inputModifier,
                                             showScopeSelector = true, translationGroupAvailable = !restrictedMode,
-                                            onOpen = { browseActions.resumeBrowseSearch(); searchExpanded = true },
+                                            onOpen = editSearch,
                                             onQuery = browseActions::setQuery,
                                             onSubmit = browseActions::submitSearch,
                                             onTarget = browseActions::setSearchTarget,
-                                            onClear = { browseActions.clearSearch(); searchExpanded = false },
+                                            onClear = browseActions::clearSearch,
                                         )
                                     },
                                     recent = {
@@ -2258,6 +2271,7 @@ private fun MangaFlowContent(
                                     },
                                     modifier = Modifier.align(Alignment.TopCenter)
                                         .onSizeChanged { chromeHeightPx = it.height }
+                                        .motionInputGate(rootActive)
                                         .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top)),
                                 )
                             } else if (current.section == Section.DISCOVER) {

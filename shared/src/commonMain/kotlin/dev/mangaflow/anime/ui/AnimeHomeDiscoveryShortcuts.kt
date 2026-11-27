@@ -16,11 +16,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
 import dev.mangaflow.anime.AnimeDiscoveryFeed
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.platform.localDateAt
@@ -42,20 +45,31 @@ internal fun AnimeHomeDiscoveryShortcuts(calendar: AnimeDiscoveryFeed?, today: L
             work.airWeekday == weekday || (work.airWeekday == null && calendar?.query?.weekday == weekday)
         }.distinctBy { it.key }
         when {
-            todayItems.size == 1 -> todayItems.first().title
+            todayItems.size == 1 -> "今日 · ${todayItems.first().title}"
             todayItems.size > 1 -> "今日放送 · ${todayItems.size} 部"
-            else -> "按周或季度查看"
+            else -> "周历与季度"
         }
     }
-    BoxWithConstraints(Modifier.fillMaxWidth().padding(bottom = 5.dp)
-        .background(MaterialTheme.colorScheme.surfaceContainerLow, RoundedCornerShape(16.dp))) {
+    val colors = MaterialTheme.colorScheme
+    val accessibility = LocalGlassAccessibilitySettings.current
+    val solid = accessibility.increaseContrast || accessibility.reduceTransparency
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
         val links: @Composable (Modifier) -> Unit = { item ->
-            onSchedule?.let { AnimeHomeShortcut("放送", scheduleCaption, Icons.Outlined.CalendarMonth, item, active, it) }
-            onRanking?.let { AnimeHomeShortcut("榜单", "热门 · 高分", Icons.Outlined.Leaderboard, item, active, it) }
+            val surface = if (solid) item.background(colors.surface, RoundedCornerShape(14.dp)) else item
+            onSchedule?.let {
+                AnimeHomeShortcut("放送", scheduleCaption, Icons.Outlined.CalendarMonth,
+                    if (solid) colors.onPrimaryContainer else colors.primary,
+                    if (solid) colors.primaryContainer else colors.primary.copy(alpha = .11f), surface, active, it)
+            }
+            onRanking?.let {
+                AnimeHomeShortcut("榜单", "热门 · 高分", Icons.Outlined.Leaderboard,
+                    if (solid) colors.onTertiaryContainer else colors.tertiary,
+                    if (solid) colors.tertiaryContainer else colors.tertiary.copy(alpha = .11f), surface, active, it)
+            }
         }
-        if (onSchedule != null && onRanking != null && maxWidth < 265.dp * LocalDensity.current.fontScale) {
+        if (onSchedule != null && onRanking != null && maxWidth < 255.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)) {
             Column(Modifier.fillMaxWidth()) { links(Modifier.fillMaxWidth()) }
-        } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             links(Modifier.weight(1f))
         }
     }
@@ -63,21 +77,22 @@ internal fun AnimeHomeDiscoveryShortcuts(calendar: AnimeDiscoveryFeed?, today: L
 
 @Composable
 private fun AnimeHomeShortcut(title: String, supporting: String, icon: ImageVector,
-    modifier: Modifier, active: Boolean, onClick: () -> Unit) {
+    ink: Color, tile: Color, modifier: Modifier, active: Boolean, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
-    val shape = RoundedCornerShape(16.dp)
-    Row(modifier.motionPress(interaction, enabled = active, pressedScale = .985f)
-        .clip(shape)
+    Row(modifier.clip(RoundedCornerShape(14.dp))
         .clickable(interactionSource = interaction, indication = null, enabled = active, role = Role.Button,
             onClickLabel = "查看$title", onClick = onClick)
-        .heightIn(min = 56.dp).padding(start = 11.dp, end = 6.dp, top = 7.dp, bottom = 7.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Icon(icon, null, Modifier.size(18.dp), tint = colors.primary)
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.labelLarge, color = colors.onSurface)
+        .motionPress(interaction, enabled = active, pressedScale = .985f)
+        .heightIn(min = 54.dp).padding(horizontal = 6.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+        Box(Modifier.size(32.dp).background(tile, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+            Icon(icon, null, Modifier.size(19.dp), tint = ink)
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Text(title, style = MaterialTheme.typography.titleSmall, color = colors.onSurface, fontWeight = FontWeight.SemiBold)
             Text(supporting, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
     }
 }

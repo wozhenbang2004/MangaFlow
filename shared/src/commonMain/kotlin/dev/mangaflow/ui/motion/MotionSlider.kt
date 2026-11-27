@@ -110,6 +110,7 @@ internal fun MotionSlider(
     formatValue: (Float) -> String = { ((it * 100f).roundToInt() / 100f).toString() },
     bufferedRange: ClosedFloatingPointRange<Float>? = null,
     trackOutline: Color = Color.Unspecified,
+    showValueBubble: Boolean = true,
 ) {
     require(valueRange.start.isFinite() && valueRange.endInclusive.isFinite() &&
         valueRange.start <= valueRange.endInclusive) { "Slider range must be finite and ordered" }
@@ -131,14 +132,14 @@ internal fun MotionSlider(
     val desktop = platformKind == PlatformKind.DESKTOP
     var adjustmentKeyDown by remember(interaction) { mutableStateOf(false) }
     var keyboardChange by remember(interaction, valueRange) { mutableStateOf<Any?>(null) }
-    if (desktop) LaunchedEffect(keyboardChange, focused, tracking, available) {
+    if (desktop && showValueBubble) LaunchedEffect(keyboardChange, focused, tracking, available) {
         if (!focused || tracking || !available) adjustmentKeyDown = false
         if (keyboardChange != null) {
             if (focused && !tracking && available) delay(900L)
             keyboardChange = null
         }
     }
-    val inspectValue = tracking || (desktop && focused && available && keyboardChange != null)
+    val inspectValue = showValueBubble && (tracking || desktop && focused && available && keyboardChange != null)
     val motion = LocalMotionEnabled.current
     val gesture = updateTransition(inspectValue, label = "slider-contact")
     val lift = gesture.animateFloat(transitionSpec = {
@@ -159,7 +160,7 @@ internal fun MotionSlider(
     var lastLabel by remember(valueRange) { mutableStateOf(label) }
     var lastFraction by remember(valueRange) { mutableFloatStateOf(fraction) }
     if (inspectValue) SideEffect { lastLabel = label; lastFraction = fraction }
-    val follow = if (motion && showValue) animateFloatAsState(if (inspectValue) fraction else lastFraction,
+    val follow = if (motion && (tracking || showValue)) animateFloatAsState(if (tracking || inspectValue) fraction else lastFraction,
         spring(.92f, MangaMotion.NavigationStiffness, visibilityThreshold = .0005f),
         label = "slider-value-follow") else null
     val accessibilityLabel = buffered?.let {
@@ -193,13 +194,13 @@ internal fun MotionSlider(
                     edge = limit
                 } else if (position >= .025f && position <= .975f) edge = 0
             }
-            if (desktop && adjustmentKeyDown && !tracking && next != current) keyboardChange = Any()
+            if (desktop && showValueBubble && adjustmentKeyDown && !tracking && next != current) keyboardChange = Any()
             onValueChange(next)
         },
             valueRange = valueRange, enabled = available,
             onValueChangeFinished = onValueChangeFinished,
             interactionSource = interaction,
-            modifier = Modifier.fillMaxWidth().then(if (!desktop) Modifier else Modifier.onPreviewKeyEvent { event ->
+            modifier = Modifier.fillMaxWidth().then(if (!desktop || !showValueBubble) Modifier else Modifier.onPreviewKeyEvent { event ->
                 adjustmentKeyDown = event.type == KeyEventType.KeyDown && when (event.key) {
                     Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown,
                     Key.MoveHome, Key.MoveEnd, Key.PageUp, Key.PageDown -> true

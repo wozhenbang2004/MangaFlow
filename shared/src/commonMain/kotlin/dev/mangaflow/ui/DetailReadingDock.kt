@@ -111,8 +111,10 @@ internal fun DetailReadingDock(
     val resuming = preferred != null || resume != null
     val actionTitle = if (resuming) "继续阅读" else "开始阅读"
     val percent = detailReadingPercent(displayedResume)
+    val savedPage = displayedResume?.let(::detailReadingPage)
     val subtitle = when {
         preferred != null -> "已采用拷贝章节"
+        savedPage != null && displayedResume != null -> "上次读至第 $savedPage 页，共 ${displayedResume.pageCount} 页"
         resume != null -> percent?.let { "上次读至 $it%" } ?: "继续上次位置"
         firstChapter != null -> ""
         loading -> "正在读取章节"
@@ -125,7 +127,7 @@ internal fun DetailReadingDock(
     DetailActionDock(mangaId, backdrop, DetailDockContent(
         title = if (canRead) actionTitle else subtitle,
         compactTitle = if (!canRead) subtitle else if (resuming) "继续" else "阅读",
-        caption = chapterTitle,
+        caption = if (savedPage != null) "第 $savedPage 页 · $chapterTitle" else chapterTitle,
         description = listOf(actionTitle.takeIf { canRead }.orEmpty(), chapterTitle, subtitle)
             .filter(String::isNotBlank).joinToString("，"),
         fraction = detailReadingFraction(displayedResume), percent = percent,

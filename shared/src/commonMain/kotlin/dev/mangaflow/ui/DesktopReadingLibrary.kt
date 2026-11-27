@@ -48,8 +48,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
-import dev.mangaflow.ui.platform.formatUiDate
-import dev.mangaflow.ui.platform.localDateAt
 import dev.mangaflow.ui.platform.localToday
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReadingProgress
@@ -187,10 +185,9 @@ internal fun DesktopReadingHistory(
     modifier: Modifier, selection: String?, onSelect: (String) -> Unit,
     onDetails: ((Manga) -> Unit)? = null, header: (@Composable () -> Unit)? = null,
 ) {
-    fun bookKey(progress: ReadingProgress) = progress.manga.sourceId + ":" + progress.manga.id
     val positions = remember(history) {
         buildMap<String, Int>(history.size) {
-            history.forEachIndexed { index, record -> put(bookKey(record), index) }
+            history.forEachIndexed { index, record -> put(record.historyBookKey(), index) }
         }
     }
     var previous by remember { mutableStateOf<HistorySelection?>(null, referentialEqualityPolicy()) }
@@ -200,7 +197,7 @@ internal fun DesktopReadingHistory(
     val selectedIndex = if (selection == null) 0
         else positions[selection] ?: retainedIndex ?: previousIndex.coerceAtMost(history.lastIndex)
     val selectedRecord = history.getOrNull(selectedIndex) ?: return
-    val selectedKey = bookKey(selectedRecord)
+    val selectedKey = selectedRecord.historyBookKey()
     // If filtering or removal hid the previous book, compare both books in the old list.
     val direction = when {
         before == null || before.key == selectedKey -> 0
@@ -213,7 +210,7 @@ internal fun DesktopReadingHistory(
     }
     val colors = MaterialTheme.colorScheme
     val today = localToday()
-    val groups = remember(history) { history.groupBy { if (it.updatedAt > 0) localDateAt(it.updatedAt) else null } }
+    val groups = remember(history) { readingHistoryByDay(history) }
     val focus = LocalFocusManager.current
     val motion = LocalMotionEnabled.current
     val placement = if (motion) spring<IntOffset>(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null
@@ -234,18 +231,15 @@ internal fun DesktopReadingHistory(
                 if (header != null) item(key = "history-notice") { header() }
                 groups.forEach { (date, records) ->
                     item(key = "date:$date") {
-                        Text(when (date) {
-                            null -> "早期记录"
-                            today -> "今天"
-                            else -> formatUiDate(date, if (date.year != today.year) "yyyy/M/d" else "M/d")
-                        }, Modifier.animateItem(fadeInSpec = null, placementSpec = placement, fadeOutSpec = null)
+                        Text(readingHistoryDay(date, today), Modifier.animateItem(fadeInSpec = null, placementSpec = placement, fadeOutSpec = null)
                             .padding(start = 10.dp, top = 10.dp, bottom = 7.dp).semantics { heading() },
                             style = MaterialTheme.typography.labelLarge, color = colors.onSurfaceVariant)
                     }
-                    items(records, key = { "work:" + bookKey(it) }) { record ->
-                        val chosen = bookKey(record) == selectedKey
+                    items(records, key = { "work:" + it.historyBookKey() }) { record ->
+                        val chosen = record.historyBookKey() == selectedKey
                         val interaction = remember { MutableInteractionSource() }
-                        val select = { onSelect(bookKey(record)) }
+                        var resumeKey by remember { mutableStateOf<Key?>(null) }
+                        val select = { onSelect(record.historyBookKey()) }
                         val selectionColor = animateColorAsState(
                             if (chosen) colors.primaryContainer else colors.primaryContainer.copy(alpha = 0f),
                             if (motion) tween(MangaMotion.Quick) else snap(), label = "history-row-selection")
@@ -259,11 +253,20 @@ internal fun DesktopReadingHistory(
                                 Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp))
                                     .drawBehind { drawRect(selectionColor.value) }
                                     .semantics { this.selected = chosen }
-                                    .onFocusChanged { if (it.isFocused && active) select() }
+                                    .onFocusChanged { if (it.isFocused && active) select() else resumeKey = null }
                                     .onPreviewKeyEvent { event ->
-                                        if (event.type != KeyEventType.KeyDown || !active) false else when (event.key) {
-                                            Key.DirectionUp -> focus.moveFocus(FocusDirection.Up)
-                                            Key.DirectionDown -> focus.moveFocus(FocusDirection.Down)
+                                        if (!active || event.isCtrlPressed || event.isAltPressed ||
+                                            event.isShiftPressed || event.isMetaPressed) { resumeKey = null; false } else when (event.key) {
+                                            Key.Enter, Key.NumPadEnter -> {
+                                                if (event.type == KeyEventType.KeyDown) resumeKey = event.key
+                                                else if (event.type == KeyEventType.KeyUp && resumeKey == event.key) {
+                                                    resumeKey = null
+                                                    onContinue(record)
+                                                }
+                                                true
+                                            }
+                                            Key.DirectionUp -> event.type == KeyEventType.KeyDown && focus.moveFocus(FocusDirection.Up)
+                                            Key.DirectionDown -> event.type == KeyEventType.KeyDown && focus.moveFocus(FocusDirection.Down)
                                             else -> false
                                         }
                                     }.combinedClickable(enabled = active, interactionSource = interaction, indication = null,

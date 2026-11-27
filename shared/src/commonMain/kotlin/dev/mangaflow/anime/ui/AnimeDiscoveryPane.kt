@@ -12,9 +12,6 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
@@ -35,7 +32,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
@@ -300,81 +296,6 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
         rememberedOptions = { controller.rememberedDiscoveryOptions(AnimeDiscoveryTab.HOME, it) },
         onDismiss = { showFilters = false },
         onConfigure = { controller.configureDiscovery(AnimeDiscoveryTab.HOME, it) })
-}
-
-@Composable
-private fun AnimeDiscoveryWatchShelf(entries: List<AnimeLibraryEntry>, scroll: LazyListState, active: Boolean,
-    onOpenHistory: () -> Unit, continuationLabel: (AnimeLibraryEntry) -> String,
-    onResume: (AnimeLibraryEntry) -> Unit, besideGallery: Boolean) {
-    Column(Modifier.fillMaxWidth()) {
-        AnimeDiscoverySectionHeading("最近观看", "", onMore = onOpenHistory.takeIf { active },
-            moreLabel = "全部观看历史")
-        if (besideGallery) {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                entries.take(2).forEachIndexed { index, entry -> key(entry.subject.id) {
-                    AnimeDiscoveryResumeRow(entry, continuationLabel(entry), active, Modifier.fillMaxWidth(), onResume,
-                        leading = index == 0, compact = index > 0)
-                } }
-            }
-            return@Column
-        }
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            // At narrow widths, let the next real card peek rather than showing a fake second slot.
-            val width = if (entries.size == 1) minOf(maxWidth, 290.dp) else
-                (maxWidth * .61f).coerceIn(184.dp, 258.dp).coerceAtMost((maxWidth - 24.dp).coerceAtLeast(1.dp))
-            LazyRow(Modifier.fillMaxWidth(), state = scroll, userScrollEnabled = active,
-                contentPadding = PaddingValues(top = 2.dp, bottom = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                items(entries, key = { it.subject.id }, contentType = { "watch-history" }) { entry ->
-                    AnimeDiscoveryResumeRow(entry, continuationLabel(entry), active, Modifier.width(width), onResume)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AnimeDiscoveryResumeRow(entry: AnimeLibraryEntry, action: String, active: Boolean,
-    modifier: Modifier, onResume: (AnimeLibraryEntry) -> Unit, leading: Boolean = false, compact: Boolean = false) {
-    val progress = entry.resume ?: return
-    val colors = MaterialTheme.colorScheme
-    val shape = remember { RoundedCornerShape(16.dp) }
-    val interaction = remember(entry.subject.id) { MutableInteractionSource() }
-    Row(modifier
-        .motionPress(interaction, enabled = active, pressedScale = .99f)
-        .clip(shape).background(if (compact) Color.Transparent else colors.surfaceContainerLow)
-        .clickable(interactionSource = interaction, indication = null, enabled = active,
-            role = Role.Button, onClickLabel = action, onClick = { onResume(entry) })
-        .heightIn(min = if (leading) 116.dp else if (compact) 68.dp else 84.dp)
-        .padding(start = if (leading) 10.dp else 6.dp, end = 9.dp, top = 6.dp, bottom = 6.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(if (leading) 13.dp else 9.dp)) {
-        val cover = if (leading) 62.dp else if (compact) 36.dp else 44.dp
-        AnimePoster(entry.subject, Modifier.size(cover, cover * 1.5f).clearAndSetSemantics { })
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(entry.subject.title, style = animeWorkTitleStyle().copy(fontSize = if (leading) 18.sp else 15.sp,
-                lineHeight = if (leading) 23.sp else 20.sp),
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text(animeWatchedEpisodeName(entry, progress), color = colors.onSurfaceVariant,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            // A long episode title must not push the real resume timestamp out of the card.
-            Text(animeWatchPosition(progress), color = colors.onSurfaceVariant,
-                style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (!progress.completed) animeWatchFraction(progress)?.let { fraction ->
-                key(entry.subject.id, progress.episodeId) {
-                    AnimeWatchProgressLine(fraction, Modifier.widthIn(max = 164.dp).padding(top = 2.dp))
-                }
-            }
-            if (leading) Row(Modifier.padding(top = 4.dp).clearAndSetSemantics { },
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp), tint = colors.primary)
-                Text(action, color = colors.primary, style = MaterialTheme.typography.labelLarge,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-        }
-        if (!leading) Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp), tint = colors.primary)
-    }
 }
 
 @Composable

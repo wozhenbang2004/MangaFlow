@@ -24,9 +24,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -42,6 +44,9 @@ internal data class AnimeDownloadSelection(
     val versionId: String? = null,
     val originalOnly: Boolean = false,
 )
+
+private data class AnimeDownloadListItem(val id: String, val subjectId: String, val status: AnimeDownloadStatus,
+    val createdAt: Long)
 
 @Composable
 internal fun AnimeDownloadsPanel(visible: Boolean, controller: AnimeController, state: AnimeScreenState,
@@ -77,13 +82,19 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
     val enhancement by controller.enhancements.state.collectAsStateWithLifecycle()
     var filter by rememberSaveable { mutableIntStateOf(0) }
     var selectedSubjectId by rememberSaveable { mutableStateOf<String?>(null) }
+    var collapsedSubjects by rememberSaveable { mutableStateOf(listOf<String>()) }
     var removing by remember { mutableStateOf<String?>(null) }
     var actionsOpen by remember { mutableStateOf(false) }
     var actionsPresent by remember { mutableStateOf(false) }
     val positions = rememberSaveableStateHolder()
-    val removal = downloads.entries.firstOrNull { it.id == removing }
-    val rows = remember(downloads.entries, filter) {
-        downloads.entries.filter { entry ->
+    val entriesById = remember(downloads.entries) { downloads.entries.associateBy(AnimeDownloadEntry::id) }
+    val removal = removing?.let(entriesById::get)
+    // Byte updates change the visible task, not its position in the directory.
+    val directory = remember(downloads.entries) {
+        downloads.entries.map { AnimeDownloadListItem(it.id, it.subject.id, it.status, it.createdAt) }
+    }
+    val rows = remember(directory, filter) {
+        directory.filter { entry ->
             when (filter) {
                 1 -> entry.status != AnimeDownloadStatus.COMPLETED
                 2 -> entry.status == AnimeDownloadStatus.COMPLETED
@@ -91,7 +102,7 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
             }
         }.sortedByDescending { it.createdAt }
     }
-    val downloadGroups = remember(rows) { rows.groupBy { it.subject.id } }
+    val downloadGroups = remember(rows) { rows.groupBy(AnimeDownloadListItem::subjectId) }
     val selectedWork = selectedSubjectId?.takeIf(downloadGroups::containsKey)
     val versionsByDownload = remember(enhancement.entries) { enhancement.entries.groupBy { it.downloadId } }
     val readyRows = remember(rows) { rows.filter { it.status == AnimeDownloadStatus.COMPLETED } }
@@ -154,7 +165,7 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                         }
                         downloadGroups.forEach { (subjectId, episodes) ->
                             item(key = "work:$subjectId") {
-                                AnimePaneChoice(episodes.first().subject.title, selectedWork == subjectId,
+                                AnimePaneChoice(entriesById.getValue(episodes.first().id).subject.title, selectedWork == subjectId,
                                     { selectedSubjectId = subjectId }, detail = "${episodes.size} 集", enabled = !actionsPresent)
                             }
                         }
@@ -199,26 +210,41 @@ internal fun AnimeDownloadsContent(controller: AnimeController, screen: AnimeScr
                             }
                         }
                         shownGroups.forEach { (subjectId, episodes) ->
+                            val canCollapse = groupId == null && episodes.size > 1
+                            val expanded = !canCollapse || subjectId !in collapsedSubjects
                             item(key = "work:$subjectId") {
-                                Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 3.dp),
+                                val subject = entriesById.getValue(episodes.first().id).subject
+                                val disclosure = if (!canCollapse) Modifier else Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .semantics { stateDescription = if (expanded) "已展开" else "已收起" }
+                                    .clickable(enabled = !actionsPresent, role = Role.Button,
+                                        onClickLabel = if (expanded) "收起${subject.title}的剧集" else "展开${subject.title}的剧集") {
+                                        collapsedSubjects = if (expanded) collapsedSubjects + subjectId else collapsedSubjects - subjectId
+                                    }
+                                Row(Modifier.fillMaxWidth().padding(top = 8.dp).then(disclosure).padding(vertical = 5.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    val subject = episodes.first().subject
                                     AnimePoster(subject, Modifier.size(if (wide) 55.dp else 48.dp, if (wide) 80.dp else 72.dp))
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                                         Text(subject.title, Modifier.semantics { heading() },
                                             style = animeWorkTitleStyle(),
                                             maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                        val readyCount = episodes.count { it.status == AnimeDownloadStatus.COMPLETED }
-                                        AnimeQuietLabel(when (filter) {
+                                        val saved = episodes.count { it.status == AnimeDownloadStatus.COMPLETED }
+                                        val running = episodes.count { it.status == AnimeDownloadStatus.DOWNLOADING }
+                                        val failed = episodes.count { it.status == AnimeDownloadStatus.FAILED }
+                                        AnimeQuietLabel(listOfNotNull(when (filter) {
                                             1 -> "${episodes.size} 集待完成"
-                                            2 -> "${episodes.size} 集可离线"
-                                            else -> "${episodes.size} 集 · $readyCount 集可离线"
-                                        })
+                                            2 -> "$saved 集可离线"
+                                            else -> "$saved / ${episodes.size} 集可离线"
+                                        }, running.takeIf { it > 0 }?.let { "$it 集下载中" },
+                                            failed.takeIf { it > 0 }?.let { "$it 集失败" }).joinToString(" · "))
                                     }
+                                    if (canCollapse) Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                                        null, Modifier.padding(end = 10.dp).size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
-                            items(episodes, key = { "download:${it.id}" }) { entry ->
+                            if (expanded) items(episodes, key = { "download:${it.id}" }, contentType = { "episode" }) { item ->
+                                val entry = entriesById.getValue(item.id)
                                 AnimeDownloadRow(entry, screen, backdrop, onPlay = { onPlay(AnimeDownloadSelection(entry.id)) },
                                     onPause = { controller.pauseDownload(entry.id) }, onResume = { controller.resumeDownload(entry.id) },
                                     onRemove = { removing = entry.id }, versions = versionsByDownload[entry.id].orEmpty(),
@@ -264,6 +290,7 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
         entry.status == AnimeDownloadStatus.FAILED -> "重试下载"
         else -> "继续下载"
     }
+    val episodeLabel = animeEpisodeLabel(entry.episode)
     val interaction = remember(entry.id) { MutableInteractionSource() }
     val shape = RoundedCornerShape(14.dp)
     val titleAction = if (completed) Modifier.motionPress(interaction, !menuPresent)
@@ -277,7 +304,7 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
                 horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f).padding(vertical = 5.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(listOfNotNull(animeEpisodeLabel(entry.episode), animeEpisodeSubtitle(entry.episode)).joinToString(" · "),
+                    Text(listOfNotNull(episodeLabel, animeEpisodeSubtitle(entry.episode)).joinToString(" · "),
                         style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     val source = entry.sourceName.ifBlank { animeSourceName(entry.sourceId, screen) }
                     val status = if (!completed && retired) "原来源已下架" else animeDownloadStatus(entry.status)
@@ -303,16 +330,17 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
                     }
                 }
             }
-            if (!completed && !retired) MotionIconButton(onClick = action, enabled = !menuPresent,
-                modifier = Modifier.size(44.dp), tooltip = actionLabel) {
-                Box(Modifier.size(32.dp).background(colors.surfaceContainerHigh, CircleShape),
-                    contentAlignment = Alignment.Center) {
-                    Icon(when {
-                        active -> Icons.Outlined.Pause
-                        entry.status == AnimeDownloadStatus.FAILED -> Icons.Outlined.Refresh
-                        else -> Icons.Outlined.Download
-                    }, actionLabel, Modifier.size(19.dp), tint = colors.onSurface)
-                }
+            if (!completed && !retired) MotionTextButton(onClick = action, enabled = !menuPresent,
+                modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "$actionLabel · $episodeLabel" },
+                contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Icon(when {
+                    active -> Icons.Outlined.Pause
+                    entry.status == AnimeDownloadStatus.FAILED -> Icons.Outlined.Refresh
+                    else -> Icons.Outlined.PlayArrow
+                }, null, Modifier.size(17.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(if (active) "暂停" else if (entry.status == AnimeDownloadStatus.FAILED) "重试" else "继续",
+                    maxLines = 1)
             }
             Box {
                 MotionIconButton(onClick = { menuPresent = true; menu = true }, enabled = !menuPresent,
@@ -337,18 +365,25 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
             }
         }
         val total = entry.totalBytes?.takeIf { it > 0L }
-        val fraction = total?.let { (entry.downloadedBytes.toFloat() / it).coerceIn(0f, 1f) }
-        if (fraction != null && !completed) AnimeDownloadProgress(fraction, Modifier.padding(end = 7.dp))
+        val files = entry.totalFiles?.takeIf { it > 1 && !completed }
+        val byteFraction = total?.let { (entry.downloadedBytes.toDouble() / it).toFloat().coerceIn(0f, 1f) }
+        val fraction = byteFraction ?: files?.let { (entry.completedFiles.toFloat() / it).coerceIn(0f, 1f) }
         val sizeLabel = if (total != null && !completed) {
             animeDownloadBytes(entry.downloadedBytes) + " / " + animeDownloadBytes(total)
         } else entry.downloadedBytes.takeIf { it > 0L }?.let(::animeDownloadBytes)
         val progressLabel = listOfNotNull(
-            fraction?.takeIf { !completed }?.let { "${(it * 100).toInt()}%" },
+            byteFraction?.takeIf { !completed }?.let { "${(it * 100).toInt()}%" },
             sizeLabel,
-            entry.totalFiles?.takeIf { !completed && it > 1 }?.let { "${entry.completedFiles} / $it 个文件" },
+            files?.let { "${entry.completedFiles} / $it 个文件" },
         ).joinToString(" · ")
         if (progressLabel.isNotBlank()) AnimeQuietLabel(progressLabel, Modifier.padding(end = 8.dp))
-        entry.error?.takeIf { it.isNotBlank() }?.let { AnimeDiscoveryInlineStatus(it, showIssue = true) }
+        if (fraction != null && !completed) key(entry.id, byteFraction != null, total, files) {
+            AnimeDownloadProgress(fraction, if (byteFraction != null) "已接收字节" else "已保存文件",
+                Modifier.padding(end = 7.dp))
+        }
+        entry.error?.takeIf { it.isNotBlank() }?.let {
+            AnimeDiscoveryInlineStatus(it, showIssue = entry.status == AnimeDownloadStatus.FAILED)
+        }
         if (versions.isNotEmpty()) {
             val preparing = versions.count { version ->
                 version.phase == EnhancementTaskPhase.QUEUED || version.phase == EnhancementTaskPhase.WAITING ||
@@ -360,19 +395,27 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
                 else -> "增强版本 · ${versions.size}"
             }
             MotionTextButton(onClick = { versionsExpanded = !versionsExpanded }, enabled = !menuPresent,
-                modifier = Modifier.heightIn(min = 44.dp)) {
+                modifier = Modifier.heightIn(min = 48.dp).semantics {
+                    stateDescription = if (versionsExpanded) "已展开" else "已收起"
+                }) {
                 Icon(if (versionsExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
                     Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text(versionLabel)
             }
         }
-        if (versionsExpanded) versions.forEach { version ->
+        if (versionsExpanded) for (version in versions) key(version.id) {
             var versionMenu by remember(version.id) { mutableStateOf(false) }
             var versionMenuPresent by remember(version.id) { mutableStateOf(false) }
             var removeVersionRequested by remember(version.id) { mutableStateOf(false) }
             var cancelVersionRequested by remember(version.id) { mutableStateOf(false) }
             val working = version.phase in setOf(EnhancementTaskPhase.QUEUED, EnhancementTaskPhase.WAITING, EnhancementTaskPhase.RUNNING)
+            val versionAction = when {
+                version.phase == EnhancementTaskPhase.COMPLETED -> "播放增强版"
+                working -> "暂停增强"
+                version.phase == EnhancementTaskPhase.FAILED -> "重试增强"
+                else -> "继续增强"
+            }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -385,15 +428,15 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
                     when { version.phase == EnhancementTaskPhase.COMPLETED -> onPlayVersion(version.id)
                         working -> onPauseVersion(version.id); else -> onResumeVersion(version.id) }
                 }, enabled = !menuPresent && !versionMenuPresent,
-                    tooltip = when { version.phase == EnhancementTaskPhase.COMPLETED -> "播放增强版"
-                    working -> "暂停增强"; else -> "继续增强" }, modifier = Modifier.size(44.dp)) {
+                    tooltip = versionAction, modifier = Modifier.size(48.dp)) {
                     Icon(when { version.phase == EnhancementTaskPhase.COMPLETED -> Icons.Outlined.PlayArrow
-                        working -> Icons.Outlined.Pause; else -> Icons.Outlined.Refresh }, null, Modifier.size(19.dp))
+                        working -> Icons.Outlined.Pause; else -> Icons.Outlined.Refresh },
+                        "$versionAction · ${version.label}", Modifier.size(19.dp))
                 }
                 Box {
                     MotionIconButton(onClick = { versionMenuPresent = true; versionMenu = true },
-                        enabled = !menuPresent && !versionMenuPresent, tooltip = "管理增强版本", modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Outlined.MoreHoriz, null, Modifier.size(18.dp))
+                        enabled = !menuPresent && !versionMenuPresent, tooltip = "管理增强版本", modifier = Modifier.size(48.dp)) {
+                        Icon(Icons.Outlined.MoreHoriz, "管理增强版本 · ${version.label}", Modifier.size(18.dp))
                     }
                     CompactGlassPopover(versionMenu, backdrop, onDismiss = { versionMenu = false }, onPresenceChange = { present ->
                         versionMenuPresent = present
@@ -413,15 +456,16 @@ private fun AnimeDownloadRow(entry: AnimeDownloadEntry, screen: AnimeScreenState
             val completed = version.progress?.completed
             val enhancedTotal = version.progress?.total?.takeIf { it > 0 }
             if (working && completed != null && enhancedTotal != null) AnimeDownloadProgress(
-                (completed.toDouble() / enhancedTotal).toFloat().coerceIn(0f, 1f))
+                (completed.toDouble() / enhancedTotal).toFloat().coerceIn(0f, 1f), "增强进度")
             version.reason?.let { AnimeQuietLabel(it) }
         }
     }
 }
 
 @Composable
-private fun AnimeDownloadProgress(fraction: Float, modifier: Modifier = Modifier) {
+private fun AnimeDownloadProgress(fraction: Float, label: String, modifier: Modifier = Modifier) {
     AnimeProgressTrack(fraction, modifier.semantics {
+        contentDescription = label
         progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
     })
 }

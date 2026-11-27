@@ -71,6 +71,8 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -199,10 +201,12 @@ internal fun sidebarNavigationRows(headingsByDestination: List<String?>): List<S
 @Composable
 internal fun SidebarGroupLabel(title: String, modifier: Modifier = Modifier, compact: Boolean = false) {
     val ink = MaterialTheme.colorScheme.onSurfaceVariant
-    if (compact) Spacer(modifier.fillMaxWidth().height(13.dp).semantics {
+    if (compact) Box(modifier.fillMaxWidth().height(13.dp).semantics {
         heading()
         contentDescription = title
-    }) else Text(title, modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 12.dp, bottom = 2.dp)
+    }, contentAlignment = Alignment.Center) {
+        Spacer(Modifier.size(18.dp, 1.dp).background(MaterialTheme.colorScheme.outlineVariant))
+    } else Text(title, modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 12.dp, bottom = 2.dp)
         .semantics { heading() }, style = MaterialTheme.typography.labelMedium,
         color = ink, letterSpacing = .45.sp, fontWeight = FontWeight.Medium)
 }
@@ -221,7 +225,7 @@ private fun Modifier.revealDesktopNavigationLabel(progress: State<Float>): Modif
 private fun DesktopNavigationAction(
     title: String, icon: ImageVector, labels: State<Float>, onClick: () -> Unit,
     modifier: Modifier = Modifier, current: Boolean? = null, subtitle: String? = null,
-    shortcut: String? = null, identity: Boolean = false,
+    shortcut: String? = null, identity: Boolean = false, keyboardFocus: Boolean,
 ) {
     val showText by remember(labels) { derivedStateOf { labels.value > .04f } }
     val showShortcut by remember(labels) { derivedStateOf { labels.value > .80f } }
@@ -234,7 +238,7 @@ private fun DesktopNavigationAction(
     Box(modifier.fillMaxWidth().clip(shape)
         .then(if (identity) Modifier.background(if (current == true) colors.primaryContainer else colors.surface) else Modifier)
         .clickable(role = Role.Button, interactionSource = interactions, indication = null, onClick = onClick)
-        .motionPress(interactions).semantics {
+        .motionPress(interactions, showKeyboardFocus = keyboardFocus).semantics {
             contentDescription = hint
             if (current != null) selected = current
         }, contentAlignment = Alignment.CenterStart) {
@@ -264,7 +268,8 @@ private fun DesktopNavigationAction(
                     Modifier.padding(end = 8.dp).revealDesktopNavigationLabel(labels))
             }
         }
-        DesktopIconTooltip(hint.takeIf { !showText || subtitle != null || clippedLabel }, interactions, enabled = true)
+        DesktopIconTooltip(hint.takeIf { !showText || subtitle != null || clippedLabel }, interactions,
+            enabled = true, showOnFocus = keyboardFocus)
     }
 }
 
@@ -320,11 +325,13 @@ internal fun DesktopNavigationPane(
     val roomy by remember(labels) { derivedStateOf { labels.value > .74f } }
     val railHover = remember { MutableInteractionSource() }
     val keyboardPulse = remember { mutableIntStateOf(0) }
+    var keyboardFocus by remember { mutableStateOf(true) }
     val scroll = rememberScrollState()
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val motion = LocalMotionEnabled.current
     val paper = colors.surfaceContainerLow
     val pages = remember(destinations) { destinations.indices.filter { !destinations[it].utility } }
+    val pageFocus = remember(profile, pages) { List(pages.size) { FocusRequester() } }
     val utilities = remember(destinations) { destinations.indices.filter { destinations[it].utility && !destinations[it].account } }
     val accountIndex = destinations.indexOfFirst { it.account }
     val rows = remember(destinations, pages) { sidebarNavigationRows(pages.map { destinations[it].groupHeading }) }
@@ -334,34 +341,46 @@ internal fun DesktopNavigationPane(
             val sourceTitle = if (profile == ContentProfile.ANIME) "管理片源" else "管理来源"
             if (roomy) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                    DesktopUtilityAction(sourceTitle, Icons.Outlined.Source, onManageSources, Modifier.weight(1f), labelled = true)
+                    DesktopUtilityAction(sourceTitle, Icons.Outlined.Source, onManageSources, Modifier.weight(1f), labelled = true, keyboardFocus = keyboardFocus)
                     utilities.forEach { route ->
                         val target = destinations[route]
                         DesktopUtilityAction(target.title, target.icon, { onNavigate(route) }, Modifier.weight(1f),
-                            labelled = true, current = route == selectedIndex)
+                            labelled = true, current = route == selectedIndex, keyboardFocus = keyboardFocus)
                     }
                 }
             } else {
-                DesktopUtilityAction(sourceTitle, Icons.Outlined.Source, onManageSources)
+                DesktopUtilityAction(sourceTitle, Icons.Outlined.Source, onManageSources, keyboardFocus = keyboardFocus)
                 utilities.forEach { route ->
                     val target = destinations[route]
-                    DesktopUtilityAction(target.title, target.icon, { onNavigate(route) }, current = route == selectedIndex)
+                    DesktopUtilityAction(target.title, target.icon, { onNavigate(route) }, current = route == selectedIndex, keyboardFocus = keyboardFocus)
                 }
             }
             if (accountIndex >= 0) {
                 val account = destinations[accountIndex]
                 Spacer(Modifier.height(8.dp))
                 DesktopNavigationAction(account.title, account.icon, labels, { onNavigate(accountIndex) },
-                    subtitle = account.accountName, current = selectedIndex == accountIndex, identity = true)
+                    subtitle = account.accountName, current = selectedIndex == accountIndex, identity = true, keyboardFocus = keyboardFocus)
             }
         }
     }
     BoxWithConstraints(Modifier.fillMaxSize().background(paper).hoverable(railHover)
+        .pointerInput(Unit) {
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    if (event.type == PointerEventType.Press && event.changes.any { it.type == PointerType.Mouse })
+                        keyboardFocus = false
+                }
+            }
+        }
         .onPreviewKeyEvent { event ->
-            if (event.type == KeyEventType.KeyDown) keyboardPulse.intValue++
+            if (event.type == KeyEventType.KeyDown) {
+                keyboardFocus = true
+                keyboardPulse.intValue++
+            }
             false
         }
-        .onFocusChanged { if (it.hasFocus) keyboardPulse.intValue++ }.focusGroup()
+        .onFocusChanged { if (it.hasFocus) keyboardPulse.intValue++ else keyboardFocus = true }.focusGroup()
         .semantics { paneTitle = "${profile.title}导航" }.motionInputGate(enabled)) {
         val pinTools = maxHeight >= 570.dp * fontScale.coerceAtMost(1.6f)
         Column(Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 8.dp)) {
@@ -374,20 +393,23 @@ internal fun DesktopNavigationPane(
                             Icon(if (floating) Icons.Outlined.Close else Icons.Outlined.ViewSidebar, toggleLabel, Modifier.size(17.dp))
                         }
                     }
+                    val historyButtons: @Composable () -> Unit = {
+                        MotionIconButton(onClick = { onBack?.invoke() }, enabled = onBack != null, modifier = Modifier.size(36.dp),
+                            tooltip = "后退 · Alt+←") { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "后退", Modifier.size(17.dp)) }
+                        MotionIconButton(onClick = { onForward?.invoke() }, enabled = onForward != null, modifier = Modifier.size(36.dp),
+                            tooltip = "前进 · Alt+→") { Icon(Icons.AutoMirrored.Outlined.ArrowForward, "前进", Modifier.size(17.dp)) }
+                    }
                     if (roomy && (showHistory || toggleLabel != null)) Row(Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically) {
-                        if (showHistory) {
-                            MotionIconButton(onClick = { onBack?.invoke() }, enabled = onBack != null, modifier = Modifier.size(36.dp),
-                                tooltip = "后退 · Alt+←") { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "后退", Modifier.size(17.dp)) }
-                            MotionIconButton(onClick = { onForward?.invoke() }, enabled = onForward != null, modifier = Modifier.size(36.dp),
-                                tooltip = "前进 · Alt+→") { Icon(Icons.AutoMirrored.Outlined.ArrowForward, "前进", Modifier.size(17.dp)) }
-                        }
+                        if (showHistory) historyButtons()
                         Spacer(Modifier.weight(1f))
                         toggle()
                     } else if (!roomy && toggleLabel != null) Box(Modifier.align(Alignment.CenterHorizontally)) { toggle() }
                     ContentProfileSwitch(profile, onSelectProfile, onManage = null, compact = !roomy, enabled = enabled,
                         modifier = Modifier.padding(top = 3.dp, bottom = if (roomy) 10.dp else 6.dp))
-                    if (!roomy && showHistory) Box(Modifier.align(Alignment.CenterHorizontally)) {
+                    if (!roomy && showHistory && pinTools) Column(Modifier.align(Alignment.CenterHorizontally)) {
+                        historyButtons()
+                    } else if (!roomy && showHistory) Box(Modifier.align(Alignment.CenterHorizontally)) {
                         var historyOpen by remember { mutableStateOf(false) }
                         MotionIconButton(onClick = { historyOpen = true }, enabled = onBack != null || onForward != null,
                             modifier = Modifier.size(36.dp), tooltip = "导航历史") {
@@ -402,7 +424,8 @@ internal fun DesktopNavigationPane(
                             },
                         ), onDismiss = { historyOpen = false }, alignToStart = true)
                     }
-                    if (onSearch != null) DesktopNavigationAction("搜索", Icons.Outlined.Search, labels, onSearch, shortcut = "Ctrl+K")
+                    if (onSearch != null) DesktopNavigationAction("搜索", Icons.Outlined.Search, labels, onSearch,
+                        shortcut = "Ctrl+K", keyboardFocus = keyboardFocus)
                 }
             }
             if (pinTools) scopeHeader()
@@ -416,7 +439,21 @@ internal fun DesktopNavigationPane(
                                 val route = pages[row.index]
                                 val page = destinations[route]
                                 DesktopNavigationAction(page.title, page.icon, labels, { onNavigate(route) },
-                                    modifier = bounds.heightIn(min = 41.dp), current = selectedIndex == route)
+                                    modifier = bounds.heightIn(min = 41.dp).focusRequester(pageFocus[row.index])
+                                        .onPreviewKeyEvent { event ->
+                                            if (!enabled || event.isAltPressed || event.isCtrlPressed || event.isMetaPressed || event.isShiftPressed)
+                                                return@onPreviewKeyEvent false
+                                            val next = when (event.key) {
+                                                Key.DirectionUp -> row.index - 1
+                                                Key.DirectionDown -> row.index + 1
+                                                Key.MoveHome -> 0
+                                                Key.MoveEnd -> pages.lastIndex
+                                                else -> return@onPreviewKeyEvent false
+                                            }
+                                            if (next !in pages.indices) return@onPreviewKeyEvent false
+                                            if (event.type == KeyEventType.KeyDown && next != row.index) pageFocus[next].requestFocus()
+                                            true
+                                        }, current = selectedIndex == route, keyboardFocus = keyboardFocus)
                             }
                         }
                     }
@@ -431,7 +468,7 @@ internal fun DesktopNavigationPane(
 
 @Composable
 private fun DesktopUtilityAction(title: String, icon: ImageVector, onClick: () -> Unit, modifier: Modifier = Modifier,
-    labelled: Boolean = false, current: Boolean = false) {
+    labelled: Boolean = false, current: Boolean = false, keyboardFocus: Boolean) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     val ink = if (current) colors.onPrimaryContainer else colors.onSurfaceVariant
@@ -439,14 +476,14 @@ private fun DesktopUtilityAction(title: String, icon: ImageVector, onClick: () -
     Box(modifier.then(if (labelled) Modifier.heightIn(min = 44.dp) else Modifier.size(38.dp))
         .clip(shape).then(if (current) Modifier.background(colors.primaryContainer) else Modifier)
         .clickable(role = Role.Button, interactionSource = interaction, indication = null, onClick = onClick)
-        .motionPress(interaction).semantics { contentDescription = title; selected = current }, contentAlignment = Alignment.Center) {
+        .motionPress(interaction, showKeyboardFocus = keyboardFocus).semantics { contentDescription = title; selected = current }, contentAlignment = Alignment.Center) {
         Column(Modifier.padding(horizontal = 2.dp, vertical = 4.dp).clearAndSetSemantics { },
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Icon(icon, null, Modifier.size(17.dp), tint = ink)
             if (labelled) Text(title, style = MaterialTheme.typography.labelSmall, color = ink,
                 maxLines = 2, textAlign = androidx.compose.ui.text.style.TextAlign.Center, overflow = TextOverflow.Ellipsis)
         }
-        DesktopIconTooltip(title, interaction, enabled = true)
+        DesktopIconTooltip(title, interaction, enabled = true, showOnFocus = keyboardFocus)
     }
 }
 
@@ -581,6 +618,10 @@ internal fun DesktopSearchField(
         onSubmit()
         requester.requestFocus()
     }
+    val toggleScope = {
+        if (!scopeOpen) onOpen()
+        scopeOpen = !scopeOpen
+    }
     BoxWithConstraints(modifier.height(height)) {
         val showScopeName = showScopeSelector && maxWidth >= 332.dp * fontScale
         val hintRoom = maxWidth >= 416.dp * fontScale
@@ -627,6 +668,7 @@ internal fun DesktopSearchField(
             DesktopFieldClear(query.isNotEmpty() || copyOnly, active, "清空搜索", 40.dp) {
                 scopeOpen = false
                 onClear()
+                requester.requestFocus()
             }
             if (showScopeSelector) {
                 Box {
@@ -634,9 +676,8 @@ internal fun DesktopSearchField(
                         val interaction = remember { MutableInteractionSource() }
                         Row(Modifier.clip(RoundedCornerShape(9.dp))
                             .background(if (scopeOpen) colors.primaryContainer else colors.surface)
-                            .clickable(enabled = active, role = Role.Button, interactionSource = interaction, indication = null) {
-                                scopeOpen = !scopeOpen
-                            }.motionPress(interaction, enabled = active)
+                            .clickable(enabled = active, role = Role.Button, interactionSource = interaction,
+                                indication = null, onClick = toggleScope).motionPress(interaction, enabled = active)
                             .semantics { contentDescription = "搜索范围，当前" + target.scopeTitle }
                             .heightIn(min = 32.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -644,7 +685,7 @@ internal fun DesktopSearchField(
                             Text(target.scopeTitle, style = MaterialTheme.typography.labelMedium, color = colors.onSurface, maxLines = 1)
                             DesktopMenuChevron(scopeOpen)
                         }
-                    } else MotionIconButton(onClick = { scopeOpen = !scopeOpen }, enabled = active,
+                    } else MotionIconButton(onClick = toggleScope, enabled = active,
                         modifier = Modifier.size(44.dp).semantics { contentDescription = "搜索范围：" + target.scopeTitle },
                         tooltip = "搜索范围：" + target.scopeTitle) {
                         Box(Modifier.size(32.dp).background(
@@ -692,11 +733,12 @@ private fun desktopTabContentWidth(labels: List<String>): Dp {
 }
 
 @Composable
-internal fun DesktopSectionTabs(selected: Int, labels: List<String>, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
+internal fun DesktopSectionTabs(selected: Int, labels: List<String>, onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier, minimumWidth: Dp? = null) {
     if (labels.isEmpty()) return
     val colors = MaterialTheme.colorScheme
     val contrast = LocalPlatformAccessibilityPreferences.current.increaseContrast
-    val minimum = desktopTabContentWidth(labels)
+    val minimum = minimumWidth ?: desktopTabContentWidth(labels)
     val scroll = rememberScrollState()
     val motion = LocalMotionEnabled.current
     BoxWithConstraints(modifier) {
@@ -709,7 +751,9 @@ internal fun DesktopSectionTabs(selected: Int, labels: List<String>, onSelect: (
             val leading = with(density) { (slot * selected.coerceIn(labels.indices)).roundToPx() }
             val trailing = with(density) { (slot * (selected.coerceIn(labels.indices) + 1) - viewport).roundToPx() }
             val target = scroll.value.coerceIn(trailing.coerceAtMost(leading), leading).coerceAtLeast(0)
-            if (motion) scroll.animateScrollTo(target) else scroll.scrollTo(target)
+            if (target != scroll.value) {
+                if (motion) scroll.animateScrollTo(target) else scroll.scrollTo(target)
+            }
         }
         Box(if (overflow) Modifier.fillMaxWidth().horizontalScroll(scroll) else Modifier) {
             MotionTabs(selected, labels, onSelect, Modifier.width(rail), treatment = MotionTabTreatment.Soft,
@@ -723,8 +767,8 @@ internal fun DesktopSectionTabs(selected: Int, labels: List<String>, onSelect: (
 
 @Composable
 internal fun DesktopDiscoveryHeader(
-    title: String, searching: Boolean, tabLabels: List<String>, selectedTab: Int, onSelectTab: (Int) -> Unit,
-    onLeaveSearch: () -> Unit, navigation: @Composable () -> Unit, input: @Composable (Modifier) -> Unit,
+    title: String, searching: Boolean, editingSearch: Boolean, tabLabels: List<String>, selectedTab: Int, onSelectTab: (Int) -> Unit,
+    onEnterSearch: () -> Unit, onLeaveSearch: () -> Unit, navigation: @Composable () -> Unit, input: @Composable (Modifier) -> Unit,
     recent: @Composable () -> Unit, ranking: @Composable () -> Unit, modifier: Modifier = Modifier,
 ) {
     val motion = LocalMotionEnabled.current
@@ -733,44 +777,73 @@ internal fun DesktopDiscoveryHeader(
     val field = remember { movableContentOf<Modifier> { bounds -> inputContent.value(bounds) } }
     val displayed = if (searching) "搜索结果" else title
     val tabContentWidth = desktopTabContentWidth(tabLabels)
-    BoxWithConstraints(modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
-        .pointerInput(Unit) {}.semantics { paneTitle = displayed }) {
+    BoxWithConstraints(modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).pointerInput(Unit) {}) {
         val window = LocalMangaWindow.current
         val scale = window.fontScale.coerceAtLeast(1f)
         val inset = MangaLayout.sidePadding(maxWidth)
         val available = (maxWidth - inset * 2).coerceAtLeast(1.dp)
         val tabWidth = (tabContentWidth + 8.dp).coerceAtMost(available)
         val titleBudget = 132.dp * scale + 78.dp
-        val fieldBesideTitle = available >= titleBudget + 240.dp * scale
-        val inlineTabs = if (fieldBesideTitle) window.shortHeight && available >= titleBudget + tabWidth + 290.dp * scale
-            else available >= titleBudget + tabWidth
-        val fieldBudget = (available - titleBudget - if (inlineTabs && !searching) tabWidth else 0.dp).coerceAtLeast(1.dp)
-        val fieldWidth = animateDpAsState((if (searching) (available * .60f).coerceAtMost(620.dp)
-            else (available * .43f).coerceIn(220.dp, 470.dp)).coerceAtMost(fieldBudget),
-            animationSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
-            label = "workspace-search-width")
-        val tabs: @Composable () -> Unit = {
-            DesktopSectionTabs(selectedTab, tabLabels, onSelectTab, Modifier.width(tabWidth).motionInputGate(!searching))
+        val compact = available < titleBudget + 240.dp * scale
+        val compactEditor = compact && editingSearch
+        val hideBrowseTools = searching || compactEditor
+        val inlineTabs = available >= titleBudget + tabWidth + if (compact) 44.dp else 290.dp * scale
+        var returnToSearchButton by remember(compact) { mutableStateOf(false) }
+        val leaveSearch = {
+            returnToSearchButton = compact
+            onLeaveSearch()
         }
-        Column(Modifier.fillMaxWidth().padding(horizontal = inset, vertical = if (window.shortHeight) 5.dp else 9.dp)) {
+        var escapePressed by remember(editingSearch) { mutableStateOf(false) }
+        val tabs: @Composable () -> Unit = {
+            DesktopSectionTabs(selectedTab, tabLabels, { index ->
+                if (index != selectedTab || editingSearch) onSelectTab(index)
+            }, Modifier.width(tabWidth).motionInputGate(!hideBrowseTools), minimumWidth = tabContentWidth)
+        }
+        Column(Modifier.fillMaxWidth().semantics { paneTitle = if (compactEditor && !searching) "搜索漫画" else displayed }
+            .onKeyEvent { event ->
+                // An IME or scope popup gets the first chance to handle Escape.
+                if (!editingSearch || event.key != Key.Escape || event.isAltPressed || event.isCtrlPressed ||
+                    event.isShiftPressed || event.isMetaPressed) return@onKeyEvent false
+                if (event.type == KeyEventType.KeyDown) escapePressed = true
+                else if (event.type == KeyEventType.KeyUp && escapePressed) {
+                    escapePressed = false
+                    leaveSearch()
+                } else return@onKeyEvent false
+                true
+            }.padding(horizontal = inset, vertical = if (window.shortHeight) 5.dp else 9.dp)) {
             Row(Modifier.fillMaxWidth().heightIn(min = if (window.shortHeight) 40.dp else 46.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                if (searching) MotionIconButton(onClick = onLeaveSearch, modifier = Modifier.size(34.dp),
+                if (hideBrowseTools) MotionIconButton(onClick = leaveSearch, modifier = Modifier.size(36.dp),
                     tooltip = "返回发现，保留搜索") {
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回发现", Modifier.size(19.dp))
                 } else navigation()
-                DesktopPageHeading(displayed, Modifier.weight(1f))
-                if (inlineTabs && !searching) tabs()
-                if (fieldBesideTitle) field(Modifier.layout { measurable, bounds ->
-                    val width = fieldWidth.value.coerceAtMost(fieldBudget).roundToPx().coerceIn(bounds.minWidth, bounds.maxWidth)
-                    val body = measurable.measure(bounds.copy(minWidth = width, maxWidth = width))
-                    layout(body.width, body.height) { body.placeRelative(0, 0) }
-                })
-                recent()
+                if (compactEditor) field(Modifier.weight(1f)) else {
+                    DesktopPageHeading(displayed, Modifier.weight(1f))
+                    if (inlineTabs && !hideBrowseTools) tabs()
+                    if (compact) {
+                        val trigger = remember { FocusRequester() }
+                        MotionIconButton(onClick = onEnterSearch, modifier = Modifier.size(36.dp).focusRequester(trigger),
+                            tooltip = "搜索 · Ctrl+K") { Icon(Icons.Outlined.Search, "搜索漫画", Modifier.size(19.dp)) }
+                        LaunchedEffect(returnToSearchButton) {
+                            if (returnToSearchButton) { trigger.requestFocus(); returnToSearchButton = false }
+                        }
+                    } else {
+                        val fieldBudget = (available - titleBudget - if (inlineTabs && !searching) tabWidth else 0.dp).coerceAtLeast(1.dp)
+                        val fieldWidth = animateDpAsState((if (searching) (available * .60f).coerceAtMost(620.dp)
+                            else (available * .43f).coerceIn(220.dp, 470.dp)).coerceAtMost(fieldBudget),
+                            animationSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
+                            label = "workspace-search-width")
+                        field(Modifier.layout { measurable, bounds ->
+                            val width = fieldWidth.value.coerceAtMost(fieldBudget).roundToPx().coerceIn(bounds.minWidth, bounds.maxWidth)
+                            val body = measurable.measure(bounds.copy(minWidth = width, maxWidth = width))
+                            layout(body.width, body.height) { body.placeRelative(0, 0) }
+                        })
+                    }
+                    recent()
+                }
             }
-            if (!fieldBesideTitle) field(Modifier.fillMaxWidth().padding(top = 3.dp))
-            if (!inlineTabs) AnimatedVisibility(!searching,
+            if (!inlineTabs) AnimatedVisibility(!hideBrowseTools,
                 enter = expandVertically(if (motion) tween(MangaMotion.Content) else snap()) + fadeIn(if (motion) tween(MangaMotion.Quick) else snap()),
                 exit = shrinkVertically(if (motion) tween(MangaMotion.Quick) else snap()) + fadeOut(if (motion) tween(MangaMotion.Quick) else snap())) {
                 Column(Modifier.fillMaxWidth().padding(top = if (window.shortHeight) 3.dp else 7.dp)) {
@@ -778,14 +851,14 @@ internal fun DesktopDiscoveryHeader(
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             tabs()
-                            Box(Modifier.weight(1f).motionInputGate(!searching)) { ranking() }
+                            Box(Modifier.weight(1f).motionInputGate(!hideBrowseTools)) { ranking() }
                         }
                     } else {
                         tabs()
-                        if (!searching) ranking()
+                        if (!hideBrowseTools) ranking()
                     }
                 }
-            } else if (!searching) ranking()
+            } else if (!hideBrowseTools) ranking()
         }
     }
 }

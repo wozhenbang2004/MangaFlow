@@ -56,6 +56,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -67,6 +68,27 @@ import dev.mangaflow.ui.motion.MangaMotion
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.roundToInt
+
+internal data class AnimeSeekPreview(val originMs: Long, val positionMs: Long)
+
+/** Read the pending target above the dock. The slider already supplies its accessible value. */
+@Composable
+internal fun AnimeTimelinePreview(preview: State<AnimeSeekPreview?>, modifier: Modifier) {
+    val targetSecond by remember(preview) { derivedStateOf { preview.value?.positionMs?.div(1_000L) } }
+    val deltaSeconds by remember(preview) { derivedStateOf {
+        preview.value?.let { (it.positionMs - it.originMs) / 1_000L } ?: 0L
+    } }
+    val target = targetSecond ?: return
+    val text = remember(target, deltaSeconds) {
+        val time = animeTime(target * 1_000L)
+        if (deltaSeconds == 0L) time
+        else "$time   ${if (deltaSeconds > 0L) "+" else "−"}${animeTime(abs(deltaSeconds) * 1_000L)}"
+    }
+    val colors = MaterialTheme.colorScheme
+    Text(text, modifier.clearAndSetSemantics { }.background(colors.inverseSurface, RoundedCornerShape(8.dp))
+        .padding(horizontal = 9.dp, vertical = 4.dp), color = colors.inverseOnSurface,
+        style = mangaMetricValueStyle(13.sp, 18.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+}
 
 /** The pointer inspects a time without issuing a seek or registering an extra video observation. */
 @Composable

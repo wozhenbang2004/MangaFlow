@@ -10,6 +10,7 @@ import dev.mangaflow.ui.platform.*
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
@@ -118,11 +119,12 @@ internal fun VolumeBookTile(
         val focused by interaction.collectIsFocusedAsState()
         val colors = MaterialTheme.colorScheme
         val ink = if (current) colors.primary else colors.onSurface
-        Modifier.background(ink.copy(alpha = when {
+        val shape = RoundedCornerShape(10.dp)
+        Modifier.then(if (focused) Modifier.border(1.5.dp, colors.primary, shape) else Modifier).background(ink.copy(alpha = when {
             focused || hovered -> .085f
             current -> .07f
             else -> 0f
-        }), RoundedCornerShape(10.dp)).padding(6.dp)
+        }), shape).padding(6.dp)
     } else Modifier
     val nativeJm = remember(mangaId, chapter.id) { SourceKeys.decodeChapter(mangaId, chapter.id).sourceId == "jmcomic" }
     val scriptSource = remember(mangaId, chapter.id) { SourceKeys.decodeChapter(mangaId, chapter.id).sourceId.startsWith("js_") }
@@ -169,6 +171,7 @@ internal fun VolumeBookTile(
                 ).motionPress(interaction, enabled = enabled).then(desktopPaper).semantics {
                     contentDescription = chapter.title + "，" + chapter.group
                     stateDescription = listOfNotNull(
+                        "上次阅读".takeIf { current },
                         chapterReadingStatus(progress, progressKnown),
                         chapterStatus(entry, null),
                         "封面加载中".takeIf { quietLoading && busy && cover.error == null },
@@ -193,7 +196,7 @@ internal fun VolumeBookTile(
                     else if (busy && !quietLoading) CircularProgressIndicator(Modifier.size(18.dp),
                         color = DetailMuted, strokeWidth = 1.5.dp)
                 }
-                Text(chapter.title, color = if (current) DetailForeground else DetailSecondary,
+                Text(chapter.title, color = if (current) MaterialTheme.colorScheme.primary else DetailSecondary,
                     fontSize = if (desktop) 14.sp else 12.sp, lineHeight = if (desktop) 20.sp else 18.sp,
                     maxLines = if (desktop) 2 else 1, overflow = TextOverflow.Ellipsis,
                     fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,

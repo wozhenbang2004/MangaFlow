@@ -23,6 +23,7 @@ import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.combinedClickable
@@ -68,6 +69,7 @@ import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -85,8 +87,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
@@ -98,6 +108,8 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -173,6 +185,7 @@ internal fun DetailCatalog(
     onLocate: () -> Unit = {},
     onLocateSources: (() -> Unit)? = null,
     desktopFindRequest: Int = 0,
+    onOpenMobileSearch: () -> Unit = {},
     onBatchDownload: ((List<Chapter>) -> Unit)? = null,
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
@@ -183,11 +196,40 @@ internal fun DetailCatalog(
     var groupVisit by rememberSaveable(mangaId) { mutableIntStateOf(0) }
     var appliedLocate by rememberSaveable(mangaId) { mutableIntStateOf(0) }
     var chapterQuery by rememberSaveable(mangaId) { mutableStateOf("") }
-    val search = chapterQuery.trim().takeIf { desktop }.orEmpty()
+    var mobileSearch by rememberSaveable(mangaId) { mutableStateOf(false) }
+    var mobileFindRequest by rememberSaveable(mangaId) { mutableIntStateOf(0) }
+    var firstMatchFocus by remember(mangaId) { mutableStateOf<String?>(null) }
+    var returnFocus by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
+    var restoredFocus by remember(mangaId) { mutableStateOf<String?>(null) }
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val search = chapterQuery.trim().takeIf { desktop || mobileSearch }.orEmpty()
     val searching = search.isNotEmpty()
     val searchResults = rememberMatchingChapters(chapters, search)
+    fun editSearch(value: String) {
+        firstMatchFocus = null
+        restoredFocus = null
+        chapterQuery = value
+    }
+    fun closeSearch() {
+        editSearch("")
+        mobileSearch = false
+        if (!desktop) keyboard?.hide()
+        focus.clearFocus()
+    }
+    fun readChapter(chapter: Chapter) {
+        if (desktop) returnFocus = chapter.logicalId.ifBlank { chapter.id }
+        else if (mobileSearch) keyboard?.hide()
+        onRead(chapter)
+    }
+    LaunchedEffect(active) {
+        if (active && desktop) {
+            restoredFocus = returnFocus
+            returnFocus = null
+        }
+    }
     val locatePending = locateRevision != appliedLocate && progress != null
-    LaunchedEffect(locateRevision) { if (locatePending) chapterQuery = "" }
+    LaunchedEffect(locateRevision) { if (locatePending && (searching || mobileSearch)) closeSearch() }
     val locateChapter = remember(chapters, progress?.chapterId, locatePending) {
         if (locatePending) chapters.firstOrNull { chapterContainsProgress(it, progress) } else null
     }
@@ -202,6 +244,7 @@ internal fun DetailCatalog(
     var sourceAnchor by remember(mangaId) { mutableStateOf<Rect?>(null) }
     var sourcePresent by remember(mangaId) { mutableStateOf(false) }
     var sourceCloseRequested by remember(mangaId) { mutableStateOf(false) }
+    BackHandler(active && !sourcePresent && selectedChapterId == null && (mobileSearch || desktop && searching)) { closeSearch() }
     LaunchedEffect(active, chapters, sourceLoading) {
         val selected = sourceChapter
         val current = selected?.let { original ->
@@ -225,9 +268,16 @@ internal fun DetailCatalog(
                 verticalAlignment = Alignment.CenterVertically) {
                 val single = searchResults.singleOrNull()?.takeUnless { downloadMode }
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                    ChapterSearchField(chapterQuery, { chapterQuery = it }, desktopFindRequest,
-                        active && !sourcePresent, Modifier.widthIn(max = 440.dp * fontScale).fillMaxWidth(),
-                        onOpenMatch = single?.let { match -> { onRead(match) } }, showFindShortcut = roomy)
+                    ChapterSearchField(chapterQuery, ::editSearch, desktopFindRequest,
+                        active && !sourcePresent, Modifier.widthIn(max = 440.dp * fontScale).fillMaxWidth()
+                            .onPreviewKeyEvent { event ->
+                                val match = searchResults.firstOrNull()
+                                if (event.key == Key.DirectionDown && active && !sourcePresent && match != null) {
+                                    if (event.type == KeyEventType.KeyDown) firstMatchFocus = match.id
+                                    true
+                                } else false
+                            },
+                        onOpenMatch = single?.let { match -> { readChapter(match) } }, showFindShortcut = roomy)
                 }
                 if (searching) Text("${searchResults.size} 章", color = DetailMuted,
                     style = MaterialTheme.typography.labelSmall)
@@ -255,21 +305,44 @@ internal fun DetailCatalog(
                 }
             }
         }
-        if (groups.size > 1 && !searching || !desktop && progress != null) Row(
+        if (groups.size > 1 && !searching || !desktop && (mobileSearch || chapters.size > 1 || progress != null)) Row(
             Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            if (groups.size > 1) ChapterGroups(
-                groups = groups, total = chapters.size, selected = group, active = active,
-                onSelect = {
-                    if (group != it) groupVisit++
-                    appliedLocate = locateRevision
-                    chosenGroup = it
-                }, modifier = Modifier.weight(1f),
-            ) else Spacer(Modifier.weight(1f))
-            if (!desktop && progress != null) DetailAction(Icons.Outlined.MyLocation, "定位上次阅读",
-                enabled = active && !sourcePresent, onClick = onLocate)
+            if (!desktop && mobileSearch) {
+                ChapterSearchField(chapterQuery, ::editSearch, mobileFindRequest, active && !sourcePresent,
+                    Modifier.weight(1f), showKeyboardOnOpen = true)
+                if (searching) Text("${searchResults.size} 章", color = DetailMuted,
+                    style = MaterialTheme.typography.labelSmall)
+                DetailAction(Icons.Outlined.Close, "收起章节搜索", enabled = active && !sourcePresent, onClick = ::closeSearch)
+            } else {
+                val openSearch: () -> Unit = {
+                    onOpenMobileSearch()
+                    mobileSearch = true
+                    mobileFindRequest++
+                }
+                if (groups.size > 1) {
+                    ChapterGroups(groups = groups, total = chapters.size, selected = group, active = active,
+                        onSelect = {
+                            if (group != it) groupVisit++
+                            appliedLocate = locateRevision
+                            chosenGroup = it
+                        }, modifier = Modifier.weight(1f))
+                    if (!desktop) DetailAction(Icons.Outlined.Search, "查找章节",
+                        enabled = active && !sourcePresent, onClick = openSearch)
+                } else {
+                    if (!desktop && chapters.size > 1) TextButton(onClick = openSearch,
+                        enabled = active && !sourcePresent, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Icon(Icons.Outlined.Search, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("查找章节", style = MaterialTheme.typography.labelMedium)
+                    }
+                    Spacer(Modifier.weight(1f))
+                }
+                if (!desktop && progress != null) DetailAction(Icons.Outlined.MyLocation, "定位上次阅读",
+                    enabled = active && !sourcePresent, onClick = onLocate)
+            }
         }
         if (locatePending && locateChapter == null && !loading && !sourceLoading) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -302,7 +375,7 @@ internal fun DetailCatalog(
         ) { targetGroup ->
             val paneActive = active && targetGroup == group && !sourcePresent
             val catalogPosition = rememberLazyGridState()
-            val searchPosition = if (desktop) rememberLazyGridState() else catalogPosition
+            val searchPosition = rememberLazyGridState()
             val grid = if (searching) searchPosition else catalogPosition
             var landing by remember(grid) { mutableStateOf<ChapterLanding?>(null) }
             val locateLight = remember(grid) { Animatable(0f) }
@@ -332,6 +405,10 @@ internal fun DetailCatalog(
                 }
             }
             var appliedSearch by rememberSaveable(mangaId) { mutableStateOf("") }
+            LaunchedEffect(firstMatchFocus, paneActive) {
+                if (paneActive && firstMatchFocus != null && firstMatchFocus == searchResults.firstOrNull()?.id)
+                    searchPosition.scrollToItem(0)
+            }
             LaunchedEffect(search, paneActive) {
                 if (paneActive && search != appliedSearch) {
                     appliedSearch = search
@@ -459,14 +536,26 @@ internal fun DetailCatalog(
                                     (if (isVolumeChapter(chapter)) volumeColumns else chapterColumns)) },
                                 contentType = { if (isVolumeChapter(it)) "volume" else "chapter" }) { chapter ->
                                 val downloadAnchor = remember(chapter.logicalId, chapter.id) { PopupAnchor() }
-                                val downloadAnchorModifier = downloadAnchor.modifier.then(if (landing?.chapterId != chapter.id) Modifier else Modifier.drawWithContent {
-                                    drawContent()
-                                    val inset = 4.dp.toPx()
-                                    drawRoundRect(locateInk.copy(alpha = .17f * locateLight.value),
-                                        topLeft = Offset(0f, inset),
-                                        size = Size(size.width, (size.height - inset * 2f).coerceAtLeast(0f)),
-                                        cornerRadius = CornerRadius(10.dp.toPx()))
-                                })
+                                val rowKey = chapter.logicalId.ifBlank { chapter.id }
+                                val focusTarget = if (desktop) remember(chapter.id) { FocusRequester() } else null
+                                val takeFocus = desktop && paneActive && (firstMatchFocus == chapter.id ||
+                                    restoredFocus == rowKey || landing?.chapterId == chapter.id)
+                                if (takeFocus && focusTarget != null) LaunchedEffect(focusTarget) {
+                                    withFrameNanos { }
+                                    focusTarget.requestFocus()
+                                    if (firstMatchFocus == chapter.id) firstMatchFocus = null
+                                    if (restoredFocus == rowKey) restoredFocus = null
+                                }
+                                val downloadAnchorModifier = downloadAnchor.modifier
+                                    .then(if (focusTarget != null) Modifier.focusRequester(focusTarget) else Modifier)
+                                    .then(if (landing?.chapterId != chapter.id) Modifier else Modifier.drawWithContent {
+                                        drawContent()
+                                        val inset = 4.dp.toPx()
+                                        drawRoundRect(locateInk.copy(alpha = .17f * locateLight.value),
+                                            topLeft = Offset(0f, inset),
+                                            size = Size(size.width, (size.height - inset * 2f).coerceAtLeast(0f)),
+                                            cornerRadius = CornerRadius(10.dp.toPx()))
+                                    })
                                 if (isVolumeChapter(chapter)) {
                                     val coverState = remember(mangaId, chapter.id) {
                                         val retained = volumeCovers.remove(chapter.id) ?: mutableStateOf(VolumeCoverState())
@@ -507,7 +596,7 @@ internal fun DetailCatalog(
                                             downloadMode = downloadMode,
                                             // One offline variant cannot disable choosing another source.
                                             enabled = true,
-                                            onRead = { onRead(chapter) }, onDownload = { onDownload(chapter, downloadAnchor.bounds()) },
+                                            onRead = { readChapter(chapter) }, onDownload = { onDownload(chapter, downloadAnchor.bounds()) },
                                             onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id }; selectedChapterAnchor = downloadAnchor.bounds() },
                                             sourcesEnabled = !sourceLoading && chapter.variants.isNotEmpty(),
                                             onSources = {
@@ -545,7 +634,7 @@ internal fun DetailCatalog(
                                     height = tileHeight,
                                     sourceEnabled = !sourceLoading,
                                     modifier = downloadAnchorModifier,
-                                    onRead = { onRead(chapter) },
+                                    onRead = { readChapter(chapter) },
                                     onDownload = { onDownload(chapter, downloadAnchor.bounds()) },
                                     onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id }; selectedChapterAnchor = downloadAnchor.bounds() },
                                     onSources = { anchor ->
@@ -585,7 +674,10 @@ internal fun DetailCatalog(
         chapter = sourceChapter, backdrop = backdrop,
         repository = repository, workMangaId = mangaId,
         onDismiss = { sourceChapter = null; sourceAnchor = null; sourceCloseRequested = false },
-        onReadVariant = onReadVariant, onSetPreferredSource = onSetPreferredSource,
+        onReadVariant = { chapter, variant ->
+            if (desktop) returnFocus = chapter.logicalId.ifBlank { chapter.id }
+            onReadVariant(chapter, variant)
+        }, onSetPreferredSource = onSetPreferredSource,
         onClearChapterSource = onClearChapterSource, onSplitVariant = onSplitVariant,
         onRelinkVariant = onRelinkVariant, chapters = chapters, downloaded = downloaded,
         chapterPositions = chapterPositions, anchor = sourceAnchor,
@@ -619,12 +711,12 @@ internal fun DetailCatalog(
                 Text(chapter.title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 26.sp)
                 Text(
                     listOf(chapter.group.takeUnless(::isDefaultChapterGroup).orEmpty(), chapterStatus(entry,
-                        chapterPositions?.get(chapter.id) ?: progress?.takeIf { it.chapterId == chapter.id }))
+                        logicalChapterProgress(chapter, chapterPositions, progress)))
                         .filter(String::isNotBlank).joinToString(" · "),
                     color = DetailMuted, fontSize = 12.sp,
                     modifier = Modifier.padding(vertical = 10.dp),
                 )
-                TextButton(onClick = { dismissActions(); onRead(chapter) },
+                TextButton(onClick = { dismissActions(); readChapter(chapter) },
                     modifier = Modifier.fillMaxWidth()) {
                     Text(if (isVolumeChapter(chapter)) "阅读这一卷" else "阅读这一章", color = DetailForeground)
                 }
@@ -848,13 +940,15 @@ private fun ChapterTile(
             else -> Color.Transparent
         }, if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(), label = "chapter-row")
         val reading = when {
+            current && complete -> "上次阅读 · 已读完"
+            current -> progress?.let(::detailReadingPage)?.let { "上次读至第 $it 页" } ?: "上次阅读"
             complete -> "已读完"
             progress != null -> detailReadingPercent(progress)?.let { "读至 $it%" } ?: "阅读中"
-            current -> "上次阅读"
             else -> null
         }
         DesktopContextMenuArea(desktopActions) {
             Row(modifier.fillMaxWidth().padding(vertical = 2.dp).heightIn(min = height)
+                .then(if (focused) Modifier.border(1.5.dp, readingColor, RoundedCornerShape(9.dp)) else Modifier)
                 .clip(RoundedCornerShape(9.dp)).drawBehind {
                     drawRect(fill.value)
                     if (current) {
@@ -1019,8 +1113,9 @@ private fun logicalChapterProgress(
     positions: Map<String, ReadingProgress>?,
     latest: ReadingProgress?,
 ): ReadingProgress? {
-    val records = (chapter.variants.mapNotNull { positions?.get(it.storageId) } +
-        listOfNotNull(positions?.get(chapter.id), latest?.takeIf { chapterContainsProgress(chapter, it) }))
+    // Revisiting another source may yield a different page count from a previously finished edition.
+    if (latest != null && chapterContainsProgress(chapter, latest)) return latest
+    val records = (chapter.variants.mapNotNull { positions?.get(it.storageId) } + listOfNotNull(positions?.get(chapter.id)))
         .distinctBy { it.chapterId }
     return records.firstOrNull { detailReadingFraction(it) == 1f }
         ?: records.firstOrNull { it.chapterId == chapter.id } ?: records.maxByOrNull { it.updatedAt }

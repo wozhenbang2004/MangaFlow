@@ -51,6 +51,7 @@ import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.MotionIconButton
 
 private val chapterSearchNumbers = Regex("""\d+(?:\.\d+)?""")
+private val chapterSearchOrdinal = Regex("""(?:第\s*)?(\d+(?:\.\d+)?)\s*([话章回卷册集期])""")
 private val chapterSearchSpaces = Regex("""\s+""")
 private data class SearchableChapter(val chapter: Chapter, val title: String, val group: String, val numbers: Set<String>)
 
@@ -60,18 +61,25 @@ private fun String.chapterNumberKey(): String {
     return if (decimal.isEmpty()) integer else "$integer.$decimal"
 }
 
+private fun chapterSearchLabel(text: String): String {
+    val normalized = normalizeNfkc(text).lowercase().replace('話', '话').replace('巻', '卷').replace('冊', '册')
+    return chapterSearchOrdinal.replace(normalized) { match ->
+        "第" + match.groupValues[1].chapterNumberKey() + match.groupValues[2]
+    }
+}
+
 @Composable
 internal fun rememberMatchingChapters(chapters: List<Chapter>, query: String): List<Chapter> {
     if (query.isBlank()) return emptyList()
     val index = remember(chapters) {
         chapters.map { chapter ->
-            val title = normalizeNfkc(chapter.title).lowercase()
-            SearchableChapter(chapter, title, normalizeNfkc(chapterGroupLabel(chapter.group)).lowercase(),
+            val title = chapterSearchLabel(chapter.title)
+            SearchableChapter(chapter, title, chapterSearchLabel(chapterGroupLabel(chapter.group)),
                 chapterSearchNumbers.findAll(title).map { it.value.chapterNumberKey() }.toSet())
         }
     }
     return remember(index, query) {
-        val terms = normalizeNfkc(query).lowercase().split(chapterSearchSpaces).filter(String::isNotBlank)
+        val terms = chapterSearchLabel(query).split(chapterSearchSpaces).filter(String::isNotBlank)
         val numbers = terms.filter(chapterSearchNumbers::matches).map { it.chapterNumberKey() }
         val words = terms.filterNot(chapterSearchNumbers::matches)
         index.filter { entry -> entry.numbers.containsAll(numbers) && words.all { it in entry.title || it in entry.group } }

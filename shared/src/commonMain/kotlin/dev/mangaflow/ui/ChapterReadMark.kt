@@ -57,9 +57,11 @@ internal fun rememberChapterPositions(
     return positions
 }
 
-internal fun detailReadingFraction(progress: ReadingProgress?): Float? = progress?.takeIf { it.pageCount > 0 }?.let {
-    ((it.pageIndex.coerceAtLeast(0) + 1).toFloat() / it.pageCount).coerceIn(0f, 1f)
-}
+internal fun detailReadingPage(progress: ReadingProgress): Int? =
+    if (progress.pageCount > 0) progress.pageIndex.coerceIn(0, progress.pageCount - 1) + 1 else null
+
+internal fun detailReadingFraction(progress: ReadingProgress?): Float? =
+    progress?.let { record -> detailReadingPage(record)?.let { it.toFloat() / record.pageCount } }
 
 internal fun detailReadingPercent(progress: ReadingProgress?): Int? = detailReadingFraction(progress)?.let {
     (it * 100).roundToInt().coerceIn(0, if (it == 1f) 100 else 99)
@@ -69,7 +71,7 @@ internal fun chapterReadingStatus(progress: ReadingProgress?, known: Boolean = t
     progress != null && detailReadingFraction(progress) == 1f ->
         "已读完，共 ${progress.pageCount} 页"
     progress != null && progress.pageCount > 0 ->
-        "阅读中，${detailReadingPercent(progress)}%，已读至第 ${(progress.pageIndex + 1).coerceIn(1, progress.pageCount)} 页，共 ${progress.pageCount} 页"
+        "阅读中，${detailReadingPercent(progress)}%，已读至第 ${detailReadingPage(progress)} 页，共 ${progress.pageCount} 页"
     progress != null -> "阅读中"
     !known -> "阅读记录尚未载入"
     else -> "未读"

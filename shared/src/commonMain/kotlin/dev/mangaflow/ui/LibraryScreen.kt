@@ -433,9 +433,7 @@ fun LibraryScreen(
                         }) else null)
                 } else if (tab == 1) {
                     val today = localToday()
-                    val dates = remember(visibleHistory) {
-                        visibleHistory.groupBy { if (it.updatedAt > 0L) localDateAt(it.updatedAt) else null }
-                    }
+                    val dates = remember(visibleHistory) { readingHistoryByDay(visibleHistory) }
                     LazyColumn(
                         state = historyPosition,
                         modifier = Modifier.fillMaxSize(),
@@ -452,13 +450,7 @@ fun LibraryScreen(
                         }
                         dates.forEach { (date, books) ->
                             item(key = "reading-date:$date", contentType = "history-day") {
-                                val day = when {
-                                    date == null -> "早期记录"
-                                    date == today -> "今天"
-                                    date == today.minusDays(1L) -> "昨天"
-                                    date.year != today.year -> formatUiDate(date, "yyyy/M/d")
-                                    else -> "${date.monthNumber}月${date.dayOfMonth}日"
-                                }
+                                val day = readingHistoryDay(date, today)
                                 Text(mangaNumberText(day), style = MaterialTheme.typography.titleMedium,
                                     modifier = Modifier.padding(top = 10.dp, bottom = 2.dp).semantics { heading() })
                             }
