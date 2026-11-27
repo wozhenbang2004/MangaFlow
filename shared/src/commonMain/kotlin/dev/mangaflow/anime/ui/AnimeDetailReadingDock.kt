@@ -167,7 +167,7 @@ internal fun animeDetailPlayControl(episode: AnimeEpisode?, previous: AnimeWatch
         title, when (mode) {
             AnimeDetailPlayMode.PLAY -> compactPlayback
             AnimeDetailPlayMode.FIND -> "找片源"
-            AnimeDetailPlayMode.SOURCES -> "线路"
+            AnimeDetailPlayMode.SOURCES -> "来源"
             AnimeDetailPlayMode.UPCOMING -> "未放送"
             AnimeDetailPlayMode.WAIT -> "核对中"
         }, listOfNotNull(caption, note).joinToString(" · "), mode,
@@ -178,11 +178,11 @@ internal fun animeDetailPlayControl(episode: AnimeEpisode?, previous: AnimeWatch
     return when {
         offline == AnimeDetailOffline.CHECKING -> control("正在核对离线记录", AnimeDetailPlayMode.WAIT)
         offline == AnimeDetailOffline.READY -> control(playback, AnimeDetailPlayMode.PLAY, "离线")
-        offline == AnimeDetailOffline.MISSING -> control(if (episode == null) "查看作品线路" else "查看本集线路",
+        offline == AnimeDetailOffline.MISSING -> control(if (episode == null) "查看作品来源" else "查看本集来源",
             AnimeDetailPlayMode.SOURCES, "原离线记录暂不可用")
         savedLineOffered && availability != AnimeEpisodeAvailability.UPCOMING -> control(playback, AnimeDetailPlayMode.PLAY)
         episode == null && checking -> control("正在确认上次观看集", AnimeDetailPlayMode.WAIT)
-        episode == null -> control("查看作品线路", AnimeDetailPlayMode.SOURCES, "上次观看集未确认")
+        episode == null -> control("查看作品来源", AnimeDetailPlayMode.SOURCES, "上次观看集未确认")
         availability == AnimeEpisodeAvailability.UPCOMING -> control("尚未放送", AnimeDetailPlayMode.UPCOMING)
         availability == AnimeEpisodeAvailability.MATCHED -> control(playback, AnimeDetailPlayMode.PLAY)
         availability == AnimeEpisodeAvailability.RECENTLY_FAILED -> if (canRetry)
@@ -191,7 +191,7 @@ internal fun animeDetailPlayControl(episode: AnimeEpisode?, previous: AnimeWatch
                 resuming -> "重试续看"
                 else -> "重试播放"
             }, AnimeDetailPlayMode.PLAY)
-        else control("查看本集线路", AnimeDetailPlayMode.SOURCES, "线路暂不可用")
+        else control("查看本集来源", AnimeDetailPlayMode.SOURCES, "来源暂不可用")
         else -> control(when {
             next -> "找片源后看下一集"
             replay -> "找片源后重看"
@@ -231,11 +231,11 @@ internal fun AnimeDetailPlayAction(
             else -> Icons.Filled.PlayArrow
         },
         busy = control.mode == AnimeDetailPlayMode.WAIT,
-        clickLabel = if (control.mode == AnimeDetailPlayMode.UPCOMING) "查看放送与本集线路" else control.title,
+        clickLabel = if (control.mode == AnimeDetailPlayMode.UPCOMING) "查看放送与本集来源" else control.title,
     ), canActivate = control.mode != AnimeDetailPlayMode.WAIT, active = active, persistent = persistent,
         collapseProgress = collapseProgress, modifier = modifier, onHeightChanged = onHeightChanged,
         optionsLabel = "播放选项", options = listOfNotNull(
-            onLines?.let { DetailDockOption("本集线路", onClick = it) },
+            onLines?.let { DetailDockOption("本集来源", onClick = it) },
             DetailDockOption("集数列表", onClick = onEpisodes),
         ), onActivate = onActivate)
 }

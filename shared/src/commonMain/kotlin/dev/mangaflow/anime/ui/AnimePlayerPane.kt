@@ -189,10 +189,19 @@ internal fun AnimePlayerPane(
         ?: detail?.let { controller.currentPlaybackEpisode(it.subject.id, state.selectedEpisodeId) }
     val target = state.playbackTarget
     val episode = target?.episode ?: activeEpisode
+    val offeredPosition by controller.resumeOffer.collectAsStateWithLifecycle()
+    val resumeOffer = offeredPosition?.takeIf { offer ->
+        target == null && !state.resolving && detail?.subject?.id == offer.subjectId &&
+            state.selectedEpisodeId == offer.episodeId && playback.episodeId == offer.episodeId &&
+            playback.assetKey == offer.assetId && playback.sessionGeneration == offer.sessionGeneration &&
+            playback.timelineGeneration == offer.timelineGeneration && playback.phase == AnimePlayerPhase.READY
+    }
     val resolutionError = target?.error
     val awaitingVideo = playback.firstFrameRendered == false && playback.hasVideoTracks != false
-    val keepingCurrentVideo = (state.resolving || state.pendingPlayback != null) && target?.manualOption != null &&
-        target.episode.id == state.selectedEpisodeId && playback.phase == AnimePlayerPhase.READY &&
+    val keepingCurrentVideo = (state.resolving || state.pendingPlayback != null) && target != null &&
+        (target.manualOption != null || target.requestedSourceId != null) &&
+        target.episode.id == state.selectedEpisodeId && target.episode.id == playback.episodeId &&
+        playback.phase == AnimePlayerPhase.READY &&
         !playback.isBuffering && !awaitingVideo
     val blockingResolution = state.resolving && !keepingCurrentVideo
     val recoveryRequested = blockingResolution && target?.recoveringPlayback == true
@@ -222,9 +231,11 @@ internal fun AnimePlayerPane(
         showingCurrentPlayback && episode != null && state.selectedEpisodeId == episode.id
     }
     val hasAudioAlternative = if (episode != null && playback.phase == AnimePlayerPhase.READY && playback.hasVideoTracks == false)
-        remember(episode.id, state) {
-            controller.confirmedPlaybackLines(episode.id, state).asSequence()
-                .filter { controller.canAttemptPlaybackLine(episode.id, it, state) }.drop(1).any()
+        remember(episode.id, state, currentOption) {
+            controller.confirmedPlaybackLines(episode.id, state).any { candidate ->
+                (currentOption == null || !controller.samePlaybackLine(candidate, currentOption)) &&
+                    controller.canAttemptPlaybackLine(episode.id, candidate, state)
+            }
         } else false
     val ordered = remember(detail?.episodes, episode?.kind) { detail?.episodes.orEmpty().filter { it.kind == episode?.kind } }
     val index = remember(ordered, episode?.id) { ordered.indexOfFirst { it.id == episode?.id } }
@@ -234,7 +245,7 @@ internal fun AnimePlayerPane(
         controller.episodeAvailability(next.id, state) == AnimeEpisodeAvailability.UPCOMING
     val playerFailure = playback.error ?: if (playback.phase == AnimePlayerPhase.ERROR)
         "播放器未能准备视频，请重试或选择其他来源。" else null
-    val playbackSource = currentOption?.sourceName
+    val playbackSource = currentOption?.sourceName ?: "离线播放".takeIf { showingCurrentPlayback }
     val incident = target?.failure ?: playerFailure?.let { message -> currentOption?.let {
         AnimePlaybackFailure(it.sourceId, it.sourceName, "播放视频", message)
     } }
@@ -373,6 +384,9 @@ internal fun AnimePlayerPane(
     } else null
     val controlBackdrop = videoDockSource?.haze ?: artwork
     fun interact() { controlsVisible = true; interactionEpoch++ }
+    LaunchedEffect(resumeOffer, active, obscured, panelPresent, locked, playback.inPictureInPicture) {
+        if (resumeOffer != null && active && !obscured && !panelPresent && !locked && !playback.inPictureInPicture) interact()
+    }
     fun keepTransportVisibility() {
         // A keyboard or bare-video command can acknowledge itself while the movie stays clear.
         if (!desktop || showChrome) interact()
@@ -1025,15 +1039,15 @@ internal fun AnimePlayerPane(
                     .padding(horizontal = if (desktop) 14.dp else 8.dp, vertical = if (desktop) 7.dp else 4.dp),
                     contentAlignment = Alignment.BottomCenter) {
                     val hasTimeline = canControl && playback.hasTimeline
-                    val hasNotice = state.notice != null || playback.notice != null
-                    val canOpenLines = episode != null && !inlineWatching && (!showStage || compactStage)
+                    val hasNotice = resumeOffer != null || state.notice != null || playback.notice != null
+                    val canOpenSources = episode != null && !inlineWatching && (!showStage || compactStage)
                     val canOpenWatching = !inlineWatching && detail != null
                     val dockWidth = when {
                         desktop && (hasTimeline || hasNotice) -> 920.dp
                         desktop -> 420.dp
                         hasTimeline || hasNotice -> 800.dp
                         canControl -> 340.dp
-                        else -> 18.dp + 44.dp * (1 + (if (canOpenLines) 1 else 0) + (if (canOpenWatching) 1 else 0))
+                        else -> 18.dp + 44.dp * (1 + (if (canOpenSources) 1 else 0) + (if (canOpenWatching) 1 else 0))
                     }
                     AnimePlaybackSurface(controlBackdrop,
                         Modifier.widthIn(max = dockWidth).fillMaxWidth().playerChromeContact(hoverEnabled && showChrome, onChromeContact)
@@ -1050,9 +1064,10 @@ internal fun AnimePlayerPane(
                             onInteraction = ::interact, seekPreview = seekPreview, timelineInteractive = timelineInteractive,
                             nextPreparation = state.nextEpisodePreparation,
                             workspaceNotice = state.notice, onDismissNotice = controller::dismissNotice,
+                            resumeOffer = resumeOffer, onResume = { controller.resumeAtOfferedPosition(it) },
                             centralTransport = centralTransport, canControl = canControl, desktop = desktop,
-                            sourceName = currentOption?.sourceName ?: "本地播放".takeIf { showingCurrentPlayback },
-                            onSources = if (canOpenLines) ::showSources else null,
+                            sourceName = playbackSource,
+                            onSources = if (canOpenSources) ::showSources else null,
                             fullscreen = fullscreen, onFullscreen = ::toggleFullscreen,
                             onWatching = if (canOpenWatching) ::openWatching else null,
                             watchingFocus = watchingFocus, settingsFocus = settingsFocus,
@@ -1245,7 +1260,7 @@ private fun AnimeWatchingPane(
     Column(modifier.motionInputGate(active)) {
         BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp)) {
             val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-            val showLineName = onClose == null && maxWidth >= 320.dp * fontScale
+            val showSourceName = onClose == null && maxWidth >= 320.dp * fontScale
             val tabs = if (maxWidth < 278.dp * fontScale) listOf("选集", "评论") else listOf("选集", "本集评论")
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1258,18 +1273,18 @@ private fun AnimeWatchingPane(
                         tooltips = listOf("选集", "本集评论"))
                 }
                 if (episode != null && tab == 0) {
-                    val lineLabel = sourceName?.let { "切换本集线路，当前 $it" } ?: "选择本集线路"
-                    if (showLineName) MotionTextButton(onClick = { onSources(episode) },
+                    val sourceLabel = sourceName?.let { "切换本集来源，当前 $it" } ?: "选择本集来源"
+                    if (showSourceName) MotionTextButton(onClick = { onSources(episode) },
                         modifier = Modifier.widthIn(max = 128.dp).heightIn(min = 48.dp)
-                            .semantics { stateDescription = lineLabel },
+                            .semantics { stateDescription = sourceLabel },
                         contentPadding = PaddingValues(horizontal = 6.dp)) {
                         Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
                         Spacer(Modifier.width(4.dp))
-                        Text(sourceName ?: "选线路", style = MaterialTheme.typography.labelMedium,
+                        Text(sourceName ?: "选来源", style = MaterialTheme.typography.labelMedium,
                             color = colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     } else MotionIconButton(onClick = { onSources(episode) },
-                        modifier = Modifier.size(48.dp), tooltip = lineLabel) {
-                        Icon(Icons.Outlined.SwapHoriz, lineLabel, Modifier.size(18.dp))
+                        modifier = Modifier.size(48.dp), tooltip = sourceLabel) {
+                        Icon(Icons.Outlined.SwapHoriz, sourceLabel, Modifier.size(18.dp))
                     }
                 }
                 if (onClose != null) MotionIconButton(onClick = onClose, modifier = Modifier.size(44.dp),
@@ -1334,14 +1349,14 @@ private fun AnimeVideoStatus(
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             if (canChooseSource) MotionIconButton(onClick = onSources, modifier = Modifier.size(44.dp),
-                tooltip = "选择本集线路") { Icon(Icons.Outlined.SwapHoriz, "选择本集线路", Modifier.size(18.dp)) }
+                tooltip = "选择本集来源") { Icon(Icons.Outlined.SwapHoriz, "选择本集来源", Modifier.size(18.dp)) }
         }
         resolving -> Column(Modifier.padding(horizontal = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            PlayerStageMessage(if (autoMatching) "正在找本集线路" else "正在打开本集", sourceName, loading = true)
+            PlayerStageMessage(if (autoMatching) "正在查找本集来源" else "正在打开本集", sourceName, loading = true)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
-                if (canChooseSource) PlayerSwitchLine(onSources)
+                if (canChooseSource) PlayerSwitchSource(onSources)
                 if (canKeepPlayback) MotionTextButton(onClick = onKeepPlayback, modifier = Modifier.heightIn(min = 44.dp)) {
-                    Text("继续原线路")
+                    Text("继续当前播放")
                 }
             }
         }
@@ -1364,17 +1379,17 @@ private fun AnimeVideoStatus(
                         Text("重试本集")
                     }
                     if (canChooseSource) MotionTextButton(onClick = onSources, modifier = Modifier.heightIn(min = 44.dp)) {
-                        Text("选择线路")
+                        Text("选择来源")
                     }
                 } else if (canChooseSource) {
                     MotionButton(onClick = onSources, shape = shape, modifier = Modifier.heightIn(min = 44.dp)) {
-                        Text("查看线路")
+                        Text("查看来源")
                     }
                 }
                 if (canKeepPlayback || canRestorePlayback) MotionTextButton(
                     onClick = if (canKeepPlayback) onKeepPlayback else onRestorePlayback,
                     modifier = Modifier.heightIn(min = 44.dp),
-                ) { Text(if (canKeepPlayback) "继续原线路" else "返回上次播放") }
+                ) { Text(if (canKeepPlayback) "继续当前播放" else "返回上次播放") }
             }
             if (desktop && (clipped || expanded)) {
                 MotionTextButton({ expanded = !expanded }, contentPadding = PaddingValues(horizontal = 8.dp)) {
@@ -1398,14 +1413,14 @@ private fun AnimeVideoStatus(
                     else -> "正在准备播放"
                 }
                 PlayerStageMessage(stage, sourceName, loading = !paused)
-                if (canChooseSource) PlayerSwitchLine(onSources)
+                if (canChooseSource) PlayerSwitchSource(onSources)
             }
         playback.phase == AnimePlayerPhase.READY && !playback.isBuffering && playback.hasVideoTracks == false ->
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 PlayerStageMessage("这条线路只有音频", null)
                 if (hasAudioAlternative) MotionTextButton(onClick = onSources,
                     modifier = Modifier.heightIn(min = 44.dp)) {
-                    Text("换条线路")
+                    Text("选择来源")
                 }
             }
         showBuffering -> AnimePlaybackSurface(null, cornerRadius = 18.dp) {
@@ -1431,11 +1446,11 @@ private fun AnimeVideoStatus(
 }
 
 @Composable
-private fun PlayerSwitchLine(onSources: () -> Unit) {
+private fun PlayerSwitchSource(onSources: () -> Unit) {
     MotionTextButton(onClick = onSources, modifier = Modifier.heightIn(min = 44.dp)) {
         Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(18.dp))
         Spacer(Modifier.width(4.dp))
-        Text("换线路")
+        Text("换来源")
     }
 }
 
@@ -1470,6 +1485,7 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
     onSeekTo: (AnimePlayerState, Long) -> Unit,
     seekPreview: MutableState<AnimeSeekPreview?>, timelineInteractive: Boolean,
     workspaceNotice: String?, onDismissNotice: () -> Unit,
+    resumeOffer: AnimeResumeOffer?, onResume: (AnimeResumeOffer) -> Unit,
     nextPreparation: AnimeNextEpisodePreparation?, centralTransport: Boolean, canControl: Boolean, desktop: Boolean,
     sourceName: String?, onSources: (() -> Unit)?,
     fullscreen: Boolean, onFullscreen: () -> Unit, onWatching: (() -> Unit)?, watchingFocus: FocusRequester,
@@ -1481,14 +1497,14 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
     BoxWithConstraints(modifier) {
         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
         val wide = maxWidth / fontScale >= 380.dp
-        val namedLine = onSources != null && sourceName != null && maxWidth / fontScale >= (if (desktop) 608.dp else 520.dp)
+        val namedSource = onSources != null && sourceName != null && maxWidth / fontScale >= (if (desktop) 608.dp else 520.dp)
         val previousButton = !centralTransport && canControl && previous != null &&
             (if (desktop) maxWidth / fontScale >= 428.dp && !state.ended else wide)
         val playButton = !centralTransport && canControl
         val nextButton = playButton && next != null && !state.ended && (!desktop || maxWidth >= 132.dp)
         val iconSlots = 1 + listOf(previousButton, playButton, nextButton, onWatching != null,
-            !namedLine && onSources != null).count { it }
-        val actionWidth = 44.dp * iconSlots + if (namedLine) 138.dp else 0.dp
+            !namedSource && onSources != null).count { it }
+        val actionWidth = 44.dp * iconSlots + if (namedSource) 138.dp else 0.dp
         val timelineWidth = (if (state.hourTimeline) 228.dp else 184.dp) * fontScale
         val showVolume = desktop && canControl && state.supportsVolume
         val desktopActions = actionWidth + 42.dp + if (showVolume) 42.dp else 0.dp
@@ -1602,6 +1618,15 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
             if (!desktop) nextEpisode()
         }
         Column {
+            if (resumeOffer != null && canSeek) Row(Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically) {
+                AnimeGlassLabel("新片源的时间轴尚未确认", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                MotionTextButton(onClick = { onInteraction(); onResume(resumeOffer) },
+                    modifier = Modifier.heightIn(min = 44.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
+                    AnimeGlassLabel("接回 ${animeTime(resumeOffer.positionMs)}", style = MaterialTheme.typography.labelMedium)
+                }
+            }
             val notice = workspaceNotice ?: state.notice
             if (notice != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 AnimeGlassLabel(notice, Modifier.weight(1f).wrapContentWidth(Alignment.Start), style = MaterialTheme.typography.bodySmall,
@@ -1616,8 +1641,8 @@ private fun AnimePlayerControls(player: AnimePlayer, state: AnimePlaybackChrome,
                     DesktopAnimeVolume(observations, showVolumeSlider, onVolume, onInteraction, trackOutline)
                 }
                 if (onSources != null) {
-                    val sourceLabel = sourceName?.let { "换线路，当前 $it" } ?: "选择播放线路"
-                    if (namedLine && sourceName != null) MotionTextButton(onClick = onSources,
+                    val sourceLabel = sourceName?.let { "切换来源，当前 $it" } ?: "选择播放来源"
+                    if (namedSource && sourceName != null) MotionTextButton(onClick = onSources,
                         modifier = Modifier.widthIn(max = 138.dp).heightIn(min = 44.dp),
                         contentPadding = PaddingValues(horizontal = 7.dp),
                     ) {

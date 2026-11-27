@@ -20,3 +20,13 @@ internal fun animeResumeBindingKey(binding: AnimeSourceBinding, episodeId: Strin
 internal fun animeResumeLineKey(bindingKey: String, sourceEpisode: AnimeSourceEpisode): String =
     "$bindingKey." + resumeDigest(sourceEpisode.id, sourceEpisode.group, sourceEpisode.kind, sourceEpisode.number,
         sourceEpisode.edition, animeContentIdentity(sourceEpisode.url))
+
+/** A one-tap transfer deliberately chosen for this exact player session and timeline. */
+internal data class AnimeResumeOffer(
+    val subjectId: String,
+    val episodeId: String,
+    val assetId: String,
+    val sessionGeneration: Long,
+    val timelineGeneration: Long,
+    val positionMs: Long,
+)

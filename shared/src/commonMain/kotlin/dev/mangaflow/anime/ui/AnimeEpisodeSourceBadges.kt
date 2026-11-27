@@ -13,7 +13,6 @@ import dev.mangaflow.anime.AnimeScreenState
 /** Like manga chapter variants, these marks belong to one confirmed episode mapping. */
 internal data class AnimeEpisodeSources(
     val sources: List<Pair<String, String>>,
-    val lineCount: Int,
     val retrySources: Int,
     val unavailableSources: Int,
 )
@@ -27,7 +26,6 @@ internal fun animeEpisodeSources(
     val grouped = lines.groupBy { it.sourceId }
     return AnimeEpisodeSources(
         sources = grouped.map { (id, options) -> id to options.first().sourceName },
-        lineCount = lines.size,
         retrySources = grouped.values.count { options ->
             options.any { controller.canAttemptPlaybackLine(episodeId, it, state) } &&
                 options.all { controller.recentPlaybackLineFailure(episodeId, it, state) != null }
@@ -49,7 +47,7 @@ internal fun AnimeEpisodeSourceBadges(
     if (sources.sources.isEmpty()) return
     AnimeSourceBadge(sources.sources, modifier.semantics {
         stateDescription = buildList {
-            add("本集已匹配 ${sources.sources.size} 个来源，${sources.lineCount} 条线路")
+            add("本集已匹配 ${sources.sources.size} 个来源")
             if (sources.retrySources > 0) add("${sources.retrySources} 个来源待重试")
             if (sources.unavailableSources > 0) add("${sources.unavailableSources} 个来源暂不可用")
         }.joinToString("，")

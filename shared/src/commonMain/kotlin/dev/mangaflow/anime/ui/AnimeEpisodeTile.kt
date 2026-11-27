@@ -91,9 +91,9 @@ internal fun AnimeEpisodeTile(
         animeEpisodeNumber(episode.number) else null
     val sourceState = when (availability) {
         AnimeEpisodeAvailability.UPCOMING -> "尚未放送"
-        AnimeEpisodeAvailability.RECENTLY_FAILED -> "线路未就绪"
-        AnimeEpisodeAvailability.CHECKING -> "正在找线路"
-        AnimeEpisodeAvailability.UNMATCHED -> "暂无匹配线路"
+        AnimeEpisodeAvailability.RECENTLY_FAILED -> "来源未就绪"
+        AnimeEpisodeAvailability.CHECKING -> "正在查找来源"
+        AnimeEpisodeAvailability.UNMATCHED -> "暂无匹配来源"
         AnimeEpisodeAvailability.MATCHED -> null
     }
     val headline = if (titleFirst || ordinal != null) subtitle ?: label else if (showNumber) animeEpisodeNumber(episode.number) else label
@@ -105,10 +105,10 @@ internal fun AnimeEpisodeTile(
         AnimeEpisodeAvailability.UPCOMING, AnimeEpisodeAvailability.RECENTLY_FAILED -> sourceState
         else -> subtitle ?: selectionLabel ?: sourceState.takeIf { listRow }
     }
-    val menuLabel = if (onMore != null) "本集操作" else "选择本集线路"
+    val menuLabel = if (onMore != null) "本集操作" else "选择本集来源"
     val menu = onMore ?: onSources
     val actionLabel = when (availability) {
-        AnimeEpisodeAvailability.UPCOMING -> "查看 $label 的放送与线路"
+        AnimeEpisodeAvailability.UPCOMING -> "查看 $label 的放送与来源"
         AnimeEpisodeAvailability.CHECKING, AnimeEpisodeAvailability.UNMATCHED -> "查找 $label 的片源并播放"
         AnimeEpisodeAvailability.RECENTLY_FAILED -> "尝试播放 $label"
         AnimeEpisodeAvailability.MATCHED -> "播放 $label"
@@ -129,7 +129,7 @@ internal fun AnimeEpisodeTile(
             scaleY = scaleX
         }, tint = colors.onPrimaryContainer)
     }
-    val sourcesLabel = "选择本集线路"
+    val sourcesLabel = "选择本集来源"
     Box(modifier) {
         DesktopContextMenuArea(if (!enabled || platformKind != PlatformKind.DESKTOP) emptyList() else buildList {
             add(DesktopMenuAction(sourcesLabel, icon = Icons.Outlined.Tune, onClick = onSources))

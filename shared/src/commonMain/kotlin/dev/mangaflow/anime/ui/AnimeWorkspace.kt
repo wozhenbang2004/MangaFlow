@@ -1191,15 +1191,33 @@ private fun AnimeWorkspaceContent(
                 controller.selectRankingProvider(provider)
             }
         })
-    AnimeSourcesPanel(sourcesVisible, state, controller, backdrop, sourceEpisode,
+    val pickerSubjectId = state.detail?.subject?.id
+    val pickerEpisode = sourceEpisode
+    val pickerVisit = controller.lineLookupDetailVisit
+    fun currentPickerEpisode(id: String): AnimeEpisode? {
+        if (!active || !sourcesVisible || controller.lineLookupDetailVisit != pickerVisit ||
+            pickerEpisode?.id != sourceEpisode?.id ||
+            pickerEpisode != null && (pickerEpisode.id != id || pickerEpisode.subjectId != pickerSubjectId)) return null
+        val live = controller.state.value.detail?.takeIf { it.subject.id == pickerSubjectId } ?: return null
+        return live.episodes.firstOrNull { it.id == id && it.subjectId == live.subject.id }
+    }
+    AnimeSourcesPanel(sourcesVisible, state, controller, backdrop, pickerEpisode,
         overVideo = sourcesOverVideo,
         recovering = playbackPhase == AnimePlayerPhase.ERROR || state.playbackTarget?.error != null,
-        onDismiss = ::dismissSources, onAutomaticPlay = { episode ->
-            sourcesVisible = false
-            requestPlayback(episode, null)
+        onDismiss = ::dismissSources, onAutomaticPlay = { shown ->
+            currentPickerEpisode(shown.id)?.takeIf { it.subjectId == shown.subjectId }?.let { episode ->
+                dismissSources()
+                requestPlayback(episode, null)
+            }
+        }, onPlaySource = { episodeId, sourceId ->
+            currentPickerEpisode(episodeId)?.let { episode ->
+                if (controller.playFromSource(episode.id, sourceId, episode.subjectId)) dismissSources()
+            }
         }, onPlay = { episodeId, option ->
-            sourcesVisible = false
-            state.detail?.episodes?.firstOrNull { it.id == episodeId }?.let { requestPlayback(it, option) }
+            currentPickerEpisode(episodeId)?.let { episode ->
+                dismissSources()
+                requestPlayback(episode, option)
+            }
         }, onOpenSourceWork = { chooseReference(it, true) })
     AnimeTrackingPanel(trackingVisible, state, controller, backdrop,
         onDismiss = { trackingVisible = false }, onReview = { reviewsVisible = true })

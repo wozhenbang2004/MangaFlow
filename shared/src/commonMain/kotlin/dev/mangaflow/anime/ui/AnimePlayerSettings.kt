@@ -303,8 +303,12 @@ internal fun AnimePlayerSettings(
                                 controller.player.setSpeed(speed)
                             }, onMore = { show(AnimePlayerPanel.SPEED) }) }
                             if (episode != null) item {
-                                AnimePlayerSettingLink(Icons.Outlined.SwapHoriz, "播放线路",
-                                    state.selectedPlaybackOption?.sourceName?.takeIf { currentMedia != null }.orEmpty()) {
+                                val sourceLabel = when {
+                                    currentMedia != null -> state.selectedPlaybackOption?.sourceName ?: "离线播放"
+                                    state.resolving -> target?.sourceName?.let { "正在连接 $it" }
+                                    else -> null
+                                }
+                                AnimePlayerSettingLink(Icons.Outlined.SwapHoriz, "播放来源", sourceLabel.orEmpty()) {
                                     pendingSourceEpisode = episode
                                     onDismiss()
                                 }
@@ -647,7 +651,7 @@ internal fun AnimePlayerSettings(
                                     ?: state.selectedPlaybackOption?.sourceName.takeIf { currentMedia != null }
                                 val route = state.playbackRouteMode?.takeIf { currentMedia != null }?.let(::downloadRouteLabel)
                                 val stage = when {
-                                    state.resolving && state.autoMatching -> "正在查找线路"
+                                    state.resolving && state.autoMatching -> "正在查找来源"
                                     state.resolving -> "正在解析播放地址"
                                     target?.error != null -> target.failure?.stage ?: "取址未完成"
                                     currentMedia?.phase == AnimePlayerPhase.OPENING -> "正在打开媒体"
@@ -684,7 +688,7 @@ internal fun AnimePlayerSettings(
                                 if (episode != null) MotionTextButton(onClick = {
                                     pendingSourceEpisode = episode
                                     onDismiss()
-                                }, modifier = Modifier.heightIn(min = 44.dp)) { Text("查看本集线路") }
+                                }, modifier = Modifier.heightIn(min = 44.dp)) { Text("查看本集来源") }
                             }
                             val configureBuffer = AnimePlayerCapability.BUFFER_CONTROL in capabilities ||
                                 currentMedia == null || playback.phase in setOf(AnimePlayerPhase.OPENING, AnimePlayerPhase.ERROR)

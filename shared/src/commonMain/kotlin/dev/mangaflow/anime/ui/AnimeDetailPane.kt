@@ -287,6 +287,7 @@ internal fun AnimeDetailPane(
     val firstAvailability = first?.let { controller.episodeAvailability(it.id, state) }
     val bindings = remember(state.sourceBindings, subject.id) { state.sourceBindings.filter { it.subjectId == subject.id } }
     val firstLines = first?.let { controller.confirmedPlaybackLines(it.id, state) }.orEmpty()
+    val firstSourceCount = remember(firstLines) { firstLines.distinctBy { it.sourceId }.size }
     val firstCanRetry = first != null && firstAvailability == AnimeEpisodeAvailability.RECENTLY_FAILED &&
         firstLines.any { controller.canAttemptPlaybackLine(first.id, it, state) }
     val lastSource = firstLines.firstOrNull {
@@ -762,7 +763,7 @@ internal fun AnimeDetailPane(
                                 }
                             }
                             else -> Column(Modifier.fillMaxSize()) {
-                                AnimeDetailLineRow(first, firstAvailability, firstLines.size, firstCanRetry, lastSource,
+                                AnimeDetailSourceRow(first, firstAvailability, firstSourceCount, firstCanRetry, lastSource,
                                     sourceSearchInProgress, hasSourceIssues, paneActive, Modifier.padding(horizontal = horizontal),
                                     compact = landscapeStage,
                                     onOpen = { onSources(first) }, onManage = { onSources(null) })
@@ -878,7 +879,7 @@ internal fun AnimeDetailPane(
                                                     if (missingResume) item(key = "missing-resume") {
                                                         AnimeDetailStatus("上次观看记录已保留", Icons.Outlined.History,
                                                             detail = "当前目录尚未找到对应剧集，不会用其他集替代。",
-                                                            actionLabel = "查看作品线路", actionIcon = Icons.Outlined.Link, onAction = { onSources(null) })
+                                                            actionLabel = "查看作品来源", actionIcon = Icons.Outlined.Link, onAction = { onSources(null) })
                                                     }
                                                     items(rows, key = { row -> "episodes:" + row.first().id }) { row ->
                                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1222,10 +1223,10 @@ private fun AnimeDetailHero(
 }
 
 @Composable
-private fun AnimeDetailLineRow(
+private fun AnimeDetailSourceRow(
     episode: AnimeEpisode?,
     availability: AnimeEpisodeAvailability?,
-    lineCount: Int,
+    sourceCount: Int,
     canRetry: Boolean,
     lastSource: Pair<String, String>?,
     looking: Boolean,
@@ -1238,10 +1239,10 @@ private fun AnimeDetailLineRow(
 ) {
     val colors = MaterialTheme.colorScheme
     val caption = when (availability) {
-        AnimeEpisodeAvailability.MATCHED -> "自动选线 · $lineCount 条"
-        AnimeEpisodeAvailability.CHECKING -> "正在找线路"
-        AnimeEpisodeAvailability.UNMATCHED -> "暂无匹配线路"
-        AnimeEpisodeAvailability.RECENTLY_FAILED -> if (canRetry) "播放失败 · 可重试" else "线路暂不可用"
+        AnimeEpisodeAvailability.MATCHED -> "$sourceCount 个来源 · 自动选择"
+        AnimeEpisodeAvailability.CHECKING -> "正在查找来源"
+        AnimeEpisodeAvailability.UNMATCHED -> "本集暂无匹配来源"
+        AnimeEpisodeAvailability.RECENTLY_FAILED -> if (canRetry) "播放失败 · 可重试" else "来源暂不可用"
         AnimeEpisodeAvailability.UPCOMING -> episode?.let { upcomingEpisodeLabel(it, fullDate = true) } ?: "尚未放送"
         null -> when {
             looking -> "正在查找播放来源"
@@ -1255,7 +1256,7 @@ private fun AnimeDetailLineRow(
         Row(Modifier.weight(1f).clip(RoundedCornerShape(14.dp))
             .then(if (compact) Modifier else Modifier.background(colors.surfaceContainerLow))
             .clickable(enabled = active, role = Role.Button, interactionSource = interaction, indication = null,
-                onClickLabel = "查看播放线路", onClick = onOpen)
+                onClickLabel = "查看播放来源", onClick = onOpen)
             .motionPress(interaction, enabled = active)
             .heightIn(min = if (compact) 44.dp else 50.dp).padding(horizontal = if (compact) 4.dp else 12.dp, vertical = 6.dp)
             .semantics(mergeDescendants = true) {
@@ -1266,11 +1267,11 @@ private fun AnimeDetailLineRow(
             } else if (availability == AnimeEpisodeAvailability.MATCHED && lastSource != null) {
                 AnimeSourceMark(lastSource.first, lastSource.second, size = 17.dp)
             } else Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
-            val lineName = episode?.let { "${animeEpisodeLabel(it)}线路" } ?: "播放线路"
-            if (compact) Text("$lineName · $caption", Modifier.weight(1f), color = colors.onSurfaceVariant,
+            val sourceLabel = episode?.let { "${animeEpisodeLabel(it)} 来源" } ?: "播放来源"
+            if (compact) Text("$sourceLabel · $caption", Modifier.weight(1f), color = colors.onSurfaceVariant,
                 style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
             else Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(lineName, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold,
+                Text(sourceLabel, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(caption, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -1612,7 +1613,7 @@ private fun AnimeEpisodeCell(
                     enabled = active, onOpen = openLines)
             }
             val status = when {
-                options.lineCount > 0 -> "${options.lineCount} 条线路"
+                options.sources.isNotEmpty() -> "${options.sources.size} 个来源"
                 availability == AnimeEpisodeAvailability.UPCOMING -> upcomingEpisodeLabel(episode, fullDate = true)
                 else -> null
             }
@@ -1621,7 +1622,7 @@ private fun AnimeEpisodeCell(
             CompactMenuAction(if (completed) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
                 if (completed) "取消已看" else "标记已看", enabled = libraryAvailable,
                 onClick = { menuVisible = false; onCompleted() })
-            CompactMenuAction(Icons.Outlined.SwapHoriz, "本集播放线路", onClick = openLines)
+            CompactMenuAction(Icons.Outlined.SwapHoriz, "本集播放来源", onClick = openLines)
         }
     }
 }
