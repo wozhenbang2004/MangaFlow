@@ -70,6 +70,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
 
+/** Completion of the requested queue mutation, including the writer or metadata handoff. */
+enum class DownloadCommandResult { ACCEPTED, SAVED, FAILED, CANCELLED, CHANGED }
+
 enum class DownloadStatus { QUEUED, RUNNING, WAITING, PAUSED, COMPLETED, FAILED }
 
 data class DownloadEntry(
@@ -618,26 +621,37 @@ class DownloadStore private constructor(context: Context) {
     }
 
     fun pause(id: String, expectedWorkId: String? = null) {
-        scope.launch {
+        pauseCommand(id, expectedWorkId)
+    }
+
+    internal fun pauseCommand(id: String, expectedWorkId: String?, expected: DownloadEntry? = null): Deferred<DownloadCommandResult> =
+        scope.async {
             awaitReady()
             changeChapter(id) {
                 var generation: String? = null
                 try {
                     val change = synchronized(lock) {
-                        val record = records[id] ?: return@changeChapter
-                        if (expectedWorkId != null && record.workId != expectedWorkId) return@changeChapter
-                        if (record.entry.status == DownloadStatus.COMPLETED) return@changeChapter
+                        val record = records[id] ?: return@changeChapter DownloadCommandResult.CHANGED
+                        if ((expectedWorkId != null && record.workId != expectedWorkId) || expected != null &&
+                            (record.entry.createdAt != expected.createdAt || record.entry.manga.id != expected.manga.id ||
+                                record.entry.chapter.id != expected.chapter.id ||
+                                expected.progress.generation.isNotBlank() && record.generation != expected.progress.generation))
+                            return@changeChapter DownloadCommandResult.CHANGED
+                        if (record.entry.status == DownloadStatus.COMPLETED) return@changeChapter DownloadCommandResult.SAVED
+                        if (expected != null && record.entry.status !in ACTIVE_STATUSES)
+                            return@changeChapter DownloadCommandResult.CHANGED
                         generation = record.generation
                         detachWriter(record)
                     }
                     generation = change.detached.generation
                     stopWriter(change)
+                    DownloadCommandResult.ACCEPTED
                 } catch (error: Exception) {
                     memoryFailure(id, error, generation)
+                    DownloadCommandResult.FAILED
                 }
             }
         }
-    }
 
     suspend fun remove(id: String) = withContext(Dispatchers.IO) {
         awaitReady()

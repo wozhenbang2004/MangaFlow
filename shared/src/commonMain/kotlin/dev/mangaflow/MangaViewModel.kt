@@ -85,6 +85,7 @@ import dev.mangaflow.data.combineOrdinarySearchTags
 import dev.mangaflow.data.federatedMangaIdentity
 import dev.mangaflow.data.sources.KomiicBodySource
 import dev.mangaflow.storage.DownloadEntry
+import dev.mangaflow.storage.DownloadCommandResult
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStorageException
 import dev.mangaflow.storage.DownloadStore
@@ -96,6 +97,8 @@ import dev.mangaflow.storage.BrowseSnapshot
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.update.UpdateManager
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineStart
@@ -3561,12 +3564,23 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     fun retryDownloadUsingLatestRoute(entry: DownloadEntry) = retryDownload(entry, useLatestRoute = true)
 
-    private fun retryDownload(entry: DownloadEntry, useLatestRoute: Boolean) {
+    internal fun refreshDownloadForQueue(entry: DownloadEntry, useLatestRoute: Boolean): Deferred<DownloadCommandResult> {
+        val receipt = CompletableDeferred<DownloadCommandResult>()
+        retryDownload(entry, useLatestRoute, receipt)
+        return receipt
+    }
+
+    private fun retryDownload(entry: DownloadEntry, useLatestRoute: Boolean, receipt: CompletableDeferred<DownloadCommandResult>? = null) {
         if (entry.manga.sourceUrl == LOCAL_SOURCE_URL) {
+            receipt?.complete(DownloadCommandResult.FAILED)
             viewModelScope.launch { messages.send("本地文件已损坏，请删除后重新导入。") }
             return
         }
-        val expected = downloads.entryFor(entry.manga.id, entry.chapter.id) ?: return
+        val expected = downloads.entryFor(entry.manga.id, entry.chapter.id)
+        if (expected == null || (receipt != null && (expected !== entry || !expected.needsSourceRefresh))) {
+            receipt?.complete(DownloadCommandResult.CHANGED)
+            return
+        }
         if (!expected.needsSourceRefresh) {
             if (useLatestRoute) downloads.retryUsingLatestRoute(expected.id) else downloads.retry(expected.id)
             return
@@ -3575,12 +3589,17 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             try {
                 val route = downloads.routeForReadingDownload(expected.manga.id, expected.chapter.id,
                     expectedEntry = expected, useLatestDefaults = useLatestRoute)
-                enqueueChapterDownload(expected.manga, expected.chapter, refreshingEntry = expected, frozenRoute = route)
+                enqueueChapterDownload(expected.manga, expected.chapter, refreshingEntry = expected, frozenRoute = route, receipt = receipt)
             } catch (cancel: CancellationException) {
+                currentCoroutineContext().ensureActive()
+                receipt?.complete(DownloadCommandResult.CHANGED)
                 throw cancel
             } catch (failure: Exception) {
+                receipt?.complete(DownloadCommandResult.FAILED)
                 messages.send(preparationError(failure))
             }
+        }.invokeOnCompletion { cause ->
+            if (cause != null) receipt?.complete(if (cause is CancellationException) DownloadCommandResult.CANCELLED else DownloadCommandResult.FAILED)
         }
     }
 
@@ -4121,9 +4140,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         routeMode: DownloadRouteMode? = null,
         refreshingEntry: DownloadEntry? = null,
         frozenRoute: DownloadRouteSnapshot? = null,
+        receipt: CompletableDeferred<DownloadCommandResult>? = null,
     ) {
-        services.preparations.enqueue(manga, chapter, routeMode, refreshingEntry, frozenRoute)
-        messages.trySend("已加入章节准备队列，可在下载页查看或取消")
+        services.preparations.enqueue(manga, chapter, routeMode, refreshingEntry, frozenRoute, receipt)
+        if (receipt == null) messages.trySend("已加入章节准备队列，可在下载页查看或取消")
     }
 
     private fun preparationError(failure: Exception): String = when {

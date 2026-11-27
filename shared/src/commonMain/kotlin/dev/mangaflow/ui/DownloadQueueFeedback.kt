@@ -18,42 +18,52 @@ import androidx.compose.ui.unit.dp
 import dev.mangaflow.storage.ChapterPreparationPhase
 import dev.mangaflow.storage.ChapterPreparationState
 import dev.mangaflow.storage.DownloadEntry
+import dev.mangaflow.storage.DownloadCommandResult
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.ui.motion.LocalPlatformAccessibilityPreferences
 import dev.mangaflow.ui.motion.MotionIconButton
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 
 internal enum class QueueCommand(val label: String) { PAUSE("暂停"), RESUME("继续"), RETRY("重试") }
 
 private data class QueueAcknowledgement(val pending: Int, val accepted: Int = 0, val saved: Int = 0,
-    val failed: Int = 0, val removed: Int = 0)
-
-internal enum class QueueResolution { ACCEPTED, SAVED, FAILED, REMOVED }
+    val failed: Int = 0, val removed: Int = 0, val cancelled: Int = 0)
 
 internal class DownloadQueueRequest(val command: QueueCommand, private val targets: List<DownloadEntry>,
-    preparations: List<ChapterPreparationState>, val unavailable: Int) {
+    preparations: List<ChapterPreparationState>, val unavailable: Int,
+    val commands: Map<String, Deferred<DownloadCommandResult>>) {
     val total = targets.size + unavailable
     private val priorPreparations = preparations.filter { it.refreshingEntryId != null }.associateBy { it.refreshingEntryId }
 
-    fun observe(entries: Map<String, DownloadEntry>, preparations: List<ChapterPreparationState>): Map<String, QueueResolution> {
+    fun observe(entries: Map<String, DownloadEntry>, preparations: List<ChapterPreparationState>,
+        completed: Map<String, DownloadCommandResult>): Map<String, DownloadCommandResult> {
         val latestPreparation = preparations.filter { it.refreshingEntryId != null }.associateBy { it.refreshingEntryId }
         return buildMap {
             for (original in targets) {
+                if (original.id in commands) {
+                    completed[original.id]?.let { put(original.id, it) }
+                    continue
+                }
                 val now = entries[original.id]
                 val preparation = latestPreparation[original.id]
                 val outcome = when {
-                    now == null || !sameDownloadTask(original, now) -> QueueResolution.REMOVED
-                    now.status == DownloadStatus.COMPLETED -> QueueResolution.SAVED
-                    command == QueueCommand.PAUSE && now.status == DownloadStatus.PAUSED -> QueueResolution.ACCEPTED
+                    now == null || !sameDownloadTask(original, now) -> DownloadCommandResult.CHANGED
+                    now.status == DownloadStatus.COMPLETED -> DownloadCommandResult.SAVED
+                    command == QueueCommand.PAUSE && now.status == DownloadStatus.PAUSED -> DownloadCommandResult.ACCEPTED
                     command != QueueCommand.PAUSE && !now.needsSourceRefresh &&
                         (now.status == DownloadStatus.QUEUED || now.status == DownloadStatus.RUNNING ||
-                            now.status == DownloadStatus.WAITING) -> QueueResolution.ACCEPTED
+                            now.status == DownloadStatus.WAITING) -> DownloadCommandResult.ACCEPTED
                     now.status == DownloadStatus.FAILED && (original.status != DownloadStatus.FAILED ||
-                        now.error != original.error || now.progress != original.progress) -> QueueResolution.FAILED
+                        now.error != original.error || now.progress != original.progress) -> DownloadCommandResult.FAILED
                     command != QueueCommand.PAUSE && preparation?.phase == ChapterPreparationPhase.FAILED &&
                         preparation.manga.id == original.manga.id && preparation.chapter.id == original.chapter.id &&
-                        preparation != priorPreparations[original.id] -> QueueResolution.FAILED
+                        preparation != priorPreparations[original.id] -> DownloadCommandResult.FAILED
                     else -> null
                 }
                 if (outcome != null) put(original.id, outcome)
@@ -82,16 +92,27 @@ internal fun DownloadQueueFeedback(request: DownloadQueueRequest, entries: Map<S
         }
     }
     LaunchedEffect(request) {
-        val settled = mutableMapOf<String, QueueResolution>()
-        snapshotFlow { request.observe(latestEntries, latestPreparations) }.first { observed ->
+        val completed = mutableStateMapOf<String, DownloadCommandResult>()
+        request.commands.forEach { (id, command) ->
+            launch {
+                completed[id] = try { command.await() }
+                catch (cancel: CancellationException) {
+                    currentCoroutineContext().ensureActive()
+                    DownloadCommandResult.CANCELLED
+                } catch (_: Exception) { DownloadCommandResult.FAILED }
+            }
+        }
+        val settled = mutableMapOf<String, DownloadCommandResult>()
+        snapshotFlow { request.observe(latestEntries, latestPreparations, completed) }.first { observed ->
             observed.forEach { (id, outcome) -> if (id !in settled) settled[id] = outcome }
             val outcomes = settled.values
             result = QueueAcknowledgement(request.total - request.unavailable - settled.size,
-                outcomes.count { it == QueueResolution.ACCEPTED }, outcomes.count { it == QueueResolution.SAVED },
-                outcomes.count { it == QueueResolution.FAILED }, request.unavailable + outcomes.count { it == QueueResolution.REMOVED })
+                outcomes.count { it == DownloadCommandResult.ACCEPTED }, outcomes.count { it == DownloadCommandResult.SAVED },
+                outcomes.count { it == DownloadCommandResult.FAILED }, request.unavailable + outcomes.count { it == DownloadCommandResult.CHANGED },
+                outcomes.count { it == DownloadCommandResult.CANCELLED })
             result.pending == 0
         }
-        if (result.failed == 0 && result.removed == 0) {
+        if (result.failed == 0 && result.removed == 0 && result.cancelled == 0) {
             delay(4_500L)
             if (!access.touchExploration) latestDismiss()
         }
@@ -102,6 +123,7 @@ internal fun DownloadQueueFeedback(request: DownloadQueueRequest, entries: Map<S
     val signal = when {
         result.pending > 0 -> ManagementSignal.QUEUED
         result.failed > 0 -> ManagementSignal.ATTENTION
+        result.cancelled > 0 -> ManagementSignal.CANCELLED
         result.removed > 0 -> ManagementSignal.INFORMATION
         else -> ManagementSignal.COMPLETE
     }
@@ -114,8 +136,14 @@ internal fun DownloadQueueFeedback(request: DownloadQueueRequest, entries: Map<S
         if (result.accepted > 0) add(if (request.command == QueueCommand.PAUSE) "已暂停 ${result.accepted} 话" else "已恢复调度 ${result.accepted} 话")
         if (result.saved > 0) add("已下载完成 ${result.saved} 话")
         if (result.failed > 0) add("失败 ${result.failed} 话")
+        if (result.cancelled > 0) add("已取消 ${result.cancelled} 话")
         if (result.removed > 0) add("任务已变更 ${result.removed} 话")
-        if (result.pending > 0) add(if (waitingDetails) "${result.pending} 话尚未回应，可查看任务详情" else "等待队列确认 ${result.pending} 话")
+        if (result.pending > 0) add(when {
+            request.command == QueueCommand.PAUSE && waitingDetails -> "正在等待 ${result.pending} 话停止写入"
+            request.command == QueueCommand.PAUSE -> "正在暂停 ${result.pending} 话"
+            waitingDetails -> "${result.pending} 话尚未回应，可查看任务详情"
+            else -> "等待队列确认 ${result.pending} 话"
+        })
     }.joinToString(" · ")
     Surface(modifier = Modifier.widthIn(max = 480.dp), shape = RoundedCornerShape(14.dp),
         color = colors.surfaceContainerHigh, tonalElevation = 0.dp, shadowElevation = 4.dp) {

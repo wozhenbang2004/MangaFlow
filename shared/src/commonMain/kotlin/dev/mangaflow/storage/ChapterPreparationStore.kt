@@ -104,6 +104,7 @@ class ChapterPreparationStore(
         val target: Target? = null,
         val retryAt: Long = 0L,
         val attempts: Int = 0,
+        val receipt: CompletableDeferred<DownloadCommandResult>? = null,
     )
 
     init {
@@ -141,6 +142,7 @@ class ChapterPreparationStore(
     fun enqueue(
         manga: Manga, chapter: Chapter, routeMode: DownloadRouteMode? = null,
         refreshingEntry: DownloadEntry? = null, frozenRoute: DownloadRouteSnapshot? = null,
+        receipt: CompletableDeferred<DownloadCommandResult>? = null,
     ) {
         // Capture before waiting for disk, preparation capacity or a platform execution slot.
         val route = runCatching { frozenRoute?.checked() ?: DownloadRoutingStore.get(app).sourceSnapshot(
@@ -152,10 +154,12 @@ class ChapterPreparationStore(
             val id = ChapterPreparationState.key(manga.id, chapter.id)
             var accepted: Preparation? = null
             mutation.withLock {
-                if (synchronized(lock) { records[id]?.state?.phase?.let { it != ChapterPreparationPhase.FAILED } == true })
-                    return@withLock
                 val old = refreshingEntry ?: downloads.entryFor(manga.id, chapter.id)
-                if (old?.status in SETTLED_DOWNLOADS) return@withLock
+                if (synchronized(lock) { records[id]?.state?.phase?.let { it != ChapterPreparationPhase.FAILED } == true } ||
+                    old?.status in SETTLED_DOWNLOADS) {
+                    receipt?.complete(DownloadCommandResult.CHANGED)
+                    return@withLock
+                }
                 val current = old?.let { downloads.record(it.id) }
                 val changed = old != null && current?.entry !== old
                 val generation = synchronized(lock) { ++sequence }
@@ -168,7 +172,7 @@ class ChapterPreparationStore(
                     route.getOrNull(), if (problem.isEmpty()) ChapterPreparationPhase.WAITING else ChapterPreparationPhase.FAILED,
                     error = problem.ifBlank { if (scheduler.systemManaged) "等待系统网络调度" else "等待准备" },
                     refreshingEntryId = current?.entry?.id)
-                val next = Preparation(state, randomUuid(), current?.let { Target(it.entry.id, it.generation, it.workId) })
+                val next = Preparation(state, randomUuid(), current?.let { Target(it.entry.id, it.generation, it.workId) }, receipt = receipt)
                 try {
                     write(next)
                     synchronized(lock) {
@@ -177,16 +181,20 @@ class ChapterPreparationStore(
                         publish()
                     }
                     if (state.phase != ChapterPreparationPhase.FAILED) accepted = next
+                    else receipt?.complete(if (changed) DownloadCommandResult.CHANGED else DownloadCommandResult.FAILED)
                 } catch (_: Exception) {
                     mutableError.value = "章节准备尚未保存，请检查本机存储后重试。"
                     synchronized(lock) {
                         records[id] = next.copy(state = state.copy(phase = ChapterPreparationPhase.FAILED,
                             error = "章节准备尚未保存，尚未开始网络请求。"))
                         publish()
+                        receipt?.complete(DownloadCommandResult.FAILED)
                     }
                 }
             }
             accepted?.let { schedule(it) }
+        }.invokeOnCompletion { cause ->
+            if (cause != null) receipt?.complete(if (cause is CancellationException) DownloadCommandResult.CANCELLED else DownloadCommandResult.FAILED)
         }
     }
 
@@ -204,6 +212,7 @@ class ChapterPreparationStore(
                 try {
                     removeFile(id)
                     synchronized(lock) { records.remove(id); cancelled.remove(owned.workId); publish() }
+                    owned.receipt?.complete(DownloadCommandResult.CANCELLED)
                 } catch (_: Exception) {
                     mutableError.value = "取消状态尚未保存，请检查本机存储后重试。"
                     synchronized(lock) {
@@ -211,6 +220,7 @@ class ChapterPreparationStore(
                             records[id] = it.copy(state = it.state.copy(phase = ChapterPreparationPhase.FAILED,
                                 error = "取消状态尚未保存，请重试取消；当前进程已停止此任务。"))
                             publish()
+                            it.receipt?.complete(DownloadCommandResult.FAILED)
                         }
                     }
                 }
@@ -268,7 +278,7 @@ class ChapterPreparationStore(
                 downloads.awaitReady()
                 val existing = downloads.entryFor(task.state.manga.id, task.state.chapter.id)
                 if (existing?.status in SETTLED_DOWNLOADS) {
-                    finish(task)
+                    finish(task, DownloadCommandResult.CHANGED)
                     return@execution ChapterPreparationOutcome.SUCCESS
                 }
                 val target = task.target
@@ -312,7 +322,15 @@ class ChapterPreparationStore(
                             fail(task, "下载任务已变化，已保留当前状态；可重新准备。")
                             ChapterPreparationOutcome.FAILURE
                         } else {
-                            finish(task)
+                            val current = if (task.receipt == null || committed == null) null else
+                                downloads.record(committed.id)?.takeIf { it.generation == committed.generation && it.workId == committed.workId }
+                            val result = when (current?.entry?.status) {
+                                DownloadStatus.COMPLETED -> DownloadCommandResult.SAVED
+                                DownloadStatus.FAILED -> DownloadCommandResult.FAILED
+                                DownloadStatus.QUEUED, DownloadStatus.WAITING, DownloadStatus.RUNNING -> DownloadCommandResult.ACCEPTED
+                                else -> DownloadCommandResult.CHANGED
+                            }
+                            finish(task, result)
                             ChapterPreparationOutcome.SUCCESS
                         }
                     }
@@ -414,16 +432,28 @@ class ChapterPreparationStore(
             val next = transform(current)
             try { write(next) }
             catch (failure: Exception) { journalFailed(task); throw JournalFailure(failure) }
-            synchronized(lock) { if (owns(task)) { records[task.state.id] = next; publish() } }
+            synchronized(lock) {
+                if (owns(task)) {
+                    records[task.state.id] = next
+                    publish()
+                    if (next.state.phase == ChapterPreparationPhase.FAILED) task.receipt?.complete(DownloadCommandResult.FAILED)
+                }
+            }
         }
     }
 
-    private suspend fun finish(task: Preparation) {
+    private suspend fun finish(task: Preparation, result: DownloadCommandResult) {
         mutation.withLock {
             if (!owns(task)) return@withLock
             try { removeFile(task.state.id) }
             catch (failure: Exception) { journalFailed(task); throw JournalFailure(failure) }
-            synchronized(lock) { if (owns(task)) { records.remove(task.state.id); publish() } }
+            synchronized(lock) {
+                if (owns(task)) {
+                    records.remove(task.state.id)
+                    publish()
+                    task.receipt?.complete(result)
+                }
+            }
         }
     }
 
@@ -439,6 +469,7 @@ class ChapterPreparationStore(
             records[task.state.id] = it.copy(state = it.state.copy(phase = ChapterPreparationPhase.FAILED,
                 error = "任务状态尚未保存，已停止新的请求；请检查存储后重试。"))
             publish()
+            it.receipt?.complete(DownloadCommandResult.FAILED)
         }
     }
 

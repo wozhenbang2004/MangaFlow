@@ -241,7 +241,10 @@ internal fun SourceImportSheet(
     }, backdrop = backdrop, containerColor = colors.surface.copy(alpha = .97f), desktopWidth = 920.dp) { dismiss ->
         LaunchedEffect(installOperation?.id, installOperation?.phase) {
             val operation = installOperation ?: return@LaunchedEffect
-            if (operation.active || (operation.id != submittedInstallId && operations.result<String>(operation.id) == null)) return@LaunchedEffect
+            if (operation.active) return@LaunchedEffect
+            // Restored interruptions have an operation ID and durable message, with no in-memory payload.
+            if (operation.phase != ApplicationOperationPhase.INTERRUPTED && operation.id != submittedInstallId &&
+                operations.result<String>(operation.id) == null) return@LaunchedEffect
             when (operation.phase) {
                 ApplicationOperationPhase.SUCCEEDED -> operations.result<String>(operation.id)?.let { result ->
                     val name = result.await()

@@ -69,6 +69,9 @@ private val navigationBlur = OpticalSizeValue.Responsive(
 private val readingDockBlur = OpticalSizeValue.Responsive(
     OpticalSizePoint(44.dp, 8.dp), OpticalSizePoint(84.dp, 12.dp), OpticalSizePoint(144.dp, 17.dp),
 )
+private val desktopReadingDockBlur = OpticalSizeValue.Responsive(
+    OpticalSizePoint(44.dp, 4.dp), OpticalSizePoint(84.dp, 7.dp), OpticalSizePoint(144.dp, 11.dp),
+)
 private val toolbarDepth = OpticalSizeValue.Responsive(
     OpticalSizePoint(44.dp, .58f), OpticalSizePoint(84.dp, .78f), OpticalSizePoint(144.dp, .92f),
 )
@@ -108,6 +111,7 @@ internal fun LiquidGlassSurface(
     val foreground = contentColor ?: if (surfaceColor == null) colors.onSurface
         else if (light) Color(0xFF242426) else Color.White
     val toolbar = role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.SEARCH || role == GlassSurfaceRole.READING_DOCK
+    val desktopReadingDock = platformKind == PlatformKind.DESKTOP && role == GlassSurfaceRole.READING_DOCK && surfaceColor == null
     val compactHeader = headerInk != null && role == GlassSurfaceRole.NAVIGATION
     val tabLens = role == GlassSurfaceRole.TAB_LENS
     val tintColor = when {
@@ -147,7 +151,7 @@ internal fun LiquidGlassSurface(
     }
     val material = if (liquid) {
         val themedGlass = (if (clear) GlassStyle.clear else GlassStyle.regular).material3(tintColor)
-        val glassStyle = remember(themedGlass, shape, role, interactive, light, accessibility, protectArtworkInk, compactHeader, pointerLens) {
+        val glassStyle = remember(themedGlass, shape, role, interactive, light, accessibility, protectArtworkInk, compactHeader, pointerLens, desktopReadingDock) {
             themedGlass.then {
                 shape(shape)
                 val progress = expansion.value().coerceIn(0f, 1f)
@@ -224,14 +228,18 @@ internal fun LiquidGlassSurface(
                         contentNormalBlend(.045f)
                     }
                     GlassSurfaceRole.READING_DOCK -> {
-                        optics { copy(refractionStrength = .32f,
+                        optics { copy(refractionStrength = if (desktopReadingDock) .43f else .32f,
                             refractionHeightFraction = .20f,
                             refractionDisplacement = 6.dp + 2.dp * progress,
                             refractionProfile = RefractionProfile.Edge(4.dp + 1.dp * progress),
-                            blurRadius = readingDockBlur, depth = toolbarDepth) }
-                        val bodyTint = if (light) .60f else .71f
+                            blurRadius = if (desktopReadingDock) desktopReadingDockBlur else readingDockBlur, depth = toolbarDepth) }
+                        val bodyTint = when {
+                            desktopReadingDock -> if (light) .36f else .46f
+                            light -> .60f
+                            else -> .71f
+                        }
                         tint(tintColor.copy(alpha = bodyTint + .025f * progress))
-                        whitePoint(if (light) .045f else -.08f)
+                        whitePoint(if (desktopReadingDock) 0f else if (light) .045f else -.08f)
                         specularIntensity(if (light) .18f else .15f)
                         ambientResponse(.06f)
                         chromaticAberrationStrength(0f)
@@ -410,14 +418,17 @@ internal fun LiquidGlassSurface(
                 startY = inputHeight * .72f, endY = inputHeight * 1.55f)
             onDrawBehind { if (size.height > inputHeight) drawRect(paper) }
         }
-    } else if ((role == GlassSurfaceRole.NAVIGATION || tabLens) &&
+    } else if ((role == GlassSurfaceRole.NAVIGATION || tabLens || desktopReadingDock) &&
         !accessibility.reduceTransparency && !accessibility.increaseContrast) {
         val darkInk = foreground.luminance() < .5f
         val tone = if (darkInk) Color(0xFFA0A0A0) else Color(0xFF56565A)
         val blend = if (darkInk) BlendMode.Lighten else BlendMode.Darken
         if (headerInk != null) Modifier.headerInkContrast(headerInk, tone, blend)
         else Modifier.drawWithCache {
-            val feather = (4.dp.toPx() / size.height.coerceAtLeast(1f)).coerceAtMost(.49f)
+            // A comic can be solid black or white. Support the ink through the middle of the
+            // dock while the outer curve keeps the page colour and its original contrast.
+            val featherSize = if (desktopReadingDock) 9.dp else 4.dp
+            val feather = (featherSize.toPx() / size.height.coerceAtLeast(1f)).coerceAtMost(.49f)
             val edge = tone.copy(alpha = 0f)
             val center = tone.copy(alpha = .85f)
             val guard = Brush.verticalGradient(0f to edge, feather to center, 1f - feather to center, 1f to edge)

@@ -110,6 +110,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -266,7 +267,8 @@ fun SettingsScreen(
         ApplicationOperationKind.WEBDAV_READ -> "webdav-download"
         else -> "webdav-save"
     } }
-    var backupNotice by remember { mutableStateOf<BackupNotice?>(null) }
+    var receivedBackupOperation by rememberSaveable { mutableStateOf<String?>(null) }
+    var backupNotice by rememberSaveable(stateSaver = backupNoticeSaver) { mutableStateOf<BackupNotice?>(null) }
     var pendingRestore by remember { mutableStateOf<PendingLibraryRestore?>(null) }
     var pendingWebDavRestore by remember { mutableStateOf<PendingLibraryRestore?>(null) }
     val webDavStore = remember(context.applicationContext) { WebDavBackupStore.get(context.applicationContext) }
@@ -276,7 +278,7 @@ fun SettingsScreen(
     var showWebDav by remember { mutableStateOf(false) }
     var webDavPresent by remember { mutableStateOf(false) }
     var webDavConnectionOnly by remember { mutableStateOf(false) }
-    var webDavNotice by remember { mutableStateOf<BackupNotice?>(null) }
+    var webDavNotice by rememberSaveable(stateSaver = backupNoticeSaver) { mutableStateOf<BackupNotice?>(null) }
     var expandedSetting by rememberSaveable { mutableStateOf<String?>(null) }
     var showBodySources by remember { mutableStateOf(false) }
     var showAnimeSources by remember { mutableStateOf(false) }
@@ -374,16 +376,20 @@ fun SettingsScreen(
 
     LaunchedEffect(backupOperation?.id, backupOperation?.phase, screenActive) {
         val operation = backupOperation ?: return@LaunchedEffect
-        if (!screenActive || operation.active) return@LaunchedEffect
+        if (!screenActive || operation.active || operation.id == receivedBackupOperation) return@LaunchedEffect
+        val remote = operation.kind in setOf(ApplicationOperationKind.WEBDAV_SAVE,
+            ApplicationOperationKind.WEBDAV_UPLOAD, ApplicationOperationKind.WEBDAV_READ)
+        fun deliver(receipt: BackupNotice?) {
+            backupNotice = if (remote) null else receipt
+            webDavNotice = if (remote) receipt else null
+        }
         if (operation.phase != ApplicationOperationPhase.SUCCEEDED) {
-            val receipt = operation.message?.let { message ->
+            deliver(operation.message?.let { message ->
                 BackupNotice(message, if (operation.phase == ApplicationOperationPhase.CANCELLED)
                     PreferenceNoticeKind.INFO else PreferenceNoticeKind.ERROR)
-            }
-            if (operation.kind in setOf(ApplicationOperationKind.WEBDAV_SAVE,
-                ApplicationOperationKind.WEBDAV_UPLOAD, ApplicationOperationKind.WEBDAV_READ)) webDavNotice = receipt
-            else backupNotice = receipt
+            })
             operations.consumeResult(operation.id)
+            receivedBackupOperation = operation.id
             return@LaunchedEffect
         }
         when (operation.kind) {
@@ -401,30 +407,36 @@ fun SettingsScreen(
             }
             ApplicationOperationKind.BACKUP_RESTORE -> operations.result<LibraryBackupInfo>(operation.id)?.let { result ->
                 val restored = result.await()
-                backupNotice = BackupNotice("已恢复 ${restored.favorites} 本收藏、${restored.history} 条阅读记录")
+                deliver(BackupNotice("已恢复 ${restored.favorites} 本收藏、${restored.history} 条阅读记录"))
                 operations.consumeResult(operation.id)
             }
             ApplicationOperationKind.WEBDAV_READ -> operations.result<InspectedReadingBackup?>(operation.id)?.let { result ->
                 result.await()?.let { inspected ->
                     val pending = PendingLibraryRestore(inspected.payload, inspected.info)
                     if (showWebDav || webDavPresent) { pendingWebDavRestore = pending; showWebDav = false }
-                    else { backupNotice = null; pendingRestore = pending }
-                    webDavNotice = BackupNotice("已读取远端备份，可查看恢复预览")
+                    else pendingRestore = pending
+                    deliver(BackupNotice("已读取远端备份"))
                 }
                 operations.consumeResult(operation.id)
             }
             ApplicationOperationKind.WEBDAV_UPLOAD -> operations.result<Any?>(operation.id)?.let {
-                webDavNotice = BackupNotice("阅读备份已上传")
+                deliver(BackupNotice("阅读备份已上传"))
                 operations.consumeResult(operation.id)
             }
             ApplicationOperationKind.WEBDAV_SAVE -> operations.result<Any?>(operation.id)?.let {
-                webDavNotice = if (webDavStore.config.value.configured)
+                deliver(if (webDavStore.config.value.configured)
                     BackupNotice("连接设置已保存 · 尚未验证", PreferenceNoticeKind.INFO, savedConfiguration = true)
-                    else BackupNotice("本机连接设置已清除")
+                    else BackupNotice("本机连接设置已清除"))
                 operations.consumeResult(operation.id)
             }
             else -> Unit
         }
+        if (desktop && !operation.statusDurable && operation.message != null) {
+            val receipt = if (remote) webDavNotice else backupNotice
+            deliver(receipt?.copy(message = "${receipt.message}（操作记录未保存，重启后请确认结果）", kind = PreferenceNoticeKind.INFO)
+                ?: BackupNotice(operation.message, PreferenceNoticeKind.INFO))
+        }
+        receivedBackupOperation = operation.id
     }
 
     fun runWebDav(action: String, draft: WebDavBackupDraft? = null) {
@@ -596,7 +608,6 @@ fun SettingsScreen(
                             val notice = when {
                                 exportSaving -> PreferenceNotice("等待选择保存位置", PreferenceNoticeKind.INFO)
                                 op?.active == true -> PreferenceNotice(op.message ?: op.title, PreferenceNoticeKind.WORKING)
-                                op != null && !op.statusDurable && op.message != null -> PreferenceNotice(op.message, PreferenceNoticeKind.INFO)
                                 else -> confirmed?.presentation()
                             }
                             PreferenceOperationFeedback(notice) {
@@ -833,7 +844,13 @@ fun SettingsScreen(
         backdrop = sourceBackdrop,
         busy = backupBusy == "restore",
         error = backupNotice?.takeIf { it.failed && pendingRestore != null }?.message,
-        onDismiss = { pendingRestore = null },
+        onDismiss = {
+            if (pendingRestore != null) {
+                pendingRestore = null
+                webDavNotice = null
+                backupNotice = BackupNotice("已取消恢复，阅读数据未更改", PreferenceNoticeKind.INFO)
+            }
+        },
         onConfirm = {
             val pending = pendingRestore ?: return@BackupRestoreDialog
             if (backupBusy != null) return@BackupRestoreDialog
@@ -890,6 +907,14 @@ private data class BackupNotice(
     val failed: Boolean get() = kind == PreferenceNoticeKind.ERROR
     fun presentation() = PreferenceNotice(message, kind)
 }
+
+// Keep the last visible receipt across navigation. The backup payload stays in memory.
+private val backupNoticeSaver = listSaver<BackupNotice?, String>(
+    save = { notice -> notice?.let { listOf(it.message, it.kind.name, it.savedConfiguration.toString()) }.orEmpty() },
+    restore = { fields -> fields.takeIf { it.size == 3 }?.let {
+        BackupNotice(it[0], PreferenceNoticeKind.valueOf(it[1]), it[2].toBoolean())
+    } },
+)
 
 private data class WebDavBackupDraft(
     val endpoint: String,

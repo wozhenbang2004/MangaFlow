@@ -19,4 +19,11 @@ class ReaderKeyboardConfiguration(
 
 val LocalReaderKeyboard = staticCompositionLocalOf<ReaderKeyboardConfiguration?> { null }
 
-internal data class ReaderKeyboardRequest(val serial: Int, val action: ReaderKeyboardAction, val firstSerial: Int)
+internal data class ReaderKeyboardRequest(val serial: Int, val action: ReaderKeyboardAction, val startsBurst: Boolean)
+
+internal val ReaderKeyboardAction.pagedStep: Int
+    get() = when (this) {
+        ReaderKeyboardAction.PREVIOUS_PAGE, ReaderKeyboardAction.SCROLL_UP -> -1
+        ReaderKeyboardAction.NEXT_PAGE, ReaderKeyboardAction.SCROLL_DOWN -> 1
+        else -> 0
+    }

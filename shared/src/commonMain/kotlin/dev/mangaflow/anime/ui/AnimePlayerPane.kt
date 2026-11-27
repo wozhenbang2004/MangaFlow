@@ -93,6 +93,7 @@ import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.motion.*
 import dev.mangaflow.platform.monotonicTimeMillis
 import kotlinx.coroutines.delay
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -276,6 +277,7 @@ internal fun AnimePlayerPane(
     val feedbackNotice = remember(player, playback.sessionGeneration, playback.assetKey, playback.episodeId) {
         mutableStateOf<AnimePlayerCue?>(null)
     }
+    var lastDesktopSeek by remember(feedbackNotice) { mutableStateOf<AnimePlayerCue.Seek?>(null) }
     var heldArrow by remember(feedbackNotice) { mutableStateOf<Key?>(null) }
     var lastArrowStep by remember(feedbackNotice) { mutableLongStateOf(0L) }
     val touchFeedback = rememberFeelFeedback()
@@ -368,38 +370,54 @@ internal fun AnimePlayerPane(
             val distance = if (desktop && forward != null && difference != 0L && previous != null &&
                 previous.forward == forward && previous.canContinue(current.timelineGeneration, now))
                 previous.distanceMs + difference else difference
-            val accepted = after.timelineGeneration.takeIf { difference == 0L || it == current.timelineGeneration + 1 }
-            feedbackNotice.value = AnimePlayerCue.Seek(destination, forward, distance,
-                atLimit = difference == 0L && forward != null, point = point, acceptedTimeline = accepted, inputTime = now)
+            val expected = if (difference == 0L) current.timelineGeneration else current.timelineGeneration + 1L
+            val cue = AnimePlayerCue.Seek(destination, forward, distance, atLimit = difference == 0L && forward != null,
+                point = point, inputTimeline = playback.timelineGeneration,
+                acceptedTimeline = after.timelineGeneration.takeIf { it == expected }, inputTime = now)
+            if (desktop) lastDesktopSeek = cue
+            feedbackNotice.value = cue
         }
         keepTransportVisibility()
     }
-    fun jump(current: AnimePlayerState, delta: Long, point: Offset?) {
+    fun jump(current: AnimePlayerState, delta: Long, point: Offset?, keyRepeat: Boolean = false) {
         val previous = feedbackNotice.value as? AnimePlayerCue.Seek
-        val origin = if (desktop && previous != null && previous.canContinue(current.timelineGeneration, monotonicTimeMillis()))
-            previous.positionMs else current.positionMs
+        val limit = if (delta > 0L) current.durationMs else 0L
+        val last = lastDesktopSeek
+        val sameLimit = desktop && last != null && last.acceptedTimeline == current.timelineGeneration &&
+            last.forward == (delta > 0L) && last.positionMs == limit
+        // A held arrow at the head must not restart the decoder for each subsecond clock tick.
+        // A new tap still acts on the exact live position; holding acts again once a second is visible.
+        if (keyRepeat && sameLimit && abs(current.positionMs - limit) < 1_000L &&
+            (current.positionMs == limit || current.isPlaying && !current.playbackSuppressed)) return
+        val origin = if (desktop && !sameLimit && previous != null &&
+            previous.canContinue(current.timelineGeneration, monotonicTimeMillis())) previous.positionMs else current.positionMs
         val requested = (origin + delta).coerceAtLeast(0L)
         val destination = if (current.durationMs > 0L) requested.coerceAtMost(current.durationMs) else requested
         movePlayhead(current, origin, destination, delta > 0L, point)
     }
-    fun ownsRelativeInput(owner: AnimePlaybackChrome, live: AnimePlayerState): Boolean {
+    fun ownsPlaybackInput(owner: AnimePlaybackChrome, live: AnimePlayerState): Boolean {
+        if (!desktop) return owner.owns(live)
+        val screen = controller.state.value
+        if (!owner.sameMedia(live) || screen.selectedEpisodeId != live.episodeId ||
+            screen.playbackTarget?.episode?.let { it.id != live.episodeId } == true) return false
         if (owner.owns(live)) return true
-        // Another quick press can arrive before Compose receives our own published seek.
-        // A different episode, asset or unrelated timeline must still disown the input.
-        val last = feedbackNotice.value as? AnimePlayerCue.Seek ?: return false
-        return desktop && owner.sameMedia(live) && last.canContinue(live.timelineGeneration, monotonicTimeMillis())
+        // Pause or mute may replace the visual receipt before Compose has drawn our seek.
+        val last = lastDesktopSeek ?: return false
+        return screen.playbackTarget == null && !screen.resolving && screen.pendingPlayback == null &&
+            last.ownsInput(owner.timelineGeneration, live.timelineGeneration, monotonicTimeMillis())
     }
-    fun seek(delta: Long, point: Offset? = null) {
+    fun seek(delta: Long, keyRepeat: Boolean = false) {
         val current = player.state.value
-        if (!canControl || !ownsRelativeInput(playback, current) || current.durationMs <= 0L ||
+        if (!canControl || !ownsPlaybackInput(playback, current) || current.durationMs <= 0L ||
             current.phase != AnimePlayerPhase.READY && !current.ended) return
-        jump(current, delta, point)
+        jump(current, delta, null, keyRepeat)
     }
     var audibleVolume by remember(player) { mutableFloatStateOf(1f) }
     fun changeVolume(requested: Float?, showReceipt: Boolean): Boolean {
         val live = player.state.value
         if (!desktop || !active || locked || obscured || panelPresent || !windowInfo.isWindowFocused ||
-            live.inPictureInPicture || !canControl || !playback.owns(live) ||
+            live.inPictureInPicture || !canControl || !ownsPlaybackInput(playback, live) ||
+            live.phase != AnimePlayerPhase.READY && !live.ended ||
             AnimePlayerCapability.VOLUME !in live.capabilities) return false
         val level = requested?.coerceIn(0f, 1f) ?: if (live.volume > 0f) 0f else audibleVolume
         if (level != live.volume) {
@@ -413,9 +431,9 @@ internal fun AnimePlayerPane(
         else if (feedbackNotice.value is AnimePlayerCue.Volume) feedbackNotice.value = null
         return true
     }
-    fun toggle() {
+    fun toggle(): Boolean {
         val current = player.state.value
-        if (!canControl || !playback.owns(current) || current.phase != AnimePlayerPhase.READY && !current.ended) return
+        if (!canControl || !ownsPlaybackInput(playback, current) || current.phase != AnimePlayerPhase.READY && !current.ended) return false
         keepTransportVisibility()
         when {
             current.ended -> { player.seekTo(0L); player.play() }
@@ -426,6 +444,7 @@ internal fun AnimePlayerPane(
         if (desktop && playback.sameMedia(after) && after.phase != AnimePlayerPhase.ERROR && after.error == null) {
             feedbackNotice.value = AnimePlayerCue.Transport(current.ended || !current.playWhenReady, current.ended)
         }
+        return true
     }
     LaunchedEffect(Unit) { focus.requestFocus() }
     LaunchedEffect(fullscreen) { controlsVisible = true; if (!fullscreen) locked = false }
@@ -498,10 +517,11 @@ internal fun AnimePlayerPane(
                     // bounded native seek rate; releasing it never seeks a second time.
                     if (event.type == KeyEventType.KeyDown) {
                         val now = monotonicTimeMillis()
-                        if (heldArrow != event.key || now - lastArrowStep >= (if (seekArrow) 240L else 95L)) {
+                        val repeated = heldArrow == event.key
+                        if (!repeated || now - lastArrowStep >= (if (seekArrow) 240L else 95L)) {
                             heldArrow = event.key
                             lastArrowStep = now
-                            if (seekArrow) seek(if (event.key == Key.DirectionRight) 10_000L else -10_000L)
+                            if (seekArrow) seek(if (event.key == Key.DirectionRight) 10_000L else -10_000L, keyRepeat = repeated)
                             else {
                                 val level = player.state.value.volume + if (event.key == Key.DirectionUp) .05f else -.05f
                                 if (changeVolume(level, showReceipt = true)) keepTransportVisibility()
@@ -512,7 +532,7 @@ internal fun AnimePlayerPane(
                 } else if (event.type != KeyEventType.KeyUp) false
                 else if (locked) { if (event.key == Key.Escape) { locked = false; true } else false }
                 else when (event.key) {
-                    Key.Spacebar -> { toggle(); true }
+                    Key.Spacebar -> toggle()
                     Key.DirectionLeft, Key.DirectionRight -> if (!desktop) {
                         seek(if (event.key == Key.DirectionRight) 10_000L else -10_000L); true
                     } else false
@@ -602,16 +622,16 @@ internal fun AnimePlayerPane(
             val latestChrome by rememberUpdatedState(playback)
             val latestRequiredControls by rememberUpdatedState(requiredControls)
             val latestChromeVisible by rememberUpdatedState(showChrome)
-            val seekBareVideo by rememberUpdatedState<(AnimePlaybackChrome, Long, Offset) -> Unit> { owner, delta, point ->
+            val seekBareVideo by rememberUpdatedState<(Long, Offset) -> Unit> { delta, point ->
                 val live = controller.state.value
                 val current = player.state.value
                 if (active && !locked && !obscured && !settingsPresent && !watchPanelPresent &&
                     windowInfo.isWindowFocused && !current.inPictureInPicture &&
                     live.selectedEpisodeId == current.episodeId && live.playbackTarget == null &&
-                    !live.resolving && live.pendingPlayback == null && ownsRelativeInput(owner, current) &&
+                    !live.resolving && live.pendingPlayback == null && ownsPlaybackInput(playback, current) &&
                     canControl && current.durationMs > 0L && (current.phase == AnimePlayerPhase.READY || current.ended)) {
                     focus.requestFocus()
-                    seek(delta, point)
+                    jump(current, delta, point)
                 }
             }
 
@@ -683,8 +703,8 @@ internal fun AnimePlayerPane(
                     target == null && !state.resolving && state.pendingPlayback == null) {
                     // A backmost hit target, not a parent of the buttons, timeline or panels.
                     // The stock touch detector still handles non-mouse pointers.
-                    Box(Modifier.matchParentSize().desktopVideoSeek(pointerMedia) { delta, point ->
-                        seekBareVideo(pointerMedia, delta, point)
+                    Box(Modifier.matchParentSize().desktopVideoSeek(player, pointerMedia, windowInfo.isWindowFocused) { delta, point ->
+                        seekBareVideo(delta, point)
                     })
                 }
                 AnimePlaybackObservation(observations) { current ->
@@ -812,7 +832,7 @@ internal fun AnimePlayerPane(
                                     Icon(Icons.Outlined.SkipPrevious, "上一集", Modifier.size(23.dp))
                                 }
                                 val playLabel = if (playback.playWhenReady) "暂停" else "播放"
-                                MotionIconButton(onClick = ::toggle, modifier = Modifier.size(52.dp), tooltip = "$playLabel · 空格") {
+                                MotionIconButton(onClick = { toggle() }, modifier = Modifier.size(52.dp), tooltip = "$playLabel · 空格") {
                                     Box(Modifier.size(44.dp).background(MaterialTheme.colorScheme.onSurface,
                                         RoundedCornerShape(50)), contentAlignment = Alignment.Center) {
                                         AnimeTransportGlyph(playback.playWhenReady, playLabel, MaterialTheme.colorScheme.surface,
@@ -959,7 +979,7 @@ internal fun AnimePlayerPane(
                             .hoverable(transportPointer, enabled = desktop && hoverEnabled),
                         cornerRadius = if (desktop) 19.dp else 23.dp, windowsVideoDock = useWindowsVideoDock) {
                         AnimePlayerControls(player, playback, observations,
-                            previous, next, onEpisode, onToggle = ::toggle,
+                            previous, next, onEpisode, onToggle = { toggle() },
                             onSeekTo = { current, position -> movePlayhead(current, current.positionMs, position, null, null) },
                             onInteraction = ::interact, onHoldControls = { controlsHeld = it },
                             nextPreparation = state.nextEpisodePreparation,
@@ -1069,10 +1089,13 @@ private fun Modifier.revealOnMouseMove(enabled: Boolean, onMove: () -> Unit): Mo
 
 // Match an ordinary click rather than treating a drag, wheel or mouse chord as a seek.
 // Read raw Press/Release because Foundation's tap detector is primary-button oriented.
-private fun Modifier.desktopVideoSeek(owner: AnimePlaybackChrome, onSeek: (Long, Offset) -> Unit): Modifier =
-    pointerInput(owner.sessionGeneration, owner.timelineGeneration, owner.assetKey, owner.episodeId) {
+private fun Modifier.desktopVideoSeek(player: AnimePlayer, owner: AnimePlaybackChrome, focused: Boolean,
+    onSeek: (Long, Offset) -> Unit): Modifier =
+    pointerInput(player, owner.sessionGeneration, owner.assetKey, owner.episodeId, focused) {
+        if (!focused) return@pointerInput
         awaitPointerEventScope {
             var down: PointerInputChange? = null
+            var downTimeline = 0L
             var delta = 0L
             fun inside(change: PointerInputChange) = change.position.x >= 0f && change.position.x < size.width &&
                 change.position.y >= 0f && change.position.y < size.height
@@ -1089,6 +1112,9 @@ private fun Modifier.desktopVideoSeek(owner: AnimePlaybackChrome, onSeek: (Long,
                         event.buttons.isSecondaryPressed -> 10_000L
                         else -> continue
                     }
+                    val live = player.state.value
+                    if (!owner.sameMedia(live)) continue
+                    downTimeline = live.timelineGeneration
                     down = mouse
                     mouse.consume() // The ancestor's touch tap/hold must not also claim this stroke.
                 } else if (mouse.id != held.id || mouse.isConsumed || !inside(mouse) ||
@@ -1100,8 +1126,12 @@ private fun Modifier.desktopVideoSeek(owner: AnimePlaybackChrome, onSeek: (Long,
                     down = null
                     if (!event.buttons.areAnyPressed) {
                         mouse.consume()
-                        onSeek(delta, Offset(mouse.position.x / size.width.coerceAtLeast(1),
-                            mouse.position.y / size.height.coerceAtLeast(1)))
+                        val live = player.state.value
+                        // A redraw acknowledging the previous click may occur mid-stroke.
+                        // Only a real media/timeline change since this press invalidates it.
+                        if (owner.sameMedia(live) && live.timelineGeneration == downTimeline)
+                            onSeek(delta, Offset(mouse.position.x / size.width.coerceAtLeast(1),
+                                mouse.position.y / size.height.coerceAtLeast(1)))
                     }
                 }
             }

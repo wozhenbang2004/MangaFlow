@@ -162,9 +162,12 @@ internal fun AnimeTransportGlyph(playing: Boolean, label: String, color: Color, 
 /** Event-only state owned by a single player, asset and episode. It never subscribes to autoplay. */
 internal sealed interface AnimePlayerCue {
     class Seek(val positionMs: Long, val forward: Boolean?, val distanceMs: Long, val atLimit: Boolean,
-        val point: Offset?, val acceptedTimeline: Long?, private val inputTime: Long) : AnimePlayerCue {
+        val point: Offset?, private val inputTimeline: Long, val acceptedTimeline: Long?, private val inputTime: Long) : AnimePlayerCue {
+        fun ownsInput(from: Long, live: Long, now: Long): Boolean =
+            acceptedTimeline == live && from in inputTimeline..live && now - inputTime in 0L..680L
+
         fun canContinue(timeline: Long, now: Long): Boolean =
-            forward != null && acceptedTimeline == timeline && now - inputTime in 0L..680L
+            forward != null && ownsInput(timeline, timeline, now)
     }
 
     class Transport(val resume: Boolean, val restart: Boolean) : AnimePlayerCue

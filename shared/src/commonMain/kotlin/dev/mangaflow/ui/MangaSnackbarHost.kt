@@ -54,10 +54,12 @@ import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.platform.PlatformKind
-import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.monotonicTimeMillis
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionInputGate
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -70,8 +72,6 @@ internal suspend fun Flow<String>.presentMangaNotices(host: SnackbarHostState) {
     if (platformKind == PlatformKind.DESKTOP) conflate().collect { host.showSnackbar(it) }
     else collectLatest { host.showSnackbar(it) }
 }
-import dev.mangaflow.ui.motion.MotionIconButton
-import dev.mangaflow.ui.motion.MotionTextButton
 
 /** SnackbarHostState still serializes requests and delivers the actual undo/dismiss result. */
 @Composable

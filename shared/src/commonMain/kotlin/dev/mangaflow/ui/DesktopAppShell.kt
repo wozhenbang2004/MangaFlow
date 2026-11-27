@@ -80,7 +80,6 @@ import androidx.compose.ui.input.pointer.indexOfFirstPressed
 import androidx.compose.ui.input.pointer.indexOfLastPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -544,7 +543,6 @@ internal fun DesktopSearchField(
         if (searchFocus != null && active) searchFocus.field = requester
         onDispose { if (searchFocus != null && searchFocus.field === requester) searchFocus.field = null }
     }
-    val focus = LocalFocusManager.current
     var scopeOpen by remember { mutableStateOf(false) }
     val inputInteraction = remember { MutableInteractionSource() }
     val focused by inputInteraction.collectIsFocusedAsState()
@@ -566,7 +564,7 @@ internal fun DesktopSearchField(
         scopeOpen = false
         onOpen()
         onSubmit()
-        focus.clearFocus(force = true)
+        requester.requestFocus()
     }
     BoxWithConstraints(modifier.height(height)) {
         val hintRoom = maxWidth >= 356.dp * LocalMangaWindow.current.fontScale

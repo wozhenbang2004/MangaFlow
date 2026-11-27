@@ -141,6 +141,7 @@ import dev.mangaflow.enhancement.ReaderChapterEnhancementTask
 import dev.mangaflow.enhancement.ui.EnhancementCenterPanel
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.DownloadEntry
+import dev.mangaflow.storage.DownloadCommandResult
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
 import dev.mangaflow.storage.localPdfImportSupported
@@ -165,6 +166,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Deferred
 
 private enum class DownloadFilter(val label: String) {
     ALL("全部"), ACTIVE("未完成"), SAVED("已下载");
@@ -222,6 +224,7 @@ fun DownloadsScreen(
     onCancelPreparation: (String, Long) -> Unit = { _, _ -> },
     onRetryPreparation: (String, Long) -> Unit = { _, _ -> },
     onRetryPreparationUsingLatestRoute: (String, Long) -> Unit,
+    onRefreshForQueue: ((DownloadEntry, Boolean) -> Deferred<DownloadCommandResult>)? = null,
 ) {
     fun sourceIncluded(sourceId: String): Boolean =
         (includedSourceIds == null || sourceId in includedSourceIds) && sourceId !in excludedSourceIds
@@ -364,7 +367,7 @@ fun DownloadsScreen(
     val retryableEntries = manageableEntries.filter { it.status == DownloadStatus.FAILED && it.manga.sourceUrl != LOCAL_SOURCE_URL }
     val completedEntries = manageableEntries.filter { it.status == DownloadStatus.COMPLETED }
     var queueRequest by remember(desktopScope) { mutableStateOf<DownloadQueueRequest?>(null) }
-    fun dispatchQueue(command: QueueCommand, candidates: List<DownloadEntry>, retryAction: (DownloadEntry) -> Unit = onRetry) {
+    fun dispatchQueue(command: QueueCommand, candidates: List<DownloadEntry>, useLatestRoute: Boolean = false) {
         if (!active || desktop && currentDesktopScope !== desktopScope) return
         val requested = candidates.filter { sourceIncluded(it.manga.sourceId) }.distinctBy(DownloadEntry::id)
         if (requested.isEmpty()) return
@@ -382,15 +385,23 @@ fun DownloadsScreen(
                     }
             }
         }
-        if (desktop) queueRequest = DownloadQueueRequest(command, targets, visiblePreparations, requested.size - targets.size)
+        val commands = mutableMapOf<String, Deferred<DownloadCommandResult>>()
         targets.forEach { target ->
-            if (command == QueueCommand.PAUSE) store.pause(target.id, target.progress.workId.takeIf { it.isNotBlank() })
-            else retryAction(target)
+            val workId = target.progress.workId.takeIf { it.isNotBlank() }
+            when {
+                desktop && command == QueueCommand.PAUSE -> commands[target.id] = store.pauseCommand(target.id, workId, target)
+                command == QueueCommand.PAUSE -> store.pause(target.id, workId)
+                desktop && target.needsSourceRefresh && onRefreshForQueue != null ->
+                    commands[target.id] = onRefreshForQueue(target, useLatestRoute)
+                useLatestRoute -> onRetryUsingLatestRoute(target)
+                else -> onRetry(target)
+            }
         }
+        if (desktop) queueRequest = DownloadQueueRequest(command, targets, visiblePreparations, requested.size - targets.size, commands)
     }
-    fun retrySelection(group: List<DownloadEntry>, retryAction: (DownloadEntry) -> Unit = onRetry) {
+    fun retrySelection(group: List<DownloadEntry>, useLatestRoute: Boolean = false) {
         val command = if (group.all { it.status == DownloadStatus.PAUSED }) QueueCommand.RESUME else QueueCommand.RETRY
-        dispatchQueue(command, group, retryAction)
+        dispatchQueue(command, group, useLatestRoute)
     }
 
     val usedBytes = visibleEntries.sumOf { it.downloadedBytes }
@@ -493,7 +504,7 @@ fun DownloadsScreen(
             },
             onPause = { currentTarget(it)?.let { target -> dispatchQueue(QueueCommand.PAUSE, listOf(target)) } },
             onRetry = { currentTarget(it)?.let { target -> retrySelection(listOf(target)) } },
-            onRetryUsingLatestRoute = { currentTarget(it)?.let { target -> retrySelection(listOf(target), onRetryUsingLatestRoute) } },
+            onRetryUsingLatestRoute = { currentTarget(it)?.let { target -> retrySelection(listOf(target), useLatestRoute = true) } },
             enhancement = enhancement,
             onEnhance = { shown -> currentTarget(shown)?.let { target ->
                 enhanceChapters(listOf(target)) { openQuality(target, inPane) }

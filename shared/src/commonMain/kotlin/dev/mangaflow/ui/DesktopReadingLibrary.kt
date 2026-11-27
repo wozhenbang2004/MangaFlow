@@ -116,6 +116,8 @@ private fun DesktopReadingLead(
     }
 }
 
+private data class HistorySelection(val key: String, val positions: Map<String, Int>)
+
 /** The selected book and its chapter history use the same scoped local record. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -126,28 +128,41 @@ internal fun DesktopReadingHistory(
     onDetails: ((Manga) -> Unit)? = null, header: (@Composable () -> Unit)? = null,
 ) {
     fun bookKey(progress: ReadingProgress) = progress.manga.sourceId + ":" + progress.manga.id
-    var lastIndex by remember { mutableIntStateOf(0) }
-    val matchedIndex = remember(history, selection) { history.indexOfFirst { bookKey(it) == selection } }
-    val selectedIndex = if (matchedIndex >= 0) matchedIndex else lastIndex.coerceAtMost(history.lastIndex)
+    val positions = remember(history) {
+        buildMap<String, Int>(history.size) {
+            history.forEachIndexed { index, record -> put(bookKey(record), index) }
+        }
+    }
+    var previous by remember { mutableStateOf<HistorySelection?>(null, referentialEqualityPolicy()) }
+    val before = previous
+    val retainedIndex = before?.let { positions[it.key] }
+    val previousIndex = before?.let { it.positions[it.key] } ?: 0
+    val selectedIndex = if (selection == null) 0
+        else positions[selection] ?: retainedIndex ?: previousIndex.coerceAtMost(history.lastIndex)
     val selectedRecord = history.getOrNull(selectedIndex) ?: return
-    SideEffect { lastIndex = selectedIndex }
     val selectedKey = bookKey(selectedRecord)
+    // If filtering or removal hid the previous book, compare both books in the old list.
+    val direction = when {
+        before == null || before.key == selectedKey -> 0
+        retainedIndex != null -> selectedIndex.compareTo(retainedIndex)
+        else -> before.positions[selectedKey]?.compareTo(previousIndex) ?: 0
+    }
+    SideEffect {
+        if (before == null || before.key != selectedKey || before.positions !== positions)
+            previous = HistorySelection(selectedKey, positions)
+    }
     val colors = MaterialTheme.colorScheme
     val today = localToday()
     val groups = remember(history) { history.groupBy { if (it.updatedAt > 0) localDateAt(it.updatedAt) else null } }
     val focus = LocalFocusManager.current
     val motion = LocalMotionEnabled.current
     val placement = if (motion) spring<IntOffset>(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null
-    var previousBook by remember { mutableStateOf(selectedKey) }
     val arrival = remember { Animatable(0f) }
     LaunchedEffect(selectedKey, motion, active) {
-        val previous = previousBook
-        previousBook = selectedKey
-        if (previous == selectedKey || !motion || !active) {
+        if (direction == 0 || !motion || !active) {
             arrival.snapTo(0f)
         } else {
-            val previousIndex = history.indexOfFirst { bookKey(it) == previous }
-            arrival.snapTo(if (previousIndex > selectedIndex) -1f else 1f)
+            arrival.snapTo(direction.toFloat())
             arrival.animateTo(0f, tween(MangaMotion.Content, easing = MangaMotion.EnterEasing))
         }
     }

@@ -459,8 +459,8 @@ fun ReaderScreen(
     // Pixel offsets are a resume cursor, not UI state. Publishing every scroll delta
     // here used to recompose ReaderScreen and ChapterPages for every animation frame.
     val cursor = remember(chapterId) { ReaderCursor() }
-    var targetPage by remember(chapterId) { mutableStateOf<Int?>(null) }
-    var targetOffset by remember(chapterId) { mutableIntStateOf(0) }
+    var targetLocation by remember(chapterId) { mutableStateOf<ReaderReturnLocation?>(null) }
+    val targetPage = targetLocation?.pageIndex
     var returnLocation by remember(chapterId) { mutableStateOf<ReaderReturnLocation?>(null) }
     var showPageNavigator by remember(chapterId) { mutableStateOf(false) }
     var pageFocusRequest by remember(chapterId) { mutableIntStateOf(0) }
@@ -953,9 +953,8 @@ fun ReaderScreen(
 
     fun returnToReadingPosition() {
         val previous = returnLocation ?: return
-        val current = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
-        targetOffset = previous.scrollOffset
-        targetPage = previous.pageIndex
+        val current = cursor.location(pageIndex)
+        targetLocation = previous
         returnLocation = current
         keyboardFocusRestore++
     }
@@ -1028,9 +1027,8 @@ fun ReaderScreen(
             backdrop = readerBackdrop,
             onSelect = { destination ->
                 if (destination != pageIndex && currentSpread?.contains(destination) != true) {
-                    returnLocation = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
-                    targetOffset = 0
-                    targetPage = destination
+                    returnLocation = cursor.location(pageIndex)
+                    targetLocation = ReaderReturnLocation(destination, 0)
                 }
                 if (!embedded) showPageNavigator = false
                 focusReadingAfterSelection = embedded
@@ -1201,19 +1199,14 @@ fun ReaderScreen(
     val keyboardFocus = remember { FocusRequester() }
     var keyboardFocused by remember { mutableStateOf(false) }
     var keyboardSerial by remember(sourceIdentity) { mutableIntStateOf(0) }
-    var keyboardRequest by remember(sourceIdentity) { mutableStateOf<ReaderKeyboardRequest?>(null) }
+    var keyboardRequests by remember(sourceIdentity) { mutableStateOf(emptyList<ReaderKeyboardRequest>()) }
     fun requestTurn(action: ReaderKeyboardAction) {
-        val serial = ++keyboardSerial
-        val first = keyboardRequest?.takeIf { it.action == action }?.firstSerial ?: serial
-        keyboardRequest = ReaderKeyboardRequest(serial, action, first)
+        if (chapterChangeRequested || chapterId != chapter.id) return
+        keyboardRequests = keyboardRequests + ReaderKeyboardRequest(++keyboardSerial, action, keyboardRequests.isEmpty())
     }
-    val requestedPage = targetPage
-    val requestedOffset = targetOffset
+    val requestedLocation = targetLocation
     val consumeRequestedPage: () -> Unit = {
-        if (targetPage == requestedPage && targetOffset == requestedOffset) {
-            targetPage = null
-            targetOffset = 0
-        }
+        if (targetLocation === requestedLocation) targetLocation = null
     }
     val desktopCanvasReady = desktop && readerForeground && !leavingReader && !panelBlocksReading &&
         !showPanelModels && !showEnhancement && !compareEnhancement && !showComments && !showSpreadAdjustment &&
@@ -1225,7 +1218,7 @@ fun ReaderScreen(
     val keyboardTurnOwned = keyboardReady && !sourceLoading && !chapterChangeRequested &&
         !loading && error == null && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF
     LaunchedEffect(keyboardTurnOwned) {
-        if (!keyboardTurnOwned) keyboardRequest = null
+        if (!keyboardTurnOwned) keyboardRequests = emptyList()
     }
     LaunchedEffect(keyboardReady, keyboardFocusRestore, readerStatusInspecting, inspector) {
         // Let closing chrome settle first. An open inspector keeps its own focused editor.
@@ -1436,10 +1429,11 @@ fun ReaderScreen(
                         manualSingles = manualSingles,
                         initialPage = pageIndex,
                         initialOffset = cursor.scrollOffset,
-                        targetPage = targetPage,
-                        targetOffset = targetOffset,
-                        keyboardRequest = keyboardRequest.takeIf { keyboardTurnOwned },
-                        onKeyboardConsumed = { serial -> if (keyboardRequest?.serial == serial) keyboardRequest = null },
+                        target = targetLocation,
+                        keyboardRequests = if (keyboardTurnOwned) keyboardRequests else emptyList(),
+                        onKeyboardConsumed = { serial, count ->
+                            if (keyboardRequests.firstOrNull()?.serial == serial) keyboardRequests = keyboardRequests.drop(count)
+                        },
                         onPositioned = { span, origin ->
                             if (desktop && active && !leavingReader) {
                                 if (origin != null) returnLocation = origin
@@ -1452,7 +1446,11 @@ fun ReaderScreen(
                                 ReaderCommandKind.EDGE, if (last) "已到本章末页" else "已到本章首页")
                         },
                         onTargetConsumed = consumeRequestedPage,
-                        onLocation = { index, offset -> cursor.scrollOffset = offset; pageIndex = index },
+                        onLocation = {
+                            cursor.scrollOffset = it.scrollOffset
+                            cursor.viewportWidth = it.viewportWidth
+                            pageIndex = it.pageIndex
+                        },
                         onSave = { index, offset -> libraryStore.saveProgress(manga, chapter, index, chapterPageCount, offset,
                             clearLegacyLongImagePosition = preferences.mode == ReadingMode.VERTICAL,
                             updateRecent = recentConfirmed && chapterId == chapter.id && active && !leavingReader) },
@@ -1749,9 +1747,8 @@ fun ReaderScreen(
                                 enabled = readerToolsVisible,
                                 onSeek = { destination ->
                                     if (destination != pageIndex && currentSpread?.contains(destination) != true) {
-                                        returnLocation = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
-                                        targetOffset = 0
-                                        targetPage = destination
+                                        returnLocation = cursor.location(pageIndex)
+                                        targetLocation = ReaderReturnLocation(destination, 0)
                                     }
                                 },
                                 onOpenNavigator = ::openPageNavigator,
@@ -2194,14 +2191,13 @@ private fun ChapterPages(
     manualSingles: Set<Int>,
     initialPage: Int,
     initialOffset: Int,
-    targetPage: Int?,
-    targetOffset: Int,
-    keyboardRequest: ReaderKeyboardRequest?,
-    onKeyboardConsumed: (Int) -> Unit,
+    target: ReaderReturnLocation?,
+    keyboardRequests: List<ReaderKeyboardRequest>,
+    onKeyboardConsumed: (firstSerial: Int, count: Int) -> Unit,
     onPositioned: (PageSpread, ReaderReturnLocation?) -> Unit,
     onBoundary: (last: Boolean) -> Unit,
     onTargetConsumed: () -> Unit,
-    onLocation: (Int, Int) -> Unit,
+    onLocation: (ReaderReturnLocation) -> Unit,
     onSave: (Int, Int) -> Unit,
     onReadingNavigation: () -> Unit,
     longImagePosition: (Int) -> Float?,
@@ -2220,6 +2216,13 @@ private fun ChapterPages(
     val readingNavigation by rememberUpdatedState(onReadingNavigation)
     val positioned by rememberUpdatedState(onPositioned)
     val boundary by rememberUpdatedState(onBoundary)
+    val keyboardRequest = keyboardRequests.firstOrNull()
+    val singleKeyTurn = keyboardRequest?.startsBurst == true && keyboardRequests.size == 1
+    fun keyboardEdge(request: ReaderKeyboardRequest, last: Boolean) {
+        val adjacent = if (last) onNext else onPrevious
+        // A repeat sent before the preceding turn landed belongs to the current chapter.
+        if (request.startsBurst && adjacent != null) adjacent() else boundary(last)
+    }
     val location by rememberUpdatedState(onLocation)
     val visibleImageChanged by rememberUpdatedState(onVisibleImageChanged)
     val nearEnd by rememberUpdatedState(onNearEnd)
@@ -2374,7 +2377,7 @@ private fun ChapterPages(
                 if (!restoring && old != null && old.first > 0 && current.first > 0 && old.first != current.first) {
                     // A vertical page's height scales with its viewport width. Keep the same
                     // place in the original image while rotating/resizing, without a new history format.
-                    val offset = (old.third.toDouble() * current.first / old.first).roundToInt().coerceAtLeast(0)
+                    val offset = ReaderReturnLocation(old.second, old.third, old.first).offsetAtWidth(current.first)
                     withoutScrollDirection {
                         list.stopScroll()
                         list.scrollToItem(old.second, offset)
@@ -2384,22 +2387,27 @@ private fun ChapterPages(
             }
         }
         LaunchedEffect(list) {
-            snapshotFlow { Triple(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex),
-                if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0, restoring) }
-                .distinctUntilChanged().collect { (index, offset, restoringNow) -> if (!restoringNow) location(index, offset) }
+            snapshotFlow {
+                if (restoring) null else ReaderReturnLocation(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex),
+                    if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0,
+                    list.layoutInfo.viewportSize.width)
+            }.distinctUntilChanged().collect { if (it != null) location(it) }
         }
         LaunchedEffect(list) {
             snapshotFlow { Triple(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex),
                 if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0, restoring) }
                 .debounce(450).distinctUntilChanged().collect { (index, offset, restoringNow) -> if (!restoringNow) save(index, offset) }
         }
-        LaunchedEffect(targetPage, targetOffset) {
-            val requested = targetPage ?: return@LaunchedEffect
+        LaunchedEffect(target) {
+            val requested = target ?: return@LaunchedEffect
             try {
                 readingNavigation()
                 restoring = false
-                val index = requested.coerceIn(0, pages.lastIndex)
-                val offset = targetOffset.coerceAtLeast(0)
+                val index = requested.pageIndex.coerceIn(0, pages.lastIndex)
+                val offset = if (requested.scrollOffset > 0 && requested.viewportWidth > 0) {
+                    val width = snapshotFlow { list.layoutInfo.viewportSize.width }.first { it > 0 }
+                    requested.offsetAtWidth(width)
+                } else requested.scrollOffset.coerceAtLeast(0)
                 recordNavigation(index, offset)
                 withoutScrollDirection(rebase = false) {
                     if (platformKind == PlatformKind.DESKTOP && keyboardMotion && offset == 0 &&
@@ -2417,10 +2425,11 @@ private fun ChapterPages(
                 readingNavigation()
                 suspend fun moveTo(index: Int, jump: Boolean = false) {
                     val target = index.coerceIn(0, pages.lastIndex)
-                    val origin = ReaderReturnLocation(list.firstVisibleItemIndex.coerceIn(pages.indices), list.firstVisibleItemScrollOffset)
+                    val origin = ReaderReturnLocation(list.firstVisibleItemIndex.coerceIn(pages.indices),
+                        list.firstVisibleItemScrollOffset, list.layoutInfo.viewportSize.width)
                     recordNavigation(target)
                     withoutScrollDirection(rebase = false) {
-                        if (keyboardMotion && (!jump || list.layoutInfo.visibleItemsInfo.any { it.index == target }))
+                        if (keyboardMotion && singleKeyTurn && (!jump || list.layoutInfo.visibleItemsInfo.any { it.index == target }))
                             list.animateScrollToItem(target)
                         else list.scrollToItem(target)
                     }
@@ -2436,27 +2445,26 @@ private fun ChapterPages(
                     ReaderKeyboardAction.PREVIOUS_PAGE -> when {
                         list.firstVisibleItemScrollOffset > 0 -> moveTo(list.firstVisibleItemIndex)
                         list.firstVisibleItemIndex > 0 -> moveTo(list.firstVisibleItemIndex - 1)
-                        else -> onPrevious?.invoke() ?: boundary(false)
+                        else -> keyboardEdge(request, false)
                     }
                     ReaderKeyboardAction.NEXT_PAGE -> when {
                         list.firstVisibleItemIndex < pages.lastIndex -> moveTo(list.firstVisibleItemIndex + 1)
                         list.canScrollForward -> {
                             val step = (list.layoutInfo.viewportEndOffset - list.layoutInfo.viewportStartOffset) * .85f
-                            if (keyboardMotion) list.animateScrollBy(step) else list.scrollBy(step)
+                            if (keyboardMotion && singleKeyTurn) list.animateScrollBy(step) else list.scrollBy(step)
                         }
-                        else -> onNext?.invoke() ?: boundary(true)
+                        else -> keyboardEdge(request, true)
                     }
                     ReaderKeyboardAction.SCROLL_UP, ReaderKeyboardAction.SCROLL_DOWN -> {
                         val forward = request.action == ReaderKeyboardAction.SCROLL_DOWN
                         if (if (forward) list.canScrollForward else list.canScrollBackward) {
                             val step = (list.layoutInfo.viewportEndOffset - list.layoutInfo.viewportStartOffset) * .85f * if (forward) 1 else -1
-                            if (keyboardMotion) list.animateScrollBy(step) else list.scrollBy(step)
-                        } else if (forward) onNext?.invoke() ?: boundary(true)
-                        else onPrevious?.invoke() ?: boundary(false)
+                            if (keyboardMotion && singleKeyTurn) list.animateScrollBy(step) else list.scrollBy(step)
+                        } else keyboardEdge(request, forward)
                     }
                     ReaderKeyboardAction.TOGGLE_CONTROLS, ReaderKeyboardAction.PAGE_NAVIGATOR -> Unit
                 }
-            } finally { onKeyboardConsumed(request.serial) }
+            } finally { onKeyboardConsumed(request.serial, 1) }
         }
         DisposableEffect(list) {
             onDispose {
@@ -2557,27 +2565,28 @@ private fun ChapterPages(
             groups.indexOfReaderPage(startPage).coerceAtLeast(0)
         }
         val pager = rememberPagerState(initialPage = startingGroup, pageCount = { groups.size })
-        val latestKey by rememberUpdatedState(keyboardRequest)
-        var intendedGroup by remember(pager) { mutableStateOf<Int?>(null) }
-        var lastStartedKey by remember(pager) { mutableIntStateOf(0) }
         LaunchedEffect(keyboardRequest?.serial, active) {
-            val request = keyboardRequest
-            if (request == null || !active) { intendedGroup = null; return@LaunchedEffect }
+            val request = keyboardRequest ?: return@LaunchedEffect
+            if (!active) return@LaunchedEffect
+            var count = 1
             try {
                 readingNavigation()
-                // Repeated desktop keys can arrive before the previous spring crosses a page.
-                // Count the presses since the last handled key and continue from that turn's intent.
-                val steps = (request.serial - maxOf(request.firstSerial - 1, lastStartedKey)).coerceAtLeast(1)
-                lastStartedKey = request.serial
-                val from = (intendedGroup ?: pager.currentPage).coerceIn(groups.indices)
+                // The head remains stable through its scroll; the next input starts from this landing.
+                val from = pager.currentPage.coerceIn(groups.indices)
+                val step = request.action.pagedStep
                 val rawDestination = when (request.action) {
                     ReaderKeyboardAction.FIRST_PAGE -> 0
                     ReaderKeyboardAction.LAST_PAGE -> groups.lastIndex
-                    ReaderKeyboardAction.PREVIOUS_PAGE, ReaderKeyboardAction.SCROLL_UP -> from - steps
-                    ReaderKeyboardAction.NEXT_PAGE, ReaderKeyboardAction.SCROLL_DOWN -> from + steps
-                    ReaderKeyboardAction.TOGGLE_CONTROLS, ReaderKeyboardAction.PAGE_NAVIGATOR -> from
+                    else -> from + step
                 }
                 val origin = pager.settledPage.coerceIn(groups.indices)
+                // Opposite buffered turns cancel only if the first could land inside this chapter.
+                // No intermediate artwork is painted and a real chapter-edge action is never discarded.
+                if (step != 0 && keyboardRequests.getOrNull(1)?.action?.pagedStep == -step &&
+                    rawDestination in groups.indices && from == origin && !pager.isScrollInProgress) {
+                    count = 2
+                    return@LaunchedEffect
+                }
                 // Finish landing at the boundary before a separate input can open a different chapter.
                 val destination = when {
                     rawDestination < 0 && origin > 0 -> 0
@@ -2586,11 +2595,11 @@ private fun ChapterPages(
                 }
                 val jump = request.action == ReaderKeyboardAction.FIRST_PAGE || request.action == ReaderKeyboardAction.LAST_PAGE
                 when {
-                    destination < 0 -> onPrevious?.invoke() ?: boundary(false)
-                    destination > groups.lastIndex -> onNext?.invoke() ?: boundary(true)
+                    destination < 0 -> keyboardEdge(request, false)
+                    destination > groups.lastIndex -> keyboardEdge(request, true)
                     else -> {
-                        intendedGroup = destination
-                        if (keyboardMotion && kotlin.math.abs(destination - origin) <= 1) pager.animateScrollToPage(destination)
+                        if (keyboardMotion && singleKeyTurn && kotlin.math.abs(destination - origin) <= 1)
+                            pager.animateScrollToPage(destination)
                         else pager.scrollToPage(destination)
                         if (jump && pager.settledPage == destination) {
                             if (origin != destination) positioned(groups[destination], ReaderReturnLocation(groups[origin].first, 0))
@@ -2598,10 +2607,7 @@ private fun ChapterPages(
                         }
                     }
                 }
-            } finally {
-                if (latestKey?.serial == request.serial) intendedGroup = null
-                onKeyboardConsumed(request.serial)
-            }
+            } finally { onKeyboardConsumed(request.serial, count) }
         }
         val dragging by pager.interactionSource.collectIsDraggedAsState()
         LaunchedEffect(dragging) { if (dragging) readingNavigation() }
@@ -2673,7 +2679,7 @@ private fun ChapterPages(
         LaunchedEffect(atEnd) { atEndChanged(atEnd) }
         LaunchedEffect(pager, groups) {
             snapshotFlow { groups.getOrNull(pager.currentPage)?.first }
-                .distinctUntilChanged().collect { index -> if (index != null) location(index, 0) }
+                .distinctUntilChanged().collect { index -> if (index != null) location(ReaderReturnLocation(index, 0)) }
         }
         LaunchedEffect(pager, groups) {
             snapshotFlow { groups.getOrNull(pager.settledPage)?.first }
@@ -2693,8 +2699,8 @@ private fun ChapterPages(
                 }
             }
         }
-        LaunchedEffect(targetPage, groups) {
-            val imageIndex = targetPage ?: return@LaunchedEffect
+        LaunchedEffect(target, groups) {
+            val imageIndex = target?.pageIndex ?: return@LaunchedEffect
             try {
                 readingNavigation()
                 val groupIndex = groups.indexOfReaderPage(imageIndex.coerceIn(0, pages.lastIndex))
@@ -2918,7 +2924,9 @@ private fun readerDirectionalPages(
 private data class ReaderSourceIdentity(val logicalId: String, val chapterId: String,
     val sourceId: String, val sourceMangaId: String)
 
-private class ReaderCursor(var scrollOffset: Int = 0, var panelIndex: Int = 0)
+private class ReaderCursor(var scrollOffset: Int = 0, var panelIndex: Int = 0, var viewportWidth: Int = 0) {
+    fun location(pageIndex: Int) = ReaderReturnLocation(pageIndex, scrollOffset, viewportWidth)
+}
 
 // A byte-progress update does not change which store can supply an original.
 private data class ReadingWindow(val visible: IntRange, val direction: Int)
@@ -4638,7 +4646,10 @@ private fun ReaderPageStepButtons(forwardOnLeft: Boolean, previousEnabled: Boole
     }
 }
 
-private data class ReaderReturnLocation(val pageIndex: Int, val scrollOffset: Int)
+private data class ReaderReturnLocation(val pageIndex: Int, val scrollOffset: Int, val viewportWidth: Int = 0) {
+    fun offsetAtWidth(width: Int): Int = if (viewportWidth > 0 && width > 0)
+        (scrollOffset.toDouble() * width / viewportWidth).roundToInt().coerceAtLeast(0) else scrollOffset.coerceAtLeast(0)
+}
 
 @Composable
 private fun ReaderPageNavigatorDialog(

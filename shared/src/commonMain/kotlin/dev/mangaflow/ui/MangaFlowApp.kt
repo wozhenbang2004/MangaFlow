@@ -2077,6 +2077,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         adultProfile = restrictedMode,
                                         onRetry = model::retryDownload, onDetails = model::openManga,
                                         onRetryUsingLatestRoute = model::retryDownloadUsingLatestRoute,
+                                        onRefreshForQueue = model::refreshDownloadForQueue,
                                         backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
                                         backgroundInParent = true,
                                         active = rootActive && !searchVisible, refreshingIds = refreshingDownloads,

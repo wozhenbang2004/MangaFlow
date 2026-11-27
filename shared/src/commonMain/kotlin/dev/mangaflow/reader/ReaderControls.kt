@@ -38,6 +38,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -67,10 +68,17 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.glass.LocalGlassAccessibilitySettings
 import dev.mangaflow.platform.PlatformKind
@@ -251,7 +259,8 @@ internal fun ReaderSeekBar(
     val focused by interactions.collectIsFocusedAsState()
     val layoutDirection = LocalLayoutDirection.current
     val lastHoverIndex = (pageCount ?: 0) - 1
-    val canInspect = enabled && platformKind == PlatformKind.DESKTOP && lastHoverIndex > 0
+    val desktopRuler = platformKind == PlatformKind.DESKTOP && pageCount != null
+    val canInspect = enabled && desktopRuler && lastHoverIndex > 0
     var hoverIndex by remember(canInspect, lastHoverIndex, layoutDirection) { mutableIntStateOf(-1) }
     var hovering by remember(canInspect, lastHoverIndex, layoutDirection) { mutableStateOf(false) }
     val contrast = LocalGlassAccessibilitySettings.current.increaseContrast
@@ -276,7 +285,8 @@ internal fun ReaderSeekBar(
         "${index + 1} / $count"
     } ?: "${(fraction * 100f).roundToInt()}%"
     // Continuous reading/scrubbing is silent; the preview and release commit are the feedback.
-    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    val density = LocalDensity.current
+    val fontScale = density.fontScale.coerceAtLeast(1f)
     val readPointer = if (!canInspect) Modifier else Modifier.pointerInput(lastHoverIndex, layoutDirection) {
         val inset = 12.dp.toPx()
         awaitPointerEventScope {
@@ -285,7 +295,7 @@ internal fun ReaderSeekBar(
                 val mouse = event.changes.firstOrNull { it.type == PointerType.Mouse }
                 if (event.type == PointerEventType.Exit || mouse == null || mouse.pressed) {
                     hovering = false
-                    if (mouse?.pressed == true) hoverIndex = -1
+                    if (event.changes.any { it.pressed }) hoverIndex = -1
                     continue
                 }
                 if (event.type != PointerEventType.Enter && event.type != PointerEventType.Move) continue
@@ -302,28 +312,39 @@ internal fun ReaderSeekBar(
         val thumbX = 12.dp + travel * bubbleFraction
         val bubbleX = (thumbX - bubbleWidth / 2f).coerceIn(0.dp, bubbleLimit)
         val origin = ((thumbX - bubbleX) / bubbleWidth.coerceAtLeast(1.dp)).coerceIn(0f, 1f)
-        Surface(
-            modifier = Modifier.width(bubbleWidth).heightIn(min = 24.dp).align(Alignment.TopStart)
-                .offset(x = bubbleX, y = (-16).dp)
-                .graphicsLayer {
+        val bubble: @Composable (Modifier, Float) -> Unit = { placement, pivot ->
+            Surface(
+                modifier = placement.heightIn(min = 24.dp).graphicsLayer {
                     val amount = bubbleReveal.value.coerceIn(0f, 1f)
-                    transformOrigin = TransformOrigin(if (layoutDirection == LayoutDirection.Rtl) 1f - origin else origin, 1f)
+                    transformOrigin = TransformOrigin(pivot, 1f)
                     alpha = amount
                     scaleX = .87f + amount * .13f
                     scaleY = .72f + amount * .28f
-                    translationY = (1f - amount) * 10.dp.toPx()
+                    if (!desktopRuler) translationY = (1f - amount) * 10.dp.toPx()
+                }.clearAndSetSemantics { },
+                shape = RoundedCornerShape(50), color = colors.surface, contentColor = colors.onSurface,
+                shadowElevation = if (bubbleShown) 2.dp else 0.dp, tonalElevation = 0.dp,
+            ) {
+                Box(Modifier.padding(horizontal = 8.dp, vertical = 2.dp), contentAlignment = Alignment.Center) {
+                    Text(mangaNumberText(previewText), color = colors.onSurface.copy(alpha = .86f),
+                        fontSize = 12.sp, lineHeight = 17.sp, textAlign = TextAlign.Center, maxLines = 1, softWrap = false)
                 }
-                .clearAndSetSemantics { },
-            shape = RoundedCornerShape(50),
-            color = colors.surface,
-            contentColor = colors.onSurface,
-            shadowElevation = if (bubbleShown) 2.dp else 0.dp,
-            tonalElevation = 0.dp,
-        ) {
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text(mangaNumberText(previewText), color = colors.onSurface.copy(alpha = .86f),
-                    fontSize = 12.sp, lineHeight = 17.sp, maxLines = 1)
             }
+        }
+        if (desktopRuler) {
+            val revealing by remember(bubbleReveal) { derivedStateOf { bubbleReveal.value > 0f } }
+            if (enabled && (bubbleShown || revealing)) {
+                val position = remember(density) { ReaderRulerLabelPosition(with(density) { 4.dp.roundToPx() }) }
+                // Keep the anchor on the ruler and measure the label outside the dock's clipped surface.
+                Box(Modifier.align(Alignment.TopStart).offset(x = thumbX - .5.dp).width(1.dp).fillMaxHeight()) {
+                    Popup(popupPositionProvider = position, properties = PopupProperties(focusable = false)) {
+                        bubble(Modifier.padding(3.dp), .5f)
+                    }
+                }
+            }
+        } else {
+            bubble(Modifier.align(Alignment.TopStart).offset(x = bubbleX, y = (-16).dp).width(bubbleWidth),
+                if (layoutDirection == LayoutDirection.Rtl) 1f - origin else origin)
         }
         Slider(
             value = value.coerceIn(valueRange),
@@ -380,6 +401,18 @@ internal fun ReaderSeekBar(
                 }
             },
         )
+    }
+}
+
+private class ReaderRulerLabelPosition(private val gap: Int) : PopupPositionProvider {
+    override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection,
+        popupContentSize: IntSize): IntOffset {
+        val x = anchorBounds.center.x - popupContentSize.width / 2
+        val above = anchorBounds.top - gap - popupContentSize.height
+        val below = anchorBounds.bottom + gap
+        val y = if (above >= 0 || below + popupContentSize.height > windowSize.height) above else below
+        return IntOffset(x.coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0)),
+            y.coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0)))
     }
 }
 
